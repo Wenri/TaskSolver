@@ -15,7 +15,7 @@ import PIL
 class GeminiModel(object):
     def __init__(self, api_key:str,
                  task:TaskSpec,
-                 model:str="gemini-pro-vision"):
+                 model:str="gemini-2.0-flash"):
         self.gemini_key:str = api_key
         self.task:TaskSpec = task
         self.model:str = model
@@ -110,7 +110,7 @@ class GeminiModel(object):
 
 
     def rough_guess(self, question:Question, max_tokens=1000,
-                    max_tries=10, query_id:int=0,
+                    max_tries=1, query_id:int=0,
                     verbose=False,
                     **kwargs):
     
@@ -132,7 +132,7 @@ class GeminiModel(object):
                 error_saved = f'errors/{time.strftime("%Y-%m-%d-%H-%M-%S")}.json'
                 with open(error_saved, "w")  as f:
                     f.write(p_ans.code)
-                logger.warning(f"The following was not parseable. Saved in {error_saved}.")
+                # logger.warning(f"The following was not parseable. Saved in {error_saved}.")
                 
                 reattempt += 1
                 if reattempt > max_tries:
@@ -148,7 +148,7 @@ class GeminiModel(object):
 
     def many_rough_guesses(self, num_threads:int,
                            question:Question, max_tokens=1000,
-                           verbose=False, max_tries=10, 
+                           verbose=False, max_tries=1, 
                            ) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
         """
         Args:
@@ -173,7 +173,7 @@ class GeminiModel(object):
             try:
                 parsed_response = [self.task.answer_type.parser(r["content"]) for r in response]
             except GPTOutputParseException as e:
-                logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
+                # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
 
                 reattempt += 1
                 if reattempt > max_tries:

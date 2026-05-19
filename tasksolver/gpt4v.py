@@ -9,7 +9,7 @@ from .exceptions import GPTOutputParseException, GPTMaxTriesExceededException
 class GPTModel(object):
     def __init__(self, api_key:str,
                  task:TaskSpec, 
-                 model:str="gpt-4-vision-preview",
+                 model:str="gpt-4o",
                  ):
         self.open_ai_key:str = api_key
         
@@ -21,16 +21,25 @@ class GPTModel(object):
         args:
             payload: json dictionary, prepared by `prepare_payload`
         """
-
         client = OpenAI(api_key=self.open_ai_key) 
 
         try:
-            response = client.chat.completions.create(
-                model=self.model, #"gpt-4-vision-preview",
-                messages=payload["messages"],
-                max_tokens=payload["max_tokens"],
-                n=n_choices
-            )
+            if self.model in ("gpt-4o", 'gpt-4o-mini', 'gpt-4-turbo'):
+                response = client.chat.completions.create(
+                    model=self.model, #"gpt-4-vision-preview",
+                    messages=payload["messages"],
+                    max_tokens=payload["max_tokens"],
+                    n=n_choices
+                )
+            elif self.model in ('o1-mini', 'o1', 'o3-mini', 'o3'):
+                response = client.chat.completions.create(
+                    model=self.model, #"gpt-4-vision-preview",
+                    messages=payload["messages"],
+                    max_completion_tokens=payload["max_tokens"],
+                    n=n_choices
+                )
+
+            
             
         except Exception as e:
             # err = e
@@ -62,6 +71,8 @@ class GPTModel(object):
 
         """
         question_dicts = question.get_json()
+        print('Getting question_dicts fine.')
+
         for part in question_dicts:
             if part["type"]=="image_url":
                 del part["image"] # remove the PIL.Image
@@ -72,10 +83,10 @@ class GPTModel(object):
         if prepend is not None:
             payload = [prepend] + payload
 
-        if verbose:
-            print("############")
-            "\n".join([str(el) for el in payload])
-            print("############")
+        # if verbose:
+        #     print("############")
+        #     "\n".join([str(el) for el in payload])
+        #     print("############")
 
         payload = {
             "model": model,
@@ -84,6 +95,7 @@ class GPTModel(object):
         return payload
 
     def run_once(self, question:Question, max_tokens=1000):
+        print('Into gpt4v.py -> think')
         q = self.task.first_question(question) 
         p_ans, ans, meta, p = self.rough_guess(q, max_tokens=max_tokens)
         return p_ans, ans, meta, p
@@ -107,7 +119,8 @@ class GPTModel(object):
         latest_answer = p_ans
 
         if verbose:
-            logger.info(f"iteration 0 Answer: {str(p_ans)}")
+            # logger.info(f"iteration 0 Answer: {str(p_ans)}")
+            pass
 
         iteration = 0 
         
@@ -115,8 +128,9 @@ class GPTModel(object):
             evaluation_answer = self.task.completed(question, latest_answer)
             eval_history.append(evaluation_answer)
             if verbose:
-                logger.info(f"eval comment from {iteration} editing: \n {str(evaluation_answer)}")
-            
+                # logger.info(f"eval comment from {iteration} editing: \n {str(evaluation_answer)}")
+                pass
+
             if evaluation_answer.success():
                 break
 
@@ -129,16 +143,19 @@ class GPTModel(object):
             answers_history.append(p_ans) 
             latest_answer = p_ans
             if verbose:
-                logger.info(f"iteration {iteration} editing output: \n{str(p_ans)}")
+                # logger.info(f"iteration {iteration} editing output: \n{str(p_ans)}")
+                pass
+
         if verbose:
-            logger.info(f"Returning answer at iteration {iteration}: \n{str(p_ans)}")
+            # logger.info(f"Returning answer at iteration {iteration}: \n{str(p_ans)}")
+            pass
         return latest_answer, ans, meta, p
 
 
     
     def many_rough_guesses(self, num_threads:int,
                            question:Question, max_tokens=1000, 
-                           verbose=False, max_tries=10) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
+                           verbose=False, max_tries=1) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
         """
         Args:
             num_threads : number of independent threads.
@@ -162,7 +179,8 @@ class GPTModel(object):
             try:
                 parsed_response = [self.task.answer_type.parser(r["content"]) for r in response]
             except GPTOutputParseException as e:
-                logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
+                # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
+                pass
 
                 reattempt += 1
                 if reattempt > max_tries:
@@ -177,7 +195,7 @@ class GPTModel(object):
 
 
     def rough_guess(self, question:Question, max_tokens=1000, verbose=False,
-                    max_tries=10, query_id:int=0) -> Tuple[ParsedAnswer, str, dict, dict]:
+                    max_tries=1, query_id:int=0) -> Tuple[ParsedAnswer, str, dict, dict]:
         """
         Args:
             question
@@ -194,6 +212,8 @@ class GPTModel(object):
                                     model=self.model,
                                     max_tokens=max_tokens)
 
+        print('Loading payload fine.')
+
         ok = False
         reattempt = 0
         while not ok:
@@ -202,8 +222,8 @@ class GPTModel(object):
             try:
                 parsed_response = self.task.answer_type.parser(response["content"])
             except GPTOutputParseException as e:
-                logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
-
+                # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
+            
                 reattempt += 1
                 if reattempt > max_tries:
                     logger.error(f"max tries ({max_tries}) exceeded.")

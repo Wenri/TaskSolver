@@ -19,9 +19,9 @@ class LeftOrRight(ParsedAnswer):
     
     def __init__(self, l_or_r:str, gpt_raw:str=None):
         if l_or_r.lower().strip() not in ('left', 'right'):
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-            print(gpt_raw)
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            # print(gpt_raw)
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             raise GPTOutputParseException("output of LLM should either be 'left' or 'right'")
         self.data = l_or_r.lower().strip()
         self.raw = gpt_raw
@@ -138,9 +138,9 @@ class PythonExecutableDiffAnswer(ParsedAnswer):
             before_string = PythonExecutableAnswer.remove_markdown_code(before_text)
             after_string = PythonExecutableAnswer.remove_markdown_code(after_text)
         except:
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-            print(gpt_raw)
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            # print(gpt_raw)
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             raise GPTOutputParseException(f"Invalid input passsed into parsing function. The following could not be parsed:\n{gpt_raw}")
         return PythonExecutableDiffAnswer(code_before=before_string, code_after=after_string, gpt_raw=gpt_raw)
 
@@ -236,14 +236,14 @@ class YesNoWhy(ParsedAnswer):
         """
 
         if "[#reason]" not in gpt_raw:
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-            print(gpt_raw)
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")        
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            # print(gpt_raw)
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")        
             raise GPTOutputParseException(f"{gpt_raw} should have [#reason] tag")
         if "[#finalanswer]" not in gpt_raw:
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-            print(gpt_raw)
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            # print(gpt_raw)
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             raise GPTOutputParseException(f"{gpt_raw} should have [#finalanswer] tag")
         
         gpt_raw_reasoning = "".join(gpt_raw.split("[#reason]")[1:]).split("[#finalanswer]")[0]
@@ -289,9 +289,9 @@ class YesNo(ParsedAnswer):
         elif yesorno == "no":
             data = "no"
         else:
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-            print(gpt_raw)
-            print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+            # print(gpt_raw)
+            # print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
             raise GPTOutputParseException(f"{yesorno} cannot be parsed to yes/no")
         return YesNo(data, gpt_raw=gpt_raw)
 

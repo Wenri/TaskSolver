@@ -8,14 +8,19 @@ from copy import deepcopy
 import time
 import os
 
+CLAUDE_MODEL_ALIASES = {
+    "claude-3.7-sonnet-latest": "claude-3-7-sonnet-latest",
+}
+
+
 class ClaudeModel(object):
     def __init__(self, api_key:str,
                  task:TaskSpec,
-                 model:str = "claude-3-haiku-20240307"):
+                 model:str = "claude-sonnet-4-6"):
 
         self.claude_key:str = api_key
         self.task:TaskSpec = task
-        self.model:str = model
+        self.model:str = CLAUDE_MODEL_ALIASES.get(model, model)
 
     def ask(self,  payload:dict, n_choices=1) -> Tuple[List[dict], List[dict]]:
         """
@@ -30,7 +35,7 @@ class ClaudeModel(object):
 
             try:
                 raw_response = client.messages.create(
-                    model="claude-3-haiku-20240307",
+                    model=self.model,
                     #messages=[{"role": "user", "content": "Hello, Claude, tell me a number between 1 to 10000 please."}],
                     messages = [mod_payload["messages"]],
                     max_tokens=mod_payload["max_tokens"],
@@ -75,7 +80,7 @@ class ClaudeModel(object):
 
         content = []
         dic_list = question.get_json()
-        for dic in question.get_json():
+        for dic in dic_list:
             # The case of text
             if dic['type'] == 'text':
                 content.append(dic)
@@ -118,7 +123,7 @@ class ClaudeModel(object):
 
 
     def rough_guess(self, question:Question, max_tokens=1000,
-                    max_tries=10, query_id:int=0,
+                    max_tries=1, query_id:int=0,
                     verbose=False,
                     **kwargs):
     
@@ -138,7 +143,7 @@ class ClaudeModel(object):
                 error_saved = f'errors/{time.strftime("%Y-%m-%d-%H-%M-%S")}.json'
                 with open(error_saved, "w")  as f:
                     f.write(p_ans.code)
-                logger.warning(f"The following was not parseable. Saved in {error_saved}.")
+                # logger.warning(f"The following was not parseable. Saved in {error_saved}.")
                 
                 reattempt += 1
                 if reattempt > max_tries:
@@ -154,7 +159,7 @@ class ClaudeModel(object):
 
     def many_rough_guesses(self, num_threads:int,
                            question:Question, max_tokens=1000,
-                           verbose=False, max_tries=10, 
+                           verbose=False, max_tries=1, 
                            ) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
         """
         Args:
@@ -178,7 +183,7 @@ class ClaudeModel(object):
             try:
                 parsed_response = [self.task.answer_type.parser(r["content"]) for r in response]
             except GPTOutputParseException as e:
-                logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
+                # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
 
                 reattempt += 1
                 if reattempt > max_tries:
