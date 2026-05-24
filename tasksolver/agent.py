@@ -79,14 +79,38 @@ class Agent(object):
                 model = "claude-" + vision_model[len("claude-code-"):]
             self.visual_interface = ClaudeCodeModel(None, task, model=model)
         
-        elif vision_model in ('gemini-pro', 'gemini-pro-vision', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'):
+        elif vision_model in (
+            'gemini-pro',
+            'gemini-pro-vision',
+            'gemini-2.0-flash',
+            'gemini-1.5-flash',
+            'gemini-1.5-pro',
+            'gemini3',
+            'gemini-3',
+            'gemini3-flash',
+            'gemini-3-flash',
+            'gemini3-pro',
+            'gemini-3-pro',
+            'gemini-3-flash-preview',
+            'gemini-3-pro-preview',
+        ):
             from .gemini import GeminiModel
 
             # using the gemini key.
             if isinstance(api_key, KeyChain):
                 api_key = api_key["gemini"]
-            if vision_model in ('gemini-pro', 'gemini-pro-vision', 'gemini-1.5-pro'):
-                vision_model = 'gemini-2.0-flash'
+            gemini_aliases = {
+                'gemini-pro': 'gemini-2.0-flash',
+                'gemini-pro-vision': 'gemini-2.0-flash',
+                'gemini-1.5-pro': 'gemini-2.0-flash',
+                'gemini3': 'gemini-3-flash-preview',
+                'gemini-3': 'gemini-3-flash-preview',
+                'gemini3-flash': 'gemini-3-flash-preview',
+                'gemini-3-flash': 'gemini-3-flash-preview',
+                'gemini3-pro': 'gemini-3-pro-preview',
+                'gemini-3-pro': 'gemini-3-pro-preview',
+            }
+            vision_model = gemini_aliases.get(vision_model, vision_model)
             logger.info(f"creating Gemini-based agent of type: {vision_model}")
             self.visual_interface = GeminiModel(api_key=api_key, task=task, model=vision_model)
 
