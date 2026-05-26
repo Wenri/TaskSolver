@@ -11,6 +11,16 @@ from .exceptions import GPTMaxTriesExceededException, GPTOutputParseException
 
 DEFAULT_QWEN3_MODEL = "Qwen/Qwen3.5-397B-A17B-GPTQ-Int4"
 MIN_QWEN3_MAX_TOKENS = 4096
+QWEN3_BUILTIN_ENDPOINTS = {
+    "qwen3-5": {
+        "base_url": "https://vlm1.wenri.me/v1",
+        "model": "Qwen/Qwen3.5-397B-A17B-GPTQ-Int4",
+    },
+    "qwen3-6": {
+        "base_url": "https://vlm2.wenri.me/v1",
+        "model": "Qwen/Qwen3.6-27B-FP8",
+    },
+}
 QWEN3_BASE_URL_MODEL_ALIASES = {
     "vlm1.wenri.me": "Qwen/Qwen3.5-397B-A17B-GPTQ-Int4",
     "vega-lix.polytechnique.fr": "Qwen/Qwen3.5-397B-A17B-GPTQ-Int4",
@@ -246,6 +256,10 @@ def resolve_qwen3_base_url():
         if value:
             return value
     return None
+
+
+def resolve_qwen3_builtin_endpoint(vision_model: str):
+    return QWEN3_BUILTIN_ENDPOINTS.get((vision_model or "").strip().lower())
 
 
 def resolve_qwen3_model_name(base_url=None):
