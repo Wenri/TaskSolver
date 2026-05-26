@@ -73,10 +73,7 @@ class ClaudeCodeModel(object):
         stdout = completed.stdout.strip()
         stderr = completed.stderr.strip()
         if completed.returncode != 0:
-            raise RuntimeError(
-                "Claude Code CLI call failed. Run `claude auth status --text` "
-                f"to check login status.\nSTDERR:\n{stderr}"
-            )
+            raise RuntimeError(self._format_cli_failure(stdout, stderr))
 
         try:
             parsed = json.loads(stdout)
@@ -87,6 +84,23 @@ class ClaudeCodeModel(object):
             return {"result": stdout, "stdout": stdout, "stderr": stderr}
 
     @staticmethod
+    def _format_cli_failure(stdout: str, stderr: str) -> str:
+        combined_output = "\n".join(part for part in (stderr, stdout) if part).strip()
+        if not combined_output:
+            combined_output = "(no CLI output)"
+
+        lowered_output = combined_output.lower()
+        if "not logged in" in lowered_output or "please run /login" in lowered_output:
+            return (
+                "Claude Code CLI is not logged in for prompt execution. "
+                "Run `claude /login` in the Claude Code CLI, then verify prompt execution with "
+                "`claude -p \"Reply with OK\" --output-format json`.\n"
+                f"CLI output:\n{combined_output}"
+            )
+
+        return f"Claude Code CLI call failed.\nCLI output:\n{combined_output}"
+
+    @staticmethod
     def _build_cli_command(prompt: str, tool_flag: str) -> List[str]:
         return [
             ClaudeCodeModel._claude_command(),
@@ -94,19 +108,10 @@ class ClaudeCodeModel(object):
             prompt,
             "--output-format",
             "json",
-            "--bare",
-            "--no-chrome",
-            "--disable-slash-commands",
-            "--strict-mcp-config",
-            "--mcp-config",
-            '{"mcpServers":{}}',
-            "--settings",
-            '{"sandbox":{"network":{"deniedDomains":["*"]}}}',
             tool_flag,
             "Read",
             "--permission-mode",
             "acceptEdits",
-            "--no-session-persistence",
         ]
 
     @staticmethod
