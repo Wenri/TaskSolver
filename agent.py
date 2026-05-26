@@ -79,8 +79,8 @@ class Agent(object):
                 model = "claude-" + vision_model[len("claude-code-"):]
             self.visual_interface = ClaudeCodeModel(None, task, model=model)
         
-        elif vision_model == 'qwen3':
-            from .vllm import VLLMModel, resolve_qwen3_api_key, resolve_qwen3_base_url, resolve_qwen3_model_name
+        elif vision_model in ('qwen3', 'qwen3-5', 'qwen3-6'):
+            from .vllm import VLLMModel, resolve_qwen3_api_key, resolve_qwen3_base_url, resolve_qwen3_model_name, resolve_qwen3_builtin_endpoint
 
             if isinstance(api_key, KeyChain):
                 if 'vllm' in api_key.keys:
@@ -90,20 +90,23 @@ class Agent(object):
             else:
                 resolved_api_key = resolve_qwen3_api_key(api_key)
 
-            resolved_base_url = resolve_qwen3_base_url()
-            resolved_model = resolve_qwen3_model_name(resolved_base_url)
+            builtin_endpoint = resolve_qwen3_builtin_endpoint(vision_model)
+            if builtin_endpoint is not None:
+                resolved_base_url = builtin_endpoint["base_url"]
+                resolved_model = builtin_endpoint["model"]
+            else:
+                resolved_base_url = resolve_qwen3_base_url()
+                resolved_model = resolve_qwen3_model_name(resolved_base_url)
 
             if not resolved_api_key:
-                raise ValueError(
-                    "qwen3 requires a vLLM API key. Set VLLM_API_KEY or provide system/credentials/vllm_api.txt."
-                )
+                raise ValueError(f"{vision_model} requires a vLLM API key. Set VLLM_API_KEY or provide system/credentials/vllm_api.txt.")
             if not resolved_base_url:
                 raise ValueError(
-                    "qwen3 requires an OpenAI-compatible vLLM base URL. "
+                    f"{vision_model} requires an OpenAI-compatible vLLM base URL. "
                     "Set QWEN3_OPENAI_BASE_URL, QWEN3_BASE_URL, VLLM_OPENAI_BASE_URL, or VLLM_BASE_URL."
                 )
 
-            logger.info(f"creating vLLM-based agent of type: {resolved_model}")
+            logger.info(f"creating vLLM-based agent of type: {resolved_model} @ {resolved_base_url}")
             self.visual_interface = VLLMModel(
                 api_key=resolved_api_key,
                 task=task,
