@@ -2,7 +2,7 @@ from typing import List, Union, Tuple
 from loguru import logger
 import io
 from openai import OpenAI
-from .common import TaskSpec, ParsedAnswer, Question
+from .common import TaskSpec, ParsedAnswer, Question, attach_response_metadata
 from .exceptions import GPTOutputParseException, GPTMaxTriesExceededException
 
 
@@ -177,7 +177,14 @@ class GPTModel(object):
         while not ok:
             response, meta_data = self.ask(p, n_choices=n_choices)
             try:
-                parsed_response = [self.task.answer_type.parser(r["content"]) for r in response]
+                parsed_response = [
+                    attach_response_metadata(
+                        self.task.answer_type.parser(r["content"]),
+                        response_metadata=r,
+                        request_payload=p,
+                    )
+                    for r in response
+                ]
             except GPTOutputParseException as e:
                 # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
                 pass
@@ -220,7 +227,11 @@ class GPTModel(object):
             response, meta_data = self.ask(p)
             response = response[0]
             try:
-                parsed_response = self.task.answer_type.parser(response["content"])
+                parsed_response = attach_response_metadata(
+                    self.task.answer_type.parser(response["content"]),
+                    response_metadata=response,
+                    request_payload=p,
+                )
             except GPTOutputParseException as e:
                 # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
             

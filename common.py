@@ -3,6 +3,7 @@ from typing import Type, List, Union, Callable, Tuple, TypeVar
 from pathlib import Path
 import base64
 from abc import abstractmethod
+from collections.abc import Mapping
 from PIL import Image
 from loguru import logger
 import requests
@@ -14,6 +15,82 @@ import os
 from typing import Union, Dict
 
 io_semaphore = threading.Semaphore(1)
+
+
+def _stringify_reasoning_value(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, Mapping):
+                text = item.get("text")
+                if text:
+                    parts.append(str(text).strip())
+                elif item.get("type") == "thinking" and item.get("thinking"):
+                    parts.append(str(item.get("thinking")).strip())
+            else:
+                text = _stringify_reasoning_value(item)
+                if text:
+                    parts.append(text)
+        combined = "\n\n".join(part for part in parts if part)
+        return combined or None
+    if isinstance(value, Mapping):
+        for key in ("text", "thinking", "content", "reasoning_content", "reasoning"):
+            if key in value:
+                text = _stringify_reasoning_value(value.get(key))
+                if text:
+                    return text
+        return None
+    return str(value).strip() or None
+
+
+def extract_explicit_reasoning_output(response_metadata):
+    if response_metadata is None:
+        return None
+
+    if isinstance(response_metadata, list):
+        outputs = []
+        for item in response_metadata:
+            text = extract_explicit_reasoning_output(item)
+            if text:
+                outputs.append(text)
+        combined = "\n\n".join(outputs)
+        return combined or None
+
+    if not isinstance(response_metadata, Mapping):
+        return None
+
+    if response_metadata.get("explicit_reasoning_output"):
+        return _stringify_reasoning_value(response_metadata.get("explicit_reasoning_output"))
+
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        text = _stringify_reasoning_value(response_metadata.get(key))
+        if text:
+            return text
+
+    content = response_metadata.get("content")
+    if isinstance(content, list):
+        thinking_blocks = []
+        for block in content:
+            if isinstance(block, Mapping) and block.get("type") == "thinking":
+                text = _stringify_reasoning_value(block.get("thinking"))
+                if text:
+                    thinking_blocks.append(text)
+        if thinking_blocks:
+            return "\n\n".join(thinking_blocks)
+
+    return None
+
+
+def attach_response_metadata(parsed_response, response_metadata=None, request_payload=None):
+    parsed_response.llm_response_metadata = response_metadata
+    parsed_response.request_payload = request_payload
+    parsed_response.explicit_reasoning_output = extract_explicit_reasoning_output(response_metadata)
+    return parsed_response
 
 T = TypeVar('T', bound="ParsedAnswer")
 class ParsedAnswer(object):

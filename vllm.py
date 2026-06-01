@@ -5,7 +5,7 @@ from typing import List, Tuple, Union
 from loguru import logger
 from openai import OpenAI
 
-from .common import ParsedAnswer, Question, TaskSpec
+from .common import ParsedAnswer, Question, TaskSpec, attach_response_metadata, extract_explicit_reasoning_output
 from .exceptions import GPTMaxTriesExceededException, GPTOutputParseException
 
 
@@ -120,6 +120,7 @@ class VLLMModel(object):
         for choice in response["choices"]:
             message = choice["message"]
             message["finish_reason"] = choice.get("finish_reason")
+            message["explicit_reasoning_output"] = extract_explicit_reasoning_output(message)
             message["content"] = self._extract_message_text(message)
             messages.append(message)
 
@@ -179,7 +180,13 @@ class VLLMModel(object):
                             self.model,
                             p["max_tokens"],
                         ))
-                    parsed_response.append(self.task.answer_type.parser(content))
+                    parsed_response.append(
+                        attach_response_metadata(
+                            self.task.answer_type.parser(content),
+                            response_metadata=message,
+                            request_payload=p,
+                        )
+                    )
             except GPTOutputParseException:
                 reattempt += 1
                 if reattempt > max_tries:
@@ -221,7 +228,11 @@ class VLLMModel(object):
                         self.model,
                         p["max_tokens"],
                     ))
-                parsed_response = self.task.answer_type.parser(content)
+                parsed_response = attach_response_metadata(
+                    self.task.answer_type.parser(content),
+                    response_metadata=response,
+                    request_payload=p,
+                )
             except GPTOutputParseException:
                 reattempt += 1
                 if reattempt > max_tries:
