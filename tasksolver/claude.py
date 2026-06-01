@@ -1,5 +1,5 @@
 import anthropic
-from .common import TaskSpec, ParsedAnswer, Question
+from .common import TaskSpec, ParsedAnswer, Question, attach_response_metadata, extract_explicit_reasoning_output
 from .exceptions import GPTOutputParseException, GPTMaxTriesExceededException
 import threading
 from typing import List, Tuple, Union
@@ -44,8 +44,14 @@ class ClaudeModel(object):
                 raise e
 
             response = raw_response.dict()
-            response['content'] = response['content'][0]['text']
-            message = {key: response[key] for key in ['role', 'content']}
+            text_blocks = [
+                block.get("text", "").strip()
+                for block in response.get("content", [])
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+            ]
+            response['content'] = "\n".join(text_blocks).strip() if text_blocks else None
+            response["explicit_reasoning_output"] = extract_explicit_reasoning_output(response)
+            message = {key: response.get(key) for key in ['role', 'content']}
             metadata = response.copy() # okay
             del metadata["content"]
             results[idx] = {"message": message, "metadata": metadata} 
@@ -131,11 +137,16 @@ class ClaudeModel(object):
                                     model=self.model)
 
         ok = False
+        reattempt = 0
         while not ok:
             response, meta_data = self.ask(p) 
             response = response [0] 
             try: 
-                parsed_response = self.task.answer_type.parser(response["content"])
+                parsed_response = attach_response_metadata(
+                    self.task.answer_type.parser(response["content"]),
+                    response_metadata=meta_data[0] if isinstance(meta_data, list) and len(meta_data) > 0 else meta_data,
+                    request_payload=p,
+                )
             except GPTOutputParseException as e:
                 if not os.path.exists('errors/'):
                     # Create the directory if it doesn't exist
@@ -181,7 +192,14 @@ class ClaudeModel(object):
         while not ok:
             response, meta_data = self.ask(p, n_choices=n_choices)
             try:
-                parsed_response = [self.task.answer_type.parser(r["content"]) for r in response]
+                parsed_response = [
+                    attach_response_metadata(
+                        self.task.answer_type.parser(r["content"]),
+                        response_metadata=meta_data[idx] if isinstance(meta_data, list) and len(meta_data) > idx else None,
+                        request_payload=p,
+                    )
+                    for idx, r in enumerate(response)
+                ]
             except GPTOutputParseException as e:
                 # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
 

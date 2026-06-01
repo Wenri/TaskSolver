@@ -1,5 +1,5 @@
 import os
-from .common import TaskSpec, ParsedAnswer, Question
+from .common import TaskSpec, ParsedAnswer, Question, attach_response_metadata
 from .exceptions import GPTOutputParseException, GPTMaxTriesExceededException
 import threading
 import base64
@@ -118,11 +118,16 @@ class GeminiModel(object):
                                     model=self.model)
 
         ok = False
+        reattempt = 0
         while not ok:
             response, meta_data = self.ask(p) 
             response = response [0] 
             try: 
-                parsed_response = self.task.answer_type.parser(response["content"])
+                parsed_response = attach_response_metadata(
+                    self.task.answer_type.parser(response["content"]),
+                    response_metadata=meta_data[0] if isinstance(meta_data, list) and len(meta_data) > 0 else meta_data,
+                    request_payload=p,
+                )
             except GPTOutputParseException as e:
 
                 if not os.path.exists('errors/'):
@@ -171,7 +176,14 @@ class GeminiModel(object):
         while not ok:
             response, meta_data = self.ask(p, n_choices=n_choices)
             try:
-                parsed_response = [self.task.answer_type.parser(r["content"]) for r in response]
+                parsed_response = [
+                    attach_response_metadata(
+                        self.task.answer_type.parser(r["content"]),
+                        response_metadata=meta_data[idx] if isinstance(meta_data, list) and len(meta_data) > idx else None,
+                        request_payload=p,
+                    )
+                    for idx, r in enumerate(response)
+                ]
             except GPTOutputParseException as e:
                 # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
 

@@ -9,7 +9,7 @@ from typing import List, Tuple
 
 from loguru import logger
 
-from .common import ParsedAnswer, Question, TaskSpec
+from .common import ParsedAnswer, Question, TaskSpec, attach_response_metadata
 from .exceptions import GPTMaxTriesExceededException, GPTOutputParseException
 
 
@@ -187,7 +187,11 @@ class ClaudeCodeModel(object):
             response, meta_data = self.ask(p)
             response = response[0]
             try:
-                parsed_response = self.task.answer_type.parser(response["content"])
+                parsed_response = attach_response_metadata(
+                    self.task.answer_type.parser(response["content"]),
+                    response_metadata=meta_data[0] if isinstance(meta_data, list) and len(meta_data) > 0 else meta_data,
+                    request_payload=p,
+                )
             except GPTOutputParseException:
                 reattempt += 1
                 if reattempt > max_tries:
@@ -216,7 +220,14 @@ class ClaudeCodeModel(object):
         while not ok:
             response, meta_data = self.ask(p, n_choices=n_choices)
             try:
-                parsed_response = [self.task.answer_type.parser(r["content"]) for r in response]
+                parsed_response = [
+                    attach_response_metadata(
+                        self.task.answer_type.parser(r["content"]),
+                        response_metadata=meta_data[idx] if isinstance(meta_data, list) and len(meta_data) > idx else None,
+                        request_payload=p,
+                    )
+                    for idx, r in enumerate(response)
+                ]
             except GPTOutputParseException:
                 reattempt += 1
                 if reattempt > max_tries:
