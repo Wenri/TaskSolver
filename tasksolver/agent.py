@@ -72,11 +72,19 @@ class Agent(object):
             }
             if vision_model in _CLAUDE_CODE_ALIASES:
                 model = _CLAUDE_CODE_ALIASES[vision_model]
-            elif vision_model == "claude-code":
-                model = None
             else:
-                # e.g. "claude-code-sonnet-4-6" -> "claude-sonnet-4-6"
-                model = "claude-" + vision_model[len("claude-code-"):]
+                suffix = vision_model[len("claude-code-"):]
+                if suffix.startswith(("sonnet-", "opus-", "haiku-")):
+                    # e.g. "claude-code-sonnet-4-6" -> "claude-sonnet-4-6"
+                    model = "claude-" + suffix
+                else:
+                    supported = ", ".join(sorted(_CLAUDE_CODE_ALIASES))
+                    raise ValueError(
+                        f"Unsupported Claude Code model alias: {vision_model}. "
+                        "Use a complete family-qualified alias such as "
+                        "`claude-code-sonnet-4-6` or `claude-code-opus-4-7`; "
+                        f"supported built-in aliases: {supported}."
+                    )
             self.visual_interface = ClaudeCodeModel(None, task, model=model)
         
         elif vision_model in ('qwen3', 'qwen3-5', 'qwen3-6'):
