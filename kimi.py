@@ -26,7 +26,7 @@ class KimiModel(object):
         api_key: str,
         task: TaskSpec,
         model: str = KIMI_DEFAULT_MODEL,
-        thinking: bool = True,
+        thinking: bool = False,
     ):
         self.moonshot_key: str = api_key
         self.task: TaskSpec = task
@@ -75,15 +75,11 @@ class KimiModel(object):
     def ask(self, payload: dict, n_choices=1) -> Tuple[List[dict], List[dict]]:
         def kimi_thread(idx, request_payload, results):
             mod_payload = deepcopy(request_payload)
-            request_kwargs = {}
-            if self.thinking:
-                request_kwargs["thinking"] = {"type": "enabled"}
 
             raw_response = self.client.messages.create(
                 model=self.model,
                 messages=[mod_payload["messages"]],
                 max_tokens=mod_payload["max_tokens"],
-                **request_kwargs,
             )
 
             response = raw_response.dict()
