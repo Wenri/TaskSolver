@@ -89,6 +89,23 @@ class ClaudeCodeModel(object):
         if not combined_output:
             combined_output = "(no CLI output)"
 
+        parsed_output = None
+        try:
+            parsed_output = json.loads(stdout or stderr)
+        except json.JSONDecodeError:
+            parsed_output = None
+
+        if isinstance(parsed_output, dict) and parsed_output.get("api_error_status") == 404:
+            result = parsed_output.get("result") or "Selected Claude Code model was not found or is not accessible."
+            return (
+                "Claude Code CLI model is unavailable. "
+                "Check the model alias and your Claude account access. "
+                "Use a family-qualified alias such as `claude-code-sonnet-4-6` "
+                "or `claude-code-opus-4-7`.\n"
+                f"CLI result: {result}\n"
+                f"CLI output:\n{combined_output}"
+            )
+
         lowered_output = combined_output.lower()
         if "not logged in" in lowered_output or "please run /login" in lowered_output:
             return (
