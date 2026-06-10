@@ -64,7 +64,9 @@ class Agent(object):
                 "claude-code-sonnet": "sonnet",
                 "claude-code-opus": "opus",
                 "claude-code-haiku": "claude-haiku-4-5",
+                "claude-code-fable": "fable",
                 "claude-code-haiku-4-5": "claude-haiku-4-5",
+                "claude-code-fable-5": "claude-fable-5",
                 "claude-code-sonnet-4-5": "claude-sonnet-4-5",
                 "claude-code-sonnet-4-6": "claude-sonnet-4-6",
                 "claude-code-opus-4-5": "claude-opus-4-5",
@@ -74,7 +76,7 @@ class Agent(object):
                 model = _CLAUDE_CODE_ALIASES[vision_model]
             else:
                 suffix = vision_model[len("claude-code-"):]
-                if suffix.startswith(("sonnet-", "opus-", "haiku-")):
+                if suffix.startswith(("sonnet-", "opus-", "haiku-", "fable-")):
                     # e.g. "claude-code-sonnet-4-6" -> "claude-sonnet-4-6"
                     model = "claude-" + suffix
                 else:
@@ -82,7 +84,8 @@ class Agent(object):
                     raise ValueError(
                         f"Unsupported Claude Code model alias: {vision_model}. "
                         "Use a complete family-qualified alias such as "
-                        "`claude-code-sonnet-4-6` or `claude-code-opus-4-7`; "
+                        "`claude-code-sonnet-4-6`, `claude-code-opus-4-7`, "
+                        "or `claude-code-fable-5`; "
                         f"supported built-in aliases: {supported}."
                     )
             self.visual_interface = ClaudeCodeModel(None, task, model=model)
