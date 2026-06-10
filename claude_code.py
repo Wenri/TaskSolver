@@ -100,8 +100,8 @@ class ClaudeCodeModel(object):
             return (
                 "Claude Code CLI model is unavailable. "
                 "Check the model alias and your Claude account access. "
-                "Use a family-qualified alias such as `claude-code-sonnet-4-6` "
-                "or `claude-code-opus-4-7`.\n"
+                "Use a family-qualified alias such as `claude-code-sonnet-4-6`, "
+                "`claude-code-opus-4-7`, or `claude-code-fable-5`.\n"
                 f"CLI result: {result}\n"
                 f"CLI output:\n{combined_output}"
             )
