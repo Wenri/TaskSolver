@@ -13,11 +13,26 @@ KIMI_BASE_URL = "https://api.kimi.com/coding"
 KIMI_DEFAULT_MODEL = "k2p6"
 KIMI_DEFAULT_HEADERS = {"User-Agent": "KimiCLI/1.12.0"}
 
+# Maps the vision_model id passed via --generator_type / --verifier_type to the
+# concrete Moonshot model name expected by the Kimi coding endpoint.
+KIMI_MODEL_ALIASES = {
+    "kimi2-6": "k2p6",
+    "kimi-k2.7-code": "k2p7",
+    "kimi2-7": "k2p7",
+    "k2p7": "k2p7",
+}
+
 
 def resolve_moonshot_api_key(explicit_api_key=None):
     if explicit_api_key:
         return explicit_api_key
     return os.environ.get("MOONSHOT_API_KEY")
+
+
+def resolve_moonshot_model_name(vision_model=None):
+    if not vision_model:
+        return KIMI_DEFAULT_MODEL
+    return KIMI_MODEL_ALIASES.get(vision_model.strip(), KIMI_DEFAULT_MODEL)
 
 
 class KimiModel(object):

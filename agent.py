@@ -125,8 +125,8 @@ class Agent(object):
                 base_url=resolved_base_url,
             )
 
-        elif vision_model in ("kimi2-6",):
-            from .kimi import KimiModel, resolve_moonshot_api_key
+        elif vision_model in ("kimi2-6", "kimi-k2.7-code", "kimi2-7", "k2p7"):
+            from .kimi import KIMI_BASE_URL, KimiModel, resolve_moonshot_api_key, resolve_moonshot_model_name
 
             if isinstance(api_key, KeyChain):
                 if "moonshot" in api_key.keys:
@@ -138,16 +138,17 @@ class Agent(object):
 
             if not resolved_api_key:
                 raise ValueError(
-                    "kimi2-6 requires MOONSHOT_API_KEY. "
+                    f"{vision_model} requires MOONSHOT_API_KEY. "
                     "Set the MOONSHOT_API_KEY environment variable or provide an explicit key. "
                     "This backend does not add a default credentials/moonshot_api.txt path."
                 )
 
-            logger.info("creating Kimi / Moonshot-based agent of type: k2p6 @ https://api.kimi.com/coding")
+            resolved_model = resolve_moonshot_model_name(vision_model)
+            logger.info(f"creating Kimi / Moonshot-based agent of type: {resolved_model} @ {KIMI_BASE_URL}")
             self.visual_interface = KimiModel(
                 api_key=resolved_api_key,
                 task=task,
-                model="k2p6",
+                model=resolved_model,
             )
 
         elif vision_model in (
