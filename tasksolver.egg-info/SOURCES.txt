@@ -12,12 +12,14 @@ tasksolver/gemini.py
 tasksolver/gpt4v.py
 tasksolver/intern.py
 tasksolver/keychain.py
+tasksolver/kimi.py
 tasksolver/llama.py
 tasksolver/minicpm.py
 tasksolver/ollama.py
 tasksolver/phi.py
 tasksolver/qwen.py
 tasksolver/utils.py
+tasksolver/vllm.py
 tasksolver.egg-info/PKG-INFO
 tasksolver.egg-info/SOURCES.txt
 tasksolver.egg-info/dependency_links.txt
