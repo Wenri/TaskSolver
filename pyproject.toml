@@ -42,3 +42,35 @@ local = [
 
 [tool.setuptools.packages.find]
 include = ["tasksolver*"]
+
+# --- pixi workspace + buildable package -----------------------------------
+# Uses the `pixi-build` preview feature: rather than installing this project as
+# an editable PyPI dependency, pixi builds it as a conda package via the
+# pixi-build-python backend, and the workspace depends on it by path. The
+# package's runtime deps are read from [project.dependencies] above. The heavy
+# `local` extra stays out of the default environment (its ML stack may lag new
+# Python releases); add a separate environment for it once those wheels
+# support 3.14.
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+preview = ["pixi-build"]
+
+[tool.pixi.dependencies]
+python = "3.14.*"
+tasksolver = { path = "." }
+
+[tool.pixi.package]
+name = "tasksolver"
+version = "0.0.1"
+
+[tool.pixi.package.build.backend]
+name = "pixi-build-python"
+version = "*"
+
+# The python backend builds without build isolation, so the [build-system]
+# requirements must be present in the package's host environment.
+[tool.pixi.package.host-dependencies]
+python = "3.14.*"
+pip = "*"
+setuptools = ">=61"
