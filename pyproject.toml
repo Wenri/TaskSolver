@@ -25,12 +25,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# These extras are plain PEP 621 metadata so the package stays installable as a
+# dependency by uv and pixi. The torch wheel index, no-build-isolation, and the
+# CUDA requirement are deliberately NOT encoded here — that config does not
+# propagate to a consumer, so a consuming project must point at a torch index
+# itself. TaskSolver's own pixi dev env wires all of that up under [tool.pixi.*].
+
 # Local HuggingFace model adapters (qwen / intern / minicpm / phi / llama),
-# which are imported lazily only when those model ids are selected. flash-attn
-# is intentionally excluded: it builds from source and needs a CUDA toolkit.
+# imported lazily only when those model ids are selected.
 local = [
     "torch",
     "torchvision",
+    "torchaudio",
     "transformers",
     "accelerate",
     "timm",
@@ -38,6 +44,24 @@ local = [
     "decord",
     "qwen-vl-utils",
     "einops",
+]
+
+# Legacy BlenderAlchemy app / UI / plotting stack. Not imported by the tasksolver
+# library itself; restored from the original setup.py install_requires.
+app = [
+    "streamlit",
+    "flask",
+    "flask-cors",
+    "matplotlib",
+]
+
+# Fused-attention kernels requested by the InternVL / Phi / MiniCPM / LLaMA
+# adapters (they pass `attn_implementation="flash_attention_2"`). Builds from
+# source: needs a CUDA toolkit, torch present at build time, and the consumer to
+# allow no-build-isolation for it. Kept as its own extra so `tasksolver[local]`
+# stays installable on machines without CUDA.
+flash = [
+    "flash-attn",
 ]
 
 [tool.setuptools.packages.find]
@@ -74,3 +98,53 @@ version = "*"
 python = "3.14.*"
 pip = "*"
 setuptools = ">=61"
+
+# --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---
+# The `local` / `app` / `flash` features auto-map to the same-named
+# [project.optional-dependencies] extras above, and are all merged into the single
+# default environment below. The PyTorch cu130 wheel index, CUDA requirement, and
+# flash-attn build toolchain live in these feature tables (consumers never see them).
+[tool.pixi.feature.local.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu130"]
+index-strategy = "unsafe-best-match"
+
+[tool.pixi.feature.local.system-requirements]
+cuda = "13.0"
+
+# flash-attn builds from source: disable build isolation so it can import torch,
+# and supply a CUDA-13-compatible compiler (system gcc 15 is too new for nvcc).
+[tool.pixi.feature.flash.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu130"]
+index-strategy = "unsafe-best-match"
+no-build-isolation = ["flash-attn"]
+
+[tool.pixi.feature.flash.system-requirements]
+cuda = "13.0"
+
+[tool.pixi.feature.flash.dependencies]
+cmake = ">=4"
+ninja = "*"
+gxx_linux-64 = ">=11,<13.3"
+
+[tool.pixi.feature.flash.activation.env]
+CUDA_HOME = "/usr/local/cuda-13.0"
+CC = "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc"
+CXX = "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++"
+# flash-attn build tuning (its setup.py reads these exact names):
+#  - FLASH_ATTN_CUDA_ARCHS: which SM archs to compile. "80" = Ampere (covers this
+#    sm_86 RTX 3080) and avoids the default "80;90;100;120" fat binary (~4x work).
+#    NOTE: flash-attn ignores TORCH_CUDA_ARCH_LIST entirely.
+#  - MAX_JOBS: set explicitly so flash-attn skips its psutil auto-calc, which
+#    under-counts jobs here because ZFS ARC deflates "available" memory. 8 jobs ×
+#    ~3.7 GB (1 arch, NVCC_THREADS=1) ≈ 30 GB; ARC yields the rest.
+#  - NVCC_THREADS: moot for a single arch (only parallelizes across archs).
+FLASH_ATTN_CUDA_ARCHS = "80"
+MAX_JOBS = "8"
+NVCC_THREADS = "1"
+
+# Single merged environment: core + local (torch cu130) + app (UI) + flash
+# (flash-attn). It requires CUDA 13 (from the local/flash features) and builds
+# flash-attn from source on the first `pixi install` (uv caches the wheel after).
+# The PEP 621 extras above stay separate, so consumers still install à la carte.
+[tool.pixi.environments]
+default = { features = ["local", "app", "flash"], solve-group = "default" }
