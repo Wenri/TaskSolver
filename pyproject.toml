@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tasksolver"
+version = "0.0.1"
+description = "Provider-agnostic VLM query flow: an Agent that dispatches to OpenAI / Anthropic / Gemini / vLLM / Claude Code CLI / local HuggingFace model backends."
+readme = "README.md"
+requires-python = ">=3.10"
+# Core deps are the ones imported unconditionally (Agent + common/event/keychain)
+# plus the lightweight API SDKs the provider adapters use. Versions are left
+# unpinned so the consuming environment (e.g. a pixi workspace) owns resolution.
+dependencies = [
+    "loguru",
+    "pillow",
+    "numpy",
+    "requests",
+    "tqdm",
+    "shortuuid",
+    "pymongo",            # provides the `bson` module (standalone `bson` breaks on Python 3.14)
+    "openai",             # gpt4v + vLLM adapters
+    "anthropic",          # claude + kimi adapters
+    "google-generativeai" # gemini adapter
+]
+
+[project.optional-dependencies]
+# Local HuggingFace model adapters (qwen / intern / minicpm / phi / llama),
+# which are imported lazily only when those model ids are selected. flash-attn
+# is intentionally excluded: it builds from source and needs a CUDA toolkit.
+local = [
+    "torch",
+    "torchvision",
+    "transformers",
+    "accelerate",
+    "timm",
+    "bitsandbytes",
+    "decord",
+    "qwen-vl-utils",
+    "einops",
+]
+
+[tool.setuptools.packages.find]
+include = ["tasksolver*"]
