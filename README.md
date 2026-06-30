@@ -20,7 +20,7 @@ One `Agent`, many backends — selected by the `vision_model` id. Provider adapt
 
 ## Install
 
-TaskSolver uses [pixi](https://pixi.sh) for a managed Python 3.14 environment:
+TaskSolver uses [pixi](https://pixi.sh) for a managed Python 3.13 environment:
 
 ```bash
 pixi install                                              # build + install the default env
@@ -28,9 +28,9 @@ pixi run python test_scripts/text_only.py --model claude-code
 pixi shell                                                # drop into the environment
 ```
 
-The pixi workspace is configured in `pyproject.toml`: it pins Python 3.14 and builds TaskSolver itself as an **editable** package via the `pixi-build` backend (so source edits are live). It defines a single merged environment carrying the full stack — core API / Claude Code backends, the local HuggingFace + torch (cu130) adapters, the legacy UI/plotting tools, and flash-attn — so `pixi install` needs a CUDA 13 GPU and **builds flash-attn from source on first run** (uv caches the wheel afterward).
+The pixi workspace is configured in `pyproject.toml`: it pins Python 3.13 and builds TaskSolver itself as an **editable** package via the `pixi-build` backend (so source edits are live). It defines a single merged environment carrying the full stack — core API / Claude Code backends, the local HuggingFace + torch (cu130) adapters, the legacy UI/plotting tools, and flash-attn — so `pixi install` needs a CUDA 13 GPU and **builds flash-attn from source on first run** (uv caches the wheel afterward).
 
-For à-la-carte or non-CUDA use, the same groups are portable `[project.optional-dependencies]` extras — `tasksolver[local]`, `[app]`, `[flash]` — so the package stays installable as a dependency by uv and pixi (a consumer points at its own torch index). Core dependencies are unpinned so the consuming workspace owns version resolution; `flash-attn` has no prebuilt wheels for new Pythons and builds from source.
+For à-la-carte use, the same groups are portable `[project.optional-dependencies]` extras — `tasksolver[local]` (torch + HuggingFace adapters, **including flash-attn**) and `tasksolver[app]` (UI/plotting) — so the package stays installable as a dependency by uv and pixi (a consumer points at its own torch index). Core dependencies are unpinned so the consuming workspace owns version resolution; `flash-attn` has no prebuilt wheels for new Pythons and builds from source, so `tasksolver[local]` needs CUDA.
 
 Credentials are supplied via a `KeyChain` (loading files like `system/credentials/openai_api.txt`) or environment variables (`OPENAI_API_KEY`, the `claude` key, `GEMINI_API_KEY`, `VLLM_API_KEY`, `MOONSHOT_API_KEY`).
 

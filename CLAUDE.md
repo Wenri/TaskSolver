@@ -9,7 +9,7 @@ TaskSolver is a **provider-agnostic query flow for vision-language models**. You
 ## Commands
 
 ```bash
-# pixi: ONE merged env — pins Python 3.14, builds tasksolver editable via the
+# pixi: ONE merged env — pins Python 3.13, builds tasksolver editable via the
 # pixi-build backend, and carries the full stack (torch cu130 + UI + flash-attn).
 # Needs a CUDA 13 GPU; the first `pixi install` compiles flash-attn from source
 # (~25-30 min, cached after). Plain `pixi install` builds everything.
@@ -22,11 +22,11 @@ python test_scripts/text_only.py --model claude-code   # choices: claude, claude
 python test_scripts/vision_language.py                 # vision; uses QwenModel (present in the merged env)
 ```
 
-There is no formal test/lint/CI setup. The `test_scripts/` files are runnable smoke tests, not automated tests — verify changes by running the relevant one with a backend you have credentials for. `requires-python` is ≥3.10, but the pixi env pins **3.14** (the reason `pymongo` is used instead of a standalone `bson`, which breaks on 3.14). Core deps are intentionally **unpinned** (the host env owns version resolution).
+There is no formal test/lint/CI setup. The `test_scripts/` files are runnable smoke tests, not automated tests — verify changes by running the relevant one with a backend you have credentials for. `requires-python` is ≥3.10, but the pixi env pins **3.13** (the reason `pymongo` is used instead of a standalone `bson`, which breaks on 3.14). Core deps are intentionally **unpinned** (the host env owns version resolution).
 
 **pixi-build env (`[tool.pixi.*]` in `pyproject.toml`):** the workspace uses the `pixi-build` preview feature — `tasksolver` is built as a noarch conda package by the `pixi-build-python` backend and depended on by path, so `pixi install` installs it **editable** automatically (no separate `pip install -e` needed). Two non-obvious bits if you edit this config: the backend builds *without isolation*, so the `[build-system].requires` (setuptools/pip) must be repeated under `[tool.pixi.package.host-dependencies]`; and the backend resolves from pixi's default channel and is not pinned in `pixi.lock`, so no explicit `channels` are required.
 
-**Optional extras, the merged env, and building flash-attn.** `[project.optional-dependencies]` keeps three *portable* extras — `local` (torch/HF stack), `app` (streamlit/flask/matplotlib), `flash` (flash-attn) — so a consumer can `pip install tasksolver[local]` without inheriting any pixi/CUDA config. TaskSolver's own workspace then merges all three into the single `default` pixi environment (`[tool.pixi.environments]`) and puts the cu130 torch index, CUDA requirement, and flash-attn toolchain in `[tool.pixi.feature.{local,flash}.*]` — so the dev env requires CUDA 13 and `pixi install` compiles flash-attn. That build has two non-obvious knobs, set in `[tool.pixi.feature.flash.activation.env]` (pixi *does* apply a feature's `activation.env` during the build): use **`FLASH_ATTN_CUDA_ARCHS`** (e.g. `"80"` = Ampere) — flash-attn silently ignores `TORCH_CUDA_ARCH_LIST` and otherwise builds a 4-arch fat binary (~4× the work); and set **`MAX_JOBS`** explicitly, else flash-attn's `psutil`-based auto-calc under-parallelizes because this host's ZFS ARC cache deflates "available" memory.
+**Optional extras, the merged env, and building flash-attn.** `[project.optional-dependencies]` keeps two *portable* extras — `local` (torch/HF stack **incl. flash-attn**, since the intern/phi/minicpm/llama adapters hardcode `flash_attention_2`) and `app` (streamlit/flask/matplotlib). TaskSolver's own workspace merges both into the single `default` pixi environment (`[tool.pixi.environments]`) and puts the cu130 torch index, `no-build-isolation`, and the flash-attn build toolchain in `[tool.pixi.feature.local.*]`; the CUDA 13 requirement is a virtual package on the workspace `platforms`. So the dev env requires CUDA 13 and `pixi install` compiles flash-attn — and `pip install tasksolver[local]` likewise pulls flash-attn (needs CUDA). That build has two non-obvious knobs, set in `[tool.pixi.feature.local.activation.env]` (pixi *does* apply a feature's `activation.env` during the build): use **`FLASH_ATTN_CUDA_ARCHS`** (e.g. `"80"` = Ampere) — flash-attn silently ignores `TORCH_CUDA_ARCH_LIST` and otherwise builds a 4-arch fat binary (~4× the work); and set **`MAX_JOBS`** explicitly, else flash-attn's `psutil`-based auto-calc under-parallelizes because this host's ZFS ARC cache deflates "available" memory.
 
 ## Architecture
 
