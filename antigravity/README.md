@@ -172,19 +172,27 @@ antigravity/
 
 ## Build & run
 
+`pixi install` **builds the shim automatically** — the tasksolver package build
+(`setup.py` → `build_py`) runs `antigravity/setup.sh` + `antigravity/native/build.sh`,
+producing `antigravity/build/antigravity.so`. It's **fail-soft**: on a machine
+without agy/frida-gum/gcc it warns and skips, so the tasksolver install still
+succeeds (and tasksolver stays a clean `noarch` package — the `.so` is a build
+side-effect, not packaged into it). pixi caches the package build, so **after an
+agy update** rebuild the shim explicitly:
+
 ```bash
-cd antigravity
-./setup.sh                                             # fetch frida-gum + UAPI headers (once)
-python3 symbols/build_symbols.py vendor/agy symbols/symbols.json   # after any agy update
-./native/build.sh                                      # or: make -C native
+pixi run antigravity            # setup.sh + resolve symbols + build (also re-pins symbols.json)
+# or the manual pieces from antigravity/:
+#   ./setup.sh && python3 symbols/build_symbols.py vendor/agy symbols/symbols.json && ./native/build.sh
+```
 
-# Incremental bring-up (AGY_HOOK_STAGE): 1=python only, 2=smoke hook, 3=real hooks.
-AGY_HOOK_STAGE=2 ./run-agy.sh --help                   # smoke: os.Getenv → capture
-AGY_HOOK_STAGE=3 ./run-agy.sh <normal agy args...>     # capture tls/http (fires under an
-                                                       # authenticated agy session)
+Run agy under the hook (`AGY_HOOK_STAGE`: 1=python+DNS, 3=tls_write+decrypt
+request/response capture, 5=parking hooks that stall):
 
+```bash
+AGY_HOOK_STAGE=3 ./run-agy.sh <normal agy args...>     # capture request+response (authenticated agy)
 python3 python/analyze_capture.py agy-capture.jsonl --plot traffic.png
-pip install hpack          # optional: decode HTTP/2 request/response headers
+pip install hpack brotli       # optional: decode HTTP/2 headers + brotli response bodies
 ```
 
 ## Status (validated on this WSL1 host, agy build 4368698a…)
