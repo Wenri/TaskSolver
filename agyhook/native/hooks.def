@@ -1,0 +1,41 @@
+/* hooks.def — declarative hook table (X-macro).
+ *
+ *   HOOK(ID, "go.symbol.Name", MODE, "kind", STAGE, LEAVE)
+ *
+ * ID     enum tag used in the on_enter/on_leave switch (register semantics are
+ *        coded per-ID in agyhook.c — different funcs read different registers).
+ * MODE   AGY_ASYNC (log, non-blocking) or AGY_SYNC (block for a modify verdict).
+ * kind   string tag passed to Python dispatch(kind, stream_id, data).
+ * STAGE  which AGY_HOOK_STAGE this hook belongs to (incremental WSL1 bring-up):
+ *          stage 1 = python only; stage 2 = ONLY stage-2 hooks (smoke);
+ *          stage >=3 = ONLY stage->=3 hooks (the real ones).
+ * LEAVE  1 => needs on_leave (return-value interception). Costs a return-address
+ *        rewrite that Go's stack unwinder can trip on, so keep it to hooks that
+ *        truly need the return value. NEVER hook runtime-special funcs
+ *        (runtime.main, goroutine entries) — Go validates their return PC.
+ */
+
+/* STAGE now selects EXACTLY that stage's hooks (2=smoke, 3=tls/http, 4=serializers).
+ * Safe ordinary startup function; fires many times, no auth/network needed. */
+HOOK(SMOKE_GETENV, "os.Getenv",                      AGY_ASYNC, "smoke",     2, 0)
+
+/* stage 3: egress capture. tls_write is safe once we attach PAST the prologue
+ * (per-hook skip from symbols.json) — it doesn't park, so no morestack re-entry
+ * and no park-while-hooked hazard. Captures the full model REQUEST. */
+HOOK(TLS_WRITE,    "crypto/tls.(*Conn).Write",        AGY_ASYNC, "tls_write", 3, 0)
+/* ingress RESPONSE: http2 pipe.Write gets each de-framed response body chunk as
+ * []byte (RBX=ptr,RCX=len), CPU-only (no park) — safe like tls_write. */
+HOOK(H2_PIPE_WRITE,"net/http/internal/http2.(*pipe).Write", AGY_ASYNC, "resp",   5, 0)
+/* ingress RESPONSE via TLS decrypt (CPU-only, post-read → doesn't park). on_leave
+ * []byte = decrypted inbound record (HTTP/2 frames of the response). */
+HOOK(TLS_DECRYPT,  "crypto/tls.(*halfConn).decrypt",   AGY_ASYNC, "tls_read",  3, 1)
+/* stage 5: these STALL agy — tls_read/RoundTrip PARK the goroutine while hooked
+ * (even on-enter-only, past-prologue). Kept for reference; response capture must
+ * use a non-parking CPU func (codecV2.Unmarshal) or the PTY transcript. */
+HOOK(TLS_READ,     "crypto/tls.(*Conn).Read",         AGY_ASYNC, "tls_read",  5, 1)
+HOOK(HTTP_RT,      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   5, 0)
+
+/* stage 4: app-layer capture R&D — CPU-only funcs returning []byte (readable). */
+HOOK(SER_ROOT,     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",    AGY_ASYNC, "serialize", 4, 1)
+HOOK(MAR_PROMPT,   "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON", AGY_ASYNC, "marshal",   4, 1)
+HOOK(PROTO_MARSHAL,"google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            AGY_ASYNC, "proto_marshal", 4, 1)

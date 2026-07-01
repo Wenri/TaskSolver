@@ -1,0 +1,4 @@
+{
+  "_comment": "Stub for agy custom-agent config. The binary references agents.json / custom_agent, but the schema is version-specific and unverified on this (non-onboarded) host. Fill in once confirmed against your agy version's docs.",
+  "agents": []
+}

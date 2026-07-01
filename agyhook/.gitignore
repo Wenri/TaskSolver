@@ -1,0 +1,22 @@
+# Vendored Antigravity binary — copied in for a self-contained tree, never committed (164 MB).
+vendor/agy
+vendor/agy-*
+
+# Build artifacts
+build/*.so
+build/*.o
+symbols/goresym.json
+
+# Fetched/copied build deps (recreate with ./setup.sh): frida-gum devkit + UAPI headers
+native/vendor/
+
+# Python
+python/**/__pycache__/
+*.pyc
+
+# Runtime capture output
+*.jsonl
+captures/
+
+# generated from symbols.json at build
+native/symbols_gen.h
