@@ -80,6 +80,9 @@ python = "3.13.*"
 tasksolver = { path = "." }
 nodejs = ">=25,<26"
 bun = ">=1.3.11,<2"
+# antigravity HTTP/2 response decoding (h2reassemble.py) — from conda-forge, not pip.
+hpack = ">=4"
+brotli-python = ">=1.1"
 
 # Put the antigravity/ python subsystem on the path so the merged agy backend
 # (`import agy` — drives the Antigravity CLI as a TaskSolver-contract model),
@@ -104,6 +107,11 @@ version = "0.0.1"
 [tool.pixi.package.build.backend]
 name = "pixi-build-python"
 version = "*"
+
+# The antigravity shim (antigravity/build/antigravity.so) is an x86-64 build and a
+# main target of this repo, so produce an arch-specific (linux-64) package, not noarch.
+[tool.pixi.package.build.config]
+noarch = false
 
 # The python backend builds without build isolation, so the [build-system]
 # requirements must be present in the package's host environment.

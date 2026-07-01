@@ -172,13 +172,16 @@ antigravity/
 
 ## Build & run
 
-`pixi install` **builds the shim automatically** — the tasksolver package build
-(`setup.py` → `build_py`) runs `antigravity/setup.sh` + `antigravity/native/build.sh`,
-producing `antigravity/build/antigravity.so`. It's **fail-soft**: on a machine
-without agy/frida-gum/gcc it warns and skips, so the tasksolver install still
-succeeds (and tasksolver stays a clean `noarch` package — the `.so` is a build
-side-effect, not packaged into it). pixi caches the package build, so **after an
-agy update** rebuild the shim explicitly:
+`pixi install` **builds the shim** — the tasksolver package build (`setup.py` →
+`build_py`) runs `antigravity/setup.sh` + `antigravity/native/build.sh`, producing
+`antigravity/build/antigravity.so`. Since the shim is x86-64-specific and a main
+target, the package is **arch-specific (linux-64)** (`[tool.pixi.package.build.config]
+noarch=false`) and the build is **required** — it fails loudly if the toolchain
+(gcc / frida-gum / libpython) is missing. Set `ANTIGRAVITY_SKIP_BUILD=1` to build
+just the Python library without the shim. (`hpack` + `brotli-python`, for HTTP/2
+response decoding, are pixi/conda deps — no `pip install` needed.)
+
+pixi caches the package build, so **after an agy update** rebuild the shim explicitly:
 
 ```bash
 pixi run antigravity            # setup.sh + resolve symbols + build (also re-pins symbols.json)
@@ -192,7 +195,6 @@ request/response capture, 5=parking hooks that stall):
 ```bash
 AGY_HOOK_STAGE=3 ./run-agy.sh <normal agy args...>     # capture request+response (authenticated agy)
 python3 python/analyze_capture.py agy-capture.jsonl --plot traffic.png
-pip install hpack brotli       # optional: decode HTTP/2 headers + brotli response bodies
 ```
 
 ## Status (validated on this WSL1 host, agy build 4368698a…)
@@ -260,7 +262,7 @@ why we hook decrypt, not read. `AGY_HOOK_PREVIEW` sets capture bytes/event.
 
 The decrypted response is HTTP/2 frames (HPACK headers) with a **compressed body**
 (brotli/gzip). `h2reassemble.py` de-frames + de-gzip/brotli/deflate + HPACK-decodes
-(`pip install hpack brotli`) — decoding on already-captured bytes, not a hook
+(via the `hpack` + `brotli-python` pixi deps) — decoding on already-captured bytes, not a hook
 concern. (The PTY transcript / `AgyModel` also give the reply if you don't need raw.)
 
 CPU-only funcs (`os.Getenv`, `(*RootModel).Serialize`, `proto.Marshal`) also hook

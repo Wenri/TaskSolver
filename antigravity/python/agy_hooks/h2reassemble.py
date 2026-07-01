@@ -6,8 +6,8 @@ application/grpc`, protobuf payloads). This module reassembles that stream:
 
     per (conn, direction):  bytes -> HTTP/2 frames -> per-h2-stream HEADERS+DATA
 
-HEADERS are HPACK-decoded if the `hpack` package is installed (recommended:
-`pip install hpack`); without it, DATA is still captured. gzip bodies are
+HEADERS are HPACK-decoded via the `hpack` package (a pixi dependency); without it,
+DATA is still captured. gzip bodies are
 inflated. gRPC length-prefixed messages inside DATA are left raw (decode with
 your .proto downstream) but split out for convenience.
 
@@ -112,7 +112,7 @@ class Reassembler:
                 body = gzip.decompress(body)
             except Exception:
                 pass
-        elif "br" in enc:                       # brotli (Google's default) — needs `pip install brotli`
+        elif "br" in enc:                       # brotli (Google's default; brotli-python is a pixi dep)
             try:
                 import brotli
                 body = brotli.decompress(body)
