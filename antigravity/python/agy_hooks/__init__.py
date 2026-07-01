@@ -11,7 +11,10 @@ Contract:
       to leave unchanged. Keep SYNC handlers fast/CPU-bound (they block a Go
       goroutine — see README's GC-stall note).
 
-kind values: "smoke" | "tls_write" | "tls_read" | "http_rt" | "dns".
+kind values with special handling: "tls_write"/"tls_read" (also fed to HTTP/2
+reassembly), "smoke" (prints). Any other kind the shim emits — "dns", "http_rt",
+"resp", "serialize", "marshal", "proto_marshal", or a new one — is recorded by the
+default path (never silently dropped).
 Set AGY_HOOK_H2=0 to disable HTTP/2 reassembly (raw capture only).
 """
 import os
@@ -67,7 +70,12 @@ _ROUTER = {
 def dispatch(kind, stream_id, data):
     try:
         handler = _ROUTER.get(kind)
-        return handler(stream_id, data) if handler else None
+        if handler is not None:
+            return handler(stream_id, data)
+        # Unrouted kind (resp/serialize/marshal/proto_marshal/…): record it rather
+        # than drop it, so stage-4/5 hooks aren't silently ineffective.
+        _rec.record(kind, stream_id, data)
+        return None
     except Exception:
         traceback.print_exc()
         return None

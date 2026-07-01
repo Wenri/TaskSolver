@@ -51,11 +51,14 @@ class AgyModel(object):
 
     def ask(self, payload: dict, n_choices: int = 1) -> Tuple[List[dict], List[dict]]:
         def worker(idx, results):
-            raw = self._query_once(payload)
-            results[idx] = {
-                "message": {"role": "assistant", "content": raw["result"]},
-                "metadata": raw,
-            }
+            try:
+                raw = self._query_once(payload)
+                results[idx] = {
+                    "message": {"role": "assistant", "content": raw["result"]},
+                    "metadata": raw,
+                }
+            except BaseException as e:  # stash to re-raise on the caller thread
+                results[idx] = e
 
         assert n_choices >= 1
         results = [None] * n_choices
@@ -67,6 +70,11 @@ class AgyModel(object):
                 j.join()
         else:
             worker(0, results)
+
+        # Propagate the first worker error instead of crashing later on a None result.
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
 
         messages = [res["message"] for res in results]
         metadata = [res["metadata"] for res in results]

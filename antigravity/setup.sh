@@ -26,8 +26,12 @@ else
     echo "[setup] downloading frida-gum devkit $FRIDA_VER ..."
     mkdir -p "$GUM"
     url="https://github.com/frida/frida/releases/download/${FRIDA_VER}/frida-gum-devkit-${FRIDA_VER}-linux-x86_64.tar.xz"
-    curl -fsSL --max-time 180 "$url" -o /tmp/gumdevkit.tar.xz
-    tar -xf /tmp/gumdevkit.tar.xz -C "$GUM"
+    tmp="$(mktemp -t gumdevkit.XXXXXX.tar.xz)"
+    trap 'rm -f "$tmp"' EXIT
+    # HTTPS-only, no redirects to other schemes
+    curl -fsSL --proto '=https' --tlsv1.2 --max-time 180 "$url" -o "$tmp"
+    tar -xf "$tmp" -C "$GUM"
+    rm -f "$tmp"; trap - EXIT
     echo "$FRIDA_VER" > "$GUM/VERSION"
     echo "[setup] frida-gum devkit ready"
 fi

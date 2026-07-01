@@ -5,7 +5,9 @@
 #
 # Env knobs (all optional):
 #   AGY_BIN                 path to agy            (default ~/.local/bin/agy)
-#   AGY_HOOK_STAGE          1=python only, 2=+smoke hook, 3=+tls/http (default 3)
+#   AGY_HOOK_STAGE          1=python+DNS only (default), 2=+smoke hook,
+#                           3=+tls_write+decrypt (request+response capture),
+#                           4=serializer/proto R&D, 5=parking hooks (STALL agy)
 #   AGY_HOOK_CAPTURE        JSONL output           (default ./agy-capture.jsonl)
 #   AGY_HOOK_LOG            native shim log        (default ./antigravity.log)
 #   AGY_HOOK_TLS_WRITE_SYNC set to enable synchronous egress rewrite

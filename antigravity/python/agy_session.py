@@ -229,7 +229,8 @@ def main():
     ap.add_argument("--idle", type=float, default=4.0)
     ap.add_argument("--timeout", type=float, default=120.0)
     ap.add_argument("--stage", type=int, default=1,
-                    help="1=python+DNS (safe, works). 3=+tls/http gum hooks STALLS agy.")
+                    help="1=python+DNS. 3=tls_write+decrypt (request+response capture, works). "
+                         "5=tls_read/RoundTrip (park-while-hooked → STALL agy).")
     ap.add_argument("--capture", default="agy-capture.jsonl")
     ap.add_argument("--workdir", default=None)
     ap.add_argument("--echo", action="store_true", help="mirror agy output to our stdout live")

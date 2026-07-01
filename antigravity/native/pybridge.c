@@ -58,10 +58,13 @@ static void enqueue(job_t *j)
 static void run_dispatch(job_t *j)
 {
     if (!g_dispatch) return;
+    /* Keep the (ptr,len) pair consistent: if there's no buffer, length is 0 so the
+     * "y#" format never reads past the empty literal. */
     const char *buf = j->data ? (const char *)j->data : "";
+    Py_ssize_t dlen = j->data ? (Py_ssize_t)j->len : 0;
     PyObject *r = PyObject_CallFunction(g_dispatch, "sKy#",
                                         j->kind, (unsigned long long)j->stream_id,
-                                        buf, (Py_ssize_t)j->len);
+                                        buf, dlen);
     if (!r) {
         PyErr_Print();
         return;
@@ -165,10 +168,11 @@ int agy_py_start(void)
 static uint8_t *copy_capped(const uint8_t *src, size_t len, size_t *out_len)
 {
     size_t n = len > g_maxcopy ? g_maxcopy : len;
-    *out_len = n;
-    if (n == 0) return NULL;
+    if (n == 0) { *out_len = 0; return NULL; }
     uint8_t *p = malloc(n);
-    if (p && src) memcpy(p, src, n);
+    if (!p) { *out_len = 0; return NULL; }   /* alloc failed → keep data/len consistent */
+    if (src) memcpy(p, src, n);
+    *out_len = n;
     return p;
 }
 

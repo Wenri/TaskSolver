@@ -23,8 +23,10 @@ HOOK(SMOKE_GETENV, "os.Getenv",                      AGY_ASYNC, "smoke",     2, 
  * (per-hook skip from symbols.json) — it doesn't park, so no morestack re-entry
  * and no park-while-hooked hazard. Captures the full model REQUEST. */
 HOOK(TLS_WRITE,    "crypto/tls.(*Conn).Write",        AGY_ASYNC, "tls_write", 3, 0)
-/* ingress RESPONSE: http2 pipe.Write gets each de-framed response body chunk as
- * []byte (RBX=ptr,RCX=len), CPU-only (no park) — safe like tls_write. */
+/* http2 pipe.Write gets each de-framed response body chunk as []byte
+ * (RBX=ptr,RCX=len) — BUT it takes a sync.Mutex/cond and PARKS under
+ * reader/writer contention, so hooking it stalls agy (stage 5, reference only,
+ * same park hazard as tls_read). Use TLS_DECRYPT for the response instead. */
 HOOK(H2_PIPE_WRITE,"net/http/internal/http2.(*pipe).Write", AGY_ASYNC, "resp",   5, 0)
 /* ingress RESPONSE via TLS decrypt (CPU-only, post-read → doesn't park). on_leave
  * []byte = decrypted inbound record (HTTP/2 frames of the response). */

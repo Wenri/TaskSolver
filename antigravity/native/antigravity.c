@@ -203,9 +203,12 @@ static void install_hooks(int stage)
         GumAttachOptions opt = { 0 };
         opt.listener_function_data = GSIZE_TO_POINTER((gsize)(i + 1));
         /* Attach PAST the stack-check prologue (agy_skip): Go's morestack re-runs
-         * the real entry, not our trampoline — this is what makes hooking the
-         * blocking network funcs (tls/http) safe. Args are still in registers at
-         * the post-prologue point (before they're spilled). */
+         * the real entry, not our trampoline. Args are still in registers at the
+         * post-prologue point (before they're spilled). NOTE: this only fixes the
+         * morestack hazard — a hooked function that PARKS the goroutine (tls_read,
+         * RoundTrip, pipe.Write) still stalls agy even past-prologue, because gum's
+         * per-thread return tracking breaks when Go resumes it on another OS thread.
+         * Only hook functions that don't park (tls_write, halfConn.decrypt, CPU funcs). */
         uint64_t skip = agy_skip(HOOKS[i].name);
         gpointer addr = GSIZE_TO_POINTER((gsize)base + va + skip);
         GumInvocationListener *lis = HOOKS[i].leave ? l_full : l_enter;
