@@ -5,7 +5,7 @@ logged-in agent CLI we shell out to). Uses `agy --print` under a PTY in a git
 workspace. No API key needed (agy is logged in via ~/.gemini/antigravity-cli/).
 
     from tasksolver.common import TaskSpec, Question
-    from agy import AgyModel
+    from pyagy import AgyModel
     model = AgyModel(api_key=None, task=my_task, model="gemini-3-pro")
     parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 """

@@ -98,7 +98,7 @@ class AgySession:
         env.update({
             "AGY_HOOK_ENABLE": "1",
             "AGY_HOOK_STAGE": str(self.stage),
-            "AGY_HOOK_MODULE": "agy_hooks",
+            "AGY_HOOK_MODULE": "agy_process",
             "AGY_HOOK_PYTHONPATH": os.path.join(self.root, "python"),
             "AGY_HOOK_CAPTURE": self.capture,
             "PYTHONPATH": os.path.join(self.root, "python") + os.pathsep + env.get("PYTHONPATH", ""),

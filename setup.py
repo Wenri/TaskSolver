@@ -34,7 +34,7 @@ class BuildPyWithShim(build_py):
         # setup.sh: vendor agy + fetch frida-gum devkit + UAPI headers (idempotent).
         subprocess.run(["bash", "antigravity/setup.sh"], cwd=root, check=True)
         # build.sh: gen symbols_gen.h from the committed symbols.json + compile.
-        subprocess.run(["bash", "antigravity/native/build.sh"], cwd=root, check=True)
+        subprocess.run(["bash", "antigravity/src/build.sh"], cwd=root, check=True)
         sys.stderr.write("[setup] antigravity.so built (arch-specific tasksolver build)\n")
 
 

@@ -23,7 +23,7 @@ export AGY_HOOK_ENABLE=1
 #   Stage 5 hooks (tls_read/RoundTrip) STALL agy (they park while hooked) — avoid.
 # NOTE: agy needs a real git workspace (an empty dir hangs at startup).
 export AGY_HOOK_STAGE="${AGY_HOOK_STAGE:-1}"
-export AGY_HOOK_MODULE="${AGY_HOOK_MODULE:-agy_hooks}"
+export AGY_HOOK_MODULE="${AGY_HOOK_MODULE:-agy_process}"
 export AGY_HOOK_PYTHONPATH="${AGY_HOOK_PYTHONPATH:-$HERE/python}"
 export AGY_HOOK_CAPTURE="${AGY_HOOK_CAPTURE:-$PWD/agy-capture.jsonl}"
 export AGY_HOOK_LOG="${AGY_HOOK_LOG:-$PWD/antigravity.log}"

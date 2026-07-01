@@ -1,4 +1,4 @@
-"""agy — drive the Antigravity `agy` CLI as a TaskSolver-contract backend.
+"""pyagy — drive the Antigravity `agy` CLI as a TaskSolver-contract backend.
 
 - `AgyModel`  : TaskSolver adapter (prepare_payload/ask/rough_guess/run_once/…),
                 mirroring tasksolver.claude_code.ClaudeCodeModel.

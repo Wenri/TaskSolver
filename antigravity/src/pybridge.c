@@ -40,7 +40,7 @@ static pthread_cond_t  g_startcv = PTHREAD_COND_INITIALIZER;
 static int             g_ready = -1;   /* -1 starting, 0 failed, 1 ready */
 
 static size_t          g_maxcopy = 1u << 20;
-static PyObject       *g_dispatch;     /* agy_hooks.dispatch (borrowed on worker thread) */
+static PyObject       *g_dispatch;     /* agy_process.dispatch (borrowed on worker thread) */
 
 int agy_py_ready(void) { return g_ready == 1; }
 
@@ -86,7 +86,7 @@ static void *worker_main(void *arg)
 {
     (void)arg;
     const char *modname = getenv("AGY_HOOK_MODULE");
-    if (!modname || !*modname) modname = "agy_hooks";
+    if (!modname || !*modname) modname = "agy_process";
     const char *pypath = getenv("AGY_HOOK_PYTHONPATH");
     const char *mc = getenv("AGY_HOOK_MAXCOPY");
     if (mc && *mc) { long v = strtol(mc, NULL, 0); if (v > 0) g_maxcopy = (size_t)v; }

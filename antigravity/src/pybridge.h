@@ -28,7 +28,7 @@ typedef struct {
 } agy_event_t;
 
 /* Start the interpreter + worker thread. Reads env:
- *   AGY_HOOK_MODULE     python module to import (default "agy_hooks")
+ *   AGY_HOOK_MODULE     python module to import (default "agy_process")
  *   AGY_HOOK_PYTHONPATH prepended to sys.path
  *   AGY_HOOK_MAXCOPY    max bytes copied per event (default 1<<20)
  * Returns 0 on success. Never aborts the host on failure. */

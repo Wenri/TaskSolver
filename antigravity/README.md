@@ -16,7 +16,7 @@ shared object:
    registry, prompt assembly).
 
 Hook events are delivered to an **embedded CPython interpreter** running on a
-dedicated worker thread, where your logic lives (`antigravity/python/agy_hooks/`).
+dedicated worker thread, where your logic lives (`antigravity/python/agy_process/`).
 
 ---
 
@@ -57,7 +57,7 @@ update.
         │           ▼                                                        │
         │   ┌───────────────────────────────────────────┐                   │
         │   │ pyworker pthread  (LARGE 16MB stack)        │  ← libpython3.12  │
-        │   │  Py_InitializeEx(0); import agy_hooks       │    lives only     │
+        │   │  Py_InitializeEx(0); import agy_process       │    lives only     │
         │   │  loop: pop req → PyGILState_Ensure →        │    here (one      │
         │   │        call on_tls_write/read/http/tool →   │    PyThreadState) │
         │   │        write verdict → signal condvar       │                   │
@@ -120,7 +120,7 @@ our callback, so reading is safe.
 
 The TLS layer gives us HTTP/2 frames (HPACK-compressed headers, possibly gzipped
 bodies, likely gRPC/protobuf). Reassembly to LLM request/response JSON happens
-**in Python** (`agy_hooks/h2reassemble.py`) — decoupled from agy internals, so it
+**in Python** (`agy_process/h2reassemble.py`) — decoupled from agy internals, so it
 survives agy updates.
 
 ---
@@ -147,7 +147,7 @@ antigravity/
     build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
                               symbols.json; self-verifies every hook is a prologue
     symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, catalog}
-  native/
+  src/
     antigravity.c               ← LD_PRELOAD constructor + gum install + Go-ABI hook
                               callbacks + getaddrinfo interposer
     pybridge.c/.h           ← embed libpython, pyworker thread, queue, dispatch
@@ -156,10 +156,10 @@ antigravity/
     build.sh / Makefile     ← build antigravity.so (build.sh = no-make path)
     vendor/                 ← frida-gum devkit + UAPI headers (gitignored; ./setup.sh)
   python/
-    agy_hooks/__init__.py   ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
-    agy_hooks/record.py     ← JSONL recorder for plotting
-    agy_hooks/h2reassemble.py ← HTTP/2 + HPACK + gzip stream reassembly
-    agy/                    ← TaskSolver-contract backend (drive agy as a model):
+    agy_process/__init__.py   ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
+    agy_process/record.py     ← JSONL recorder for plotting
+    agy_process/h2reassemble.py ← HTTP/2 + HPACK + gzip stream reassembly
+    pyagy/                    ← TaskSolver-contract backend (drive agy as a model):
       model.py  → AgyModel (prepare_payload/ask/rough_guess/run_once/…)
       session.py→ run_print (one-shot) + InteractiveSession (multi-turn PTY)
     agy_session.py          ← hook-integrated interactive driver (capture experiments)
@@ -173,7 +173,7 @@ antigravity/
 ## Build & run
 
 `pixi install` **builds the shim** — the tasksolver package build (`setup.py` →
-`build_py`) runs `antigravity/setup.sh` + `antigravity/native/build.sh`, producing
+`build_py`) runs `antigravity/setup.sh` + `antigravity/src/build.sh`, producing
 `antigravity/build/antigravity.so`. Since the shim is x86-64-specific and a main
 target, the package is **arch-specific (linux-64)** (`[tool.pixi.package.build.config]
 noarch=false`) and the build is **required** — it fails loudly if the toolchain
@@ -186,7 +186,7 @@ pixi caches the package build, so **after an agy update** rebuild the shim expli
 ```bash
 pixi run antigravity            # setup.sh + resolve symbols + build (also re-pins symbols.json)
 # or the manual pieces from antigravity/:
-#   ./setup.sh && python3 symbols/build_symbols.py vendor/agy symbols/symbols.json && ./native/build.sh
+#   ./setup.sh && python3 symbols/build_symbols.py vendor/agy symbols/symbols.json && ./src/build.sh
 ```
 
 Run agy under the hook (`AGY_HOOK_STAGE`: 1=python+DNS, 3=tls_write+decrypt
@@ -199,7 +199,7 @@ python3 python/analyze_capture.py agy-capture.jsonl --plot traffic.png
 
 ## Status (validated on this WSL1 host, agy build 4368698a…)
 
-- ✅ libpython embeds in-process; worker thread runs; `agy_hooks` imports.
+- ✅ libpython embeds in-process; worker thread runs; `agy_process` imports.
 - ✅ frida-gum **embedded** inline hooking works on WSL1 (no ptrace).
 - ✅ Hook fires on a real Go function (`os.Getenv`), reads register-ABI string
   args, marshals to Python, records to JSONL — agy runs to completion, no crash.
@@ -271,7 +271,7 @@ RAX=ptr, RBX=len).
 
 ## Using agy as a TaskSolver backend (`agy/`)
 
-`antigravity/python/agy/` drives agy as a **model backend** with the same adapter
+`antigravity/python/pyagy/` drives agy as a **model backend** with the same adapter
 surface as TaskSolver's other providers (mirrors `ClaudeCodeModel`): it shells
 out to `agy --print` under a PTY, in a throwaway git workspace, and parses the
 reply. No API key (agy is logged in via `~/.gemini/antigravity-cli/`). This is
@@ -279,15 +279,15 @@ independent of the gum/LD_PRELOAD instrumentation — it treats agy as a black b
 
 ```python
 from tasksolver.common import TaskSpec, Question
-from agy import AgyModel                       # on path in the pixi env
+from pyagy import AgyModel                       # on path in the pixi env
 model = AgyModel(api_key=None, task=my_task, model="gemini-3-pro")
 parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 ```
 
-`import agy` works in the pixi env because `[tool.pixi.activation.env]` puts
+`import pyagy` works in the pixi env because `[tool.pixi.activation.env]` puts
 `antigravity/python` on `PYTHONPATH`. Smoke test: `pixi run python
 antigravity/python/example_agy_backend.py`. For multi-turn scripting use
-`agy.InteractiveSession` (PTY + terminal-query responder).
+`pyagy.InteractiveSession` (PTY + terminal-query responder).
 
 **pixi/WSL1 note:** `pixi install` builds tasksolver as a conda package; on this
 WSL1 host the setuptools link step needs the `wsl1-exec.so` shim (already in the

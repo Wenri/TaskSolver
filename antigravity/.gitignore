@@ -7,7 +7,7 @@ vendor/
 build/*.so
 build/*.o
 # generated from symbols.json at build:
-native/symbols_gen.h
+src/symbols_gen.h
 symbols/goresym.json
 
 # Python / runtime output

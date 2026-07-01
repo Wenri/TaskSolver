@@ -1,7 +1,7 @@
-"""agy_hooks — in-process Python side of the antigravity instrumentation.
+"""agy_process — in-process Python side of the antigravity instrumentation.
 
 The native shim's worker thread calls `dispatch(kind, stream_id, data)` for every
-hook event (see native/pybridge.c). This is where your custom logic lives.
+hook event (see src/pybridge.c). This is where your custom logic lives.
 
 Contract:
   dispatch(kind: str, stream_id: int, data: bytes) -> bytes | None
@@ -53,7 +53,7 @@ def on_dns(stream_id, data):
 
 
 def on_smoke(stream_id, data):
-    print("[agy_hooks] smoke hook fired — end-to-end pipeline OK", file=sys.stderr, flush=True)
+    print("[agy_process] smoke hook fired — end-to-end pipeline OK", file=sys.stderr, flush=True)
     _rec.record("smoke", stream_id, data)
     return None
 

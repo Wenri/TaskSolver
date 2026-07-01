@@ -84,9 +84,9 @@ bun = ">=1.3.11,<2"
 hpack = ">=4"
 brotli-python = ">=1.1"
 
-# Put the antigravity/ python subsystem on the path so the merged agy backend
-# (`import agy` — drives the Antigravity CLI as a TaskSolver-contract model),
-# `agy_hooks`, and the MCP server are importable inside the pixi env.
+# Put the antigravity/ python subsystem on the path so the merged pyagy backend
+# (`import pyagy` — drives the Antigravity CLI as a TaskSolver-contract model),
+# `agy_process`, and the MCP server are importable inside the pixi env.
 [tool.pixi.activation.env]
 PYTHONPATH = "$PIXI_PROJECT_ROOT/antigravity/python"
 
@@ -98,7 +98,7 @@ PYTHONPATH = "$PIXI_PROJECT_ROOT/antigravity/python"
 [tool.pixi.tasks]
 antigravity-setup   = "bash antigravity/setup.sh"
 antigravity-symbols = { cmd = "python3 antigravity/symbols/build_symbols.py antigravity/vendor/agy antigravity/symbols/symbols.json", depends-on = ["antigravity-setup"] }
-antigravity         = { cmd = "bash antigravity/native/build.sh", depends-on = ["antigravity-symbols"] }
+antigravity         = { cmd = "bash antigravity/src/build.sh", depends-on = ["antigravity-symbols"] }
 
 [tool.pixi.package]
 name = "tasksolver"

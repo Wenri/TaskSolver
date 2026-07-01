@@ -53,7 +53,7 @@ else
     done
     if [ -z "$src" ]; then
         echo "[setup] ERROR: no UAPI header source found. Install kernel headers, or set" >&2
-        echo "        -idirafter <sysroot>/usr/include in native/Makefile CFLAGS." >&2
+        echo "        -idirafter <sysroot>/usr/include in src/Makefile CFLAGS." >&2
         exit 1
     fi
     mkdir -p "$UAPI"
@@ -63,4 +63,4 @@ else
     echo "[setup] UAPI headers vendored from $src"
 fi
 
-echo "[setup] done. Next: python3 symbols/build_symbols.py vendor/agy symbols/symbols.json && (cd native && make)"
+echo "[setup] done. Next: python3 symbols/build_symbols.py vendor/agy symbols/symbols.json && (cd src && make)"

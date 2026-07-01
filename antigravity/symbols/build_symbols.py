@@ -23,7 +23,7 @@ import json
 import struct
 import sys
 
-# Functions the native shim hooks by default. Keep in sync with native/hooks.def.
+# Functions the native shim hooks by default. Keep in sync with src/hooks.def.
 HOOK_TARGETS = [
     "crypto/tls.(*Conn).Write",          # plaintext egress to the LLM backend
     "crypto/tls.(*Conn).Read",           # plaintext ingress from the backend

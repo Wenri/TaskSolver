@@ -14,7 +14,7 @@ import re
 from tasksolver.common import ParsedAnswer, Question, TaskSpec
 from tasksolver.exceptions import GPTOutputParseException
 
-from agy import AgyModel
+from pyagy import AgyModel
 
 
 class NumberAnswer(ParsedAnswer):
