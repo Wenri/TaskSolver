@@ -81,6 +81,22 @@ tasksolver = { path = "." }
 nodejs = ">=25,<26"
 bun = ">=1.3.11,<2"
 
+# Put the agyhook/ python subsystem on the path so the merged agy backend
+# (`import agy` — drives the Antigravity CLI as a TaskSolver-contract model),
+# `agy_hooks`, and the MCP server are importable inside the pixi env.
+[tool.pixi.activation.env]
+PYTHONPATH = "$PIXI_PROJECT_ROOT/agyhook/python"
+
+# agyhook build orchestration. frida-gum's C devkit (libfrida-gum.a + header) is
+# NOT on conda-forge/PyPI — it ships only via frida's GitHub releases — so pixi
+# can't depend on it; instead it drives the fetch as a task. `pixi run agyhook`
+# does the whole chain: fetch deps (frida-gum devkit + UAPI headers + agy copy)
+# -> resolve symbols -> build the LD_PRELOAD shim. Uses system gcc + python3-config.
+[tool.pixi.tasks]
+agyhook-setup   = "bash agyhook/setup.sh"
+agyhook-symbols = { cmd = "python3 agyhook/symbols/build_symbols.py agyhook/vendor/agy agyhook/symbols/symbols.json", depends-on = ["agyhook-setup"] }
+agyhook         = { cmd = "bash agyhook/native/build.sh", depends-on = ["agyhook-symbols"] }
+
 [tool.pixi.package]
 name = "tasksolver"
 version = "0.0.1"
@@ -132,9 +148,13 @@ FLASH_ATTN_CUDA_ARCHS = "80"
 MAX_JOBS = "8"
 NVCC_THREADS = "1"
 
-# Single merged environment: core + local (torch cu130 + flash-attn) + app (UI).
-# It requires CUDA 13 (from the workspace platform) and builds flash-attn from
-# source on the first `pixi install` (uv caches the wheel after). The PEP 621
+# Two environments:
+#   default — core + app (lightweight, no CUDA/torch dependency)
+#   cuda    — core + local (torch cu130 + flash-attn) + app (UI)
+# `pixi install` resolves the default env; use `pixi install -e cuda` (or
+# `pixi run -e cuda …`) to get the full GPU stack. The CUDA 13 requirement
+# (workspace platform virtual package) only matters for `cuda`. The PEP 621
 # `local` / `app` extras stay separate, so consumers still install à la carte.
 [tool.pixi.environments]
-default = { features = ["local", "app"], solve-group = "default" }
+default = { features = ["app"], solve-group = "default" }
+cuda = { features = ["local", "app"], solve-group = "default" }
