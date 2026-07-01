@@ -49,8 +49,8 @@ def strip_ansi(b: bytes) -> str:
 class AgySession:
     def __init__(self, agy=None, stage=3, capture="agy-capture.jsonl",
                  log=None, workdir=None, extra_env=None, echo=False):
-        here = os.path.dirname(os.path.abspath(__file__))
-        self.root = os.path.dirname(here)                       # antigravity/
+        here = os.path.dirname(os.path.abspath(__file__))       # test_scripts/
+        self.root = os.path.join(os.path.dirname(here), "antigravity")  # repo/antigravity — shim + pyagy live here
         self.agy = agy or os.path.expanduser("~/.local/bin/agy")
         self.stage = stage
         self.capture = os.path.abspath(capture)
@@ -98,10 +98,10 @@ class AgySession:
         env.update({
             "AGY_PROC_ENABLE": "1",
             "AGY_PROC_STAGE": str(self.stage),
-            "AGY_PROC_MODULE": "agy_process",
-            "AGY_PROC_PYTHONPATH": os.path.join(self.root, "python"),
+            "AGY_PROC_MODULE": "pyagy.agy_process",
+            "AGY_PROC_PYTHONPATH": self.root,
             "AGY_PROC_CAPTURE": self.capture,
-            "PYTHONPATH": os.path.join(self.root, "python") + os.pathsep + env.get("PYTHONPATH", ""),
+            "PYTHONPATH": self.root + os.pathsep + env.get("PYTHONPATH", ""),
             "LD_PRELOAD": os.path.join(self.root, "vendor", "antigravity.so")
                           + (os.pathsep + env["LD_PRELOAD"] if env.get("LD_PRELOAD") else ""),
             "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),

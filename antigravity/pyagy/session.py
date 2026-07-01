@@ -172,7 +172,7 @@ def run_print(prompt, workdir=None, model=None, timeout=300, skip_permissions=Fa
 
 
 class InteractiveSession:
-    """Multi-turn TUI session (answers terminal queries). See antigravity/python/agy_session.py
+    """Multi-turn TUI session (answers terminal queries). See test_scripts/agy_session.py
     for the hook-integrated variant used during capture experiments."""
 
     def __init__(self, workdir=None, model=None, env=None):

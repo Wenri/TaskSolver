@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Example / smoke test: use agy as a TaskSolver-contract backend.
 
-    pixi run python antigravity/python/example_agy_backend.py
+    pixi run python test_scripts/example_agy_backend.py
 
 Drives the logged-in Antigravity `agy` CLI (via `agy --print` under a PTY, in a
 throwaway git workspace) through the same adapter surface as TaskSolver's other
 backends, and parses the answer. Requires agy to be logged in
-(~/.gemini/antigravity-cli/). `agy` is importable in the pixi env because
-[tool.pixi.activation.env] puts antigravity/python on PYTHONPATH.
+(~/.gemini/antigravity-cli/). `pyagy` is importable in the pixi env because the
+package ships it (see [tool.setuptools.packages.find]).
 """
 import re
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch agy under the antigravity instrumentation.
 #
-#   ./run-agy.sh [agy args...]
+#   test_scripts/run-agy.sh [agy args...]
 #
 # Env knobs (all optional):
 #   AGY_BIN                 path to agy            (default ~/.local/bin/agy)
@@ -14,6 +14,7 @@
 #   AGY_PROC_H2             0 to disable HTTP/2 reassembly
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ANTIGRAVITY="$(cd "$HERE/../antigravity" && pwd)"   # the shim (vendor/) + python subsystem live here
 
 : "${AGY_BIN:=$HOME/.local/bin/agy}"
 export AGY_PROC_ENABLE=1
@@ -23,13 +24,13 @@ export AGY_PROC_ENABLE=1
 #   Stage 5 hooks (tls_read/RoundTrip) STALL agy (they park while hooked) — avoid.
 # NOTE: agy needs a real git workspace (an empty dir hangs at startup).
 export AGY_PROC_STAGE="${AGY_PROC_STAGE:-1}"
-export AGY_PROC_MODULE="${AGY_PROC_MODULE:-agy_process}"
-export AGY_PROC_PYTHONPATH="${AGY_PROC_PYTHONPATH:-$HERE/python}"
+export AGY_PROC_MODULE="${AGY_PROC_MODULE:-pyagy.agy_process}"
+export AGY_PROC_PYTHONPATH="${AGY_PROC_PYTHONPATH:-$ANTIGRAVITY}"
 export AGY_PROC_CAPTURE="${AGY_PROC_CAPTURE:-$PWD/agy-capture.jsonl}"
 export AGY_PROC_LOG="${AGY_PROC_LOG:-$PWD/antigravity.log}"
-export PYTHONPATH="$HERE/python:${PYTHONPATH:-}"
+export PYTHONPATH="$ANTIGRAVITY:${PYTHONPATH:-}"
 
 # Force Go's cgo DNS resolver so the getaddrinfo interposer sees hostnames.
 export GODEBUG="netdns=cgo${GODEBUG:+,$GODEBUG}"
 
-exec env LD_PRELOAD="$HERE/vendor/antigravity.so${LD_PRELOAD:+:$LD_PRELOAD}" "$AGY_BIN" "$@"
+exec env LD_PRELOAD="$ANTIGRAVITY/vendor/antigravity.so${LD_PRELOAD:+:$LD_PRELOAD}" "$AGY_BIN" "$@"

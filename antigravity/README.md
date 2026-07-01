@@ -16,7 +16,7 @@ shared object:
    registry, prompt assembly).
 
 Hook events are delivered to an **embedded CPython interpreter** running on a
-dedicated worker thread, where your logic lives (`antigravity/python/agy_process/`).
+dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/`).
 
 ---
 
@@ -57,7 +57,7 @@ update.
         │           ▼                                                        │
         │   ┌───────────────────────────────────────────┐                   │
         │   │ pyworker pthread  (LARGE 16MB stack)        │  ← libpython3.12  │
-        │   │  Py_InitializeEx(0); import agy_process       │    lives only     │
+        │   │  Py_InitializeEx(0); import pyagy.agy_process │    lives only     │
         │   │  loop: pop req → PyGILState_Ensure →        │    here (one      │
         │   │        call on_tls_write/read/http/tool →   │    PyThreadState) │
         │   │        write verdict → signal condvar       │                   │
@@ -120,7 +120,7 @@ our callback, so reading is safe.
 
 The TLS layer gives us HTTP/2 frames (HPACK-compressed headers, possibly gzipped
 bodies, likely gRPC/protobuf). Reassembly to LLM request/response JSON happens
-**in Python** (`agy_process/h2reassemble.py`) — decoupled from agy internals, so it
+**in Python** (`pyagy/agy_process/h2reassemble.py`) — decoupled from agy internals, so it
 survives agy updates.
 
 ---
@@ -140,9 +140,8 @@ result). See `config/` and task #6.
 ```
 antigravity/
   README.md                 ← this file (the design)
-  Makefile                  ← one build entry: vendor deps (agy, frida-gum, UAPI) + compile
-  run-agy.sh                ← launcher: sets LD_PRELOAD, PYTHONPATH, AGY_PROC_*, GODEBUG
-  vendor/                   ← agy copy (164 MB) + frida-gum devkit + UAPI headers (gitignored; `make setup`)
+  Makefile                  ← one build entry: vendor deps (agy, frida-gum) + compile
+  vendor/                   ← agy copy (164 MB) + frida-gum devkit + built shim (gitignored; `make setup`)
   symbols/
     build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
                               symbols.json; self-verifies every hook is a prologue
@@ -153,20 +152,21 @@ antigravity/
     pybridge.c/.h           ← embed libpython, pyworker thread, queue, dispatch
     hooks.def               ← declarative hook table (id, symbol, mode, kind, stage, leave)
     gen_symbols_header.py   ← symbols.json → symbols_gen.h (build-id + name→vaddr)
-  python/
-    agy_process/__init__.py   ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
-    agy_process/record.py     ← JSONL recorder for plotting
+  pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
+    __init__.py             ← lazy exports (PEP 562): AgyModel / run_print / InteractiveSession
+    model.py                ← AgyModel (prepare_payload/ask/rough_guess/run_once/…)
+    session.py              ← run_print (one-shot) + InteractiveSession (multi-turn PTY)
+    agy_process/__init__.py ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
+    agy_process/record.py   ← JSONL recorder for plotting
     agy_process/h2reassemble.py ← HTTP/2 + HPACK + gzip stream reassembly
-    pyagy/                    ← TaskSolver-contract backend (drive agy as a model):
-      model.py  → AgyModel (prepare_payload/ask/rough_guess/run_once/…)
-      session.py→ run_print (one-shot) + InteractiveSession (multi-turn PTY)
-    agy_session.py          ← hook-integrated interactive driver (capture experiments)
     agy_mcp_server.py       ← minimal stdio MCP server (hybrid native tools/context)
-    analyze_capture.py      ← summarize / plot a capture
-    example_agy_backend.py  ← smoke test for the AgyModel backend
   config/
     mcp.json  agents.json  README.md  ← native custom MCP server / agent (hybrid path)
 ```
+
+The shim's in-process module is **`pyagy.agy_process`** (loaded by `antigravity.so` via
+`AGY_PROC_MODULE`, which defaults to it). Test/experiment drivers live in the repo's
+`test_scripts/`: `run-agy.sh`, `agy_session.py`, `analyze_capture.py`, `example_agy_backend.py`.
 
 ## Build & run
 
@@ -187,17 +187,17 @@ pixi run make -C antigravity symbols   # re-resolve symbols.json from the new ag
 pixi run make -C antigravity           # recompile the shim (also runs `make setup` first)
 ```
 
-Run agy under the hook (`AGY_PROC_STAGE`: 1=python+DNS, 3=tls_write+decrypt
-request/response capture, 5=parking hooks that stall):
+Run agy under the hook via the launcher in `test_scripts/` (`AGY_PROC_STAGE`:
+1=python+DNS, 3=tls_write+decrypt request/response capture, 5=parking hooks that stall):
 
 ```bash
-AGY_PROC_STAGE=3 ./run-agy.sh <normal agy args...>     # capture request+response (authenticated agy)
-python3 python/analyze_capture.py agy-capture.jsonl --plot traffic.png
+AGY_PROC_STAGE=3 test_scripts/run-agy.sh <normal agy args...>   # capture request+response (authenticated agy)
+python3 test_scripts/analyze_capture.py agy-capture.jsonl --plot traffic.png
 ```
 
 ## Status (validated on this WSL1 host, agy build 4368698a…)
 
-- ✅ libpython embeds in-process; worker thread runs; `agy_process` imports.
+- ✅ libpython embeds in-process; worker thread runs; `pyagy.agy_process` imports.
 - ✅ frida-gum **embedded** inline hooking works on WSL1 (no ptrace).
 - ✅ Hook fires on a real Go function (`os.Getenv`), reads register-ABI string
   args, marshals to Python, records to JSONL — agy runs to completion, no crash.
@@ -267,9 +267,9 @@ CPU-only funcs (`os.Getenv`, `(*RootModel).Serialize`, `proto.Marshal`) also hoo
 cleanly; the stage-4 examples show the `[]byte`-return capture (`on_leave`
 RAX=ptr, RBX=len).
 
-## Using agy as a TaskSolver backend (`agy/`)
+## Using agy as a TaskSolver backend (`pyagy`)
 
-`antigravity/python/pyagy/` drives agy as a **model backend** with the same adapter
+`antigravity/pyagy/` drives agy as a **model backend** with the same adapter
 surface as TaskSolver's other providers (mirrors `ClaudeCodeModel`): it shells
 out to `agy --print` under a PTY, in a throwaway git workspace, and parses the
 reply. No API key (agy is logged in via `~/.gemini/antigravity-cli/`). This is
@@ -282,10 +282,10 @@ model = AgyModel(api_key=None, task=my_task, model="gemini-3-pro")
 parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 ```
 
-`import pyagy` works in the pixi env because `[tool.pixi.activation.env]` puts
-`antigravity/python` on `PYTHONPATH`. Smoke test: `pixi run python
-antigravity/python/example_agy_backend.py`. For multi-turn scripting use
-`pyagy.InteractiveSession` (PTY + terminal-query responder).
+`import pyagy` works in the pixi env because the package ships it via
+`[tool.setuptools.packages.find]` (with `antigravity/` on `PYTHONPATH` as a fallback).
+Smoke test: `pixi run python test_scripts/example_agy_backend.py`. For multi-turn
+scripting use `pyagy.InteractiveSession` (PTY + terminal-query responder).
 
 **pixi/WSL1 note:** `pixi install` builds tasksolver as a conda package; on this
 WSL1 host the setuptools link step needs the `wsl1-exec.so` shim (already in the

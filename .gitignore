@@ -10,14 +10,15 @@ dist/
 .pixi/
 .env
 
-# --- agy/antigravity runtime capture output (see antigravity/run-agy.sh AGY_PROC_CAPTURE) ---
+# --- agy/antigravity runtime capture output (see test_scripts/run-agy.sh AGY_PROC_CAPTURE) ---
 *.jsonl
 captures/
 
 # --- antigravity build deps + artifacts (all under antigravity/, never committed) ---
 # Vendored/fetched deps + the built shim — recreate with `make -C antigravity`:
-#   vendor/agy (~164 MB binary), vendor/frida-gum (devkit), vendor/uapi (Linux UAPI
-#   headers), vendor/antigravity.so (compiled LD_PRELOAD shim).
+#   vendor/agy (~164 MB binary), vendor/frida-gum (devkit),
+#   vendor/antigravity.so (compiled LD_PRELOAD shim).  UAPI headers are NOT vendored
+#   (referenced in place from the kernel-headers_linux-64 conda dep — see the Makefile).
 antigravity/vendor/
 # generated from symbols.json at build time:
 antigravity/src/symbols_gen.h
