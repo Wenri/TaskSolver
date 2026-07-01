@@ -283,9 +283,10 @@ parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 ```
 
 `import pyagy` works in the pixi env because the package ships it via
-`[tool.setuptools.packages.find]` (with `antigravity/` on `PYTHONPATH` as a fallback).
-Smoke test: `pixi run python test_scripts/example_agy_backend.py`. For multi-turn
-scripting use `pyagy.InteractiveSession` (PTY + terminal-query responder).
+`[tool.setuptools.packages.find]` (the editable install's finder maps `pyagy` →
+`antigravity/pyagy`; no `PYTHONPATH` needed). Smoke test: `pixi run python
+test_scripts/example_agy_backend.py`. For multi-turn scripting use
+`pyagy.InteractiveSession` (PTY + terminal-query responder).
 
 **pixi/WSL1 note:** `pixi install` builds tasksolver as a conda package; on this
 WSL1 host the setuptools link step needs the `wsl1-exec.so` shim (already in the

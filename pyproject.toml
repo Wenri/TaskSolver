@@ -98,12 +98,6 @@ kernel-headers_linux-64 = ">=4"
 hpack = ">=4"
 brotli-python = ">=1.1"
 
-# `pyagy` (incl. pyagy.agy_process / pyagy.agy_mcp_server) ships in the editable package
-# via [tool.setuptools.packages.find], so it imports without this. Kept as a fallback
-# that also lets the test_scripts/ helpers import pyagy straight from the source tree.
-[tool.pixi.activation.env]
-PYTHONPATH = "$PIXI_PROJECT_ROOT/antigravity"
-
 # The antigravity shim build lives in antigravity/Makefile (setup.py's build_py hook
 # runs `make -C antigravity` during the package build, so `pixi install` builds it).
 # No pixi tasks needed: after an agy update, rebuild manually with
