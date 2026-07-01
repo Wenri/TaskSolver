@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PYLOG(...) do { fprintf(stderr, "[agyhook/py] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#define PYLOG(...) do { fprintf(stderr, "[antigravity/py] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 
 typedef struct job {
     struct job *next;

@@ -81,21 +81,21 @@ tasksolver = { path = "." }
 nodejs = ">=25,<26"
 bun = ">=1.3.11,<2"
 
-# Put the agyhook/ python subsystem on the path so the merged agy backend
+# Put the antigravity/ python subsystem on the path so the merged agy backend
 # (`import agy` — drives the Antigravity CLI as a TaskSolver-contract model),
 # `agy_hooks`, and the MCP server are importable inside the pixi env.
 [tool.pixi.activation.env]
-PYTHONPATH = "$PIXI_PROJECT_ROOT/agyhook/python"
+PYTHONPATH = "$PIXI_PROJECT_ROOT/antigravity/python"
 
-# agyhook build orchestration. frida-gum's C devkit (libfrida-gum.a + header) is
+# antigravity build orchestration. frida-gum's C devkit (libfrida-gum.a + header) is
 # NOT on conda-forge/PyPI — it ships only via frida's GitHub releases — so pixi
-# can't depend on it; instead it drives the fetch as a task. `pixi run agyhook`
+# can't depend on it; instead it drives the fetch as a task. `pixi run antigravity`
 # does the whole chain: fetch deps (frida-gum devkit + UAPI headers + agy copy)
 # -> resolve symbols -> build the LD_PRELOAD shim. Uses system gcc + python3-config.
 [tool.pixi.tasks]
-agyhook-setup   = "bash agyhook/setup.sh"
-agyhook-symbols = { cmd = "python3 agyhook/symbols/build_symbols.py agyhook/vendor/agy agyhook/symbols/symbols.json", depends-on = ["agyhook-setup"] }
-agyhook         = { cmd = "bash agyhook/native/build.sh", depends-on = ["agyhook-symbols"] }
+antigravity-setup   = "bash antigravity/setup.sh"
+antigravity-symbols = { cmd = "python3 antigravity/symbols/build_symbols.py antigravity/vendor/agy antigravity/symbols/symbols.json", depends-on = ["antigravity-setup"] }
+antigravity         = { cmd = "bash antigravity/native/build.sh", depends-on = ["antigravity-symbols"] }
 
 [tool.pixi.package]
 name = "tasksolver"

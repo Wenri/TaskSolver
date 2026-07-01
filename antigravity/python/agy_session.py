@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive an interactive `agy` session under a controlled PTY + the agyhook network
+"""Drive an interactive `agy` session under a controlled PTY + the antigravity network
 hooks. This is the "session" layer: agy is a TUI that wants a real terminal, so we
 give it a pty we own — letting us read its rendered output and inject further input,
 while the LD_PRELOAD hooks capture the model traffic (clean, ANSI-free) in parallel.
@@ -50,7 +50,7 @@ class AgySession:
     def __init__(self, agy=None, stage=3, capture="agy-capture.jsonl",
                  log=None, workdir=None, extra_env=None, echo=False):
         here = os.path.dirname(os.path.abspath(__file__))
-        self.root = os.path.dirname(here)                       # agyhook/
+        self.root = os.path.dirname(here)                       # antigravity/
         self.agy = agy or os.path.expanduser("~/.local/bin/agy")
         self.stage = stage
         self.capture = os.path.abspath(capture)
@@ -67,7 +67,7 @@ class AgySession:
     # terminal by replying to the common queries so the UI proceeds.
     _QUERIES = [
         (re.compile(rb"\x1b\[\?(\d+)\$p"), lambda m: b"\x1b[?" + m.group(1) + b";0$y"),  # DECRQM
-        (re.compile(rb"\x1b\[>0?q"),       lambda m: b"\x1bP>|agyhook 0.1\x1b\\"),        # XTVERSION
+        (re.compile(rb"\x1b\[>0?q"),       lambda m: b"\x1bP>|antigravity 0.1\x1b\\"),        # XTVERSION
         (re.compile(rb"\x1b\[\?u"),        lambda m: b"\x1b[?0u"),                        # kitty kbd query
         (re.compile(rb"\x1b\[>0?c"),       lambda m: b"\x1b[>0;10;1c"),                   # secondary DA
         (re.compile(rb"\x1b\[0?c"),        lambda m: b"\x1b[?1;2c"),                      # primary DA
@@ -102,7 +102,7 @@ class AgySession:
             "AGY_HOOK_PYTHONPATH": os.path.join(self.root, "python"),
             "AGY_HOOK_CAPTURE": self.capture,
             "PYTHONPATH": os.path.join(self.root, "python") + os.pathsep + env.get("PYTHONPATH", ""),
-            "LD_PRELOAD": os.path.join(self.root, "build", "agyhook.so")
+            "LD_PRELOAD": os.path.join(self.root, "build", "antigravity.so")
                           + (os.pathsep + env["LD_PRELOAD"] if env.get("LD_PRELOAD") else ""),
             "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),
             "TERM": env.get("TERM", "xterm-256color"),

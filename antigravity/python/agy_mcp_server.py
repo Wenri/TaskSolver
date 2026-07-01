@@ -13,7 +13,7 @@ import json
 import sys
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "agyhook-tasksolver", "version": "0.1.0"}
+SERVER_INFO = {"name": "antigravity-tasksolver", "version": "0.1.0"}
 
 
 def log(*a):

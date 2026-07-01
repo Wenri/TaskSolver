@@ -3,7 +3,7 @@
  *   HOOK(ID, "go.symbol.Name", MODE, "kind", STAGE, LEAVE)
  *
  * ID     enum tag used in the on_enter/on_leave switch (register semantics are
- *        coded per-ID in agyhook.c — different funcs read different registers).
+ *        coded per-ID in antigravity.c — different funcs read different registers).
  * MODE   AGY_ASYNC (log, non-blocking) or AGY_SYNC (block for a modify verdict).
  * kind   string tag passed to Python dispatch(kind, stream_id, data).
  * STAGE  which AGY_HOOK_STAGE this hook belongs to (incremental WSL1 bring-up):

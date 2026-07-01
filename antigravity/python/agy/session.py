@@ -1,6 +1,6 @@
 """Drive the Antigravity `agy` CLI under a PTY.
 
-Two facts force this shape (see agyhook/README.md for the full reverse-engineering):
+Two facts force this shape (see antigravity/README.md for the full reverse-engineering):
   * agy needs a real TTY — it inspects the terminal, so we run it under a pty.
   * agy needs a real **git workspace** — an empty dir hangs at startup.
 
@@ -69,11 +69,11 @@ def ensure_git_workspace(path=None) -> str:
 def _clean_env():
     env = dict(os.environ)
     env["TERM"] = env.get("TERM", "xterm-256color")
-    for k in list(env):               # don't inherit the agyhook instrumentation
+    for k in list(env):               # don't inherit the antigravity instrumentation
         if k.startswith("AGY_HOOK"):
             env.pop(k, None)
     # keep other preloads (e.g. the WSL1 wsl1-exec.so shim agy runs with); drop only ours
-    kept = [p for p in env.get("LD_PRELOAD", "").split(os.pathsep) if p and "agyhook" not in p]
+    kept = [p for p in env.get("LD_PRELOAD", "").split(os.pathsep) if p and "antigravity" not in p]
     if kept:
         env["LD_PRELOAD"] = os.pathsep.join(kept)
     else:
@@ -172,7 +172,7 @@ def run_print(prompt, workdir=None, model=None, timeout=300, skip_permissions=Fa
 
 
 class InteractiveSession:
-    """Multi-turn TUI session (answers terminal queries). See agyhook/python/agy_session.py
+    """Multi-turn TUI session (answers terminal queries). See antigravity/python/agy_session.py
     for the hook-integrated variant used during capture experiments."""
 
     def __init__(self, workdir=None, model=None, env=None):

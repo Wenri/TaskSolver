@@ -19,7 +19,7 @@ else
 fi
 
 # --- 1. frida-gum devkit (GitHub-only; not on conda-forge/PyPI) ------------
-GUM="$HERE/native/vendor/frida-gum"
+GUM="$HERE/vendor/frida-gum"
 if [ -f "$GUM/libfrida-gum.a" ]; then
     echo "[setup] frida-gum devkit present ($(cat "$GUM/VERSION" 2>/dev/null))"
 else
@@ -33,7 +33,7 @@ else
 fi
 
 # --- 2. Linux UAPI headers -------------------------------------------------
-UAPI="$HERE/native/vendor/uapi"
+UAPI="$HERE/vendor/uapi"
 if [ -f "$UAPI/linux/limits.h" ] && [ -f "$UAPI/asm/socket.h" ]; then
     echo "[setup] UAPI headers present"
 elif [ -f /usr/include/linux/limits.h ] && [ -f /usr/include/asm/socket.h ]; then

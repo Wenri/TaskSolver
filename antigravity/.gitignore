@@ -1,0 +1,17 @@
+# Vendored/fetched build deps — never committed; recreate with ./setup.sh (or
+# `pixi run antigravity`): vendor/agy (~164 MB binary), vendor/frida-gum (devkit),
+# vendor/uapi (Linux UAPI headers).
+vendor/
+
+# Build artifacts
+build/*.so
+build/*.o
+# generated from symbols.json at build:
+native/symbols_gen.h
+symbols/goresym.json
+
+# Python / runtime output
+**/__pycache__/
+*.pyc
+*.jsonl
+captures/

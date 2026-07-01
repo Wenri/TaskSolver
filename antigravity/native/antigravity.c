@@ -1,4 +1,4 @@
-/* agyhook.c — LD_PRELOAD shim: embed frida-gum, install inline hooks on the
+/* antigravity.c — LD_PRELOAD shim: embed frida-gum, install inline hooks on the
  * recovered Go function addresses, and forward events to the Python worker.
  *
  * Loaded into `agy` via LD_PRELOAD. The constructor (agy_init) verifies the
@@ -34,7 +34,7 @@ static const struct { const char *name; agy_mode_t mode; const char *kind; int s
 /* ---- logging -------------------------------------------------------------- */
 static FILE *g_logf;
 #define LOG(...) do { FILE *f = g_logf ? g_logf : stderr; \
-    fprintf(f, "[agyhook] " __VA_ARGS__); fputc('\n', f); fflush(f); } while (0)
+    fprintf(f, "[antigravity] " __VA_ARGS__); fputc('\n', f); fflush(f); } while (0)
 
 static int g_tls_write_sync;   /* AGY_HOOK_TLS_WRITE_SYNC=1 → allow modifying egress */
 static int g_dryrun;           /* AGY_HOOK_DRYRUN=1 → hooks fire but do nothing (isolate gum vs emit) */

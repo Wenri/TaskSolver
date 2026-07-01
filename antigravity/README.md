@@ -1,6 +1,6 @@
-# agyhook — bind custom network / MCP context / tools into `agy`
+# antigravity — bind custom network / MCP context / tools into `agy`
 
-`agyhook` instruments the **Antigravity CLI** (`~/.local/bin/agy`, Google's agentic
+`antigravity` instruments the **Antigravity CLI** (`~/.local/bin/agy`, Google's agentic
 coding tool, internal codename *jetski*) so we can observe and modify its
 behaviour from our own **Python** code, in-process — without the source and
 without a supported plugin API for what we need.
@@ -16,7 +16,7 @@ shared object:
    registry, prompt assembly).
 
 Hook events are delivered to an **embedded CPython interpreter** running on a
-dedicated worker thread, where your logic lives (`agyhook/python/agy_hooks/`).
+dedicated worker thread, where your logic lives (`antigravity/python/agy_hooks/`).
 
 ---
 
@@ -63,7 +63,7 @@ update.
         │   │        write verdict → signal condvar       │                   │
         │   └───────────────────────────────────────────┘                   │
         └────────────────────────────────────────────────────────────────────┘
-             ▲ LD_PRELOAD=agyhook.so  (constructor: gum_init_embedded,
+             ▲ LD_PRELOAD=antigravity.so  (constructor: gum_init_embedded,
                                        verify build-id, load symbols.json,
                                        install hooks, spawn pyworker)
 ```
@@ -138,7 +138,7 @@ result). See `config/` and task #6.
 ## Layout
 
 ```
-agyhook/
+antigravity/
   README.md                 ← this file (the design)
   setup.sh                  ← fetch frida-gum devkit + vendor UAPI headers (deps not committed)
   run-agy.sh                ← launcher: sets LD_PRELOAD, PYTHONPATH, AGY_HOOK_*, GODEBUG
@@ -148,12 +148,12 @@ agyhook/
                               symbols.json; self-verifies every hook is a prologue
     symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, catalog}
   native/
-    agyhook.c               ← LD_PRELOAD constructor + gum install + Go-ABI hook
+    antigravity.c               ← LD_PRELOAD constructor + gum install + Go-ABI hook
                               callbacks + getaddrinfo interposer
     pybridge.c/.h           ← embed libpython, pyworker thread, queue, dispatch
     hooks.def               ← declarative hook table (id, symbol, mode, kind, stage, leave)
     gen_symbols_header.py   ← symbols.json → symbols_gen.h (build-id + name→vaddr)
-    build.sh / Makefile     ← build agyhook.so (build.sh = no-make path)
+    build.sh / Makefile     ← build antigravity.so (build.sh = no-make path)
     vendor/                 ← frida-gum devkit + UAPI headers (gitignored; ./setup.sh)
   python/
     agy_hooks/__init__.py   ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
@@ -173,7 +173,7 @@ agyhook/
 ## Build & run
 
 ```bash
-cd agyhook
+cd antigravity
 ./setup.sh                                             # fetch frida-gum + UAPI headers (once)
 python3 symbols/build_symbols.py vendor/agy symbols/symbols.json   # after any agy update
 ./native/build.sh                                      # or: make -C native
@@ -261,7 +261,7 @@ RAX=ptr, RBX=len).
 
 ## Using agy as a TaskSolver backend (`agy/`)
 
-`agyhook/python/agy/` drives agy as a **model backend** with the same adapter
+`antigravity/python/agy/` drives agy as a **model backend** with the same adapter
 surface as TaskSolver's other providers (mirrors `ClaudeCodeModel`): it shells
 out to `agy --print` under a PTY, in a throwaway git workspace, and parses the
 reply. No API key (agy is logged in via `~/.gemini/antigravity-cli/`). This is
@@ -275,8 +275,8 @@ parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 ```
 
 `import agy` works in the pixi env because `[tool.pixi.activation.env]` puts
-`agyhook/python` on `PYTHONPATH`. Smoke test: `pixi run python
-agyhook/python/example_agy_backend.py`. For multi-turn scripting use
+`antigravity/python` on `PYTHONPATH`. Smoke test: `pixi run python
+antigravity/python/example_agy_backend.py`. For multi-turn scripting use
 `agy.InteractiveSession` (PTY + terminal-query responder).
 
 **pixi/WSL1 note:** `pixi install` builds tasksolver as a conda package; on this

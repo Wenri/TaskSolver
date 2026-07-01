@@ -1,4 +1,4 @@
-"""agy_hooks — in-process Python side of the agyhook instrumentation.
+"""agy_hooks — in-process Python side of the antigravity instrumentation.
 
 The native shim's worker thread calls `dispatch(kind, stream_id, data)` for every
 hook event (see native/pybridge.c). This is where your custom logic lives.

@@ -1,0 +1,12 @@
+{
+  "_comment": "Template: register the antigravity TaskSolver-backed MCP server with agy. Replace <AGYHOOK> with the absolute path to this repo's antigravity/ dir and <TASKSOLVER> with the TaskSolver repo root. The exact file agy reads (and whether it lives at ~/.antigravity, ~/.agy, ~/.config/antigravity, or a per-project .mcp.json) depends on your agy version — confirm against `agy` docs; the mcpServers schema below is the common MCP convention.",
+  "mcpServers": {
+    "antigravity-tasksolver": {
+      "command": "python3",
+      "args": ["<AGYHOOK>/python/agy_mcp_server.py"],
+      "env": {
+        "PYTHONPATH": "<TASKSOLVER>"
+      }
+    }
+  }
+}

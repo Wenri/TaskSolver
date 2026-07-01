@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch agy under the agyhook instrumentation.
+# Launch agy under the antigravity instrumentation.
 #
 #   ./run-agy.sh [agy args...]
 #
@@ -7,7 +7,7 @@
 #   AGY_BIN                 path to agy            (default ~/.local/bin/agy)
 #   AGY_HOOK_STAGE          1=python only, 2=+smoke hook, 3=+tls/http (default 3)
 #   AGY_HOOK_CAPTURE        JSONL output           (default ./agy-capture.jsonl)
-#   AGY_HOOK_LOG            native shim log        (default ./agyhook.log)
+#   AGY_HOOK_LOG            native shim log        (default ./antigravity.log)
 #   AGY_HOOK_TLS_WRITE_SYNC set to enable synchronous egress rewrite
 #   AGY_HOOK_H2             0 to disable HTTP/2 reassembly
 set -euo pipefail
@@ -24,10 +24,10 @@ export AGY_HOOK_STAGE="${AGY_HOOK_STAGE:-1}"
 export AGY_HOOK_MODULE="${AGY_HOOK_MODULE:-agy_hooks}"
 export AGY_HOOK_PYTHONPATH="${AGY_HOOK_PYTHONPATH:-$HERE/python}"
 export AGY_HOOK_CAPTURE="${AGY_HOOK_CAPTURE:-$PWD/agy-capture.jsonl}"
-export AGY_HOOK_LOG="${AGY_HOOK_LOG:-$PWD/agyhook.log}"
+export AGY_HOOK_LOG="${AGY_HOOK_LOG:-$PWD/antigravity.log}"
 export PYTHONPATH="$HERE/python:${PYTHONPATH:-}"
 
 # Force Go's cgo DNS resolver so the getaddrinfo interposer sees hostnames.
 export GODEBUG="netdns=cgo${GODEBUG:+,$GODEBUG}"
 
-exec env LD_PRELOAD="$HERE/build/agyhook.so${LD_PRELOAD:+:$LD_PRELOAD}" "$AGY_BIN" "$@"
+exec env LD_PRELOAD="$HERE/build/antigravity.so${LD_PRELOAD:+:$LD_PRELOAD}" "$AGY_BIN" "$@"
