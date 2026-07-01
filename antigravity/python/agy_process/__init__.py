@@ -6,7 +6,7 @@ hook event (see src/pybridge.c). This is where your custom logic lives.
 Contract:
   dispatch(kind: str, stream_id: int, data: bytes) -> bytes | None
     * ASYNC hooks (logging): return value is ignored — do fire-and-forget work.
-    * SYNC hooks (modify, e.g. tls_write when AGY_HOOK_TLS_WRITE_SYNC=1): return
+    * SYNC hooks (modify, e.g. tls_write when AGY_PROC_TLS_WRITE_SYNC=1): return
       replacement bytes (must be <= original length for in-place rewrite) or None
       to leave unchanged. Keep SYNC handlers fast/CPU-bound (they block a Go
       goroutine — see README's GC-stall note).
@@ -15,7 +15,7 @@ kind values with special handling: "tls_write"/"tls_read" (also fed to HTTP/2
 reassembly), "smoke" (prints). Any other kind the shim emits — "dns", "http_rt",
 "resp", "serialize", "marshal", "proto_marshal", or a new one — is recorded by the
 default path (never silently dropped).
-Set AGY_HOOK_H2=0 to disable HTTP/2 reassembly (raw capture only).
+Set AGY_PROC_H2=0 to disable HTTP/2 reassembly (raw capture only).
 """
 import os
 import sys
@@ -25,7 +25,7 @@ from .record import Recorder
 from . import h2reassemble as h2
 
 _rec = Recorder()
-_reasm = h2.Reassembler(_rec) if os.environ.get("AGY_HOOK_H2", "1") != "0" else None
+_reasm = h2.Reassembler(_rec) if os.environ.get("AGY_PROC_H2", "1") != "0" else None
 
 
 def on_tls_write(stream_id, data):

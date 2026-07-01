@@ -36,8 +36,8 @@ static FILE *g_logf;
 #define LOG(...) do { FILE *f = g_logf ? g_logf : stderr; \
     fprintf(f, "[antigravity] " __VA_ARGS__); fputc('\n', f); fflush(f); } while (0)
 
-static int g_tls_write_sync;   /* AGY_HOOK_TLS_WRITE_SYNC=1 → allow modifying egress */
-static int g_dryrun;           /* AGY_HOOK_DRYRUN=1 → hooks fire but do nothing (isolate gum vs emit) */
+static int g_tls_write_sync;   /* AGY_PROC_TLS_WRITE_SYNC=1 → allow modifying egress */
+static int g_dryrun;           /* AGY_PROC_DRYRUN=1 → hooks fire but do nothing (isolate gum vs emit) */
 
 /* ---- build-id of the main executable (via PT_NOTE, no file IO) ------------ */
 struct bid { char hex[80]; int done; };
@@ -196,7 +196,7 @@ static void install_hooks(int stage)
 
     gum_interceptor_begin_transaction(interceptor);
     for (int i = 0; i < HK_COUNT; i++) {
-        /* AGY_HOOK_STAGE selects EXACTLY that stage's hooks (isolates each group) */
+        /* AGY_PROC_STAGE selects EXACTLY that stage's hooks (isolates each group) */
         if (HOOKS[i].stage != stage) continue;
         uint64_t va = agy_sym(HOOKS[i].name);
         if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
@@ -243,16 +243,16 @@ int getaddrinfo(const char *node, const char *service,
 __attribute__((constructor))
 static void agy_init(void)
 {
-    if (!getenv("AGY_HOOK_ENABLE")) return;          /* opt-in */
+    if (!getenv("AGY_PROC_ENABLE")) return;          /* opt-in */
     if (getenv("_AGY_SBOXSERVE")) return;            /* skip sandbox-server children */
 
-    const char *logpath = getenv("AGY_HOOK_LOG");
+    const char *logpath = getenv("AGY_PROC_LOG");
     if (logpath && *logpath) g_logf = fopen(logpath, "ae");
-    g_tls_write_sync = getenv("AGY_HOOK_TLS_WRITE_SYNC") != NULL;
-    g_dryrun = getenv("AGY_HOOK_DRYRUN") != NULL;
+    g_tls_write_sync = getenv("AGY_PROC_TLS_WRITE_SYNC") != NULL;
+    g_dryrun = getenv("AGY_PROC_DRYRUN") != NULL;
 
     int stage = 3;
-    const char *st = getenv("AGY_HOOK_STAGE");
+    const char *st = getenv("AGY_PROC_STAGE");
     if (st && *st) stage = atoi(st);
 
     /* build-id guard: refuse to apply offsets to a different agy build */
@@ -263,7 +263,7 @@ static void agy_init(void)
     if (strcmp(b.hex, AGY_BUILD_ID) != 0) {
         LOG("build-id not agy (running=%s symbols=%s); not hooking this process",
             b.hex[0] ? b.hex : "<none>", AGY_BUILD_ID);
-        if (!getenv("AGY_HOOK_FORCE")) return;
+        if (!getenv("AGY_PROC_FORCE")) return;
     } else {
         LOG("build-id ok (%s), stage=%d", b.hex, stage);
     }

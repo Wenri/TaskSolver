@@ -85,10 +85,10 @@ static void run_dispatch(job_t *j)
 static void *worker_main(void *arg)
 {
     (void)arg;
-    const char *modname = getenv("AGY_HOOK_MODULE");
+    const char *modname = getenv("AGY_PROC_MODULE");
     if (!modname || !*modname) modname = "agy_process";
-    const char *pypath = getenv("AGY_HOOK_PYTHONPATH");
-    const char *mc = getenv("AGY_HOOK_MAXCOPY");
+    const char *pypath = getenv("AGY_PROC_PYTHONPATH");
+    const char *mc = getenv("AGY_PROC_MAXCOPY");
     if (mc && *mc) { long v = strtol(mc, NULL, 0); if (v > 0) g_maxcopy = (size_t)v; }
 
     Py_InitializeEx(0);  /* no signal handlers — leave those to Go */

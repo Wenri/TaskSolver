@@ -70,7 +70,7 @@ def _clean_env():
     env = dict(os.environ)
     env["TERM"] = env.get("TERM", "xterm-256color")
     for k in list(env):               # don't inherit the antigravity instrumentation
-        if k.startswith("AGY_HOOK"):
+        if k.startswith("AGY_PROC"):
             env.pop(k, None)
     # keep other preloads (e.g. the WSL1 wsl1-exec.so shim agy runs with); drop only ours
     kept = [p for p in env.get("LD_PRELOAD", "").split(os.pathsep) if p and "antigravity" not in p]

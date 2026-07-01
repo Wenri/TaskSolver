@@ -141,7 +141,7 @@ result). See `config/` and task #6.
 antigravity/
   README.md                 ← this file (the design)
   setup.sh                  ← fetch frida-gum devkit + vendor UAPI headers (deps not committed)
-  run-agy.sh                ← launcher: sets LD_PRELOAD, PYTHONPATH, AGY_HOOK_*, GODEBUG
+  run-agy.sh                ← launcher: sets LD_PRELOAD, PYTHONPATH, AGY_PROC_*, GODEBUG
   vendor/agy                ← copied-in binary, gitignored (164 MB)
   symbols/
     build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
@@ -189,11 +189,11 @@ pixi run antigravity            # setup.sh + resolve symbols + build (also re-pi
 #   ./setup.sh && python3 symbols/build_symbols.py vendor/agy symbols/symbols.json && ./src/build.sh
 ```
 
-Run agy under the hook (`AGY_HOOK_STAGE`: 1=python+DNS, 3=tls_write+decrypt
+Run agy under the hook (`AGY_PROC_STAGE`: 1=python+DNS, 3=tls_write+decrypt
 request/response capture, 5=parking hooks that stall):
 
 ```bash
-AGY_HOOK_STAGE=3 ./run-agy.sh <normal agy args...>     # capture request+response (authenticated agy)
+AGY_PROC_STAGE=3 ./run-agy.sh <normal agy args...>     # capture request+response (authenticated agy)
 python3 python/analyze_capture.py agy-capture.jsonl --plot traffic.png
 ```
 
@@ -209,7 +209,7 @@ python3 python/analyze_capture.py agy-capture.jsonl --plot traffic.png
   (with a terminal-query responder) we ran a real multi-turn session against the
   logged-in agy — `"what is 2+2"` → `4`, then `"×10"` → `40` — reading agy's
   rendered output and injecting follow-up input. This is stage 1 (no network hooks).
-- ✅ **In-process model-request capture works** (`AGY_HOOK_STAGE=3`). Hooking
+- ✅ **In-process model-request capture works** (`AGY_PROC_STAGE=3`). Hooking
   `crypto/tls.(*Conn).Write` **past the stack-check prologue** (per-func `skip`)
   captures the full Gemini request (HTTP/2 + JSON) with no stall — validated:
   the prompt + `<USER_REQUEST>` framing + context show up in the captured egress.
@@ -233,7 +233,7 @@ before/after the parking I/O), never the **I/O** step (`Write`/`decrypt` ✓,
 
 ## Capturing model traffic (given stage 3 is out)
 
-**In-process request capture works** (`AGY_HOOK_STAGE=3`). Two hazards had to be
+**In-process request capture works** (`AGY_PROC_STAGE=3`). Two hazards had to be
 solved, both validated on full turns that reach `daily-cloudcode-pa.googleapis.com`:
 
 1. **morestack re-entry.** Hooking *at* a func entry: when the frame grows the
@@ -258,7 +258,7 @@ after the I/O) — never the **I/O** step (which parks). So:
 
 Both are stage 3. `Read`/`net/http.RoundTrip`/`http2.(*pipe).Write` all **park**
 (netpoll / mutex / cond) and stall agy even on-enter-only past-prologue — that's
-why we hook decrypt, not read. `AGY_HOOK_PREVIEW` sets capture bytes/event.
+why we hook decrypt, not read. `AGY_PROC_PREVIEW` sets capture bytes/event.
 
 The decrypted response is HTTP/2 frames (HPACK headers) with a **compressed body**
 (brotli/gzip). `h2reassemble.py` de-frames + de-gzip/brotli/deflate + HPACK-decodes

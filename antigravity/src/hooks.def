@@ -6,7 +6,7 @@
  *        coded per-ID in antigravity.c — different funcs read different registers).
  * MODE   AGY_ASYNC (log, non-blocking) or AGY_SYNC (block for a modify verdict).
  * kind   string tag passed to Python dispatch(kind, stream_id, data).
- * STAGE  which AGY_HOOK_STAGE this hook belongs to (incremental WSL1 bring-up):
+ * STAGE  which AGY_PROC_STAGE this hook belongs to (incremental WSL1 bring-up):
  *          stage 1 = python only; stage 2 = ONLY stage-2 hooks (smoke);
  *          stage >=3 = ONLY stage->=3 hooks (the real ones).
  * LEAVE  1 => needs on_leave (return-value interception). Costs a return-address

@@ -5,8 +5,8 @@ higher-level reassembled HTTP/2 messages (kind="h2msg"). Timestamps are epoch
 seconds (float) so you can plot bytes-over-time, request/response sizes, and
 inter-event latencies directly.
 
-Output path: $AGY_HOOK_CAPTURE (default ./agy-capture.jsonl).
-Hex preview length per raw event: $AGY_HOOK_PREVIEW bytes (default 64; 0 = off).
+Output path: $AGY_PROC_CAPTURE (default ./agy-capture.jsonl).
+Hex preview length per raw event: $AGY_PROC_PREVIEW bytes (default 64; 0 = off).
 """
 import hashlib
 import json
@@ -17,8 +17,8 @@ import time
 
 class Recorder:
     def __init__(self, path=None):
-        self.path = path or os.environ.get("AGY_HOOK_CAPTURE", "agy-capture.jsonl")
-        self.preview = int(os.environ.get("AGY_HOOK_PREVIEW", "64"))
+        self.path = path or os.environ.get("AGY_PROC_CAPTURE", "agy-capture.jsonl")
+        self.preview = int(os.environ.get("AGY_PROC_PREVIEW", "64"))
         self._lock = threading.Lock()
         self._f = open(self.path, "a", buffering=1)  # line-buffered
 

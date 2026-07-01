@@ -7,7 +7,7 @@ while the LD_PRELOAD hooks capture the model traffic (clean, ANSI-free) in paral
 Two channels of "output":
   * PTY transcript  — what agy renders (ANSI-stripped here). Good for UI state.
   * network capture — the actual Gemini request/response (via crypto/tls hooks),
-                      written to the AGY_HOOK_CAPTURE JSONL. Cleaner for content.
+                      written to the AGY_PROC_CAPTURE JSONL. Cleaner for content.
 
 Usage:
     python3 agy_session.py --mode interactive --prompt "what is 2+2" \
@@ -96,11 +96,11 @@ class AgySession:
     def _env(self):
         env = dict(os.environ)
         env.update({
-            "AGY_HOOK_ENABLE": "1",
-            "AGY_HOOK_STAGE": str(self.stage),
-            "AGY_HOOK_MODULE": "agy_process",
-            "AGY_HOOK_PYTHONPATH": os.path.join(self.root, "python"),
-            "AGY_HOOK_CAPTURE": self.capture,
+            "AGY_PROC_ENABLE": "1",
+            "AGY_PROC_STAGE": str(self.stage),
+            "AGY_PROC_MODULE": "agy_process",
+            "AGY_PROC_PYTHONPATH": os.path.join(self.root, "python"),
+            "AGY_PROC_CAPTURE": self.capture,
             "PYTHONPATH": os.path.join(self.root, "python") + os.pathsep + env.get("PYTHONPATH", ""),
             "LD_PRELOAD": os.path.join(self.root, "build", "antigravity.so")
                           + (os.pathsep + env["LD_PRELOAD"] if env.get("LD_PRELOAD") else ""),
@@ -108,7 +108,7 @@ class AgySession:
             "TERM": env.get("TERM", "xterm-256color"),
         })
         if self.log:
-            env["AGY_HOOK_LOG"] = self.log
+            env["AGY_PROC_LOG"] = self.log
         env.update(self.extra_env)
         return env
 
