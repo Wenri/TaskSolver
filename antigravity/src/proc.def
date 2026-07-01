@@ -1,4 +1,4 @@
-/* hooks.def — declarative hook table (X-macro).
+/* proc.def — declarative hook table (X-macro).
  *
  *   HOOK(ID, "go.symbol.Name", MODE, "kind", STAGE, LEAVE)
  *
@@ -41,3 +41,16 @@ HOOK(HTTP_RT,      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   5,
 HOOK(SER_ROOT,     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",    AGY_ASYNC, "serialize", 4, 1)
 HOOK(MAR_PROMPT,   "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON", AGY_ASYNC, "marshal",   4, 1)
 HOOK(PROTO_MARSHAL,"google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            AGY_ASYNC, "proto_marshal", 4, 1)
+
+/* stage 6: agy-native application boundary — REFERENCE ONLY (like stage 5, these break
+ * agy). These sit right where agy handles fully-decoded data: SendUserMessage = the
+ * request path; callbackStreamer.Send = decoded response updates pushed to the UI.
+ * EXPERIMENT RESULT: both FIRE in-process (send_user_msg=1, stream_send=2-3) — so the
+ * decoded request/response IS reachable here, no HTTP/2/HPACK/gzip — BUT hooking either
+ * one (on-enter, past-prologue) makes agy's turn produce NO answer. Isolated: stage 6 =
+ * SendUserMessage alone and (formerly stage 7) Send alone each broke the turn; control
+ * stages 1/2 answered. Same park/reschedule hazard as stage 5 — they're on the
+ * goroutine-scheduling path, so gum's return-tracking corrupts the turn. Conclusion:
+ * NOT usable for capture; the CPU-only crypto hook + our own HTTP/2 decode stays. */
+HOOK(SEND_USER_MSG, "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage", AGY_ASYNC, "send_user_msg", 6, 0)
+HOOK(CB_STREAM_SEND,"google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",          AGY_ASYNC, "stream_send",   6, 0)

@@ -150,7 +150,7 @@ antigravity/
     antigravity.c               ← LD_PRELOAD constructor + gum install + Go-ABI hook
                               callbacks + getaddrinfo interposer
     pybridge.c/.h           ← embed libpython, pyworker thread, queue, dispatch
-    hooks.def               ← declarative hook table (id, symbol, mode, kind, stage, leave)
+    proc.def                ← declarative hook table (id, symbol, mode, kind, stage, leave)
     gen_symbols_header.py   ← symbols.json → symbols_gen.h (build-id + name→vaddr)
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
     __init__.py             ← lazy exports (PEP 562): AgyModel / run_print / InteractiveSession

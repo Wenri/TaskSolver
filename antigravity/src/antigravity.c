@@ -18,16 +18,16 @@
 #include "pybridge.h"
 #include "symbols_gen.h"
 
-/* ---- hook table generated from hooks.def ---------------------------------- */
+/* ---- hook table generated from proc.def ---------------------------------- */
 enum {
 #define HOOK(ID, NAME, MODE, KIND, STAGE, LEAVE) HK_##ID,
-#include "hooks.def"
+#include "proc.def"
 #undef HOOK
     HK_COUNT
 };
 static const struct { const char *name; agy_mode_t mode; const char *kind; int stage; int leave; } HOOKS[] = {
 #define HOOK(ID, NAME, MODE, KIND, STAGE, LEAVE) [HK_##ID] = { NAME, MODE, KIND, STAGE, LEAVE },
-#include "hooks.def"
+#include "proc.def"
 #undef HOOK
 };
 
@@ -135,6 +135,19 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
                                .mode = AGY_ASYNC };
             agy_py_emit(&ev);
         }
+        break;
+    }
+    case HK_SEND_USER_MSG: {
+        /* (*ServerBackend).SendUserMessage(...): receiver=RAX. Fire+stall probe only —
+         * arg layout unknown, so emit no payload (never deref a guessed pointer). */
+        agy_event_t ev = { .kind = "send_user_msg", .stream_id = cpu->rax, .mode = AGY_ASYNC };
+        agy_py_emit(&ev);
+        break;
+    }
+    case HK_CB_STREAM_SEND: {
+        /* (*callbackStreamer).Send(update): receiver=RAX. Fire+stall probe only. */
+        agy_event_t ev = { .kind = "stream_send", .stream_id = cpu->rax, .mode = AGY_ASYNC };
+        agy_py_emit(&ev);
         break;
     }
     default: break;

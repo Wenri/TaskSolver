@@ -1,5 +1,5 @@
 {
-  "agy_path": "antigravity/vendor/agy",
+  "agy_path": "vendor/agy",
   "build_id": "4368698a979e6df1c84d2af6ffe16020",
   "ptr_size": 8,
   "moduledata_vaddr": 170051104,
@@ -16,7 +16,9 @@
     "os.Getenv": 83773824,
     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize": 121450144,
     "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON": 121386048,
-    "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 84765504
+    "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 84765504,
+    "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage": 114748992,
+    "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 114743136
   },
   "skips": {
     "crypto/tls.(*Conn).Write": 15,
@@ -28,7 +30,9 @@
     "os.Getenv": 6,
     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize": 10,
     "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON": 18,
-    "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 10
+    "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 10,
+    "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage": 15,
+    "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 18
   },
   "missing": [],
   "catalog": {

@@ -23,8 +23,8 @@ import json
 import struct
 import sys
 
-# Functions the native shim hooks by default. Keep in sync with src/hooks.def.
-HOOK_TARGETS = [
+# Functions the native shim hooks by default. Keep in sync with src/proc.def.
+PROC_TARGETS = [
     "crypto/tls.(*Conn).Write",          # plaintext egress to the LLM backend
     "crypto/tls.(*Conn).Read",           # plaintext ingress from the backend
     "net/http.(*Transport).RoundTrip",   # HTTP-level request/response
@@ -44,6 +44,11 @@ HOOK_TARGETS = [
     # generic protobuf marshal: CPU-only, returns []byte — captures the marshaled
     # StreamGenerateChat request (and every other proto) before the network send.
     "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",
+    # --- stage 6: agy-native application boundary (fire+stall probe) ---
+    # ServerBackend is agy's own client to the model backend; these run in-process on
+    # fully-decoded Go data (no HTTP/2/HPACK/gzip). Testing whether they fire and stall.
+    "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage",
+    "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",
 ]
 
 # Reference groups emitted for picking further hook points (not hooked by default).
@@ -237,7 +242,7 @@ def main():
         return 0
 
     hooks, skips, missing, unverified = {}, {}, [], []
-    for nm in HOOK_TARGETS:
+    for nm in PROC_TARGETS:
         if nm not in name2addr:
             missing.append(nm)
             continue
@@ -258,8 +263,8 @@ def main():
         "text_base": text_base,
         "minpc": minpc,
         "total_funcs": nfunc,
-        "hooks": {k: hooks[k] for k in HOOK_TARGETS if k in hooks},
-        "skips": {k: skips[k] for k in HOOK_TARGETS if k in hooks},
+        "hooks": {k: hooks[k] for k in PROC_TARGETS if k in hooks},
+        "skips": {k: skips[k] for k in PROC_TARGETS if k in hooks},
         "missing": missing,
         "catalog": catalog,
     }
@@ -271,9 +276,9 @@ def main():
     print(f"  moduledata: {md_vaddr:#x}   text_base: {text_base:#x}   minpc: {minpc:#x}" if minpc else
           f"  moduledata: {md_vaddr:#x}   text_base: {text_base:#x}")
     print(f"  funcs:      {nfunc}")
-    print(f"  hooks:      {len(hooks)}/{len(HOOK_TARGETS)}"
+    print(f"  hooks:      {len(hooks)}/{len(PROC_TARGETS)}"
           + (f"  MISSING={missing}" if missing else ""))
-    for nm in HOOK_TARGETS:
+    for nm in PROC_TARGETS:
         if nm in hooks:
             flag = "  !! NOT A PROLOGUE" if nm in unverified else ""
             print(f"    {hooks[nm]:#012x} (+{skips[nm]:2d})  {nm}{flag}")
