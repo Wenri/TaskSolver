@@ -140,9 +140,9 @@ result). See `config/` and task #6.
 ```
 antigravity/
   README.md                 ← this file (the design)
-  setup.sh                  ← fetch frida-gum devkit + vendor UAPI headers (deps not committed)
+  Makefile                  ← one build entry: vendor deps (agy, frida-gum, UAPI) + compile
   run-agy.sh                ← launcher: sets LD_PRELOAD, PYTHONPATH, AGY_PROC_*, GODEBUG
-  vendor/agy                ← copied-in binary, gitignored (164 MB)
+  vendor/                   ← agy copy (164 MB) + frida-gum devkit + UAPI headers (gitignored; `make setup`)
   symbols/
     build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
                               symbols.json; self-verifies every hook is a prologue
@@ -153,8 +153,6 @@ antigravity/
     pybridge.c/.h           ← embed libpython, pyworker thread, queue, dispatch
     hooks.def               ← declarative hook table (id, symbol, mode, kind, stage, leave)
     gen_symbols_header.py   ← symbols.json → symbols_gen.h (build-id + name→vaddr)
-    build.sh / Makefile     ← build antigravity.so (build.sh = no-make path)
-    vendor/                 ← frida-gum devkit + UAPI headers (gitignored; ./setup.sh)
   python/
     agy_process/__init__.py   ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
     agy_process/record.py     ← JSONL recorder for plotting
@@ -173,20 +171,20 @@ antigravity/
 ## Build & run
 
 `pixi install` **builds the shim** — the tasksolver package build (`setup.py` →
-`build_py`) runs `antigravity/setup.sh` + `antigravity/src/build.sh`, producing
-`antigravity/build/antigravity.so`. Since the shim is x86-64-specific and a main
+`build_py`) runs `make -C antigravity`, which vendors the deps and compiles
+`antigravity/vendor/antigravity.so`. Since the shim is x86-64-specific and a main
 target, the package is **arch-specific (linux-64)** (`[tool.pixi.package.build.config]
 noarch=false`) and the build is **required** — it fails loudly if the toolchain
 (gcc / frida-gum / libpython) is missing. Set `ANTIGRAVITY_SKIP_BUILD=1` to build
-just the Python library without the shim. (`hpack` + `brotli-python`, for HTTP/2
-response decoding, are pixi/conda deps — no `pip install` needed.)
+just the Python library without the shim. (`make`, `hpack`, and `brotli-python` are
+pixi/conda deps — no `pip install` needed; this host has no system `make`.)
 
-pixi caches the package build, so **after an agy update** rebuild the shim explicitly:
+pixi caches the package build, so **after an agy update** rebuild the shim explicitly
+(GNU make comes from the pixi env, so run it via `pixi run`):
 
 ```bash
-pixi run antigravity            # setup.sh + resolve symbols + build (also re-pins symbols.json)
-# or the manual pieces from antigravity/:
-#   ./setup.sh && python3 symbols/build_symbols.py vendor/agy symbols/symbols.json && ./src/build.sh
+pixi run make -C antigravity symbols   # re-resolve symbols.json from the new agy binary
+pixi run make -C antigravity           # recompile the shim (also runs `make setup` first)
 ```
 
 Run agy under the hook (`AGY_PROC_STAGE`: 1=python+DNS, 3=tls_write+decrypt

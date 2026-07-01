@@ -1,11 +1,24 @@
+# --- Python ---
 __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
 build/
 dist/
+
+# --- tooling / env ---
 .pixi/
 .env
-# agy/antigravity runtime capture output (see antigravity/run-agy.sh AGY_PROC_CAPTURE)
-agy-capture.jsonl
+
+# --- agy/antigravity runtime capture output (see antigravity/run-agy.sh AGY_PROC_CAPTURE) ---
 *.jsonl
+captures/
+
+# --- antigravity build deps + artifacts (all under antigravity/, never committed) ---
+# Vendored/fetched deps + the built shim — recreate with `make -C antigravity`:
+#   vendor/agy (~164 MB binary), vendor/frida-gum (devkit), vendor/uapi (Linux UAPI
+#   headers), vendor/antigravity.so (compiled LD_PRELOAD shim).
+antigravity/vendor/
+# generated from symbols.json at build time:
+antigravity/src/symbols_gen.h
+antigravity/symbols/goresym.json

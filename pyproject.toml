@@ -80,6 +80,9 @@ python = "3.13.*"
 tasksolver = { path = "." }
 nodejs = ">=25,<26"
 bun = ">=1.3.11,<2"
+# GNU make drives the antigravity shim build (antigravity/Makefile); this host has
+# no system make, so pull it from conda-forge for manual rebuilds (`pixi run make …`).
+make = ">=4"
 # antigravity HTTP/2 response decoding (h2reassemble.py) — from conda-forge, not pip.
 hpack = ">=4"
 brotli-python = ">=1.1"
@@ -90,16 +93,11 @@ brotli-python = ">=1.1"
 [tool.pixi.activation.env]
 PYTHONPATH = "$PIXI_PROJECT_ROOT/antigravity/python"
 
-# antigravity build orchestration. frida-gum's C devkit (libfrida-gum.a + header) is
-# NOT on conda-forge/PyPI — it ships only via frida's GitHub releases — so pixi
-# can't depend on it; instead it drives the fetch as a task. `pixi run antigravity`
-# does the whole chain: fetch deps (frida-gum devkit + UAPI headers + agy copy)
-# -> resolve symbols -> build the LD_PRELOAD shim. Uses system gcc + python3-config.
-[tool.pixi.tasks]
-antigravity-setup   = "bash antigravity/setup.sh"
-antigravity-symbols = { cmd = "python3 antigravity/symbols/build_symbols.py antigravity/vendor/agy antigravity/symbols/symbols.json", depends-on = ["antigravity-setup"] }
-antigravity         = { cmd = "bash antigravity/src/build.sh", depends-on = ["antigravity-symbols"] }
-
+# The antigravity shim build lives in antigravity/Makefile (setup.py's build_py hook
+# runs `make -C antigravity` during the package build, so `pixi install` builds it).
+# No pixi tasks needed: after an agy update, rebuild manually with
+#   pixi run make -C antigravity symbols   # re-resolve symbols.json from the new agy
+#   pixi run make -C antigravity           # recompile the shim
 [tool.pixi.package]
 name = "tasksolver"
 version = "0.0.1"
@@ -108,17 +106,19 @@ version = "0.0.1"
 name = "pixi-build-python"
 version = "*"
 
-# The antigravity shim (antigravity/build/antigravity.so) is an x86-64 build and a
+# The antigravity shim (antigravity/vendor/antigravity.so) is an x86-64 build and a
 # main target of this repo, so produce an arch-specific (linux-64) package, not noarch.
 [tool.pixi.package.build.config]
 noarch = false
 
 # The python backend builds without build isolation, so the [build-system]
-# requirements must be present in the package's host environment.
+# requirements must be present in the package's host environment — plus `make`,
+# which setup.py's build_py hook invokes to build the antigravity shim.
 [tool.pixi.package.host-dependencies]
 python = "3.13.*"
 pip = "*"
 setuptools = ">=61"
+make = ">=4"
 
 # --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---
 # The `local` and `app` features auto-map to the same-named

@@ -32,4 +32,4 @@ export PYTHONPATH="$HERE/python:${PYTHONPATH:-}"
 # Force Go's cgo DNS resolver so the getaddrinfo interposer sees hostnames.
 export GODEBUG="netdns=cgo${GODEBUG:+,$GODEBUG}"
 
-exec env LD_PRELOAD="$HERE/build/antigravity.so${LD_PRELOAD:+:$LD_PRELOAD}" "$AGY_BIN" "$@"
+exec env LD_PRELOAD="$HERE/vendor/antigravity.so${LD_PRELOAD:+:$LD_PRELOAD}" "$AGY_BIN" "$@"

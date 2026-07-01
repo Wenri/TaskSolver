@@ -102,7 +102,7 @@ class AgySession:
             "AGY_PROC_PYTHONPATH": os.path.join(self.root, "python"),
             "AGY_PROC_CAPTURE": self.capture,
             "PYTHONPATH": os.path.join(self.root, "python") + os.pathsep + env.get("PYTHONPATH", ""),
-            "LD_PRELOAD": os.path.join(self.root, "build", "antigravity.so")
+            "LD_PRELOAD": os.path.join(self.root, "vendor", "antigravity.so")
                           + (os.pathsep + env["LD_PRELOAD"] if env.get("LD_PRELOAD") else ""),
             "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),
             "TERM": env.get("TERM", "xterm-256color"),
