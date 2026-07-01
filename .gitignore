@@ -6,3 +6,6 @@ build/
 dist/
 .pixi/
 .env
+# agy/antigravity runtime capture output (see antigravity/run-agy.sh AGY_HOOK_CAPTURE)
+agy-capture.jsonl
+*.jsonl
