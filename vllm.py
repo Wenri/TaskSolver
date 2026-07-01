@@ -10,7 +10,7 @@ from .exceptions import GPTMaxTriesExceededException, GPTOutputParseException
 
 
 DEFAULT_QWEN3_MODEL = "Qwen/Qwen3.5-397B-A17B-GPTQ-Int4"
-MIN_QWEN3_MAX_TOKENS = 4096
+MIN_QWEN3_MAX_TOKENS = 10000 
 QWEN3_BUILTIN_ENDPOINTS = {
     "qwen3-5": {
         "base_url": "https://vlm1.wenri.me/v1",
