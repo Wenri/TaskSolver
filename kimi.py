@@ -91,11 +91,13 @@ class KimiModel(object):
         def kimi_thread(idx, request_payload, results):
             mod_payload = deepcopy(request_payload)
 
-            raw_response = self.client.messages.create(
+            with self.client.messages.stream(
                 model=self.model,
                 messages=[mod_payload["messages"]],
                 max_tokens=mod_payload["max_tokens"],
-            )
+            ) as stream:
+                stream.until_done()
+                raw_response = stream.get_final_message()
 
             response = raw_response.dict()
             text_content = self._combine_text_blocks(response.get("content"))
