@@ -12,25 +12,26 @@
 #   AGY_PROC_LOG            native shim log        (default ./antigravity.log)
 #   AGY_PROC_TLS_WRITE_SYNC set to enable synchronous egress rewrite
 #   AGY_PROC_H2             0 to disable HTTP/2 reassembly
+#
+# The env wiring (LD_PRELOAD + AGY_PROC_* + PYTHONPATH + GODEBUG) is delegated to
+# pyagy._env.instrumented_env so this launcher and the Python drivers stay in sync.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANTIGRAVITY="$(cd "$HERE/../antigravity" && pwd)"   # the shim (vendor/) + python subsystem live here
 
 : "${AGY_BIN:=$HOME/.local/bin/agy}"
-export AGY_PROC_ENABLE=1
-# AGY_PROC_STAGE: 1=Python bridge + getaddrinfo DNS logging, no gum hooks (default).
-#   3 = + tls_write hook (past-prologue): captures the model REQUEST in-process
-#       (HTTP/2+JSON), no stall. Set AGY_PROC_PREVIEW high to grab full bodies.
-#   Stage 5 hooks (tls_read/RoundTrip) STALL agy (they park while hooked) — avoid.
-# NOTE: agy needs a real git workspace (an empty dir hangs at startup).
-export AGY_PROC_STAGE="${AGY_PROC_STAGE:-1}"
-export AGY_PROC_MODULE="${AGY_PROC_MODULE:-pyagy.agy_process}"
-export AGY_PROC_PYTHONPATH="${AGY_PROC_PYTHONPATH:-$ANTIGRAVITY}"
-export AGY_PROC_CAPTURE="${AGY_PROC_CAPTURE:-$PWD/agy-capture.jsonl}"
-export AGY_PROC_LOG="${AGY_PROC_LOG:-$PWD/antigravity.log}"
-export PYTHONPATH="$ANTIGRAVITY:${PYTHONPATH:-}"
 
-# Force Go's cgo DNS resolver so the getaddrinfo interposer sees hostnames.
-export GODEBUG="netdns=cgo${GODEBUG:+,$GODEBUG}"
-
-exec env LD_PRELOAD="$ANTIGRAVITY/vendor/antigravity.so${LD_PRELOAD:+:$LD_PRELOAD}" "$AGY_BIN" "$@"
+exec python3 - "$AGY_BIN" "$@" <<PY
+import os, sys
+sys.path.insert(0, ${ANTIGRAVITY@Q})
+from pyagy._env import instrumented_env
+agy, *args = sys.argv[1:]
+env = instrumented_env(
+    stage=os.environ.get("AGY_PROC_STAGE", "1"),
+    capture=os.environ.get("AGY_PROC_CAPTURE", os.path.join(os.getcwd(), "agy-capture.jsonl")),
+    log=os.environ.get("AGY_PROC_LOG", os.path.join(os.getcwd(), "antigravity.log")),
+    module=os.environ.get("AGY_PROC_MODULE", "pyagy.agy_process"),
+    root=${ANTIGRAVITY@Q},
+)
+os.execve(agy, [agy] + args, env)
+PY

@@ -8,40 +8,22 @@ Two facts force this shape (see antigravity/README.md for the full reverse-engin
 backend: it returns agy's response text cleanly (no TUI). `InteractiveSession`
 drives a multi-turn TUI session, answering the terminal-capability queries agy
 blocks on, for scripted agentic use.
+
+The PTY fork/pump, ANSI stripping, terminal-query replies, and env wiring live in
+the shared `_pty`/`_term`/`_env` modules; this file is just the agy-specific policy
+(git workspace, argv assembly, the run_print return dict).
 """
 import os
-import pty
-import re
-import select
-import struct
 import subprocess
 import tempfile
-import time
+
+from ._env import clean_env
+from ._pty import PtyProcess
+from ._term import strip_ansi  # re-exported (public API)
 
 AGY_BIN = os.environ.get("AGY_BIN", os.path.expanduser("~/.local/bin/agy"))
 
-_ANSI = re.compile(
-    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P^_][^\x1b]*\x1b\\"
-    r"|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|[\x00-\x08\x0b\x0c\x0e-\x1f]"
-)
-
-
-def strip_ansi(b) -> str:
-    if isinstance(b, (bytes, bytearray)):
-        b = bytes(b).decode("utf-8", "replace")
-    return _ANSI.sub("", b)
-
-
-# Terminal-capability queries agy sends and blocks on; reply like a real terminal.
-_QUERIES = [
-    (re.compile(rb"\x1b\[\?(\d+)\$p"), lambda m: b"\x1b[?" + m.group(1) + b";0$y"),
-    (re.compile(rb"\x1b\[>0?q"),       lambda m: b"\x1bP>|agy-session\x1b\\"),
-    (re.compile(rb"\x1b\[\?u"),        lambda m: b"\x1b[?0u"),
-    (re.compile(rb"\x1b\[>0?c"),       lambda m: b"\x1b[>0;10;1c"),
-    (re.compile(rb"\x1b\[0?c"),        lambda m: b"\x1b[?1;2c"),
-    (re.compile(rb"\x1b\[6n"),         lambda m: b"\x1b[50;200R"),
-    (re.compile(rb"\x1b\[5n"),         lambda m: b"\x1b[0n"),
-]
+_clean_env = clean_env  # backwards-compatible alias
 
 _scratch_ws = None
 
@@ -66,38 +48,10 @@ def ensure_git_workspace(path=None) -> str:
     return d
 
 
-def _clean_env():
-    env = dict(os.environ)
-    env["TERM"] = env.get("TERM", "xterm-256color")
-    for k in list(env):               # don't inherit the antigravity instrumentation
-        if k.startswith("AGY_PROC"):
-            env.pop(k, None)
-    # keep other preloads (e.g. the WSL1 wsl1-exec.so shim agy runs with); drop only ours
-    kept = [p for p in env.get("LD_PRELOAD", "").split(os.pathsep) if p and "antigravity" not in p]
-    if kept:
-        env["LD_PRELOAD"] = os.pathsep.join(kept)
-    else:
-        env.pop("LD_PRELOAD", None)
-    return env
-
-
-def _spawn(argv, workdir, env):
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.chdir(workdir)
-        os.execve(argv[0], argv, env)
-        os._exit(127)
-    try:
-        import fcntl, termios
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
-    except Exception:
-        pass
-    return pid, fd
-
-
 def run_print(prompt, workdir=None, model=None, timeout=300, skip_permissions=False,
-              extra_flags=None):
-    """One-shot `agy --print <prompt>`. Returns dict(result, transcript, exit_status)."""
+              extra_flags=None, env=None):
+    """One-shot `agy --print <prompt>`. Returns dict(result, transcript, exit_status,
+    workspace). ``env`` defaults to a clean (uninstrumented) environment."""
     workdir = ensure_git_workspace(workdir)
     argv = [AGY_BIN, "--print", prompt]
     if model:
@@ -107,67 +61,12 @@ def run_print(prompt, workdir=None, model=None, timeout=300, skip_permissions=Fa
     if extra_flags:
         argv += list(extra_flags)
 
-    pid, fd = _spawn(argv, workdir, _clean_env())
-    raw = bytearray()
-    qpos = 0
-    status = None
-    start = time.time()
-    while time.time() - start < timeout:
-        r, _, _ = select.select([fd], [], [], 0.5)
-        if r:
-            try:
-                chunk = os.read(fd, 65536)
-            except OSError:
-                break
-            if not chunk:
-                break
-            raw += chunk
-            # answer any terminal queries (harmless in print mode)
-            while True:
-                best = None
-                for rx, rep in _QUERIES:
-                    m = rx.search(raw, qpos)
-                    if m and (best is None or m.start() < best[0].start()):
-                        best = (m, rep)
-                if not best:
-                    qpos = max(qpos, len(raw) - 8)
-                    break
-                m, rep = best
-                try:
-                    os.write(fd, rep(m))
-                except OSError:
-                    break
-                qpos = m.end()
-        try:
-            p, st = os.waitpid(pid, os.WNOHANG)
-            if p != 0:
-                status = st
-                try:
-                    while True:
-                        c = os.read(fd, 65536)
-                        if not c:
-                            break
-                        raw += c
-                except OSError:
-                    pass
-                break
-        except ChildProcessError:
-            break
-    if status is None:
-        try:
-            os.kill(pid, 15)
-            os.waitpid(pid, 0)
-        except Exception:
-            pass
-    try:
-        os.close(fd)
-    except OSError:
-        pass
+    proc = PtyProcess().spawn(argv, workdir, env if env is not None else clean_env())
+    transcript = proc.read_until_exit(timeout=timeout)
+    proc.close(interrupt=False)
 
-    transcript = strip_ansi(raw)
-    # The response is the stripped output with surrounding blank lines trimmed.
     result = "\n".join(ln for ln in transcript.splitlines()).strip()
-    return {"result": result, "transcript": transcript, "exit_status": status,
+    return {"result": result, "transcript": transcript, "exit_status": proc.status,
             "workspace": workdir}
 
 
@@ -178,69 +77,21 @@ class InteractiveSession:
     def __init__(self, workdir=None, model=None, env=None):
         self.workdir = ensure_git_workspace(workdir)
         self.model = model
-        self.env = env or _clean_env()
-        self.pid = self.fd = None
-        self.raw = bytearray()
-        self._qpos = 0
+        self.env = env if env is not None else clean_env()
+        self.proc = PtyProcess()
 
     def start(self, prompt):
         argv = [AGY_BIN, "--prompt-interactive", prompt]
         if self.model:
             argv += ["--model", self.model]
-        self.pid, self.fd = _spawn(argv, self.workdir, self.env)
+        self.proc.spawn(argv, self.workdir, self.env)
         return self
 
-    def _answer(self):
-        while True:
-            best = None
-            for rx, rep in _QUERIES:
-                m = rx.search(self.raw, self._qpos)
-                if m and (best is None or m.start() < best[0].start()):
-                    best = (m, rep)
-            if not best:
-                self._qpos = max(self._qpos, len(self.raw) - 8)
-                return
-            m, rep = best
-            try:
-                os.write(self.fd, rep(m))
-            except OSError:
-                return
-            self._qpos = m.end()
-
     def read_until_idle(self, idle=6.0, timeout=180.0):
-        start = last = time.time()
-        buf = bytearray()
-        while time.time() - start < timeout:
-            r, _, _ = select.select([self.fd], [], [], min(idle, 1.0))
-            if r:
-                try:
-                    c = os.read(self.fd, 65536)
-                except OSError:
-                    break
-                if not c:
-                    break
-                buf += c
-                self.raw += c
-                self._answer()
-                last = time.time()
-            elif time.time() - last >= idle:
-                break
-        return strip_ansi(buf)
+        return self.proc.read_until_idle(idle=idle, timeout=timeout)
 
     def submit(self, text=""):
-        os.write(self.fd, text.encode() + b"\r")
+        self.proc.send_line(text)
 
     def close(self):
-        if not self.pid:
-            return
-        try:
-            os.write(self.fd, b"\x03")
-            time.sleep(0.2)
-            os.kill(self.pid, 15)
-            os.waitpid(self.pid, 0)
-        except Exception:
-            pass
-        try:
-            os.close(self.fd)
-        except OSError:
-            pass
+        self.proc.close(interrupt=True)

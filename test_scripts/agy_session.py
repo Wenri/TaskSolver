@@ -9,6 +9,10 @@ Two channels of "output":
   * network capture — the actual Gemini request/response (via crypto/tls hooks),
                       written to the AGY_PROC_CAPTURE JSONL. Cleaner for content.
 
+The PTY pump, ANSI/terminal-query handling, and instrumented env wiring now live in
+the shared `pyagy._pty` / `pyagy._term` / `pyagy._env` modules; this is a thin agy-
+instrumentation front-end over them (kept here as the CLI used in capture experiments).
+
 Usage:
     python3 agy_session.py --mode interactive --prompt "what is 2+2" \
         --send "and times 10?" --idle 4 --timeout 120 --stage 3
@@ -24,190 +28,69 @@ As a library:
 """
 import argparse
 import os
-import pty
-import re
-import select
-import signal
 import sys
-import time
 
-ANSI = re.compile(
-    r"""\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)   # OSC ... BEL/ST
-      | \x1b[P^_][^\x1b]*\x1b\\             # DCS/PM/APC ... ST
-      | \x1b\[[0-9;?]*[ -/]*[@-~]           # CSI
-      | \x1b[@-Z\\-_]                       # 2-byte escapes
-      | [\x00-\x08\x0b\x0c\x0e-\x1f]        # stray control chars (keep \t \n \r)
-    """,
-    re.VERBOSE,
-)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ANTIGRAVITY = os.path.join(os.path.dirname(_HERE), "antigravity")
+if _ANTIGRAVITY not in sys.path:
+    sys.path.insert(0, _ANTIGRAVITY)   # make `pyagy` importable without an install
 
-
-def strip_ansi(b: bytes) -> str:
-    return ANSI.sub("", b.decode("utf-8", "replace"))
+from pyagy._env import instrumented_env  # noqa: E402
+from pyagy._pty import PtyProcess         # noqa: E402
+from pyagy._term import strip_ansi        # noqa: E402  (re-exported for callers)
 
 
 class AgySession:
     def __init__(self, agy=None, stage=3, capture="agy-capture.jsonl",
                  log=None, workdir=None, extra_env=None, echo=False):
-        here = os.path.dirname(os.path.abspath(__file__))       # test_scripts/
-        self.root = os.path.join(os.path.dirname(here), "antigravity")  # repo/antigravity — shim + pyagy live here
+        self.root = _ANTIGRAVITY            # repo/antigravity — shim + pyagy live here
         self.agy = agy or os.path.expanduser("~/.local/bin/agy")
         self.stage = stage
         self.capture = os.path.abspath(capture)
         self.log = os.path.abspath(log) if log else None
         self.workdir = workdir or os.getcwd()
-        self.echo = echo
         self.extra_env = extra_env or {}
-        self.pid = None
-        self.fd = None
-        self.raw = bytearray()           # all bytes read from the pty
-        self._qpos = 0                   # scan position for terminal-query auto-replies
+        self.proc = PtyProcess(echo=echo)
 
-    # agy's TUI queries the terminal and blocks until answered. Emulate a real
-    # terminal by replying to the common queries so the UI proceeds.
-    _QUERIES = [
-        (re.compile(rb"\x1b\[\?(\d+)\$p"), lambda m: b"\x1b[?" + m.group(1) + b";0$y"),  # DECRQM
-        (re.compile(rb"\x1b\[>0?q"),       lambda m: b"\x1bP>|antigravity 0.1\x1b\\"),        # XTVERSION
-        (re.compile(rb"\x1b\[\?u"),        lambda m: b"\x1b[?0u"),                        # kitty kbd query
-        (re.compile(rb"\x1b\[>0?c"),       lambda m: b"\x1b[>0;10;1c"),                   # secondary DA
-        (re.compile(rb"\x1b\[0?c"),        lambda m: b"\x1b[?1;2c"),                      # primary DA
-        (re.compile(rb"\x1b\[6n"),         lambda m: b"\x1b[50;200R"),                    # cursor pos
-        (re.compile(rb"\x1b\[5n"),         lambda m: b"\x1b[0n"),                         # device status
-    ]
+    # --- back-compat shims over PtyProcess -------------------------------------
+    @property
+    def pid(self):
+        return self.proc.pid
 
-    def _answer_queries(self):
-        while True:
-            best = None
-            for rx, rep in self._QUERIES:
-                m = rx.search(self.raw, self._qpos)
-                if m and (best is None or m.start() < best[0].start()):
-                    best = (m, rep)
-            if not best:
-                # keep a small tail in case a query is split across reads
-                self._qpos = max(self._qpos, len(self.raw) - 8)
-                return
-            m, rep = best
-            try:
-                os.write(self.fd, rep(m))
-            except OSError:
-                return
-            self._qpos = m.end()
+    @property
+    def fd(self):
+        return self.proc.fd
+
+    @property
+    def raw(self):
+        return self.proc.raw
 
     def _env(self):
-        env = dict(os.environ)
-        env.update({
-            "AGY_PROC_ENABLE": "1",
-            "AGY_PROC_STAGE": str(self.stage),
-            "AGY_PROC_MODULE": "pyagy.agy_process",
-            "AGY_PROC_PYTHONPATH": self.root,
-            "AGY_PROC_CAPTURE": self.capture,
-            "PYTHONPATH": self.root + os.pathsep + env.get("PYTHONPATH", ""),
-            "LD_PRELOAD": os.path.join(self.root, "vendor", "antigravity.so")
-                          + (os.pathsep + env["LD_PRELOAD"] if env.get("LD_PRELOAD") else ""),
-            "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),
-            "TERM": env.get("TERM", "xterm-256color"),
-        })
-        if self.log:
-            env["AGY_PROC_LOG"] = self.log
-        env.update(self.extra_env)
-        return env
+        return instrumented_env(stage=self.stage, capture=self.capture, log=self.log,
+                                root=self.root, extra_env=self.extra_env)
 
     def start(self, args):
         """Fork agy under a pty. `args` are appended after the agy binary."""
         argv = [self.agy] + list(args)
-        env = self._env()
-        pid, fd = pty.fork()
-        if pid == 0:  # child
-            try:
-                os.chdir(self.workdir)
-                os.execve(self.agy, argv, env)
-            except Exception as e:  # pragma: no cover
-                os.write(2, f"exec failed: {e}\n".encode())
-                os._exit(127)
-        self.pid, self.fd = pid, fd
-        try:
-            import termios, struct, fcntl
-            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
-        except Exception:
-            pass
+        self.proc.spawn(argv, self.workdir, self._env())
         return self
 
-    def _pump(self, timeout):
-        """Read available bytes for up to `timeout` seconds; return what was read."""
-        got = bytearray()
-        end = time.time() + timeout
-        while time.time() < end:
-            r, _, _ = select.select([self.fd], [], [], min(0.3, max(0.0, end - time.time())))
-            if not r:
-                break
-            try:
-                chunk = os.read(self.fd, 65536)
-            except OSError:
-                break
-            if not chunk:
-                break
-            got += chunk
-            self.raw += chunk
-            self._answer_queries()
-            if self.echo:
-                os.write(1, chunk)
-        return got
-
     def read_until_idle(self, idle=3.0, timeout=120.0):
-        """Read until no new output for `idle` s (agent done talking) or `timeout`."""
-        start = time.time()
-        last = time.time()
-        buf = bytearray()
-        while time.time() - start < timeout:
-            chunk = self._pump(min(idle, 1.0))
-            if chunk:
-                buf += chunk
-                last = time.time()
-            elif time.time() - last >= idle:
-                break
-            if self.pid and self._exited():
-                buf += self._pump(0.5)
-                break
-        return strip_ansi(bytes(buf))
+        return self.proc.read_until_idle(idle=idle, timeout=timeout)
 
     def send(self, data: bytes):
-        os.write(self.fd, data)
+        self.proc.write(data)
 
     def send_line(self, text: str):
-        """Type a line and press Enter (CR is what TUIs expect)."""
-        self.send(text.encode() + b"\r")
-
-    def _exited(self):
-        try:
-            pid, _ = os.waitpid(self.pid, os.WNOHANG)
-            return pid != 0
-        except ChildProcessError:
-            return True
+        self.proc.send_line(text)
 
     def close(self):
-        if not self.pid:
-            return
-        for sig in (b"\x03", b"\x03"):   # Ctrl-C twice
-            try:
-                self.send(sig); time.sleep(0.3)
-            except OSError:
-                break
-        try:
-            os.kill(self.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            os.waitpid(self.pid, 0)
-        except ChildProcessError:
-            pass
-        try:
-            os.close(self.fd)
-        except OSError:
-            pass
+        self.proc.close(interrupt=True)
 
 
 def _summarize_capture(path):
-    import collections, json
+    import collections
+    import json
     if not os.path.exists(path):
         return "no capture file"
     c, b = collections.Counter(), collections.Counter()
