@@ -11,11 +11,23 @@ shim under a minimal *system* libpython — runs this __init__, so it must NOT e
 import model/session (they pull tasksolver, which that embedded interpreter can't load).
 """
 _LAZY = {
+    # high-level client (the end-user API)
+    "ask": ".client",
+    "Session": ".client",
+    "AgyResponse": ".client",
+    "Usage": ".client",
+    "ToolSpec": ".client",
+    "ContextResource": ".client",
+    "RewriteRule": ".client",
+    # TaskSolver backend + lower-level drivers
     "AgyModel": ".model",
     "run_print": ".session",
     "InteractiveSession": ".session",
     "ensure_git_workspace": ".session",
     "strip_ansi": ".session",
+    # config injection
+    "write_mcp_config": ".config",
+    "detect_config_path": ".config",
 }
 __all__ = list(_LAZY)
 
