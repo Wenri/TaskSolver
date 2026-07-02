@@ -33,7 +33,7 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | Runs on **WSL1** (syscall-translation layer, not a real kernel) | Frida's ptrace/`frida-server` injection is unreliable here. We use **frida-gum *embedded*** (loaded in-process by our `LD_PRELOAD` constructor, `gum_init_embedded()`), which needs no ptrace — only `mprotect`. |
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
-`1d164dd96fc3c0cfe735544e9065f5ce`, agy **1.0.15**). The shim refuses to install hooks if
+`dee6de740c3883dd05450228aeec8a75`, agy **1.0.16**). The shim refuses to install hooks if
 the running binary's BuildID doesn't match `symbols.json`, so offsets can never be
 silently applied to a different build. Re-run the extractor after any `agy` update
 (`make symbols`).
@@ -178,10 +178,16 @@ trampoline is park-safe precisely because it never intercepts the return.)
 ## Hybrid tools / mcp_context
 
 `agy` is an MCP *client*, so the robust way to add custom **tools** and
-**mcp_context** is to register a custom MCP server via `config/mcp.json` (it can
-be backed by TaskSolver). Hooks are the fallback for things config can't do
-(e.g. injecting context invisibly into prompt assembly, or overriding a tool
-result). See `config/` and task #6.
+**mcp_context** is to register a custom MCP server. This is the **additive** modify
+path (the SYNC egress rewrite below can only *substitute* equal-length bytes — it
+can't grow the request, so new tools/context must come this way). agy 1.0.16 reads
+**`~/.gemini/config/mcp_config.json`** (schema `{"mcpServers": {name: {command,
+args, env}}}`); `pyagy.config.write_mcp_config(tools, context)` renders a spec and
+registers `pyagy/agy_mcp_server.py` against it (merging, preserving other servers),
+and `validate_server()` runs the initialize/tools-list handshake as a pre-flight.
+`config/mcp.json` is the manual template. Hooks remain the fallback for what config
+can't do (injecting context invisibly into prompt assembly, or overriding a tool
+result). See `config/` and `pyagy/config.py`.
 
 ---
 
@@ -203,13 +209,25 @@ antigravity/
     proc.def                ← declarative hook table (id, symbol, mode, kind, stage, leave)
     gen_symbols_header.py   ← symbols.json → symbols_gen.h (build-id + name→vaddr)
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
-    __init__.py             ← lazy exports (PEP 562): AgyModel / run_print / InteractiveSession
+    __init__.py             ← lazy exports (PEP 562): ask/Session/AgyResponse/specs,
+                              AgyModel, run_print/InteractiveSession, write_mcp_config
+    client.py               ← public API: ask() (one-shot) + Session (multi-turn) +
+                              AgyResponse + ToolSpec/ContextResource/RewriteRule/Usage
+    config.py               ← MCP config-injection (write_mcp_config/validate_server)
     model.py                ← AgyModel (prepare_payload/ask/rough_guess/run_once/…)
     session.py              ← run_print (one-shot) + InteractiveSession (multi-turn PTY)
+    _term.py / _pty.py / _env.py ← shared PTY glue (ANSI+query responder, spawn+pump,
+                              clean/instrumented env) — one home for all agy launchers
     agy_process/__init__.py ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
+    agy_process/http1sse.py ← HTTP/1.1 + SSE decoder for the MODEL endpoint (the right
+                              one — the model turn is not HTTP/2)
+    agy_process/capture.py  ← live correlator: pairs request↔response across the
+                              *Conn/*halfConn stream-id split → genai_turn events
+    agy_process/rewrite.py  ← SYNC egress rewrite registry (equal-length, mtime reload)
+    agy_process/hooks.py    ← machine-readable mirror of proc.def
     agy_process/record.py   ← JSONL recorder for plotting
-    agy_process/h2reassemble.py ← HTTP/2 + HPACK + gzip stream reassembly
-    agy_mcp_server.py       ← minimal stdio MCP server (hybrid native tools/context)
+    agy_process/h2reassemble.py ← HTTP/2 + HPACK + gzip reassembly (agy's OTHER conns)
+    agy_mcp_server.py       ← stdio MCP server (built-in stub or AGY_MCP_SPEC-driven)
   config/
     mcp.json  agents.json  README.md  ← native custom MCP server / agent (hybrid path)
 ```
@@ -257,7 +275,7 @@ AGY_PROC_STAGE=3 test_scripts/run-agy.sh <normal agy args...>   # capture reques
 python3 test_scripts/analyze_capture.py agy-capture.jsonl --plot traffic.png
 ```
 
-## Status (originally WSL1; re-validated on cloud Linux real kernel, agy 1.0.15 build 1d164dd9…)
+## Status (originally WSL1; re-validated on cloud Linux real kernel — agy 1.0.15 build 1d164dd9…, then re-pinned + re-verified on 1.0.16 build dee6de74…)
 
 - ✅ libpython embeds in-process; worker thread runs; `pyagy.agy_process` imports.
 - ✅ frida-gum **embedded** inline hooking works on WSL1 (no ptrace).
@@ -265,7 +283,7 @@ python3 test_scripts/analyze_capture.py agy-capture.jsonl --plot traffic.png
   args, marshals to Python, records to JSONL — agy runs to completion, no crash.
 - ✅ `on_leave` (return-address rewrite, used by `tls_read`) is safe on ordinary
   Go funcs (100+ calls, no `unexpected return pc`).
-- ✅ **Interactive session driving works** (`python/agy_session.py`): under a PTY
+- ✅ **Interactive session driving works** (`test_scripts/agy_session.py`): under a PTY
   (with a terminal-query responder) we ran a real multi-turn session against the
   logged-in agy — `"what is 2+2"` → `4`, then `"×10"` → `40` — reading agy's
   rendered output and injecting follow-up input. This is stage 1 (no network hooks).
@@ -346,14 +364,63 @@ Both are stage 3. `Read`/`net/http.RoundTrip`/`http2.(*pipe).Write` all **park**
 (netpoll / mutex / cond) and stall agy even on-enter-only past-prologue — that's
 why we hook decrypt, not read. `AGY_PROC_PREVIEW` sets capture bytes/event.
 
-The decrypted response is HTTP/2 frames (HPACK headers) with a **compressed body**
-(brotli/gzip). `h2reassemble.py` de-frames + de-gzip/brotli/deflate + HPACK-decodes
-(via the `hpack` + `brotli-python` pixi deps) — decoding on already-captured bytes, not a hook
-concern. (The PTY transcript / `AgyModel` also give the reply if you don't need raw.)
+**The model endpoint is HTTP/1.1 + SSE, not HTTP/2** (a load-bearing finding):
+`POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1` to
+`daily-cloudcode-pa.googleapis.com`, reply a `text/event-stream` of
+`data: {...}` lines (Gemini candidates wrapped under a `response` key). So
+`http1sse.py` — not `h2reassemble.py` — is the right decoder for it:
+de-chunk + gzip/br/deflate inflate + SSE assemble → text/usage/finishReason.
+Two wire facts it handles: requests use **keep-alive** (`streamGenerateContent`
+reuses the `loadCodeAssist` connection, so it isn't a first-write), and the
+decrypt stream carries a **TLS-handshake plaintext prefix** before the status line.
+`capture.py` correlates the request (egress `tls_write`, keyed by `*Conn`) with its
+response (ingress `decrypt`, keyed by `*halfConn` — a *different* stream id) by
+time+host and emits a merged **`genai_turn`** event with the full decoded request
+and response text. `h2reassemble.py` still applies to agy's *other* (gRPC/HTTP-2)
+connections. (The PTY transcript / `AgyModel` also give the reply if you don't need raw.)
 
 CPU-only funcs (`os.Getenv`, `(*RootModel).Serialize`, `proto.Marshal`) also hook
 cleanly; the stage-4 examples show the `[]byte`-return capture (`on_leave`
 RAX=ptr, RBX=len).
+
+## The `pyagy` client: interact / modify / decode
+
+`pyagy` exposes one end-user API that folds the pieces above (PTY driver + capture
+correlator + rewrite registry + config-injection) into a single call. You send a
+request, optionally **modify** the raw prompt/tools/context, and get back a decoded
+string/JSON response.
+
+```python
+from pyagy import ask, Session, ToolSpec, ContextResource, RewriteRule
+
+r = ask("Summarize this repo.")                 # one-shot
+print(r.text)                                    # clean final answer (PTY transcript)
+print(r.model, r.usage.total_tokens)             # decoded from the model turn
+print(r.request["tools"], r.request["first_user_text"])   # the request as SENT
+print(len(r.turns), [t["text"][:20] for t in r.turns])    # every model turn decoded
+
+with Session(tools=[ToolSpec("weather", handler="mytools:weather")]) as s:
+    print(s.ask("Weather in Paris?").text)       # agy can call the injected tool
+    s.set_rewrite([RewriteRule("Paris", "Tokyo")])  # live, equal-length substitution
+    print(s.ask("And there?").text)
+```
+
+- **Two modify mechanisms, composable** (the design accepts *both*):
+  - `rewrite=` — a `RewriteRule` list, a `"module:func"` string, or a callable →
+    **live SYNC egress rewrite**. Equal-length substitution only (framing-safe);
+    a length-changing rule is skipped in-agy and recorded (`rewrite_skip`).
+  - `tools=` / `context=` — **additive**, via an injected MCP server (`config.py`).
+- **`AgyResponse`**: `.text` (clean answer), `.turns` (all decoded `genai_turn`s),
+  `.request` / `.events` / `.usage` / `.model` (from the substantive turn),
+  `.transcript`, `.exit_status`, `.instrumented` (+`.instrumented_reason`).
+- **Graceful degrade:** `instrumented=None` auto-detects the shim and confirms the
+  build-id from the shim log after the run; if the shim is missing or agy has
+  auto-updated past the pin, the call falls back to a clean PTY run (transcript-only
+  `AgyResponse`) with the reason on `.instrumented_reason` — never a hard failure.
+- **Offline tests** (no agy/network/creds): `test_scripts/test_http1sse.py`,
+  `test_config.py`, `test_client.py`, plus the `rewrite`/`config` offline suites.
+  **Live** (skip cleanly per `test_trampoline.py`): `test_rewrite.py` round-trips a
+  redaction on the wire; `test_trampoline.py` asserts a stage-3 `genai_turn` decodes.
 
 ## Using agy as a TaskSolver backend (`pyagy`)
 
