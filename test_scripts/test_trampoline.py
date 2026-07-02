@@ -63,18 +63,22 @@ def run(stage, extra, workdir, idle=25.0, timeout=160.0):
         s.close()
     logtxt = open(log, errors="replace").read() if os.path.exists(log) else ""
     kinds = collections.Counter()
+    genai_text = ""
     if os.path.exists(cap):
         for ln in open(cap):
             try:
-                kinds[json.loads(ln).get("kind")] += 1
+                obj = json.loads(ln)
             except Exception:
-                pass
+                continue
+            kinds[obj.get("kind")] += 1
+            if obj.get("kind") == "genai_turn" and obj.get("text"):
+                genai_text += obj["text"]
     combined = out + "\n" + logtxt
     answer = "\n".join(l for l in out.splitlines()
                        if l.strip() and "antigravity" not in l
                        and "gohook" not in l and "gomod" not in l)
     return {
-        "kinds": dict(kinds), "log": logtxt,
+        "kinds": dict(kinds), "log": logtxt, "genai_text": genai_text,
         "zorple": bool(re.search(r"\bZORPLE\b", answer)),
         "crashes": sum(combined.count(k) for k in CRASH),
         "home_bad": combined.count("HOME is not defined"),
@@ -136,6 +140,13 @@ def main():
             r8a = run(8, {"AGY_PROC_MODULEDATA": "1", "AGY_PROC_ASMCGO": "1"}, wd)
             check(r8a["zorple"] and r8a["crashes"] == 0,
                   "stage8/asmcgo: completes, no crash (matches cgocall)")
+
+        # Stage 3: the tls_write/decrypt capture path — the correlator must decode the
+        # model turn (HTTP/1.1 + SSE) into a genai_turn whose assembled text is real.
+        print("[stage 3] genai_turn decode (HTTP/1.1 + SSE correlator)")
+        r3 = run(3, {}, wd)
+        check(r3["kinds"].get("genai_turn", 0) >= 1, "stage3: genai_turn emitted")
+        check("ZORPLE" in r3["genai_text"], "stage3: decoded model text is non-empty (ZORPLE)")
 
     print()
     if failures:
