@@ -46,15 +46,18 @@ def _rewrite_egress(stream_id, data):
         if not (os.environ.get("AGY_PROC_REWRITE_RULES") or os.environ.get("AGY_PROC_REWRITE")):
             return None
         from . import rewrite as _rw
-        _rewrite = _rw.RewriteRegistry.from_env()
+        _rewrite = _rw.RewriteRegistry.from_env(_rec)
     return _rewrite.rewrite(stream_id, data)
 
 
 def on_tls_write(stream_id, data):
+    out = _rewrite_egress(stream_id, data)   # SYNC rewrite point (None unless configured)
     _rec.record("tls_write", stream_id, data)
     if _corr:
-        _corr.feed("c2s", stream_id, data, time.time())
-    return _rewrite_egress(stream_id, data)  # SYNC rewrite point (None unless configured)
+        # Feed the correlator what actually goes on the wire (post-rewrite), so a
+        # decoded genai_turn.request reflects the request as sent, not as authored.
+        _corr.feed("c2s", stream_id, out if out is not None else data, time.time())
+    return out
 
 
 def on_tls_read(stream_id, data):
