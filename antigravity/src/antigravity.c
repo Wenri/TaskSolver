@@ -138,28 +138,6 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         }
         break;
     }
-    case HK_SEND_USER_MSG: {
-        /* (*ServerBackend).SendUserMessage(...): receiver=RAX. Fire+stall probe only —
-         * arg layout unknown, so emit no payload (never deref a guessed pointer). */
-        agy_event_t ev = { .kind = "send_user_msg", .stream_id = cpu->rax, .mode = AGY_ASYNC };
-        agy_py_emit(&ev);
-        break;
-    }
-    case HK_CB_STREAM_SEND: {
-        /* (*callbackStreamer).Send(update): receiver=RAX. Fire+stall probe only. */
-        agy_event_t ev = { .kind = "stream_send", .stream_id = cpu->rax, .mode = AGY_ASYNC };
-        agy_py_emit(&ev);
-        break;
-    }
-    case HK_CGOCALL: {
-        /* runtime.cgocall(fn, arg unsafe.Pointer) int32: fn=RAX (C target), arg=RBX.
-         * Emit the C fn pointer as stream_id to see which C funcs agy calls via cgo.
-         * cgocall runs the C call + returns on the same M, so it's safe under the call
-         * listener (no goroutine migration between enter and return). */
-        agy_event_t ev = { .kind = "cgocall", .stream_id = cpu->rax, .mode = AGY_ASYNC };
-        agy_py_emit(&ev);
-        break;
-    }
     default: break;
     }
 }

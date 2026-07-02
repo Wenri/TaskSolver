@@ -34,11 +34,10 @@
  * The bottom GH_SPILL bytes are DEAD outgoing-call scratch. runtime.cgocall uses Go's
  * internal ABI and spills its two register args (fn, arg) into CALLER-provided slots at
  * [rsp] and [rsp+8] at the `call` — so the block must NOT sit there, or cgocall clobbers
- * block.kind (@[rsp]) and block.regs.rax (@[rsp+8]) before our hook reads them (proven
- * via AGY_PROC_HOOKLOG: kind became a code ptr, rax became &block). We reserve those 16
- * bytes BELOW the block by baking them into the fixed frame — NOT a transient `sub`
- * around the call: cgocall enters _Gsyscall, during which GC unwinds our frame via the
- * synthetic pcsp, which must report ONE constant spdelta across the whole
+ * block.kind (@[rsp]) and block.regs.rax (@[rsp+8]) before our hook reads them. We reserve
+ * those 16 bytes BELOW the block by baking them into the fixed frame — NOT a transient
+ * `sub` around the call: cgocall enters _Gsyscall, during which GC unwinds our frame via
+ * the synthetic pcsp, which must report ONE constant spdelta across the whole
  * [frame_lo,frame_hi) window. A transient sub would make the real spdelta frame+N there
  * while pcsp says frame → throw("unknown pc"). (The asmcgo path may use a transient sub:
  * it never enters _Gsyscall, so GC never scans our frame mid-call.)
@@ -56,64 +55,13 @@ enum { OFF_KIND = GH_SPILL,      OFF_RAX = GH_SPILL + 8,  OFF_RBX = GH_SPILL + 1
 
 /* The C hook — runs on the g0/system stack during cgocall. MUST stay light and
  * must not allocate Go memory; agy_py_emit() copies + enqueues to the worker.
- * v1: emit the receiver (RAX) as stream_id, no payload — validates that the
- * trampoline fires and agy completes the turn. Payload extraction lands next. */
-static volatile int g_hook_hits;
-static int g_hook_nop = -1;
-/* DEBUG: emitted from the trampoline right after cgocall returns — proves the
- * round-trip (entersyscall→asmcgocall→fn→exitsyscall→return) completed. */
-static void agy_after_cgo(void)
-{
-    agy_event_t e = { .kind = "after_cgo", .mode = AGY_ASYNC };
-    agy_py_emit(&e);
-}
-static int g_hook_log = -1;
+ * Emits the receiver (RAX) as stream_id + the borrowed rodata kind tag; decoded
+ * payload extraction lands next. */
 static void agy_cgo_hook(agy_block *b)
 {
-    g_hook_hits++;
-    if (g_hook_log < 0) g_hook_log = getenv("AGY_PROC_HOOKLOG") != NULL;
-    if (g_hook_log && g_hook_hits <= 8) {
-        /* What did the hook actually receive across the (asm)cgocall? kind is a
-         * borrowed rodata ptr baked by the trampoline; a garbage value here = the
-         * block the hook reads was corrupted by the transition. */
-        const unsigned char *k = (const unsigned char *)b->kind;
-        GHLOG("HOOK[%d] &block=%p kind=%p [%02x %02x %02x %02x] regs.rax=%#llx regs.rbx=%#llx",
-              g_hook_hits, (void *)b, (void *)b->kind, k[0], k[1], k[2], k[3],
-              (unsigned long long)b->regs.rax, (unsigned long long)b->regs.rbx);
-    }
-    if (g_hook_nop < 0) g_hook_nop = getenv("AGY_PROC_GHHOOKNOP") != NULL;
-    if (g_hook_nop) {   /* diagnostic: does cgocall reach fn on g0? emit then return */
-        agy_event_t m = { .kind = "in_hook_g0", .mode = AGY_ASYNC };
-        agy_py_emit(&m);
-        return;
-    }
     agy_event_t ev = { .kind = (const char *)b->kind,
                        .stream_id = b->regs.rax, .mode = AGY_ASYNC };
     agy_py_emit(&ev);
-}
-
-/* SPCHECK diagnostic (AGY_PROC_SPCHECK): does the (asm)cgocall transition move the
- * goroutine onto a NEW stack? The trampoline stores the goroutine RSP into agy_sp_pre
- * (an OFF-STACK global, immune to a stack copy) right before the call, and into
- * agy_sp_post right after it returns; a nonzero delta means cgocall's exitsyscall
- * reschedule relocated the stack (copystack) — the suspected corrupter. Off-stack
- * globals + a small sample avoids the goroutine-stack races. */
-volatile uint64_t agy_sp_pre, agy_sp_post;
-static volatile int agy_sp_n;
-static void agy_sp_report(void)
-{
-    int i = __atomic_fetch_add(&agy_sp_n, 1, __ATOMIC_RELAXED);
-    if (i >= 12) return;                       /* first dozen hooked calls is plenty */
-    int64_t delta = (int64_t)(agy_sp_post - agy_sp_pre);
-    GHLOG("SPCHECK[%d]: pre=%#llx post=%#llx delta=%lld -> %s", i,
-          (unsigned long long)agy_sp_pre, (unsigned long long)agy_sp_post,
-          (long long)delta, delta ? "STACK MOVED across call" : "same stack");
-}
-/* emit `mov rax,&global ; mov [rax],rsp` — snapshot the live goroutine RSP. */
-static void gh_emit_sp_store(GumX86Writer *w, void *global)
-{
-    gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)global);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RAX, 0, GUM_X86_RSP);
 }
 
 /* Recognize the Go frame-setup prologue we overwrite: push rbp; mov rbp,rsp;
@@ -147,7 +95,6 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
         asmcgo_on = 0;
     }
     int md_on = getenv("AGY_PROC_MODULEDATA") != NULL;
-    int spcheck = getenv("AGY_PROC_SPCHECK") != NULL;
 
     /* Slot region NEAR agy's text so the target->trampoline jmp is a 5-byte rel32. */
     long page = sysconf(_SC_PAGESIZE);
@@ -170,9 +117,8 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
 
         guint8 *slot = region + (size_t)made * GH_SLOT;
         gum_x86_writer_reset(w, slot);
-        int noop = getenv("AGY_PROC_GHNOOP") != NULL;
         uint32_t lo = 0, hi = 0;
-      if (!noop) {
+
         /* prologue: reserve frame, snapshot the arg registers into the block */
         gum_x86_writer_put_sub_reg_imm(w, GUM_X86_RSP, GH_FRAME);
         lo = gum_x86_writer_offset(w);
@@ -199,32 +145,17 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
             gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_gomod_ensure);
             gum_x86_writer_put_call_reg(w, GUM_X86_RAX);
         }
-        /* SPCHECK: snapshot the goroutine RSP just before the call (the transient
-         * sub/add in the asmcgo path cancels out, so this baseline is comparable). */
-        if (spcheck) gh_emit_sp_store(w, (void *)&agy_sp_pre);
 
-        if (getenv("AGY_PROC_GHNOCALL")) {
-            /* diagnostic: frame + save/restore but NO call — isolates the call */
-        } else if (getenv("AGY_PROC_GHNOCGO")) {
-            /* diagnostic: call the C hook DIRECTLY on the goroutine stack (SysV:
-             * RDI=&block), skipping cgocall. Isolates trampoline mechanics from the
-             * cgocall integration; also == a plain entry-only C stub. */
-            gum_x86_writer_put_lea_reg_reg_offset(w, GUM_X86_RDI, GUM_X86_RSP, OFF_KIND);
-            gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_cgo_hook);
-            gum_x86_writer_put_call_reg(w, GUM_X86_RAX);
-        } else if (asmcgo_on) {
-            /* ABLATION: asmcgocall(fn, arg) — the g0-stack-switch inner half of
-             * cgocall, WITHOUT entersyscall/exitsyscall (no _Gsyscall, no P handoff,
-             * no reschedule-onto-new-stack). Isolates the g0 switch from the syscall
-             * transition. asmcgocall takes ABI0 STACK args (verified in agy): the
-             * caller places fn@[sp+0], arg@[sp+8], errno@[sp+16] at the CALL, and it
-             * re-derives g from TLS + passes arg to fn in RDI (via `mov rbx,rdi;
-             * jmp *rax`). We carve a transient 32-byte outgoing frame BELOW the block
-             * (kept 16-aligned) so the block the hook reads stays intact.
-             * NOTE: within [frame_lo,frame_hi) the moduledata claims spdelta==FRAME,
-             * but here it's FRAME+32. Benign: asmcgocall never enters _Gsyscall, so GC
-             * does no non-preemptive stack scan of this window (the cgocall hazard),
-             * and async-preempt won't stop inside C/our nosplit code. */
+        if (asmcgo_on) {
+            /* asmcgocall(fn, arg) — the g0-stack-switch inner half of cgocall, WITHOUT
+             * entersyscall/exitsyscall (no _Gsyscall, no P handoff, no reschedule-onto-
+             * new-stack). asmcgocall takes ABI0 STACK args (verified in agy): the caller
+             * places fn@[sp+0], arg@[sp+8], errno@[sp+16] at the CALL, and it re-derives
+             * g from TLS + passes arg to fn in RDI. We carve a transient 32-byte outgoing
+             * frame BELOW the block (kept 16-aligned) so the block the hook reads stays
+             * intact. NOTE: within [frame_lo,frame_hi) the moduledata claims spdelta==FRAME,
+             * but here it's FRAME+32 — benign: asmcgocall never enters _Gsyscall, so GC does
+             * no non-preemptive stack scan of this window (the cgocall hazard). */
             gum_x86_writer_put_lea_reg_reg_offset(w, GUM_X86_RSI, GUM_X86_RSP, OFF_KIND); /* rsi=&block */
             gum_x86_writer_put_sub_reg_imm(w, GUM_X86_RSP, 32);
             gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_cgo_hook);
@@ -235,32 +166,16 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
             gum_x86_writer_put_mov_reg_address(w, GUM_X86_R12, (GumAddress)asmcgocall_abs);
             gum_x86_writer_put_call_reg(w, GUM_X86_R12);
             gum_x86_writer_put_add_reg_imm(w, GUM_X86_RSP, 32);
-            if (getenv("AGY_PROC_GHDEBUG")) {   /* did asmcgocall return? */
-                gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_after_cgo);
-                gum_x86_writer_put_call_reg(w, GUM_X86_RAX);
-            }
-            if (spcheck) {   /* did the stack move across asmcgocall? (expect: no) */
-                gh_emit_sp_store(w, (void *)&agy_sp_post);
-                gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_sp_report);
-                gum_x86_writer_put_call_reg(w, GUM_X86_RAX);
-            }
         } else {
-            /* cgocall(fn=RAX, arg=RBX): arg=&block, fn=&agy_cgo_hook; X15 must be 0 */
+            /* cgocall(fn=RAX, arg=RBX): arg=&block, fn=&agy_cgo_hook; X15 must be 0.
+             * The 16-byte GH_SPILL scratch below the block absorbs cgocall's two
+             * caller-arg spill slots ([S],[S+8]), so block.kind/regs.rax stay intact. */
             gum_x86_writer_put_lea_reg_reg_offset(w, GUM_X86_RBX, GUM_X86_RSP, OFF_KIND);
             gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_cgo_hook);
             static const guint8 xorps15[] = { 0x45, 0x0f, 0x57, 0xff };  /* xorps xmm15,xmm15 */
             gum_x86_writer_put_bytes(w, xorps15, sizeof xorps15);
             gum_x86_writer_put_mov_reg_address(w, GUM_X86_R12, (GumAddress)cgocall_abs);
             gum_x86_writer_put_call_reg(w, GUM_X86_R12);
-            if (getenv("AGY_PROC_GHDEBUG")) {   /* did cgocall return? */
-                gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_after_cgo);
-                gum_x86_writer_put_call_reg(w, GUM_X86_RAX);
-            }
-            if (spcheck) {   /* did the stack move across cgocall's reschedule? */
-                gh_emit_sp_store(w, (void *)&agy_sp_post);
-                gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_sp_report);
-                gum_x86_writer_put_call_reg(w, GUM_X86_RAX);
-            }
         }
 
         /* restore the target's registers, then close the frame */
@@ -277,21 +192,12 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
         gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_RBP, GUM_X86_RSP, OFF_RBP);
         hi = gum_x86_writer_offset(w);
         gum_x86_writer_put_add_reg_imm(w, GUM_X86_RSP, GH_FRAME);
-      }  /* !noop */
 
         /* run the overwritten original instructions, then jmp back past them */
         gum_x86_writer_put_bytes(w, orig, ov);
         gum_x86_writer_put_jmp_address(w, (GumAddress)(hook_addr + ov));
-        guint tlen = gum_x86_writer_offset(w);
         gum_x86_writer_flush(w);
         frame_lo = lo; frame_hi = hi;   /* identical for every slot (fixed pro/epilogue) */
-
-        if (getenv("AGY_PROC_GHDEBUG")) {
-            char hex[3 * 200 + 1]; int p = 0;
-            for (guint j = 0; j < tlen && j < 200; j++)
-                p += snprintf(hex + p, sizeof hex - p, "%02x ", slot[j]);
-            GHLOG("slot bytes (len=%u, lo=%u hi=%u): %s", tlen, lo, hi, hex);
-        }
 
         /* patch target+skip: jmp rel32 to the slot, nop-pad to the whole prologue */
         struct patch_ctx pc = { .n = ov };
@@ -299,13 +205,7 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
         int32_t rel = (int32_t)((int64_t)(uintptr_t)slot - (int64_t)(hook_addr + 5));
         pc.bytes[0] = 0xe9;
         memcpy(pc.bytes + 1, &rel, 4);
-        gboolean ok = gum_memory_patch_code((gpointer)(uintptr_t)hook_addr, ov, patch_apply, &pc);
-        if (getenv("AGY_PROC_GHDEBUG")) {
-            const uint8_t *hb = (const uint8_t *)(uintptr_t)hook_addr;
-            GHLOG("patch @ %#llx ok=%d rel=%d slot=%p ; readback: %02x %02x %02x %02x %02x %02x",
-                  (unsigned long long)hook_addr, (int)ok, rel, (void *)slot,
-                  hb[0], hb[1], hb[2], hb[3], hb[4], hb[5]);
-        }
+        (void)gum_memory_patch_code((gpointer)(uintptr_t)hook_addr, ov, patch_apply, &pc);
 
         GHLOG("cgo-trampoline kind=%s @ +%u -> %p (overwrite %u bytes)",
               targets[i].kind, targets[i].skip, (void *)slot, ov);

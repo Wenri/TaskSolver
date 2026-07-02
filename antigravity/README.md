@@ -125,7 +125,7 @@ survives agy updates.
 
 ---
 
-## Parking functions: the cgocall-trampoline path (stages 6–9)
+## Parking functions: the cgocall-trampoline path (stages 8–9)
 
 The v1 hooks above are gum `Interceptor` attaches — fine for **CPU-only** functions (they
 run and return on the same OS thread). But agy's most useful boundaries —
@@ -166,11 +166,12 @@ transient sub would make the real spdelta disagree with the synthetic pcsp insid
 `_Gsyscall` window → `throw("unknown pc")`. cgocall always spills exactly 2 slots, so 16 bytes
 is exact and future-proof. (Directly confirmed under gdb — see Status.)
 
-`proc.def` isolates each rung as a separate `AGY_PROC_STAGE` for bring-up: **6** = naive gum
-attach on the parking funcs (breaks the turn; reference), **7** = `runtime.cgocall` gateway
-probe, **8** = trampoline on `SendUserMessage`/`Send`, **9** = trampoline on the benign
-`os.Getenv` (a CPU-only validator — if it answers cleanly, the tool is sound). Set
-`AGY_PROC_MODULEDATA=1` for the GC-safe synthetic-moduledata path.
+`proc.def` isolates each rung as a separate `AGY_PROC_STAGE`: **8** = trampoline on
+`SendUserMessage`/`Send`, **9** = trampoline on the benign `os.Getenv` (a CPU-only validator
+— if it answers cleanly, the tool is sound). Set `AGY_PROC_MODULEDATA=1` for the GC-safe
+synthetic-moduledata path. (Two earlier bring-up rungs — a naive gum attach on the parking
+funcs, and a `runtime.cgocall` gateway probe — were removed once this path proved out; the
+trampoline is park-safe precisely because it never intercepts the return.)
 
 ---
 

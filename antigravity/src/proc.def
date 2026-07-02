@@ -42,30 +42,17 @@ HOOK(SER_ROOT,     "google3/third_party/jetski/cli/model/model.(*RootModel).Seri
 HOOK(MAR_PROMPT,   "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON", AGY_ASYNC, "marshal",   4, 1)
 HOOK(PROTO_MARSHAL,"google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            AGY_ASYNC, "proto_marshal", 4, 1)
 
-/* stage 6: agy-native application boundary — REFERENCE ONLY (like stage 5, these break
- * agy). These sit right where agy handles fully-decoded data: SendUserMessage = the
- * request path; callbackStreamer.Send = decoded response updates pushed to the UI.
- * EXPERIMENT RESULT: both FIRE in-process (send_user_msg=1, stream_send=2-3) — so the
- * decoded request/response IS reachable here, no HTTP/2/HPACK/gzip — BUT hooking either
- * one (on-enter, past-prologue) makes agy's turn produce NO answer. Isolated: stage 6 =
- * SendUserMessage alone and (formerly stage 7) Send alone each broke the turn; control
- * stages 1/2 answered. Same park/reschedule hazard as stage 5 — they're on the
- * goroutine-scheduling path, so gum's return-tracking corrupts the turn. Conclusion:
- * NOT usable for capture; the CPU-only crypto hook + our own HTTP/2 decode stays. */
-HOOK(SEND_USER_MSG, "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage", AGY_ASYNC, "send_user_msg", 6, 0)
-HOOK(CB_STREAM_SEND,"google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",          AGY_ASYNC, "stream_send",   6, 0)
-
-/* stage 7: cgo GATEWAY probe (the "proper hook point first" rung). runtime.cgocall runs the
- * Go->C call and returns on the SAME M, so gum's per-thread return-tracking stays consistent →
- * expected stall-free (this stage verifies it). Args: fn=RAX (C target), arg=RBX. We emit the C
- * fn pointer as stream_id to see WHAT agy routes through cgo (net/sqlite/webchannel).
- * NOTE: the decoded model request is pure-Go (crypto/tls+http2) and likely does NOT cross here —
- * this stage confirms that empirically before we descend to the entry-only fallback. */
-HOOK(CGOCALL,      "runtime.cgocall",                  AGY_ASYNC, "cgocall",   7, 0)
+/* RATIONALE (former stages 6-7, removed once the trampoline below proved out): a naive
+ * gum attach on the parking funcs `SendUserMessage`/`callbackStreamer.Send` (stage 6) and
+ * a cgo-gateway probe on `runtime.cgocall` (stage 7) were experiments. Both parking funcs
+ * FIRE in-process, but a gum attach makes agy's turn produce NO answer — they're on the
+ * goroutine-scheduling path, so gum's per-thread return-tracking corrupts the turn (same
+ * hazard as stage 5). Stage 8 hooks the SAME targets via the cgocall trampoline instead,
+ * which never intercepts the return and so is park-safe. */
 
 /* stage 8: cgocall-TRAMPOLINE hooks (Approach A — the robust general mechanism).
- * Same parking targets as stage 6, but instead of a gum attach (whose return-
- * tracking breaks on park/reschedule) we redirect them through runtime.cgocall via
+ * The parking targets (SendUserMessage/callbackStreamer.Send), but instead of a gum
+ * attach (whose return-tracking breaks on park/reschedule) we redirect them through runtime.cgocall via
  * a generated trampoline (gohook.c) + a synthetic moduledata (set AGY_PROC_MODULEDATA=1)
  * so GC stack-unwind is safe. MODE/leave are advisory here — the trampoline path
  * reads args on the g0 stack and never intercepts the return. */
