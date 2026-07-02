@@ -32,11 +32,11 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | Speaks **MCP as a client** (`mcp.json`/`mcpServers`, `GetPluginMCPSpecs`, `SetMcpManager`) and supports **custom agents** | Custom **tools** and **mcp_context** can largely be delivered *natively* by config (the hybrid path); hooks are reserved for what config can't express. |
 | Runs on **WSL1** (syscall-translation layer, not a real kernel) | Frida's ptrace/`frida-server` injection is unreliable here. We use **frida-gum *embedded*** (loaded in-process by our `LD_PRELOAD` constructor, `gum_init_embedded()`), which needs no ptrace — only `mprotect`. |
 
-**Build pinning.** Everything is pinned to the agy ELF BuildID
-`4368698a979e6df1c84d2af6ffe16020`. The shim refuses to install hooks if the
-running binary's BuildID doesn't match `symbols.json`, so offsets can never be
-silently applied to a different build. Re-run the extractor after any `agy`
-update.
+**Build pinning.** Everything is pinned to the agy ELF BuildID (currently
+`1d164dd96fc3c0cfe735544e9065f5ce`, agy **1.0.15**). The shim refuses to install hooks if
+the running binary's BuildID doesn't match `symbols.json`, so offsets can never be
+silently applied to a different build. Re-run the extractor after any `agy` update
+(`make symbols`).
 
 ---
 
@@ -125,6 +125,55 @@ survives agy updates.
 
 ---
 
+## Parking functions: the cgocall-trampoline path (stages 6–9)
+
+The v1 hooks above are gum `Interceptor` attaches — fine for **CPU-only** functions (they
+run and return on the same OS thread). But agy's most useful boundaries —
+`backend.(*ServerBackend).SendUserMessage` (the fully-decoded model **request**) and
+`backend.(*callbackStreamer).Send` (decoded **response** chunks to the UI) — **park** the
+goroutine (blocking I/O, mutex/cond). A gum attach rewrites the return address and tracks it
+*per-OS-thread*; when a parked goroutine resumes on a **different** M, the intercepted return
+never matches → agy silently stalls (stages 5/6, reference only).
+
+**Approach A (`src/gohook.c` + `src/gomod.c`, stages 8–9)** avoids gum's return-tracking
+entirely. It redirects the target — **past its stack-check prologue** — into a generated
+trampoline that:
+1. snapshots the Go-ABI arg registers into a stack **block**,
+2. `CALL runtime.cgocall(fn=agy_cgo_hook, arg=&block)` — Go's own Go→C gateway, which switches
+   to the g0/system stack and runs our C hook in a safe cgo context (`entersyscall`, P-handoff,
+   GC coordination); the hook copies + enqueues to the pyworker, exactly like the ASYNC path,
+3. restores the registers, runs the overwritten original instructions, and `jmp`s back into
+   the target body.
+
+Because the trampoline never rewrites *our* return address, parking/rescheduling is
+unaffected — the goroutine may resume on any M. `AGY_PROC_ASMCGO=1` selects a lighter variant
+that calls `runtime.asmcgocall` (just the g0 stack switch, no `entersyscall`/`_Gsyscall`).
+
+**Synthetic moduledata (`gomod.c`).** `cgocall`'s `entersyscall()` opens a GC-scannable window
+over our trampoline frame; if Go's unwinder can't `findfunc` the trampoline PCs it
+`throw("unknown pc")`s. `agy_gomod_register()` installs a **synthetic moduledata** whose
+pclntab/pcsp cover the trampoline, so GC unwinds it cleanly — and the pcsp must report **one
+constant spdelta** across the whole trampoline-frame window.
+
+**The GH_SPILL geometry (the fix that made the cgocall variant correct).** `runtime.cgocall`
+uses Go's internal ABI and spills its two register args (`fn`, `arg`) into **caller-provided
+slots at `[S]` and `[S+8]`** (`S` = rsp at the `call`). So the block must **not** sit at `S`,
+or cgocall overwrites `block.kind`(@`[S]`) and `block.regs.rax`(@`[S+8]`) before the hook reads
+them — the symptom was `os.Getenv` returning `""` → `$HOME is not defined` at startup. The fix
+reserves **16 dead bytes (`GH_SPILL`) below the block**, baked into the **fixed** frame
+(`GH_FRAME = 16 + 96 block + 8 pad = 120`), *not* a transient `sub` around the call — a
+transient sub would make the real spdelta disagree with the synthetic pcsp inside the
+`_Gsyscall` window → `throw("unknown pc")`. cgocall always spills exactly 2 slots, so 16 bytes
+is exact and future-proof. (Directly confirmed under gdb — see Status.)
+
+`proc.def` isolates each rung as a separate `AGY_PROC_STAGE` for bring-up: **6** = naive gum
+attach on the parking funcs (breaks the turn; reference), **7** = `runtime.cgocall` gateway
+probe, **8** = trampoline on `SendUserMessage`/`Send`, **9** = trampoline on the benign
+`os.Getenv` (a CPU-only validator — if it answers cleanly, the tool is sound). Set
+`AGY_PROC_MODULEDATA=1` for the GC-safe synthetic-moduledata path.
+
+---
+
 ## Hybrid tools / mcp_context
 
 `agy` is an MCP *client*, so the robust way to add custom **tools** and
@@ -187,15 +236,26 @@ pixi run make -C antigravity symbols   # re-resolve symbols.json from the new ag
 pixi run make -C antigravity           # recompile the shim (also runs `make setup` first)
 ```
 
+**Building without pixi (system toolchain).** The shim embeds the **system** libpython
+(`/usr/bin/python3-config`), so it builds and runs without a pixi env — `make -C antigravity`
+on a host with `gcc`, `python3.x`+dev headers, and `/usr/include/linux/limits.h` is enough
+(pixi's role is the *Python* environment, not the shim itself). `make setup` fetches the
+**frida-gum devkit** from GitHub releases; where GitHub egress is blocked (e.g. a locked-down
+cloud container), vendor it manually into `vendor/frida-gum/` (`libfrida-gum.a`, `frida-gum.h`,
+`VERSION`) and `make` finds it. `pyagy.agy_process` needs `hpack`/`brotli` only for stage-3
+HTTP/2 body decode (both are guarded/lazy), so stages 8–9 import fine without them.
+
 Run agy under the hook via the launcher in `test_scripts/` (`AGY_PROC_STAGE`:
-1=python+DNS, 3=tls_write+decrypt request/response capture, 5=parking hooks that stall):
+1=python+DNS, 3=tls_write+decrypt request/response capture, 5=parking hooks that stall,
+8=cgocall-trampoline on `SendUserMessage`/`Send`, 9=cgocall-trampoline on `os.Getenv`; add
+`AGY_PROC_MODULEDATA=1` for the GC-safe path, `AGY_PROC_ASMCGO=1` for the asmcgocall variant):
 
 ```bash
 AGY_PROC_STAGE=3 test_scripts/run-agy.sh <normal agy args...>   # capture request+response (authenticated agy)
 python3 test_scripts/analyze_capture.py agy-capture.jsonl --plot traffic.png
 ```
 
-## Status (validated on this WSL1 host, agy build 4368698a…)
+## Status (originally WSL1; re-validated on cloud Linux real kernel, agy 1.0.15 build 1d164dd9…)
 
 - ✅ libpython embeds in-process; worker thread runs; `pyagy.agy_process` imports.
 - ✅ frida-gum **embedded** inline hooking works on WSL1 (no ptrace).
@@ -228,6 +288,32 @@ matches → silent stall (even past-prologue, even on-enter-only). **Corollary /
 the capture rule:** hook the **crypto** step (encrypt/decrypt — CPU-only, runs
 before/after the parking I/O), never the **I/O** step (`Write`/`decrypt` ✓,
 `Read`/`socket write` ✗).
+
+### Cloud Linux (real kernel 6.18.5) re-validation — cgocall trampoline
+
+The cgocall-trampoline path was re-verified end-to-end on a **real-kernel** cloud container
+(not WSL1), agy 1.0.15 (`build 1d164dd9…`), with the shim built by the **system toolchain**:
+
+- ✅ **Builds + loads on a real kernel** — build-id verified, synthetic moduledata
+  (`frame=120`) prepared, trampoline installed. The `mprotect(PROT_EXEC|PROT_WRITE)` W^X
+  concern did **not** materialize here.
+- ✅ **Live-turn matrix** (`agy --print` under a PTY): stage 9 (`os.Getenv`, 234 trampoline
+  transitions) and stage 8 (`SendUserMessage`=1 + `callbackStreamer.Send`≈20) both **complete
+  the turn** — cgocall == asmcgocall == no-hook baseline, with zero `throw`/`unknown pc`/panic/
+  `UnicodeDecodeError` and zero `$HOME is not defined`.
+- ✅ **gdb direct root-cause proof** (impossible on WSL1, where gdb couldn't run): breaking
+  inside `runtime.cgocall` for our invocation shows its prologue spilling `fn→[S]`, `arg→[S+8]`
+  (`mov %rax,0x38(%rsp)`/`mov %rbx,0x40(%rsp)`); with the fix `&block − S == 16`, so after the
+  spill `block.kind`(→`"cgt_getenv"`) and `block.regs.rax` are byte-for-byte intact — the two
+  spill slots land entirely in the dead `GH_SPILL` scratch. Pre-fix (`&block==S`) they'd be
+  clobbered.
+- ℹ️ **Headless login in a cloud container:** agy's Google OAuth uses an out-of-band
+  code-paste flow (`redirect_uri=antigravity.google/oauth-callback`), so sign-in needs no
+  in-container browser — open the URL elsewhere, paste the `4/…` code back. All Google/Gemini
+  endpoints (`oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`) are reachable.
+- ⚠️ **Harness gotcha:** the model's silent "thinking" gap can exceed a short read-idle
+  window, so a too-aggressive idle cutoff looks like "no answer" — widen it or wait for
+  process exit.
 
 ## Capturing model traffic (given stage 3 is out)
 
@@ -294,11 +380,17 @@ shell's `LD_PRELOAD`), otherwise it fails copying `_distutils_hack/__init__.py`.
 
 ## Risks / limitations
 
-- **WSL1**: gum embedded needs `mprotect(PROT_EXEC|PROT_WRITE)` on `.text`;
-  validated (see Status). The known WSL1 0-byte-mmap bug is already worked around
-  on this host (see MEMORY).
+- **W^X / mprotect**: gum embedded needs `mprotect(PROT_EXEC|PROT_WRITE)` on `.text`.
+  Validated on both WSL1 and a real cloud kernel (6.18.5) — see Status. The known WSL1
+  0-byte-mmap bug is worked around on that host (see MEMORY); it does not apply to a real
+  kernel.
+- **Cloud-container caveats**: `make setup` and `pixi`/`agy` installers fetch from GitHub
+  releases, which a locked-down egress policy may block (403) — vendor the frida-gum devkit
+  (and, if needed, the pixi binary) from a mirror instead. agy sign-in works headlessly via
+  its out-of-band OAuth code-paste flow (no in-container browser needed).
 - **agy updates** change offsets and may reorder text again → re-run
-  `build_symbols.py`. Names are stable; the build-id guard blocks mismatched hooks.
+  `build_symbols.py` (`make symbols`). Names are stable; the build-id guard blocks
+  mismatched hooks.
 - **SYNC + GC**: keep SYNC callbacks fast/CPU-bound (above).
 - This instruments a binary **you run on your own machine** for research/interop.
   It does not defeat anyone else's security boundary.
