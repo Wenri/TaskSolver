@@ -203,7 +203,7 @@ static void install_hooks(int stage)
 
     /* stages 8/9: the cgocall-trampoline path (gohook.c) — NOT a gum attach. Collect
      * this stage's targets and redirect them through runtime.cgocall + a synthetic
-     * moduledata. Set AGY_PROC_MODULEDATA=1 to make it GC-unwind-safe. */
+     * moduledata (always installed) that keeps GC stack-unwind safe. */
     if (stage == 8 || stage == 9) {
         agy_gh_target tg[HK_COUNT];
         int nt = 0;

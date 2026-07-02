@@ -168,8 +168,8 @@ is exact and future-proof. (Directly confirmed under gdb — see Status.)
 
 `proc.def` isolates each rung as a separate `AGY_PROC_STAGE`: **8** = trampoline on
 `SendUserMessage`/`Send`, **9** = trampoline on the benign `os.Getenv` (a CPU-only validator
-— if it answers cleanly, the tool is sound). Set `AGY_PROC_MODULEDATA=1` for the GC-safe
-synthetic-moduledata path. (Two earlier bring-up rungs — a naive gum attach on the parking
+— if it answers cleanly, the tool is sound). The GC-safe synthetic moduledata is always
+installed for these stages. (Two earlier bring-up rungs — a naive gum attach on the parking
 funcs, and a `runtime.cgocall` gateway probe — were removed once this path proved out; the
 trampoline is park-safe precisely because it never intercepts the return.)
 
@@ -248,8 +248,9 @@ HTTP/2 body decode (both are guarded/lazy), so stages 8–9 import fine without 
 
 Run agy under the hook via the launcher in `test_scripts/` (`AGY_PROC_STAGE`:
 1=python+DNS, 3=tls_write+decrypt request/response capture, 5=parking hooks that stall,
-8=cgocall-trampoline on `SendUserMessage`/`Send`, 9=cgocall-trampoline on `os.Getenv`; add
-`AGY_PROC_MODULEDATA=1` for the GC-safe path, `AGY_PROC_ASMCGO=1` for the asmcgocall variant):
+8=cgocall-trampoline on `SendUserMessage`/`Send`, 9=cgocall-trampoline on `os.Getenv`
+(the GC-safe synthetic moduledata is always on for these; `AGY_PROC_ASMCGO=1` selects the
+asmcgocall variant):
 
 ```bash
 AGY_PROC_STAGE=3 test_scripts/run-agy.sh <normal agy args...>   # capture request+response (authenticated agy)

@@ -94,7 +94,6 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
         GHLOG("AGY_PROC_ASMCGO set but runtime.asmcgocall unresolved; falling back to cgocall");
         asmcgo_on = 0;
     }
-    int md_on = getenv("AGY_PROC_MODULEDATA") != NULL;
 
     /* Slot region NEAR agy's text so the target->trampoline jmp is a 5-byte rel32. */
     long page = sysconf(_SC_PAGESIZE);
@@ -141,10 +140,8 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
          * _Gsyscall GC-scan window. Runs on the goroutine stack in _Grunning (our
          * unknown PC is never an async-safe-point → no scan/preempt), and only
          * clobbers already-saved caller-saved regs. rsp is 16-aligned here. */
-        if (md_on) {
-            gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_gomod_ensure);
-            gum_x86_writer_put_call_reg(w, GUM_X86_RAX);
-        }
+        gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_gomod_ensure);
+        gum_x86_writer_put_call_reg(w, GUM_X86_RAX);
 
         if (asmcgo_on) {
             /* asmcgocall(fn, arg) — the g0-stack-switch inner half of cgocall, WITHOUT
@@ -223,18 +220,13 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
 
     /* GC-unwind safety: BUILD the covering synthetic moduledata now (constructor
      * time; no firstmoduledata read). The trampolines call agy_gomod_ensure() to
-     * SPLICE it lazily on first hit, when Go is up. Gated so the trampoline
-     * mechanics can be validated first without it. */
-    if (md_on) {
-        uintptr_t rbase = (uintptr_t)region;
-        int rc = agy_gomod_prepare(base + md_vaddr, cgocall_abs,
-                                   rbase, rbase + (uintptr_t)made * GH_SLOT,
-                                   GH_SLOT, made, GH_FRAME, frame_lo, frame_hi);
-        if (rc != 0) GHLOG("moduledata prepare failed (rc=%d); trampolines are live "
-                           "but NOT GC-safe — expect throw(\"unknown pc\") under GC", rc);
-    } else {
-        GHLOG("AGY_PROC_MODULEDATA unset: trampolines live WITHOUT moduledata "
-              "(mechanics-only; not GC-safe)");
-    }
+     * SPLICE it lazily on first hit, when Go is up. Required — without it a GC that
+     * unwinds a trampoline frame throws("unknown pc"). */
+    uintptr_t rbase = (uintptr_t)region;
+    int rc = agy_gomod_prepare(base + md_vaddr, cgocall_abs,
+                               rbase, rbase + (uintptr_t)made * GH_SLOT,
+                               GH_SLOT, made, GH_FRAME, frame_lo, frame_hi);
+    if (rc != 0) GHLOG("moduledata prepare failed (rc=%d); trampolines are live "
+                       "but NOT GC-safe — expect throw(\"unknown pc\") under GC", rc);
     return made;
 }
