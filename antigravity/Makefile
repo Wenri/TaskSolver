@@ -41,12 +41,12 @@ all: $(SHIM)
 
 # Recompile only when sources/symbols change; `| setup` (order-only) ensures the
 # vendored deps exist first without forcing a rebuild.
-$(SHIM): src/antigravity.c src/pybridge.c src/pybridge.h src/proc.def src/gen_symbols_header.py symbols/symbols.json | setup
+$(SHIM): src/antigravity.c src/pybridge.c src/pybridge.h src/gomod.c src/gohook.c src/gomod.h src/proc.def src/gen_symbols_header.py symbols/symbols.json | setup
 	test -n "$(UAPI_INC)" || test -f /usr/include/linux/limits.h || { echo "ERROR: no linux/limits.h — install kernel-headers_linux-64 (a pixi dep) so \$$CONDA_PREFIX has a sysroot (CONDA_PREFIX=$(CONDA_PREFIX) PREFIX=$(PREFIX))" >&2; exit 1; }
 	echo "[build] UAPI headers: $(if $(UAPI_INC),$(UAPI_INC),/usr/include (system))"
 	python3 src/gen_symbols_header.py symbols/symbols.json src/symbols_gen.h
 	mkdir -p vendor
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(SHIM) src/antigravity.c src/pybridge.c $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(SHIM) src/antigravity.c src/pybridge.c src/gomod.c src/gohook.c $(LIBS)
 	echo "built $(SHIM) ($$(stat -c%s $(SHIM)) bytes)"
 
 # Vendor the deps that are NOT committed (see .gitignore); all steps idempotent.

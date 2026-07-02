@@ -54,3 +54,27 @@ HOOK(PROTO_MARSHAL,"google3/third_party/golang/gogo/protobuf/proto/proto.Marshal
  * NOT usable for capture; the CPU-only crypto hook + our own HTTP/2 decode stays. */
 HOOK(SEND_USER_MSG, "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage", AGY_ASYNC, "send_user_msg", 6, 0)
 HOOK(CB_STREAM_SEND,"google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",          AGY_ASYNC, "stream_send",   6, 0)
+
+/* stage 7: cgo GATEWAY probe (the "proper hook point first" rung). runtime.cgocall runs the
+ * Go->C call and returns on the SAME M, so gum's per-thread return-tracking stays consistent →
+ * expected stall-free (this stage verifies it). Args: fn=RAX (C target), arg=RBX. We emit the C
+ * fn pointer as stream_id to see WHAT agy routes through cgo (net/sqlite/webchannel).
+ * NOTE: the decoded model request is pure-Go (crypto/tls+http2) and likely does NOT cross here —
+ * this stage confirms that empirically before we descend to the entry-only fallback. */
+HOOK(CGOCALL,      "runtime.cgocall",                  AGY_ASYNC, "cgocall",   7, 0)
+
+/* stage 8: cgocall-TRAMPOLINE hooks (Approach A — the robust general mechanism).
+ * Same parking targets as stage 6, but instead of a gum attach (whose return-
+ * tracking breaks on park/reschedule) we redirect them through runtime.cgocall via
+ * a generated trampoline (gohook.c) + a synthetic moduledata (set AGY_PROC_MODULEDATA=1)
+ * so GC stack-unwind is safe. MODE/leave are advisory here — the trampoline path
+ * reads args on the g0 stack and never intercepts the return. */
+HOOK(CGT_SEND_USER_MSG, "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage", AGY_ASYNC, "send_user_msg", 8, 0)
+HOOK(CGT_STREAM_SEND,   "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",          AGY_ASYNC, "stream_send",   8, 0)
+
+/* stage 9: cgocall-trampoline TOOL validation on a BENIGN function. os.Getenv is
+ * CPU-only, non-parking, not on agy's request/response concurrency path — if the
+ * trampoline works here (agy answers + hook fires many times) the tool is sound
+ * and SendUserMessage/Send (stage 8) are simply intolerant of a syscall transition
+ * at entry. Uses the same gohook.c path as stage 8. */
+HOOK(CGT_GETENV, "os.Getenv", AGY_ASYNC, "cgt_getenv", 9, 0)

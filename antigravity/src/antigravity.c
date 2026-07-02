@@ -17,6 +17,7 @@
 #include "frida-gum.h"
 #include "pybridge.h"
 #include "symbols_gen.h"
+#include "gomod.h"
 
 /* ---- hook table generated from proc.def ---------------------------------- */
 enum {
@@ -150,6 +151,15 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         agy_py_emit(&ev);
         break;
     }
+    case HK_CGOCALL: {
+        /* runtime.cgocall(fn, arg unsafe.Pointer) int32: fn=RAX (C target), arg=RBX.
+         * Emit the C fn pointer as stream_id to see which C funcs agy calls via cgo.
+         * cgocall runs the C call + returns on the same M, so it's safe under the call
+         * listener (no goroutine migration between enter and return). */
+        agy_event_t ev = { .kind = "cgocall", .stream_id = cpu->rax, .mode = AGY_ASYNC };
+        agy_py_emit(&ev);
+        break;
+    }
     default: break;
     }
 }
@@ -199,13 +209,42 @@ static void install_hooks(int stage)
 {
     gum_init_embedded();
     GumInterceptor *interceptor = gum_interceptor_obtain();
-    /* Two listeners: enter-only avoids return-address rewriting (safer for Go's
-     * stack unwinder); full is used only where we need the return value. */
-    GumInvocationListener *l_enter = gum_make_call_listener(on_enter, NULL, NULL, NULL);
+    /* Two listeners:
+     *  - PROBE (enter-only, leave=0 hooks): a true fire-on-enter listener that installs
+     *    NO return trampoline. gum_make_call_listener(on_enter, NULL) does NOT achieve
+     *    this — it still intercepts the return (restores the clobbered return addr + pops
+     *    its per-thread invocation context), which is what stalled the parking funcs at
+     *    stages 5/6. A probe listener leaves the return untouched, so the goroutine can
+     *    park and resume on another OS thread without corrupting gum's bookkeeping.
+     *  - CALL (enter+leave, leave=1 hooks): used only where we need the []byte return. */
+    GumInvocationListener *l_enter = gum_make_probe_listener(on_enter, NULL, NULL);
     GumInvocationListener *l_full  = gum_make_call_listener(on_enter, on_leave, NULL, NULL);
     GumModule *mainmod = gum_process_get_main_module();
     GumAddress base = gum_module_get_range(mainmod)->base_address;
     LOG("main module base = 0x%llx", (unsigned long long)base);
+
+    /* stages 8/9: the cgocall-trampoline path (gohook.c) — NOT a gum attach. Collect
+     * this stage's targets and redirect them through runtime.cgocall + a synthetic
+     * moduledata. Set AGY_PROC_MODULEDATA=1 to make it GC-unwind-safe. */
+    if (stage == 8 || stage == 9) {
+        agy_gh_target tg[HK_COUNT];
+        int nt = 0;
+        for (int i = 0; i < HK_COUNT; i++) {
+            if (HOOKS[i].stage != stage) continue;
+            uint64_t va = agy_sym(HOOKS[i].name);
+            if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
+            tg[nt].entry = va;
+            tg[nt].skip  = agy_skip(HOOKS[i].name);
+            tg[nt].kind  = HOOKS[i].kind;
+            nt++;
+        }
+        int made = agy_gohook_install((uint64_t)base, agy_sym("runtime.cgocall"),
+                                      agy_sym("runtime.asmcgocall"),
+                                      AGY_MODULEDATA_VADDR, tg, nt);
+        LOG("cgocall-trampoline stage: installed %d/%d target(s)%s", made, nt,
+            getenv("AGY_PROC_ASMCGO") ? " [asmcgocall variant]" : "");
+        return;
+    }
 
     gum_interceptor_begin_transaction(interceptor);
     for (int i = 0; i < HK_COUNT; i++) {

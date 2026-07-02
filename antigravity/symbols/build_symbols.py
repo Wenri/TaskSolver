@@ -49,6 +49,14 @@ PROC_TARGETS = [
     # fully-decoded Go data (no HTTP/2/HPACK/gzip). Testing whether they fire and stall.
     "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage",
     "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",
+    # --- stage 7: cgo gateway probe (proper safe hook point first) ---
+    "runtime.cgocall",
+    # asmcgocall: the g0-stack-switch INNER half of cgocall, WITHOUT entersyscall/
+    # exitsyscall (no _Gsyscall, no P handoff, no reschedule). Called (not hooked)
+    # by the trampoline as an ablation to isolate the g0 switch from the syscall
+    # transition. Two same-named entries exist (BOLT hot/cold); build picks the
+    # lower entryoff (0x4f52780), which is the one cgocall actually CALLs.
+    "runtime.asmcgocall",
 ]
 
 # Reference groups emitted for picking further hook points (not hooked by default).

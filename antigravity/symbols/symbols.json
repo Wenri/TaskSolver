@@ -18,7 +18,9 @@
     "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON": 121386048,
     "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 84765504,
     "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage": 114748992,
-    "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 114743136
+    "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 114743136,
+    "runtime.cgocall": 83128480,
+    "runtime.asmcgocall": 83175296
   },
   "skips": {
     "crypto/tls.(*Conn).Write": 15,
@@ -32,7 +34,9 @@
     "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON": 18,
     "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 10,
     "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage": 15,
-    "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 18
+    "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 18,
+    "runtime.cgocall": 0,
+    "runtime.asmcgocall": 0
   },
   "missing": [],
   "catalog": {
