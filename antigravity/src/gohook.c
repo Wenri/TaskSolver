@@ -205,7 +205,14 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
         int32_t rel = (int32_t)((int64_t)(uintptr_t)slot - (int64_t)(hook_addr + 5));
         pc.bytes[0] = 0xe9;
         memcpy(pc.bytes + 1, &rel, 4);
-        (void)gum_memory_patch_code((gpointer)(uintptr_t)hook_addr, ov, patch_apply, &pc);
+        if (!gum_memory_patch_code((gpointer)(uintptr_t)hook_addr, ov, patch_apply, &pc)) {
+            /* target prologue wasn't overwritten → the trampoline is unreachable. Don't
+             * count it (the moduledata below covers only `made` slots) and reuse this
+             * slot offset on the next target. */
+            GHLOG("patch failed for kind=%s @ +%u — trampoline NOT installed, skipping",
+                  targets[i].kind, targets[i].skip);
+            continue;
+        }
 
         GHLOG("cgo-trampoline kind=%s @ +%u -> %p (overwrite %u bytes)",
               targets[i].kind, targets[i].skip, (void *)slot, ov);

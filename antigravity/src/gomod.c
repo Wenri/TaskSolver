@@ -170,10 +170,15 @@ void agy_gomod_ensure(void)
 {
     if (__atomic_load_n(&g_done, __ATOMIC_ACQUIRE)) return;          /* fast path */
     int expected = 0;
-    if (!__atomic_compare_exchange_n(&g_claimed, &expected, 1, 0,
-                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-        while (!__atomic_load_n(&g_done, __ATOMIC_ACQUIRE)) __builtin_ia32_pause();
-        return;
+    while (!__atomic_compare_exchange_n(&g_claimed, &expected, 1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        /* Lost the claim to another thread. If it finished the splice, we're done.
+         * Otherwise it may have hit the pre-init retry path and dropped g_claimed back
+         * to 0 WITHOUT setting g_done — so loop and try to become the splicer ourselves
+         * rather than wait forever on a g_done the claimer is not obligated to set. */
+        if (__atomic_load_n(&g_done, __ATOMIC_ACQUIRE)) return;
+        __builtin_ia32_pause();
+        expected = 0;
     }
 
     go_moduledata *md  = g_md;
