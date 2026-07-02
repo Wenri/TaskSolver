@@ -33,7 +33,6 @@ static pthread_t       g_worker;
 static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_qcv = PTHREAD_COND_INITIALIZER;
 static job_t          *g_head, *g_tail;
-static int             g_stop;
 
 static pthread_mutex_t g_startmu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_startcv = PTHREAD_COND_INITIALIZER;
@@ -125,8 +124,7 @@ static void *worker_main(void *arg)
 
     for (;;) {
         pthread_mutex_lock(&g_qmu);
-        while (!g_head && !g_stop) pthread_cond_wait(&g_qcv, &g_qmu);
-        if (g_stop && !g_head) { pthread_mutex_unlock(&g_qmu); break; }
+        while (!g_head) pthread_cond_wait(&g_qcv, &g_qmu);
         job_t *j = g_head;
         g_head = j->next;
         if (!g_head) g_tail = NULL;
@@ -217,12 +215,4 @@ void agy_py_emit(agy_event_t *ev)
 void agy_py_free(agy_event_t *ev)
 {
     if (ev->out_data) { free(ev->out_data); ev->out_data = NULL; ev->out_len = 0; ev->verdict = 0; }
-}
-
-void agy_py_stop(void)
-{
-    pthread_mutex_lock(&g_qmu);
-    g_stop = 1;
-    pthread_cond_signal(&g_qcv);
-    pthread_mutex_unlock(&g_qmu);
 }

@@ -53,6 +53,10 @@ enum { OFF_KIND = GH_SPILL,      OFF_RAX = GH_SPILL + 8,  OFF_RBX = GH_SPILL + 1
        OFF_R8   = GH_SPILL + 48, OFF_R9  = GH_SPILL + 56, OFF_R10 = GH_SPILL + 64,
        OFF_R11  = GH_SPILL + 72, OFF_RDX = GH_SPILL + 80, OFF_RBP = GH_SPILL + 88 };
 
+/* xorps xmm15,xmm15 — Go's ABI requires X15 zeroed across a (asm)cgocall
+ * boundary; emitted verbatim into both call paths below. */
+static const guint8 XORPS_XMM15[] = { 0x45, 0x0f, 0x57, 0xff };
+
 /* The C hook — runs on the g0/system stack during cgocall. MUST stay light and
  * must not allocate Go memory; agy_py_emit() copies + enqueues to the worker.
  * Emits the receiver (RAX) as stream_id + the borrowed rodata kind tag; decoded
@@ -158,8 +162,7 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
             gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_cgo_hook);
             gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, 0, GUM_X86_RAX);   /* [sp+0]=fn  */
             gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, 8, GUM_X86_RSI);   /* [sp+8]=arg */
-            static const guint8 xorps15a[] = { 0x45, 0x0f, 0x57, 0xff };  /* xorps xmm15,xmm15 */
-            gum_x86_writer_put_bytes(w, xorps15a, sizeof xorps15a);
+            gum_x86_writer_put_bytes(w, XORPS_XMM15, sizeof XORPS_XMM15);
             gum_x86_writer_put_mov_reg_address(w, GUM_X86_R12, (GumAddress)asmcgocall_abs);
             gum_x86_writer_put_call_reg(w, GUM_X86_R12);
             gum_x86_writer_put_add_reg_imm(w, GUM_X86_RSP, 32);
@@ -169,8 +172,7 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
              * caller-arg spill slots ([S],[S+8]), so block.kind/regs.rax stay intact. */
             gum_x86_writer_put_lea_reg_reg_offset(w, GUM_X86_RBX, GUM_X86_RSP, OFF_KIND);
             gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_cgo_hook);
-            static const guint8 xorps15[] = { 0x45, 0x0f, 0x57, 0xff };  /* xorps xmm15,xmm15 */
-            gum_x86_writer_put_bytes(w, xorps15, sizeof xorps15);
+            gum_x86_writer_put_bytes(w, XORPS_XMM15, sizeof XORPS_XMM15);
             gum_x86_writer_put_mov_reg_address(w, GUM_X86_R12, (GumAddress)cgocall_abs);
             gum_x86_writer_put_call_reg(w, GUM_X86_R12);
         }
