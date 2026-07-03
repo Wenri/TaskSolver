@@ -21,6 +21,12 @@ class Recorder:
         self.preview = int(os.environ.get("AGY_PROC_PREVIEW", "64"))
         self._lock = threading.Lock()
         self._f = open(self.path, "a", buffering=1)  # line-buffered
+        self._subs = []                              # in-process event subscribers (AgyProcess)
+
+    def subscribe(self, fn):
+        """Register fn(obj) to receive every recorded event (raw records + decoded turns).
+        Called on the dispatch worker thread — keep it quick and non-throwing (e.g. queue.put)."""
+        self._subs.append(fn)
 
     def record(self, kind, stream_id, data):
         rec = {"t": round(time.time(), 6), "kind": kind,
@@ -39,3 +45,8 @@ class Recorder:
         line = json.dumps(obj, ensure_ascii=False)
         with self._lock:
             self._f.write(line + "\n")
+        for fn in self._subs:                        # notify in-process subscribers (outside the lock)
+            try:
+                fn(obj)
+            except Exception:
+                pass

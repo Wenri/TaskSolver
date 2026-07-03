@@ -35,6 +35,12 @@ _reasm = h2.Reassembler(_rec) if os.environ.get("AGY_PROC_H2", "1") != "0" else 
 _corr = (capture.Correlator(_rec, _reasm)
          if os.environ.get("AGY_PROC_CORRELATE", "1") != "0" else None)
 
+
+def subscribe(fn):
+    """Register an in-process consumer fn(obj) for every recorded/decoded event — used by
+    AgyProcess targets (e.g. mp_child.stream_turns) to stream decoded turns home live."""
+    _rec.subscribe(fn)
+
 # SYNC egress rewrite registry (task #8). Lazily bound to keep import cheap and pure.
 _rewrite = None
 

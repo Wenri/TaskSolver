@@ -16,7 +16,7 @@ _ANTI = os.path.join(os.path.dirname(_HERE), "antigravity")
 sys.path.insert(0, _ANTI)
 
 from pyagy.agyprocess import AgyProcess                       # noqa: E402
-from pyagy.agy_process.mp_child import _demo_target, _raise_target  # noqa: E402
+from pyagy.agy_process.mp_child import _demo_target, _raise_target, stream_turns  # noqa: E402
 
 _fail = []
 
@@ -65,9 +65,39 @@ def case_exception():
         _fail.append("exception")
 
 
+def case_stream():
+    # The payoff: stream agy's DECODED model turns home as native objects. Needs a live
+    # model turn (network/auth) + stage 3; agy occasionally exits before completing a turn,
+    # so retry once. A turn with EMPTY text = a real decode bug (FAIL); no turns after
+    # retries = a live-model flake (NOTE, not a failure).
+    for _ in range(2):
+        p = AgyProcess(target=stream_turns, stage=3,
+                       agy_args=["--print", "What is 2+2? Reply with only the digits."])
+        p.start()
+        turns, end = [], time.time() + 75
+        while time.time() < end:
+            try:
+                if p.poll(1.0):
+                    o = p.recv()
+                    if isinstance(o, dict) and o.get("kind") == "genai_turn":
+                        turns.append(o)
+            except EOFError:
+                break
+        _teardown(p)
+        if turns:
+            has_text = any((t.get("text") or "").strip() for t in turns)
+            print(f"  {'ok  ' if has_text else 'FAIL'} stream: {len(turns)} decoded genai_turn(s), "
+                  f"text={'yes' if has_text else 'EMPTY'}")
+            if not has_text:
+                _fail.append("stream")
+            return
+    print("  NOTE stream: agy produced no turn this run (live-model flake); decode path unexercised")
+
+
 if __name__ == "__main__":
     print("[AgyProcess] real multiprocessing.spawn child (agy = vendor/agy)")
     case_roundtrip()
     case_exception()
+    case_stream()
     print("\nPASS" if not _fail else "\nFAIL: " + ",".join(_fail))
     sys.exit(1 if _fail else 0)

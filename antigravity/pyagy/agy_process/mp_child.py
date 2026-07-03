@@ -15,6 +15,7 @@ and the `is_forking(sys.argv)` assert. `_bootstrap` runs the target and RETURNS 
 import os
 import sys
 import threading
+import time
 import traceback
 
 _result_conn = None   # child end of the AgyProcess result Pipe; the target sends objects here
@@ -87,6 +88,29 @@ def main():
 def start():
     """Run the child on a daemon thread (called from agy_process import under AGY_MP_MODE)."""
     threading.Thread(target=main, name="agy-mp-child", daemon=True).start()
+
+
+def stream_turns(kinds=None, max_wait=300):
+    """Built-in AgyProcess target: stream agy's DECODED model turns home over the Connection
+    as they're produced, until agy exits (the parent then sees EOF on recv()) or max_wait.
+    Needs an instrumented stage that decodes turns (stage>=3 → genai_turn). Uses a subscribe
+    → in-process queue → single-sender loop, so the send side has no Connection race."""
+    import queue as _q
+    from . import subscribe as _subscribe
+    conn = get_result_conn()
+    kinds = set(kinds or ("genai_turn", "app_response", "resp_text", "resp_thinking"))
+    q = _q.Queue()
+    _subscribe(lambda obj: q.put(obj) if isinstance(obj, dict) and obj.get("kind") in kinds else None)
+    end = time.time() + max_wait
+    while time.time() < end:
+        try:
+            obj = q.get(timeout=1.0)
+        except _q.Empty:
+            continue
+        try:
+            conn.send(obj)
+        except (BrokenPipeError, OSError):
+            break
 
 
 # --- targets used by test_scripts/test_agyprocess.py (importable by reference in the child) ---
