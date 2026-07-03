@@ -22,6 +22,7 @@ Knobs: AGY_PROC_H2=0 disables HTTP/2 reassembly; AGY_PROC_CORRELATE=0 disables t
 genai-turn correlator (raw capture only).
 """
 import os
+import re
 import sys
 import time
 import traceback
@@ -89,6 +90,26 @@ def on_smoke(stream_id, data):
     return None
 
 
+# conversation-id capture (AGY_PROC_CONV_ID): the FILE_OPEN hook (os.OpenFile) is C-filtered to
+# conversation-store paths, so `data` is a path like `.../conversations/<uuid>.db` or
+# `.../brain/<uuid>/.../transcript.jsonl`. Extract the uuid and emit a `conversation_id` event
+# (deduped per process; the FIRST distinct id is the main/top-level conversation — subagents open
+# their own dirs later). This is the exact, in-process id that agy doesn't expose via env.
+_CONV_UUID = re.compile(
+    r"(?:conversations/|/brain/)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+_seen_conv_ids = set()
+
+
+def on_file_open(stream_id, data):
+    m = _CONV_UUID.search(data.decode("utf-8", "replace"))
+    if m:
+        cid = m.group(1)
+        if cid not in _seen_conv_ids:
+            _seen_conv_ids.add(cid)
+            _rec.event({"kind": "conversation_id", "id": cid})
+    return None
+
+
 def on_cgt_args(stream_id, data):
     # Diagnostic (AGY_PROC_CGT_ARGS): the C hook already rendered a readable arg
     # report; print it in full (the raw recorder would truncate to the preview len)
@@ -129,6 +150,7 @@ _ROUTER = {
     "http_rt": on_http_rt,
     "dns": on_dns,
     "smoke": on_smoke,
+    "file_open": on_file_open,
     "cgt_args": on_cgt_args,
     "callstack": on_callstack,
     "delta_ccpa": _on_model_text("delta_ccpa"),

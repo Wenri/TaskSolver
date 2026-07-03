@@ -40,6 +40,7 @@ static FILE *g_logf;
 static int g_tls_write_sync;   /* AGY_PROC_TLS_WRITE_SYNC=1 → allow modifying egress */
 static int g_dryrun;           /* AGY_PROC_DRYRUN=1 → hooks fire but do nothing (isolate gum vs emit) */
 static int g_stack;            /* AGY_PROC_STACK=1 → emit a "callstack" event per hook fire */
+static int g_conv_id;          /* AGY_PROC_CONV_ID=1 → install the os.OpenFile conversation-id probe */
 static uint64_t g_base;        /* main-module base (for PC→link-vaddr reduction) */
 
 /* ---- build-id of the main executable (via PT_NOTE, no file IO) ------------ */
@@ -77,6 +78,16 @@ static int bid_cb(struct dl_phdr_info *info, size_t size, void *data)
 /* ---- gum listener --------------------------------------------------------- */
 struct rd_state { uint64_t conn, ptr; };  /* passed enter→leave for TLS_READ */
 
+/* substring scan over a NON-nul-terminated Go string (name.ptr/name.len) */
+static int mem_has(const char *h, size_t n, const char *needle)
+{
+    size_t m = strlen(needle);
+    if (m == 0 || n < m) return 0;
+    for (size_t i = 0; i + m <= n; i++)
+        if (memcmp(h + i, needle, m) == 0) return 1;
+    return 0;
+}
+
 static void on_enter(GumInvocationContext *ic, gpointer user_data)
 {
     (void)user_data;
@@ -95,6 +106,21 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
                            .data = (const uint8_t *)cpu->rax, .len = (size_t)cpu->rbx,
                            .mode = AGY_ASYNC };
         agy_py_emit(&ev);
+        break;
+    }
+    case HK_FILE_OPEN: {
+        /* os.OpenFile(name string, ...): name.ptr=RAX, name.len=RBX. agy's conversation
+         * store lives at .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
+         * so the uuid is IN the path. Filter to those paths HERE (C, cheap) so Python only
+         * sees a conversation open, then it parses the uuid → a conversation_id event. */
+        const char *p = (const char *)cpu->rax;
+        size_t len = (size_t)cpu->rbx;
+        if (p && len > 0 && len < 4096 &&
+            (mem_has(p, len, "conversations/") || mem_has(p, len, "/brain/"))) {
+            agy_event_t ev = { .kind = "file_open", .stream_id = 0,
+                               .data = (const uint8_t *)p, .len = len, .mode = AGY_ASYNC };
+            agy_py_emit(&ev);
+        }
         break;
     }
     case HK_TLS_WRITE: {
@@ -240,6 +266,9 @@ static void install_hooks(int stage)
     for (int i = 0; i < HK_COUNT; i++) {
         /* AGY_PROC_STAGE selects EXACTLY that stage's hooks (isolates each group) */
         if (HOOKS[i].stage != stage) continue;
+        /* FILE_OPEN is a stage-3 hook but an OVERLAY: only install it when the caller asked
+         * for conversation-id capture, so a plain stage-3 run isn't burdened by os.OpenFile. */
+        if (i == HK_FILE_OPEN && !g_conv_id) continue;
         uint64_t va = agy_sym(HOOKS[i].name);
         if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
         GumAttachOptions opt = { 0 };
@@ -293,6 +322,7 @@ static void agy_init(void)
     g_tls_write_sync = getenv("AGY_PROC_TLS_WRITE_SYNC") != NULL;
     g_dryrun = getenv("AGY_PROC_DRYRUN") != NULL;
     g_stack = getenv("AGY_PROC_STACK") != NULL;
+    g_conv_id = getenv("AGY_PROC_CONV_ID") != NULL;
 
     int stage = 3;
     const char *st = getenv("AGY_PROC_STAGE");

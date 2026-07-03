@@ -58,6 +58,11 @@ def instrumented_env(stage=3, capture="agy-capture.jsonl", log=None,
         "AGY_PROC_MODULE": module,
         "AGY_PROC_PYTHONPATH": root,
         "AGY_PROC_CAPTURE": os.path.abspath(capture),
+        # install the os.OpenFile conversation-id probe (overlay) so instrumented runs learn
+        # the exact conversation id in-process (agy doesn't expose it via env); mtime is the
+        # fallback. Fires only on the gum-attach stages (3), and its C-side path filter keeps
+        # it cheap (Python sees only conversation-store opens).
+        "AGY_PROC_CONV_ID": "1",
         "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),
         "TERM": env.get("TERM", "xterm-256color"),
         "AGY_CLI_DISABLE_AUTO_UPDATE": "true",   # disable agy's background self-update

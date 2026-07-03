@@ -37,6 +37,11 @@ PROC_TARGETS = [
     "crypto/tls.(*halfConn).decrypt",
     "runtime.main",                      # smoke-test anchor (fires every launch)
     "os.Getenv",                         # smoke-test anchor (no auth/network)
+    # conversation-id capture (AGY_PROC_CONV_ID overlay): agy opens its conversation
+    # store at .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl —
+    # the uuid is IN the path, so an enter-only probe reading OpenFile's name arg
+    # (RAX=ptr,RBX=len, same shape as os.Getenv) yields the exact id in-process.
+    "os.OpenFile",
 
     # --- app-layer capture R&D (CPU-only funcs returning []byte = readable) ---
     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",

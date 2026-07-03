@@ -17,6 +17,11 @@ DEFAULT_STAGE = 3
 HOOKS = [
     {"id": "SMOKE_GETENV", "symbol": "os.Getenv", "mode": "async", "kind": "smoke",
      "stage": 2, "leave": False, "note": "liveness smoke; fires often, no network"},
+    {"id": "FILE_OPEN", "symbol": "os.OpenFile", "mode": "async", "kind": "file_open",
+     "stage": 3, "leave": False,
+     "note": "OVERLAY (AGY_PROC_CONV_ID): enter-only probe reading OpenFile's path arg; "
+             "C-filtered to conversations/·/brain/ paths → conversation_id event (the uuid "
+             "is in the path). Not installed by a plain stage-3 run."},
     {"id": "TLS_WRITE", "symbol": "crypto/tls.(*Conn).Write", "mode": "async",
      "kind": "tls_write", "stage": 3, "leave": False,
      "note": "egress c2s; the ONLY rewrite surface (AGY_PROC_TLS_WRITE_SYNC); "

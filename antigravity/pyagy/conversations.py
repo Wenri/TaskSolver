@@ -288,13 +288,40 @@ def snapshot(app_data_dir=None, home=None):
                        for p in _all_db_paths(app_data_dir, home)}}
 
 
-def capture_conversation_id(snapshot=None, app_data_dir=None, home=None):
-    """Resolve the conversation a just-finished run created or continued, vs the pre-run
-    ``snapshot``: the newest conversation that is NEW or whose mtime advanced (covers both
-    create and resume); else the newest overall. Returns the conversation ID, or ``None`` if
-    the store is empty. (agy 1.0.16 does not expose its conversation id in-process — verified
-    — so this mtime scan is how a Session learns the id; keep runs from racing on the same
-    store to keep it unambiguous.)"""
+def _id_from_capture(capture_path):
+    """First ``{"kind":"conversation_id","id":...}`` event in the capture JSONL, or ``None``.
+    Emitted by the FILE_OPEN hook (AGY_PROC_CONV_ID) from the conversation-store path — exact
+    and in-process. FIRST = the main/top-level conversation (its store opens before any
+    subagent's)."""
+    if not capture_path or not os.path.exists(capture_path):
+        return None
+    try:
+        with open(capture_path, errors="replace") as f:
+            for line in f:
+                if '"conversation_id"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if obj.get("kind") == "conversation_id" and obj.get("id"):
+                    return obj["id"]
+    except OSError:
+        return None
+    return None
+
+
+def capture_conversation_id(snapshot=None, capture_path=None, app_data_dir=None, home=None):
+    """Resolve the conversation a just-finished run created or continued, most-reliable first:
+      1. a ``conversation_id`` event from the FILE_OPEN hook in the capture JSONL (exact,
+         in-process — needs AGY_PROC_CONV_ID + an instrumented run);
+      2. vs the pre-run ``snapshot``: the newest conversation that is NEW or whose mtime
+         advanced (covers both create and resume);
+      3. else the newest conversation overall.
+    Returns the conversation ID, or ``None`` if the store is empty."""
+    cid = _id_from_capture(capture_path)
+    if cid:
+        return cid
     cur = {os.path.splitext(os.path.basename(p))[0]: _safe_mtime(p)
            for p in _all_db_paths(app_data_dir, home)}
     if snapshot:

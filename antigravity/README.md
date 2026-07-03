@@ -590,6 +590,7 @@ didn't capture that kind:
   | `AGY_PROC_REWRITE_RULES` / `AGY_PROC_REWRITE` | `rewrite=` | rules-file path / `module:func` |
   | `AGY_PROC_STACK` | `stack=True` | emit deduped `callstack` events |
   | `AGY_PROC_CGT_ARGS` | `arg_probe=True` | emit `cgt_args` arg-graph reports |
+  | `AGY_PROC_CONV_ID` | (auto, instrumented) | install the `os.OpenFile` probe → `conversation_id` event (exact id) |
   | `AGY_PROC_H2` / `AGY_PROC_CORRELATE` | — | `=0` disables HTTP/2 reassembly / the genai-turn correlator |
 
 - **Graceful degrade:** `instrumented=None` auto-detects the shim and confirms the
@@ -629,9 +630,15 @@ print(pyagy.read_transcript(cid))                    # stored turns (also s.hist
 - **Turn model:** in-run turns ride one live `--prompt-interactive` process (as before); the
   durable part is **capturing** the `conversation_id` and **resuming** a stored conversation on
   a *new* launch via `--conversation=<id>` / `--continue` — both verified to recall context, in
-  `--print` and interactive mode. The id is resolved from the store by mtime (agy 1.0.16 does
-  not expose it in-process). `ask(..., conversation_id=…/continue_latest=True)` resumes in
+  `--print` and interactive mode. `ask(..., conversation_id=…/continue_latest=True)` resumes in
   one-shot `--print`; `AgyResponse.conversation_id` is always the id the run created/continued.
+- **How the id is captured:** instrumented runs read it *exactly, in-process* — agy doesn't put
+  `ANTIGRAVITY_CONVERSATION_ID` in its own env (it's per-conversation, injected only into child
+  processes), and it isn't in any RPC/`SendUserMessage` entry-arg graph, but agy opens
+  `conversations/<uuid>.db` / `brain/<uuid>/…`, so the **`FILE_OPEN` hook** (`os.OpenFile`,
+  a stage-3 overlay enabled by `AGY_PROC_CONV_ID`) reads the uuid straight from the path and
+  emits a `conversation_id` event. Uninstrumented runs fall back to newest-`*.db`-by-mtime.
+  (`capture_conversation_id` prefers the event; verified event == mtime.)
 - **`AgyProcess(conversation_id=…)`** (the multiprocessing child) and
   **`AgyModel(multi_turn=True | conversation_id=…)`** (the TaskSolver backend — then continues
   one conversation across calls, exposes `.session()`) are session-capable too.

@@ -462,7 +462,8 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
                            else ([], [], 0))
     # Prefer the app-boundary answer (stage 12) when present; else the PTY transcript.
     text = (max(app_texts, key=len) if app_texts else _answer_text(transcript))
-    cid = _conv.capture_conversation_id(snap, home=home)
+    cid = _conv.capture_conversation_id(snap, capture_path=cap_path if use_instr else None,
+                                        home=home)
     return AgyResponse(
         text=text, transcript=transcript, turns=turns, app_turns=app_texts,
         exit_status=proc.status, capture_path=cap_path, workspace=workspace,
@@ -566,7 +567,9 @@ class Session:
             _load_capture(self.cap_path, self._cursor)
             if (self.cap_path and self.instrumented) else ([], [], self._cursor))
         if self._conversation_id is None:            # first turn of a fresh session
-            self._conversation_id = _conv.capture_conversation_id(self._snap, home=self._home)
+            self._conversation_id = _conv.capture_conversation_id(
+                self._snap, capture_path=self.cap_path if self.instrumented else None,
+                home=self._home)
         text = (max(app_texts, key=len) if app_texts else _answer_text(transcript))
         return AgyResponse(
             text=text, transcript=transcript, turns=turns, app_turns=app_texts,

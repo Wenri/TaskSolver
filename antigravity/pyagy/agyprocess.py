@@ -51,6 +51,7 @@ class AgyPopen(_ForkPopen):
         agy = getattr(process_obj, "_agy_bin", None) or _VENDOR_AGY
         workdir = ensure_git_workspace(getattr(process_obj, "_workdir", None))
         capture = getattr(process_obj, "_capture", None) or os.path.join(workdir, "agy-capture.jsonl")
+        self._capture_path = capture        # for AgyProcess.conversation_id (conversation_id event)
         self._home, env_ovr = _conv.scope_for_run(
             workdir, getattr(process_obj, "_data_dir", None),
             trust=getattr(process_obj, "_trust", True))     # repo-scoped store + workspace trust
@@ -183,6 +184,7 @@ class AgyProcess(SpawnProcess):
         if self._conversation_id is None and getattr(self, "_popen", None) is not None:
             self._conversation_id = _conv.capture_conversation_id(
                 getattr(self._popen, "_snap", None),
+                capture_path=getattr(self._popen, "_capture_path", None),
                 home=getattr(self._popen, "_home", None))
         return self._conversation_id
 

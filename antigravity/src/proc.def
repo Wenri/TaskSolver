@@ -19,6 +19,13 @@
  * Safe ordinary startup function; fires many times, no auth/network needed. */
 HOOK(SMOKE_GETENV, "os.Getenv",                      AGY_ASYNC, "smoke",     2, 0)
 
+/* conversation-id capture (overlay, gated by AGY_PROC_CONV_ID — NOT installed by a plain
+ * stage-3 run). os.OpenFile(name string, ...) reads name.ptr=RAX/len=RBX (same shape as
+ * os.Getenv); agy opens .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
+ * so the uuid is in the path. Enter-only probe → park-safe across the openat syscall; the
+ * on_enter case filters to conversation paths in C so Python only sees the match. */
+HOOK(FILE_OPEN,    "os.OpenFile",                     AGY_ASYNC, "file_open", 3, 0)
+
 /* stage 3: egress capture. tls_write is safe once we attach PAST the prologue
  * (per-hook skip from symbols.json) — it doesn't park, so no morestack re-entry
  * and no park-while-hooked hazard. Captures the full model REQUEST. */
