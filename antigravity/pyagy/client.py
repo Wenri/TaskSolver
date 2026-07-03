@@ -15,6 +15,16 @@ Two modify mechanisms compose here (the package accepts *both*, per the design):
     (framing-safe; additive changes are impossible — use tools/context for those).
   * ``tools=`` / ``context=`` — additive, via an injected MCP server (config.py).
 
+What a call captures is chosen by ``stage`` (int or alias) and two overlays:
+  * ``stage="wire"`` (3, default) → ``.turns``/``.request``/``.usage``/``.model`` from
+    the decoded wire model turn (and the ``rewrite=`` surface);
+  * ``stage="app"`` (12) → ``.app_text``/``.source`` from agy's own consumer boundary;
+  * ``stage="rpc"`` (13) → ``.rpc_trace``, the labeled backend-RPC timeline;
+  * ``stack=True`` → ``.stacks``/``.call_graph`` (symbolized Go call stacks);
+  * ``arg_probe=True`` → ``.cgt_args`` (trampoline arg-graph reports).
+The diagnostic accessors are lazy: reading one decodes its capture on demand (and
+returns empty/None when this run didn't capture that kind).
+
 When the shim isn't built (or agy's build-id doesn't match the pin), the call
 **degrades gracefully** to a clean PTY run: you still get ``.text``/``.transcript``,
 just no decoded ``.turns``/``.request``/rewrite — with the reason on
@@ -25,6 +35,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from . import _env
 from . import config as _config
@@ -33,6 +44,26 @@ from ._term import strip_ansi
 from .session import AGY_BIN, ensure_git_workspace
 
 _UNIQ = [0]
+
+# Semantic stage aliases → the AGY_PROC_STAGE the shim reads (see agy_process/hooks.py).
+# Callers may pass an int stage directly or one of these names; ints pass through.
+#   wire     → 3  : egress tls_write + ingress decrypt → wire genai_turn + SYNC rewrite
+#   smoke    → 2  : liveness only (os.Getenv), no network hooks
+#   pipeline → 12 : framework stream consumers (updateWithStep → app_response)
+#   app      → 12 : alias of pipeline; the app-boundary RESPONSE
+#   rpc      → 13 : CodeAssistClient RPC trace (rpc_* events, StreamGenerateContent)
+_STAGES = {"smoke": 2, "wire": 3, "pipeline": 12, "app": 12, "rpc": 13}
+
+
+def _resolve_stage(stage):
+    """Map a stage alias (str) to its AGY_PROC_STAGE int; pass ints through."""
+    if isinstance(stage, str):
+        try:
+            return _STAGES[stage]
+        except KeyError:
+            raise ValueError(
+                f"unknown stage {stage!r}; use an int or one of {sorted(_STAGES)}")
+    return int(stage)
 
 
 # --- declarative inputs ------------------------------------------------------
@@ -92,6 +123,7 @@ class AgyResponse:
     instrumented: bool
     instrumented_reason: str = ""
     app_turns: list = field(default_factory=list)   # app-boundary answers (stage 12)
+    funcmap: str = None                              # symbols/funcmap.tsv.gz for .stacks
 
     def __str__(self):
         return self.text
@@ -153,6 +185,82 @@ class AgyResponse:
         if p:
             u.raw = p.get("usage") or {}
         return u
+
+    # --- diagnostic decoders (present only when the matching capture exists) ---
+    # These lazily import their agy_process module inside the accessor so a plain
+    # `import pyagy` / `ask()` never loads the RPC/stack/graph decoders (or the
+    # 132k-row funcmap) unless you actually read the attribute. Each degrades to a
+    # falsy/None value when its events (or the funcmap) aren't in this run's capture.
+    def _has_capture(self):
+        return bool(self.capture_path and self.instrumented
+                    and os.path.exists(self.capture_path))
+
+    @cached_property
+    def rpc_trace(self):
+        """A time-ordered, labeled RPC timeline for a stage-``"rpc"`` (13) run —
+        ``StreamGenerateContent`` is the model turn. ``""`` when the capture holds no
+        ``rpc_*`` events (any other stage)."""
+        if not self._has_capture():
+            return ""
+        from .agy_process import rpctrace
+        return rpctrace.trace(self.capture_path)
+
+    @cached_property
+    def cgt_args(self):
+        """The trampoline arg-graph reports captured with ``arg_probe=True``
+        (``AGY_PROC_CGT_ARGS``) — one rendered string per hook fire. ``[]`` otherwise."""
+        if not self._has_capture():
+            return []
+        reports = []
+        with open(self.capture_path) as f:
+            for line in f:
+                if '"cgt_args"' not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if o.get("kind") == "cgt_args" and o.get("report"):
+                    reports.append(o["report"])
+        return reports
+
+    @cached_property
+    def _symbolizer(self):
+        """A funcmap-backed Symbolizer, or None if the funcmap file is absent
+        (``make -C antigravity symbols`` produces it; it's gitignored)."""
+        from .agy_process import symbolize
+        path = self.funcmap or symbolize.DEFAULT_FUNCMAP
+        if not os.path.exists(path):
+            return None
+        return symbolize.Symbolizer(path)
+
+    @cached_property
+    def stacks(self):
+        """Symbolized, grouped call stacks captured with ``stack=True``
+        (``AGY_PROC_STACK``) — a rendered string. ``None`` when there's no capture;
+        a short reason string when the funcmap is missing."""
+        if not self._has_capture():
+            return None
+        sym = self._symbolizer
+        if sym is None:
+            from .agy_process import symbolize
+            return (f"(funcmap not found at {self.funcmap or symbolize.DEFAULT_FUNCMAP}; "
+                    "run `make -C antigravity symbols`)")
+        from .agy_process import symbolize
+        return symbolize.render_stacks(self.capture_path, sym)
+
+    @cached_property
+    def call_graph(self):
+        """Caller→callee edge counts from the ``stack=True`` capture — a
+        ``collections.Counter`` keyed by ``(caller, callee)``. ``None`` without a
+        capture or funcmap."""
+        if not self._has_capture():
+            return None
+        sym = self._symbolizer
+        if sym is None:
+            return None
+        from .agy_process import symbolize
+        return symbolize.call_graph(self.capture_path, sym)
 
 
 # --- helpers -----------------------------------------------------------------
@@ -242,11 +350,18 @@ def _argv(agy, flag, prompt, model, skip_permissions, extra_flags):
     return argv
 
 
-def _build_env(*, instrumented, stage, capture_path, rewrite, workspace, extra_env):
-    """Assemble the child env + (rules_path). Non-instrumented → a clean env."""
+def _build_env(*, instrumented, stage, capture_path, rewrite, workspace, extra_env,
+               stack=False, arg_probe=False):
+    """Assemble the child env + (rules_path). Non-instrumented → a clean env. The
+    ``stack``/``arg_probe`` overlays set the shim's diagnostic knobs (call-stack
+    unwind / trampoline arg-graph) on top of whatever base ``stage`` is selected."""
     if not instrumented:
         return _env.clean_env(), None
     env = _env.instrumented_env(stage=stage, capture=capture_path, extra_env=extra_env)
+    if stack:
+        env["AGY_PROC_STACK"] = "1"
+    if arg_probe:
+        env["AGY_PROC_CGT_ARGS"] = "1"
     rules_path = None
     if rewrite is not None:
         upd, rules_path = _prepare_rewrite(rewrite, workspace)
@@ -271,8 +386,16 @@ def _inject_config(tools, context):
 # --- one-shot ----------------------------------------------------------------
 def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
         capture=True, instrumented=None, timeout=300, skip_permissions=False,
-        agy_bin=None, extra_env=None, stage=3):
-    """Run one ``agy --print`` turn and return a decoded :class:`AgyResponse`."""
+        agy_bin=None, extra_env=None, stage=3, stack=False, arg_probe=False,
+        funcmap=None):
+    """Run one ``agy --print`` turn and return a decoded :class:`AgyResponse`.
+
+    ``stage`` selects what the shim captures — an int or an alias
+    (``"wire"``=3 default, ``"app"``/``"pipeline"``=12, ``"rpc"``=13, ``"smoke"``=2).
+    The overlays ``stack=True`` / ``arg_probe=True`` add the diagnostic call-stack /
+    trampoline arg-graph on top of any stage, surfaced on ``.stacks``/``.call_graph``
+    and ``.cgt_args``. ``funcmap`` overrides the symbol map used by ``.stacks``."""
+    stage = _resolve_stage(stage)
     workspace = ensure_git_workspace(workspace)
     agy = agy_bin or AGY_BIN
     use_instr, reason = _resolve_instrumented(instrumented)
@@ -285,7 +408,8 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
 
     log_path = os.path.join(workspace, "pyagy-shim.log") if use_instr else None
     env, _ = _build_env(instrumented=use_instr, stage=stage, capture_path=cap_path,
-                        rewrite=rewrite, workspace=workspace, extra_env=extra_env)
+                        rewrite=rewrite, workspace=workspace, extra_env=extra_env,
+                        stack=stack, arg_probe=arg_probe)
     if log_path:
         env["AGY_PROC_LOG"] = log_path
 
@@ -313,7 +437,7 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
     return AgyResponse(
         text=text, transcript=transcript, turns=turns, app_turns=app_texts,
         exit_status=proc.status, capture_path=cap_path, workspace=workspace,
-        instrumented=use_instr, instrumented_reason=reason)
+        instrumented=use_instr, instrumented_reason=reason, funcmap=funcmap)
 
 
 # --- multi-turn --------------------------------------------------------------
@@ -324,14 +448,18 @@ class Session:
 
     def __init__(self, *, model=None, workspace=None, tools=None, context=None,
                  rewrite=None, capture=True, instrumented=None, timeout=180,
-                 idle=25.0, agy_bin=None, extra_env=None, stage=3):
+                 idle=25.0, agy_bin=None, extra_env=None, stage=3, stack=False,
+                 arg_probe=False, funcmap=None):
         self.workspace = ensure_git_workspace(workspace)
         self.agy = agy_bin or AGY_BIN
         self.model = model
         self.timeout = timeout
         self.idle = idle
         self.capture = capture
-        self.stage = stage
+        self.stage = _resolve_stage(stage)
+        self.stack = stack
+        self.arg_probe = arg_probe
+        self.funcmap = funcmap
         self.extra_env = extra_env
         self.rewrite = rewrite
         self._tools = tools
@@ -358,7 +486,8 @@ class Session:
                          if self.instrumented else None)
         env, self.rules_path = _build_env(
             instrumented=self.instrumented, stage=self.stage, capture_path=self.cap_path,
-            rewrite=self.rewrite, workspace=self.workspace, extra_env=self.extra_env)
+            rewrite=self.rewrite, workspace=self.workspace, extra_env=self.extra_env,
+            stack=self.stack, arg_probe=self.arg_probe)
         if self.log_path:
             env["AGY_PROC_LOG"] = self.log_path
         self._cleanup = _inject_config(self._tools, self._context) if self.instrumented else (lambda: None)
@@ -388,7 +517,8 @@ class Session:
         return AgyResponse(
             text=text, transcript=transcript, turns=turns, app_turns=app_texts,
             exit_status=None, capture_path=self.cap_path, workspace=self.workspace,
-            instrumented=self.instrumented, instrumented_reason=self.instrumented_reason)
+            instrumented=self.instrumented, instrumented_reason=self.instrumented_reason,
+            funcmap=self.funcmap)
 
     def set_rewrite(self, spec):
         """Replace the live rewrite spec. For a RewriteRule list this rewrites the

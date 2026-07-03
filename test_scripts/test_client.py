@@ -10,6 +10,8 @@ text/model/usage, and a RewriteRule redaction is reflected on the wire.
 
     python3 test_scripts/test_client.py
 """
+import gzip
+import json
 import os
 import sys
 import tempfile
@@ -109,6 +111,112 @@ def test_resolve_instrumented():
         check(use is False and reason, "resolve: None + no shim → fallback with reason")
 
 
+def test_stage_aliases():
+    print("[offline] stage alias resolution")
+    check(C._resolve_stage("wire") == 3, "alias: wire -> 3")
+    check(C._resolve_stage("app") == 12 and C._resolve_stage("pipeline") == 12,
+          "alias: app/pipeline -> 12")
+    check(C._resolve_stage("rpc") == 13, "alias: rpc -> 13")
+    check(C._resolve_stage("smoke") == 2, "alias: smoke -> 2")
+    check(C._resolve_stage(5) == 5, "int passes through")
+    try:
+        C._resolve_stage("nope")
+        check(False, "unknown alias: rejected")
+    except ValueError as e:
+        check("unknown stage" in str(e), "unknown alias: clear ValueError")
+
+
+def test_build_env_overlays():
+    print("[offline] stack/arg_probe overlays wire the shim env knobs")
+    d = tempfile.mkdtemp()
+    cap = os.path.join(d, "c.jsonl")
+    env, _ = C._build_env(instrumented=True, stage=13, capture_path=cap, rewrite=None,
+                          workspace=d, extra_env=None, stack=True, arg_probe=True)
+    check(env.get("AGY_PROC_STACK") == "1", "stack=True -> AGY_PROC_STACK=1")
+    check(env.get("AGY_PROC_CGT_ARGS") == "1", "arg_probe=True -> AGY_PROC_CGT_ARGS=1")
+    check(env.get("AGY_PROC_STAGE") == "13", "stage threaded into env")
+    env2, _ = C._build_env(instrumented=True, stage=3, capture_path=cap, rewrite=None,
+                           workspace=d, extra_env=None)
+    check("AGY_PROC_STACK" not in env2 and "AGY_PROC_CGT_ARGS" not in env2,
+          "no overlays -> knobs absent")
+    clean, _ = C._build_env(instrumented=False, stage=3, capture_path=cap, rewrite=None,
+                            workspace=d, extra_env=None, stack=True)
+    check("AGY_PROC_STACK" not in clean, "uninstrumented: no diagnostic knobs")
+
+
+# synthetic funcmap for the .stacks/.call_graph decoders (link vaddr -> name)
+_FUNCS = [(0x1000, "runtime.goexit"), (0x2000, "app.run"),
+          (0x6000, "codeassistclient.(*CodeAssistClient).StreamGenerateContent")]
+
+
+def _synthetic_capture(d):
+    """A capture + funcmap exercising every diagnostic accessor. Returns (cap, fm)."""
+    cap = os.path.join(d, "diag.jsonl")
+    fm = os.path.join(d, "funcmap.tsv.gz")
+    with gzip.open(fm, "wt", encoding="utf-8") as f:
+        for addr, nm in _FUNCS:
+            f.write(f"{addr:x}\t{nm}\n")
+    events = [
+        {"t": 100.0, "kind": "rpc_load_code_assist", "stream": 1},
+        {"t": 101.2, "kind": "rpc_stream_generate", "stream": 2},          # the model turn
+        {"kind": "cgt_args", "stream": 2, "report": "arg[0] *Request { model: gemini }"},
+        {"kind": "cgt_args", "stream": 2, "report": "arg[1] context.Context"},
+        {"kind": "cgt_args", "stream": 2, "report": ""},                    # empty -> skipped
+        {"kind": "callstack", "src": "rpc_stream_generate", "frames": [0x6010, 0x2010, 0x1000]},
+        {"kind": "callstack", "src": "rpc_stream_generate", "frames": [0x6010, 0x2010, 0x1000]},
+        {"kind": "genai_turn", "text": "ignored"},                          # unrelated
+    ]
+    with open(cap, "w") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+    return cap, fm
+
+
+def _diag_resp(cap, fm):
+    return AgyResponse(text="x", transcript="x", turns=[], exit_status=0,
+                       capture_path=cap, workspace="/tmp", instrumented=True, funcmap=fm)
+
+
+def test_diagnostic_accessors():
+    print("[offline] AgyResponse.rpc_trace / cgt_args / stacks / call_graph")
+    d = tempfile.mkdtemp()
+    cap, fm = _synthetic_capture(d)
+    r = _diag_resp(cap, fm)
+
+    check("StreamGenerateContent" in r.rpc_trace and "the model turn" in r.rpc_trace,
+          "rpc_trace: labeled model turn")
+    check(r.rpc_trace is r.rpc_trace, "rpc_trace: cached (same object)")
+
+    check(r.cgt_args == ["arg[0] *Request { model: gemini }", "arg[1] context.Context"],
+          "cgt_args: non-empty reports collected in order")
+
+    check("2 fire(s), 1 distinct" in r.stacks, "stacks: identical stacks grouped")
+    check("StreamGenerateContent" in r.stacks and "app.run" in r.stacks,
+          "stacks: frames symbolized against funcmap")
+
+    edges = r.call_graph
+    check(edges[("app.run",
+                 "codeassistclient.(*CodeAssistClient).StreamGenerateContent")] == 2,
+          "call_graph: caller->callee edge counted")
+
+
+def test_diagnostic_graceful_empty():
+    print("[offline] diagnostic accessors degrade when a kind/funcmap is absent")
+    # no capture at all -> falsy/None
+    r = _diag_resp(None, None)
+    check(r.rpc_trace == "" and r.cgt_args == [] and r.stacks is None
+          and r.call_graph is None, "no capture: rpc_trace='' cgt_args=[] stacks/graph=None")
+    # capture present but funcmap missing -> stacks reason string, call_graph None
+    d = tempfile.mkdtemp()
+    cap, _ = _synthetic_capture(d)
+    r2 = _diag_resp(cap, "/no/such/funcmap.tsv.gz")
+    check(isinstance(r2.stacks, str) and "funcmap not found" in r2.stacks,
+          "missing funcmap: stacks returns a reason string")
+    check(r2.call_graph is None, "missing funcmap: call_graph None")
+    check(r2.cgt_args and "gemini" in r2.cgt_args[0],
+          "missing funcmap: cgt_args still decodes (independent of funcmap)")
+
+
 # --- live --------------------------------------------------------------------
 def test_live_ask():
     print("[live] ask() end-to-end")
@@ -141,6 +249,10 @@ def main():
     test_rewrite_rule()
     test_prepare_rewrite()
     test_resolve_instrumented()
+    test_stage_aliases()
+    test_build_env_overlays()
+    test_diagnostic_accessors()
+    test_diagnostic_graceful_empty()
     test_live_ask()
     print()
     if _failures:

@@ -201,7 +201,8 @@ Net: the entry-arg trampoline structurally can't see text assembled during the c
 functions that *return* it as a clean string are the inactive provider's. `crypto/tls.(*halfConn).decrypt`
 + `http1sse` already decode the exact output cleanly and stably off the wire, so **the response
 data path stays on the wire**; stages 11–12 remain as diagnostic/RE scaffolding
-(`AGY_PROC_CGT_ARGS` re-derives the layout in one command on a future agy build).
+(`AGY_PROC_CGT_ARGS` re-derives the layout in one command on a future agy build — from the
+client that's `ask("…", stage="app", arg_probe=True).cgt_args`, one rendered report per fire).
 
 ### The return-value problem — can we capture a response the trampoline built *during* a call?
 
@@ -279,8 +280,11 @@ ingress crypto/tls.(*Conn).Read   ← net/http.(*persistConn).Read ← chunkedRe
         ← io.ReadAll ← codeassistclient.doRequestAndUnmarshal ← …RecordConversationOffered / getStreamingTextCompletion.func1
 ```
 
-Usage: `AGY_PROC_STAGE=3 AGY_PROC_STACK=1 test_scripts/run-agy.sh --print "…"` (or any stage),
-then `python3 -m pyagy.agy_process.symbolize <capture.jsonl> [--graph]`.
+From the client (any stage): `ask("…", stack=True).stacks` returns the symbolized, grouped
+stacks and `.call_graph` the caller→callee edge `Counter`. Low-level path:
+`AGY_PROC_STAGE=3 AGY_PROC_STACK=1 test_scripts/run-agy.sh --print "…"` (or any stage),
+then `python3 -m pyagy.agy_process.symbolize <capture.jsonl> [--graph]`. `.stacks` needs the
+funcmap (`make symbols`); when it's absent the accessor returns a short reason string.
 
 ### RPC trace (stage 13) — the app-level backend timeline
 
@@ -288,8 +292,10 @@ then `python3 -m pyagy.agy_process.symbolize <capture.jsonl> [--graph]`.
 backend — each method is one **named** RPC with typed proto args. **Stage 13** trampolines
 them (they park on the HTTP round-trip) so each fires an `rpc_<name>` event, giving a
 labeled, time-ordered timeline of a turn that sits alongside the wire `genai_turn` decode.
-Compose with `AGY_PROC_STACK` (call stack per RPC) and `AGY_PROC_CGT_ARGS` (walk the request
-proto at entry). Render with `python3 -m pyagy.agy_process.rpctrace <capture.jsonl> --stacks`.
+From the client: `ask("…", stage="rpc").rpc_trace` returns the rendered timeline; compose
+with `stack=True` (call stack per RPC → `.stacks`) and `arg_probe=True` (walk the request
+proto at entry → `.cgt_args`). Low-level path: `python3 -m pyagy.agy_process.rpctrace
+<capture.jsonl> --stacks`.
 
 Observed (agy 1.0.16, one turn) — note the concurrency: background loops interleave with the
 model turn, and `StreamGenerateContent` **is** the model call:
@@ -526,11 +532,16 @@ string/JSON response.
 ```python
 from pyagy import ask, Session, ToolSpec, ContextResource, RewriteRule
 
-r = ask("Summarize this repo.")                 # one-shot
-print(r.text)                                    # clean final answer (PTY transcript)
+r = ask("Summarize this repo.")                 # one-shot (stage "wire", the default)
+print(r.text)                                    # clean final answer
 print(r.model, r.usage.total_tokens)             # decoded from the model turn
 print(r.request["tools"], r.request["first_user_text"])   # the request as SENT
 print(len(r.turns), [t["text"][:20] for t in r.turns])    # every model turn decoded
+
+print(ask("…", stage="app").app_text)            # answer decoded at agy's consumer boundary
+print(ask("…", stage="rpc").rpc_trace)           # labeled backend-RPC timeline
+print(ask("…", stack=True).stacks)               # symbolized Go call stacks (any stage)
+print(ask("…", stage="rpc", arg_probe=True).cgt_args)   # trampoline arg-graph reports
 
 with Session(tools=[ToolSpec("weather", handler="mytools:weather")]) as s:
     print(s.ask("Weather in Paris?").text)       # agy can call the injected tool
@@ -538,22 +549,55 @@ with Session(tools=[ToolSpec("weather", handler="mytools:weather")]) as s:
     print(s.ask("And there?").text)
 ```
 
+**One call, one result object — `stage` (int or alias) + two overlays pick what it
+captures.** Stages are mutually exclusive (one base capture per run); `stack=`/`arg_probe=`
+compose on top of any of them. The matching `AgyResponse` field is empty/None when this run
+didn't capture that kind:
+
+| `stage` (alias → int) | what fires | `AgyResponse` field |
+|---|---|---|
+| `"smoke"` → 2 | liveness only (`os.Getenv`), no network | — |
+| `"wire"` → 3 *(default)* | egress `tls_write` + ingress decrypt; **the `rewrite=` surface** | `.turns` / `.request` / `.events` / `.usage` / `.model` |
+| `"app"` / `"pipeline"` → 12 | framework consumer (`updateWithStep`) | `.app_text` (+ `.source=="app"`) |
+| `"rpc"` → 13 | `CodeAssistClient.*` backend RPCs | `.rpc_trace` |
+| overlay `stack=True` | Go call-stack unwind at each fire | `.stacks` (rendered) / `.call_graph` (`Counter`) |
+| overlay `arg_probe=True` | trampoline arg-graph walk at entry | `.cgt_args` (list of reports) |
+
 - **Two modify mechanisms, composable** (the design accepts *both*):
   - `rewrite=` — a `RewriteRule` list, a `"module:func"` string, or a callable →
-    **live SYNC egress rewrite**. Equal-length substitution only (framing-safe);
-    a length-changing rule is skipped in-agy and recorded (`rewrite_skip`).
+    **live SYNC egress rewrite** (stage `"wire"`). Equal-length substitution only
+    (framing-safe); a length-changing rule is skipped in-agy and recorded (`rewrite_skip`).
   - `tools=` / `context=` — **additive**, via an injected MCP server (`config.py`).
-- **`AgyResponse`**: `.text` (clean answer), `.turns` (all decoded `genai_turn`s),
-  `.request` / `.events` / `.usage` / `.model` (from the substantive turn),
-  `.transcript`, `.exit_status`, `.instrumented` (+`.instrumented_reason`).
+- **`AgyResponse`**: `.text` (clean answer, prefers app→wire→transcript), `.source`,
+  `.app_text`, `.turns` (all decoded `genai_turn`s), `.request` / `.events` / `.usage` /
+  `.model` (substantive turn), plus the lazy diagnostic accessors `.rpc_trace` /
+  `.stacks` / `.call_graph` / `.cgt_args` (each decodes its capture on demand — reading one
+  never costs the others, and `.stacks` loads the funcmap only when touched). Also
+  `.transcript`, `.exit_status`, `.instrumented` (+`.instrumented_reason`). `.stacks` needs
+  `symbols/funcmap.tsv.gz` (`make symbols`); pass `funcmap=` to override it.
+- **Introspect the capture surface**: `from pyagy import HOOKS, by_stage, by_kind,
+  sync_capable, DERIVED_KINDS` — the machine-readable mirror of `src/proc.def`
+  (which stage captures what, which kinds rewrite egress).
+- **Env knobs** (set for you by the kwargs above; also usable with `run-agy.sh`):
+
+  | env var | set by | effect |
+  |---|---|---|
+  | `AGY_PROC_STAGE` | `stage=` | which hook set is enabled (see table above) |
+  | `AGY_PROC_TLS_WRITE_SYNC` | `rewrite=` | make `tls_write` a SYNC (modify) hook |
+  | `AGY_PROC_REWRITE_RULES` / `AGY_PROC_REWRITE` | `rewrite=` | rules-file path / `module:func` |
+  | `AGY_PROC_STACK` | `stack=True` | emit deduped `callstack` events |
+  | `AGY_PROC_CGT_ARGS` | `arg_probe=True` | emit `cgt_args` arg-graph reports |
+  | `AGY_PROC_H2` / `AGY_PROC_CORRELATE` | — | `=0` disables HTTP/2 reassembly / the genai-turn correlator |
+
 - **Graceful degrade:** `instrumented=None` auto-detects the shim and confirms the
   build-id from the shim log after the run; if the shim is missing or agy has
   auto-updated past the pin, the call falls back to a clean PTY run (transcript-only
   `AgyResponse`) with the reason on `.instrumented_reason` — never a hard failure.
 - **Offline tests** (no agy/network/creds): `test_scripts/test_http1sse.py`,
-  `test_config.py`, `test_client.py`, plus the `rewrite`/`config` offline suites.
-  **Live** (skip cleanly per `test_trampoline.py`): `test_rewrite.py` round-trips a
-  redaction on the wire; `test_trampoline.py` asserts a stage-3 `genai_turn` decodes.
+  `test_config.py`, `test_client.py`, `test_appresponse.py`, `test_rpctrace.py`,
+  `test_symbolize.py`, plus the `rewrite`/`config` offline suites. **Live** (skip cleanly
+  per `test_trampoline.py`): `test_rewrite.py` round-trips a redaction on the wire;
+  `test_trampoline.py` asserts a stage-3 `genai_turn` decodes.
 
 ## Using agy as a TaskSolver backend (`pyagy`)
 
