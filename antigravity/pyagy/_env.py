@@ -14,6 +14,12 @@ import os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHIM = os.path.join(ROOT, "vendor", "antigravity.so")
 
+# agy self-updates in the background: it re-downloads the binary, which changes the
+# build-id (breaking the pinned symbols.json) AND undoes the WSL1 mmap byte-patch. Turn
+# it off on EVERY launch via agy's own opt-out env var (one of its AGY_CLI_* knobs). "1"
+# is truthy under both a bool-parse and a plain non-empty check.
+_NO_UPDATE = {"AGY_CLI_DISABLE_AUTO_UPDATE": "1"}
+
 
 def _prepend(env, key, value, sep=os.pathsep):
     existing = env.get(key)
@@ -35,6 +41,7 @@ def clean_env(base=None):
         env["LD_PRELOAD"] = os.pathsep.join(kept)
     else:
         env.pop("LD_PRELOAD", None)
+    env.update(_NO_UPDATE)
     return env
 
 
@@ -56,6 +63,7 @@ def instrumented_env(stage=3, capture="agy-capture.jsonl", log=None,
         "AGY_PROC_CAPTURE": os.path.abspath(capture),
         "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),
         "TERM": env.get("TERM", "xterm-256color"),
+        **_NO_UPDATE,
     })
     _prepend(env, "PYTHONPATH", root)
     _prepend(env, "LD_PRELOAD", shim)

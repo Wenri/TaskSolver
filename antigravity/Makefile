@@ -4,15 +4,37 @@
 #
 #   make            # ensure deps (setup) + build the shim from the committed symbols.json
 #   make symbols    # re-resolve symbols.json from vendor/agy (after an agy update), then `make`
-#   make setup      # just vendor/fetch deps: agy binary, frida-gum devkit, UAPI headers
+#   make setup      # just vendor/fetch deps: agy binary (pinned, sha512-verified), frida-gum, UAPI headers
+#   make agy-update # fetch the LATEST agy from the official manifest + print new pin values
 #   make clean
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 .ONESHELL:
 
 FRIDA_VER ?= 17.15.3
-AGY_BIN   ?= $(HOME)/.local/bin/agy
 CC        ?= gcc
+
+# Pinned agy release — the binary whose build-id matches the committed symbols.json.
+# agy self-updates in the background, so a local install's build-id DRIFTS; we vendor a
+# PINNED, sha512-verified release straight from the official CLI updater so the addresses
+# in symbols.json (resolved from this exact binary) stay valid. Values come from
+# $(AGY_MANIFEST_BASE)/manifests/linux_amd64.json — bump them with `make agy-update`,
+# then `make symbols` and commit symbols.json + this pin together (build-id changes).
+AGY_VERSION ?= 1.0.16
+AGY_URL     ?= https://storage.googleapis.com/antigravity-public/antigravity-cli/1.0.16-4893150192467968/linux-x64/cli_linux_x64.tar.gz
+AGY_SHA512  ?= 2e3362fb360d350285c3a79891772652ea56608121e4e89091abe553e8203c379e30bac86bde109ecc0b3266cb6eb871a68ef28a993aeca7944456f0f720ae31
+AGY_MANIFEST_BASE ?= https://antigravity-cli-auto-updater-974169037036.us-central1.run.app
+# Optional escape hatch: point at a local agy build to vendor instead of downloading the
+# pin (it must match symbols.json's build-id or the shim's load-time guard degrades).
+# Empty (default) = fetch the pinned release. NOTE: not $(HOME)/.local/bin/agy, which
+# self-updates and would silently drift off the pinned symbols.
+AGY_BIN   ?=
+# WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag (agy SIGABRTs before
+# main), so a freshly-fetched agy must be byte-patched to run there — symbols/patch_agy_wsl1.py
+# clears that flag in-place (address- & build-id-preserving, so symbols.json stays valid).
+# Auto-detected from `uname -r` (WSL1 = "…-Microsoft"); real kernels/WSL2 need no patch.
+# Override with AGY_WSL1=1/0.
+AGY_WSL1  ?= $(shell uname -r | grep -q Microsoft && echo 1 || echo 0)
 
 GUM  := vendor/frida-gum
 # vendor/ is gitignored, so the built shim lives alongside its fetched deps.
@@ -36,24 +58,35 @@ CFLAGS  := -O2 -g -fPIC -Wall -Wextra -std=gnu11 -fvisibility=hidden \
 LDFLAGS := -shared -Wl,--exclude-libs,ALL -Wl,--gc-sections
 LIBS    := $(GUM)/libfrida-gum.a $(shell $(PYCFG) --ldflags --embed) -lrt -lresolv -ldl -lm -pthread
 
-.PHONY: all setup symbols clean
+.PHONY: all setup symbols agy-update clean
 all: $(SHIM)
 
 # Recompile only when sources/symbols change; `| setup` (order-only) ensures the
 # vendored deps exist first without forcing a rebuild.
-$(SHIM): src/antigravity.c src/pybridge.c src/pybridge.h src/gomod.c src/gohook.c src/gomod.h src/proc.def src/gen_symbols_header.py symbols/symbols.json | setup
+$(SHIM): src/antigravity.c src/pybridge.c src/pybridge.h src/gomod.c src/gohook.c src/gomod.h src/proc.def symbols/gen_symbols_header.py symbols/symbols.json | setup
 	test -n "$(UAPI_INC)" || test -f /usr/include/linux/limits.h || { echo "ERROR: no linux/limits.h — install kernel-headers_linux-64 (a pixi dep) so \$$CONDA_PREFIX has a sysroot (CONDA_PREFIX=$(CONDA_PREFIX) PREFIX=$(PREFIX))" >&2; exit 1; }
 	echo "[build] UAPI headers: $(if $(UAPI_INC),$(UAPI_INC),/usr/include (system))"
-	python3 src/gen_symbols_header.py symbols/symbols.json src/symbols_gen.h
+	python3 symbols/gen_symbols_header.py symbols/symbols.json src/symbols_gen.h
 	mkdir -p vendor
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $(SHIM) src/antigravity.c src/pybridge.c src/gomod.c src/gohook.c $(LIBS)
 	echo "built $(SHIM) ($$(stat -c%s $(SHIM)) bytes)"
 
 # Vendor the deps that are NOT committed (see .gitignore); all steps idempotent.
 setup:
-	if [ -f vendor/agy ]; then echo "[setup] agy present"
-	elif [ -f "$(AGY_BIN)" ]; then mkdir -p vendor && cp "$(AGY_BIN)" vendor/agy && echo "[setup] vendored agy from $(AGY_BIN)"
-	else echo "[setup] WARN: $(AGY_BIN) not found — set AGY_BIN or copy to vendor/agy" >&2
+	if [ -f vendor/agy ]; then echo "[setup] agy present ($$(readelf -n vendor/agy 2>/dev/null | awk '/Build ID/{print $$NF}'))"
+	elif [ -n "$(AGY_BIN)" ] && [ -f "$(AGY_BIN)" ]; then
+	  mkdir -p vendor && cp "$(AGY_BIN)" vendor/agy && echo "[setup] vendored agy from $(AGY_BIN)"
+	  if [ "$(AGY_WSL1)" = 1 ]; then python3 symbols/patch_agy_wsl1.py vendor/agy || echo "[setup] WSL1 patch skipped (source already patched?)"; fi
+	else
+	  echo "[setup] fetching pinned agy $(AGY_VERSION) (sha512-verified) from the official CLI release"
+	  mkdir -p vendor
+	  tmp="$$(mktemp -t agy.XXXXXX.tar.gz)"
+	  curl -fsSL --proto '=https' --tlsv1.2 --max-time 300 "$(AGY_URL)" -o "$$tmp"
+	  printf '%s  %s\n' "$(AGY_SHA512)" "$$tmp" | sha512sum -c - >/dev/null || { rm -f "$$tmp"; echo "[setup] FATAL: agy sha512 mismatch — refusing to vendor a corrupt/tampered binary" >&2; exit 1; }
+	  tar -xzf "$$tmp" -C vendor antigravity && mv -f vendor/antigravity vendor/agy && chmod +x vendor/agy
+	  rm -f "$$tmp"
+	  echo "[setup] vendored agy $(AGY_VERSION) ($$(readelf -n vendor/agy 2>/dev/null | awk '/Build ID/{print $$NF}'))"
+	  if [ "$(AGY_WSL1)" = 1 ]; then python3 symbols/patch_agy_wsl1.py vendor/agy; fi
 	fi
 	if [ -f "$(GUM)/libfrida-gum.a" ]; then echo "[setup] frida-gum present ($$(cat $(GUM)/VERSION 2>/dev/null))"
 	else
@@ -74,3 +107,27 @@ symbols: | setup
 
 clean:
 	rm -f $(SHIM) src/symbols_gen.h
+
+# Fetch the LATEST agy from the official updater manifest, vendor it (sha512-verified),
+# and print the new pin values to paste above. The build-id WILL change vs the current
+# pin, so follow with `make symbols` and commit symbols.json + the updated pin together.
+# (Reproducible builds use the pinned AGY_URL above; this target is the deliberate bump.)
+agy-update:
+	platform="linux_$$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
+	echo "[agy-update] querying $(AGY_MANIFEST_BASE)/manifests/$$platform.json"
+	json="$$(curl -fsSL --max-time 60 "$(AGY_MANIFEST_BASE)/manifests/$$platform.json")"
+	ver="$$(printf '%s' "$$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+	url="$$(printf '%s' "$$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])')"
+	sha="$$(printf '%s' "$$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha512"])')"
+	echo "[agy-update] latest = $$ver"
+	tmp="$$(mktemp -t agy.XXXXXX.tar.gz)"
+	curl -fsSL --max-time 300 "$$url" -o "$$tmp"
+	printf '%s  %s\n' "$$sha" "$$tmp" | sha512sum -c - >/dev/null || { rm -f "$$tmp"; echo "[agy-update] FATAL: sha512 mismatch" >&2; exit 1; }
+	mkdir -p vendor && tar -xzf "$$tmp" -C vendor antigravity && mv -f vendor/antigravity vendor/agy && chmod +x vendor/agy
+	rm -f "$$tmp"
+	if [ "$(AGY_WSL1)" = 1 ]; then python3 symbols/patch_agy_wsl1.py vendor/agy; fi
+	echo "[agy-update] vendored agy $$ver ($$(readelf -n vendor/agy 2>/dev/null | awk '/Build ID/{print $$NF}')). Update the pin above:"
+	echo "    AGY_VERSION ?= $$ver"
+	echo "    AGY_URL     ?= $$url"
+	echo "    AGY_SHA512  ?= $$sha"
+	echo "[agy-update] then: pixi run make -C antigravity symbols   (re-resolve + commit symbols.json + Makefile)"

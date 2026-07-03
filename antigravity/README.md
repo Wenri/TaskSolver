@@ -340,13 +340,14 @@ antigravity/
   symbols/
     build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
                               symbols.json; self-verifies every hook is a prologue
+    gen_symbols_header.py   ← symbols.json → symbols_gen.h (build-id + name→vaddr)
+    patch_agy_wsl1.py       ← WSL1: clear tcmalloc MAP_FIXED_NOREPLACE in the fetched agy
     symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, catalog}
   src/
     antigravity.c               ← LD_PRELOAD constructor + gum install + Go-ABI hook
                               callbacks + getaddrinfo interposer
     pybridge.c/.h           ← embed libpython, pyworker thread, queue, dispatch
     proc.def                ← declarative hook table (id, symbol, mode, kind, stage, leave)
-    gen_symbols_header.py   ← symbols.json → symbols_gen.h (build-id + name→vaddr)
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
     __init__.py             ← lazy exports (PEP 562): ask/Session/AgyResponse/specs,
                               AgyModel, run_print/InteractiveSession, write_mcp_config
