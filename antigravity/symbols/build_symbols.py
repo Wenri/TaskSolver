@@ -83,6 +83,13 @@ PROC_TARGETS = [
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",
     "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",
+    # consumer-entry hook for the RESPONSE: these take the completed *Step (with the
+    # assembled assistant text) as an entry ARG — sidesteps the return-value problem.
+    # (protoTrajectory.AppendStep did NOT fire in --print/interactive; the step commit
+    # goes through the framework/cortex trajectory + the step-changed callback instead.)
+    "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep",
+    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep",
+    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged",
 ]
 
 # Nosplit/frameless leaf getters that RETURN the streamed model text as a Go string
@@ -93,6 +100,11 @@ PROC_TARGETS = [
 NOSPLIT_TARGETS = [
     "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText",
     "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText",
+    # RESPONSE getters (return the assembled assistant text as a plain Go string →
+    # gum on_leave, zero struct-offset fragility). The cortex step's response/thinking.
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse",
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking",
+    "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response",
 ]
 
 # Reference groups emitted for picking further hook points (not hooked by default).

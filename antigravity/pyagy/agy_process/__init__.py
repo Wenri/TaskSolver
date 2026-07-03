@@ -127,6 +127,9 @@ _ROUTER = {
     "callstack": on_callstack,
     "delta_ccpa": _on_model_text("delta_ccpa"),
     "delta_completion": _on_model_text("delta_completion"),
+    "resp_text": _on_model_text("resp_text"),
+    "resp_thinking": _on_model_text("resp_thinking"),
+    "resp_view": _on_model_text("resp_view"),
 }
 
 

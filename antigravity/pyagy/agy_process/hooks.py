@@ -62,6 +62,14 @@ HOOKS = [
      "symbol": "…codeium_common_go_proto.(*CompletionDelta).GetDeltaText",
      "mode": "async", "kind": "delta_completion", "stage": 11, "leave": True,
      "note": "leaf getter, returns delta text (on_leave); inactive provider — doesn't fire"},
+    # RESPONSE getters (return the assembled text as a plain string on_leave). Tried for
+    # the return-value problem; DON'T fire on 1.0.16 (framework reads the field directly).
+    {"id": "RESP_TEXT", "symbol": "…cortex_go_proto.(*CortexStepPlannerResponse).GetResponse",
+     "mode": "async", "kind": "resp_text", "stage": 11, "leave": True, "note": "response getter — doesn't fire (direct field access)"},
+    {"id": "RESP_THINKING", "symbol": "…cortex_go_proto.(*CortexStepPlannerResponse).GetThinking",
+     "mode": "async", "kind": "resp_thinking", "stage": 11, "leave": True, "note": "thinking getter — doesn't fire"},
+    {"id": "RESP_VIEW", "symbol": "…trajectory.(*PlannerResponseStepView).Response",
+     "mode": "async", "kind": "resp_view", "stage": 11, "leave": True, "note": "response view — doesn't fire"},
     {"id": "FH_FINALIZE",
      "symbol": "…generator.(*streamResponseHandler).finalizePlannerResponse",
      "mode": "async", "kind": "fh_finalize", "stage": 12, "leave": False,
@@ -78,6 +86,16 @@ HOOKS = [
      "symbol": "…core.createPlannerResponseStep",
      "mode": "async", "kind": "core_planstep", "stage": 12, "leave": False,
      "note": "builds assistant Step (trampoline); inlined/off-path — fired 0× in probe"},
+    # consumer-entry hooks for the RESPONSE (return-value problem). OnStepsChanged FIRES
+    # and its entry-reachable graph holds the full assembled answer (via AGY_PROC_CGT_ARGS);
+    # the AppendStep/AddStep variants don't fire (different concrete type / --print path).
+    {"id": "TRAJ_APPENDSTEP", "symbol": "…integration.(*ToolContextTrajectory).AppendStep",
+     "mode": "async", "kind": "traj_appendstep", "stage": 12, "leave": False, "note": "doesn't fire in --print/interactive"},
+    {"id": "TRAJ_ADDSTEP", "symbol": "…cortex/traj/traj.(*Trajectory).AddStep",
+     "mode": "async", "kind": "traj_addstep", "stage": 12, "leave": False, "note": "doesn't fire"},
+    {"id": "TRAJ_ONSTEPS", "symbol": "…agent_state_component.(*AgentState).OnStepsChanged",
+     "mode": "async", "kind": "traj_onsteps", "stage": 12, "leave": False,
+     "note": "FIRES; entry graph holds the full assembled response (deep offset; extraction fragile → wire stays authoritative)"},
     # stage 13: CodeAssistClient RPC trace (trampoline; kind = RPC label). The
     # app-semantic backend boundary — request via AGY_PROC_CGT_ARGS, stack via
     # AGY_PROC_STACK. StreamGenerateContent is the model turn. See rpctrace.py.

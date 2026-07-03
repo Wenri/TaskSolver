@@ -203,6 +203,31 @@ functions that *return* it as a clean string are the inactive provider's. `crypt
 data path stays on the wire**; stages 11–12 remain as diagnostic/RE scaffolding
 (`AGY_PROC_CGT_ARGS` re-derives the layout in one command on a future agy build).
 
+### The return-value problem — can we capture a response the trampoline built *during* a call?
+
+The trampoline reads ENTRY args, never the return, so values *built during* a call (the assembled
+response) aren't in its registers. Two general return-capture designs were assessed:
+- **`on_leave`-style return-address redirect keyed by g — BLOCKED.** Moving the real caller return
+  address off-stack breaks Go's `gentraceback`/`copystack` during a park (it can't reach the real
+  caller); no synthetic pcsp restores info that's gone.
+- **In-place `ret`-patch (capture RAX/RBX at the `ret`, post-park) — VIABLE-with-work** (reuses the
+  proven cgocall-window moduledata; blockers are ret-site discovery + the 1-byte-`ret` patch size).
+  Not built — kept as the future general escape-hatch.
+
+Instead we take the **consumer-entry hook**: Go passes a result forward as an argument, so hook the
+*consumer* whose entry arg is the produced value. For the response this works — **`agent_state_component.(*AgentState).OnStepsChanged`** (stage 12) **fires** (once per step-change) and
+its entry-reachable graph contains the **full assembled answer** (verified: a 196-char prose answer
+surfaced by the `AGY_PROC_CGT_ARGS` walk at `rax+24+…`). `protoTrajectory.AppendStep`/
+`ToolContextTrajectory.AppendStep`/`traj.Trajectory.AddStep` and the response getters
+(`CortexStepPlannerResponse.GetResponse/GetThinking`, `PlannerResponseStepView.Response`) were tried
+and **don't fire** in `--print`/interactive (direct field access / different concrete type).
+
+So the response IS observable at the app boundary via `OnStepsChanged` — but **reliable extraction is
+fragile**: the text sits behind a deep per-build-specific offset path, and a "longest prose" heuristic
+is unreliable (the 3.5 KB tool-schema JSON in the same arg is longer than the answer). Therefore
+`http1sse` stays the **authoritative** response source; `OnStepsChanged` is committed as a stage-12
+probe target so `AGY_PROC_CGT_ARGS` surfaces the assembled answer at the app boundary for inspection.
+
 ### Call-stack probe (`AGY_PROC_STACK=1`) — mapping HOW agy assembles a turn
 
 To understand the pipeline (not just the bytes), the shim can dump the **Go call stack** at

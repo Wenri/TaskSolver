@@ -176,7 +176,8 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
             agy_py_emit(&ev);
         }
     } else if (id == HK_SER_ROOT || id == HK_MAR_PROMPT || id == HK_PROTO_MARSHAL ||
-               id == HK_GET_DELTA_CCPA || id == HK_GET_DELTA_CMPL) {
+               id == HK_GET_DELTA_CCPA || id == HK_GET_DELTA_CMPL ||
+               id == HK_RESP_TEXT || id == HK_RESP_THINKING || id == HK_RESP_VIEW) {
         /* Go []byte/string return: RAX=ptr, RBX=len (CPU-only funcs). proto.Marshal is
          * hot; skip tiny protos to cut noise. The GET_DELTA_* getters return the
          * streamed assistant text as a Go string — the cleanest response signal. */

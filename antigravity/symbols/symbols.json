@@ -35,8 +35,14 @@
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep": 107586816,
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream": 107577792,
     "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep": 94242848,
+    "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep": 108622944,
+    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep": 113677280,
+    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged": 108663840,
     "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText": 93880512,
-    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText": 91762816
+    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText": 91762816,
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse": 93345760,
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking": 93345824,
+    "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response": 93807968
   },
   "skips": {
     "crypto/tls.(*Conn).Write": 15,
@@ -67,8 +73,14 @@
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep": 10,
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream": 18,
     "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep": 10,
+    "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep": 6,
+    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep": 15,
+    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged": 15,
     "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText": 0,
-    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText": 0
+    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText": 0,
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse": 0,
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking": 0,
+    "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response": 0
   },
   "missing": [],
   "catalog": {
