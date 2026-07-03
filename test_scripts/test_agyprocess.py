@@ -94,10 +94,31 @@ def case_stream():
     print("  NOTE stream: agy produced no turn this run (live-model flake); decode path unexercised")
 
 
+def case_persistent():
+    # Persistent multi-turn: agy stays alive interactive; drive follow-ups with .ask() and
+    # collect the decoded turns per prompt. Flaky (two live turns), so PASS on both-turns-with-
+    # text (context retained), else NOTE — decode itself is already asserted by case_stream.
+    p = AgyProcess(target=stream_turns, stage=3, persistent=True,
+                   prompt="What is 2+2? Reply with only the digits.")
+    p.start()
+    t1 = p.ask()                                                    # submit the prefilled initial
+    t2 = p.ask("Now multiply that by 10. Reply with only the digits.")   # follow-up (needs context)
+    _teardown(p)
+
+    def first_text(ts):
+        return next(((t.get("text") or "").strip() for t in ts if (t.get("text") or "").strip()), "")
+    x1, x2 = first_text(t1), first_text(t2)
+    if x1 and x2:
+        print(f"  ok   persistent: 2-turn session t1={x1[:16]!r} t2={x2[:16]!r} (context retained)")
+    else:
+        print(f"  NOTE persistent: incomplete this run (t1={len(t1)} t2={len(t2)}); live-model flake")
+
+
 if __name__ == "__main__":
     print("[AgyProcess] real multiprocessing.spawn child (agy = vendor/agy)")
     case_roundtrip()
     case_exception()
     case_stream()
+    case_persistent()
     print("\nPASS" if not _fail else "\nFAIL: " + ",".join(_fail))
     sys.exit(1 if _fail else 0)

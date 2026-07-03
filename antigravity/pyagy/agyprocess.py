@@ -21,6 +21,7 @@ and tracks agy's own pid; the TASK result flows over the Connection (agy owns li
 """
 import os
 import threading
+import time
 import traceback
 
 import multiprocessing.connection as _conn
@@ -57,6 +58,7 @@ class AgyPopen(_ForkPopen):
 
         self._parent_conn = parent_conn
         self._stop = threading.Event()
+        self._last_output = time.time()   # last time agy wrote to the PTY (turn-boundary idle)
         self._pty = PtyProcess()
         self._pty.spawn(argv, workdir, env)                  # pty.fork + execve(agy); child inherits the fds
         self.pid = self._pty.pid
@@ -96,10 +98,12 @@ class AgyPopen(_ForkPopen):
         threading.Thread(target=self._pump, name="agy-mp-pty", daemon=True).start()
 
     def _pump(self):
-        """Drain agy's PTY + auto-answer terminal-capability queries so its TUI proceeds."""
+        """Drain agy's PTY + auto-answer terminal-capability queries so its TUI proceeds;
+        track the last-output time so the parent can detect turn boundaries (agy going idle)."""
         try:
             while not self._stop.is_set():
-                self._pty.pump(0.3)
+                if self._pty.pump(0.3):
+                    self._last_output = time.time()
         except Exception:
             pass
 
@@ -128,16 +132,21 @@ class AgyProcess(SpawnProcess):
         return AgyPopen(process_obj)
 
     def __init__(self, target=None, name=None, args=(), kwargs=None, *,
-                 agy_bin=None, agy_args=None, workdir=None, stage=1, capture=None,
-                 persistent=False, daemon=None):
+                 agy_bin=None, agy_args=None, prompt=None, workdir=None, stage=1,
+                 capture=None, persistent=False, daemon=None):
         super().__init__(group=None, target=target, name=name,
                          args=args, kwargs=(kwargs or {}), daemon=daemon)
+        if agy_args is None:
+            # one-shot: `agy --print <prompt>` (agy exits after the turn); persistent:
+            # `agy --prompt-interactive <prompt>` — drive follow-ups with .ask()/.send().
+            flag = "--prompt-interactive" if persistent else "--print"
+            agy_args = [flag, prompt if prompt is not None else "agy-mp"]
         self._agy_bin = agy_bin        # agy binary (default: the pinned vendor/agy)
-        self._agy_args = agy_args      # agy argv tail (default: ["--print", "agy-mp"])
+        self._agy_args = agy_args      # agy argv tail
         self._workdir = workdir        # git workspace (default: a throwaway repo)
         self._stage = stage            # AGY_PROC_STAGE for the shim capture pipeline
         self._capture = capture
-        self._persistent = persistent  # (reserved) keep agy alive across multiple turns
+        self._persistent = persistent  # long-lived interactive agy (drive via .ask()/.send())
 
     # --- parent-side result channel (native Python objects sent by the child target) ---
     def recv(self):
@@ -149,3 +158,43 @@ class AgyProcess(SpawnProcess):
     @property
     def connection(self):
         return self._popen._parent_conn
+
+    # --- persistent (multi-turn TUI) driving: type prompts into agy, collect decoded turns ---
+    def send(self, prompt):
+        """Type + submit a prompt into agy's interactive TUI (fire-and-forget)."""
+        self._popen._pty.send_line(prompt)
+        self._popen._last_output = time.time()
+
+    def ask(self, prompt=None, idle=6.0, pty_idle=15.0, timeout=180.0, ready=2.5):
+        """Persistent mode: submit a prompt and return the decoded genai_turn(s) for it.
+        prompt=None submits the `--prompt-interactive` prefill (use for the first turn).
+        Waits for agy to be idle/ready before typing, settles when no new turn arrives for
+        `idle`s (or agy stays quiet `pty_idle`s with no turn), or after `timeout`. Reads
+        decoded turns off the Connection that the in-agy stream_turns target streams home."""
+        pop = self._popen
+        rstart = time.time()                 # wait until agy is ready (TUI drawn / prior turn done)
+        while time.time() - rstart < 30 and time.time() - pop._last_output < ready:
+            time.sleep(0.2)
+        if prompt is None:
+            pop._pty.write(b"\r")            # submit the prefilled initial prompt
+        else:
+            pop._pty.send_line(prompt)       # type + submit a follow-up
+        pop._last_output = time.time()
+        conn = pop._parent_conn
+        turns, last_turn, start = [], None, time.time()
+        while time.time() - start < timeout:
+            while conn.poll(0):
+                try:
+                    o = conn.recv()
+                except EOFError:
+                    return turns
+                if isinstance(o, dict) and o.get("kind") == "genai_turn":
+                    turns.append(o)
+                    last_turn = time.time()
+            now = time.time()
+            if last_turn is not None and now - last_turn >= idle:
+                break                        # turn(s) settled
+            if last_turn is None and now - pop._last_output >= pty_idle:
+                break                        # agy went idle without producing a turn
+            time.sleep(0.2)
+        return turns
