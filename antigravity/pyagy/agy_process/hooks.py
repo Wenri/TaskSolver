@@ -78,6 +78,31 @@ HOOKS = [
      "symbol": "…core.createPlannerResponseStep",
      "mode": "async", "kind": "core_planstep", "stage": 12, "leave": False,
      "note": "builds assistant Step (trampoline); inlined/off-path — fired 0× in probe"},
+    # stage 13: CodeAssistClient RPC trace (trampoline; kind = RPC label). The
+    # app-semantic backend boundary — request via AGY_PROC_CGT_ARGS, stack via
+    # AGY_PROC_STACK. StreamGenerateContent is the model turn. See rpctrace.py.
+    {"id": "RPC_STREAM_GEN", "symbol": "…codeassistclient.(*CodeAssistClient).StreamGenerateContent",
+     "mode": "async", "kind": "rpc_stream_generate", "stage": 13, "leave": False,
+     "note": "the model turn (streaming); request proto at entry"},
+    {"id": "RPC_GEN", "symbol": "…(*CodeAssistClient).GenerateContent",
+     "mode": "async", "kind": "rpc_generate", "stage": 13, "leave": False, "note": "non-streaming generate"},
+    {"id": "RPC_LOAD_CA", "symbol": "…(*CodeAssistClient).FetchLoadCodeAssistResponse",
+     "mode": "async", "kind": "rpc_load_code_assist", "stage": 13, "leave": False, "note": "startup"},
+    {"id": "RPC_USERINFO", "symbol": "…(*CodeAssistClient).FetchUserInfo",
+     "mode": "async", "kind": "rpc_fetch_userinfo", "stage": 13, "leave": False, "note": "startup"},
+    {"id": "RPC_MODELS", "symbol": "…(*CodeAssistClient).FetchAvailableModels",
+     "mode": "async", "kind": "rpc_fetch_models", "stage": 13, "leave": False, "note": "MendelStateCache pollLoop"},
+    {"id": "RPC_EXPERIMENTS", "symbol": "…(*CodeAssistClient).ListExperiments",
+     "mode": "async", "kind": "rpc_list_experiments", "stage": 13, "leave": False, "note": "MendelStateCache pollLoop"},
+    {"id": "RPC_QUOTA", "symbol": "…(*CodeAssistClient).RetrieveUserQuotaSummary",
+     "mode": "async", "kind": "rpc_quota", "stage": 13, "leave": False, "note": "store quotaRefreshLoop"},
+    {"id": "RPC_REC_OFFERED", "symbol": "…(*CodeAssistClient).RecordConversationOffered",
+     "mode": "async", "kind": "rpc_record_offered", "stage": 13, "leave": False, "note": "telemetry"},
+    {"id": "RPC_REC_TRAJ", "symbol": "…(*CodeAssistClient).RecordTrajectorySegmentAnalytics",
+     "mode": "async", "kind": "rpc_record_trajectory", "stage": 13, "leave": False,
+     "note": "post-turn telemetry (AgentExecutor.recordTelemetryAfterExecution)"},
+    {"id": "RPC_WRITE_ACLS", "symbol": "…(*CodeAssistClient).WriteTrajectoryACLs",
+     "mode": "async", "kind": "rpc_write_acls", "stage": 13, "leave": False, "note": "trajectory ACLs"},
 ]
 
 # Kinds the correlator/decoder synthesize (not raw hooks) — emitted into the capture.

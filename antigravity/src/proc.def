@@ -81,3 +81,21 @@ HOOK(FH_FINALIZE, "google3/third_party/gemini_coder/framework/generator/generato
 HOOK(FH_UPDATE,   "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",          AGY_ASYNC, "fh_update",   12, 0)
 HOOK(FH_PROCESS,  "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",           AGY_ASYNC, "fh_process",  12, 0)
 HOOK(CORE_PLANSTEP, "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",                                AGY_ASYNC, "core_planstep", 12, 0)
+
+/* stage 13: CodeAssistClient RPC trace. (*CodeAssistClient).* is agy's single client
+ * to the CloudCode backend — each method is one named RPC with typed proto args. They
+ * park on the HTTP round-trip → cgocall trampoline. The kind is the RPC label (→ a
+ * time-ordered app-level trace); AGY_PROC_STACK adds the call stack, AGY_PROC_CGT_ARGS
+ * walks the request proto at entry. StreamGenerateContent is the model turn itself. */
+#define CAC "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient)."
+HOOK(RPC_STREAM_GEN,   CAC "StreamGenerateContent",            AGY_ASYNC, "rpc_stream_generate",   13, 0)
+HOOK(RPC_GEN,          CAC "GenerateContent",                  AGY_ASYNC, "rpc_generate",          13, 0)
+HOOK(RPC_LOAD_CA,      CAC "FetchLoadCodeAssistResponse",      AGY_ASYNC, "rpc_load_code_assist",  13, 0)
+HOOK(RPC_USERINFO,     CAC "FetchUserInfo",                    AGY_ASYNC, "rpc_fetch_userinfo",    13, 0)
+HOOK(RPC_MODELS,       CAC "FetchAvailableModels",             AGY_ASYNC, "rpc_fetch_models",      13, 0)
+HOOK(RPC_EXPERIMENTS,  CAC "ListExperiments",                  AGY_ASYNC, "rpc_list_experiments",  13, 0)
+HOOK(RPC_QUOTA,        CAC "RetrieveUserQuotaSummary",         AGY_ASYNC, "rpc_quota",             13, 0)
+HOOK(RPC_REC_OFFERED,  CAC "RecordConversationOffered",        AGY_ASYNC, "rpc_record_offered",    13, 0)
+HOOK(RPC_REC_TRAJ,     CAC "RecordTrajectorySegmentAnalytics", AGY_ASYNC, "rpc_record_trajectory", 13, 0)
+HOOK(RPC_WRITE_ACLS,   CAC "WriteTrajectoryACLs",              AGY_ASYNC, "rpc_write_acls",        13, 0)
+#undef CAC

@@ -240,6 +240,30 @@ ingress crypto/tls.(*Conn).Read   ← net/http.(*persistConn).Read ← chunkedRe
 Usage: `AGY_PROC_STAGE=3 AGY_PROC_STACK=1 test_scripts/run-agy.sh --print "…"` (or any stage),
 then `python3 -m pyagy.agy_process.symbolize <capture.jsonl> [--graph]`.
 
+### RPC trace (stage 13) — the app-level backend timeline
+
+`(*CodeAssistClient).*` (jetski/language_server) is agy's single client to the CloudCode
+backend — each method is one **named** RPC with typed proto args. **Stage 13** trampolines
+them (they park on the HTTP round-trip) so each fires an `rpc_<name>` event, giving a
+labeled, time-ordered timeline of a turn that sits alongside the wire `genai_turn` decode.
+Compose with `AGY_PROC_STACK` (call stack per RPC) and `AGY_PROC_CGT_ARGS` (walk the request
+proto at entry). Render with `python3 -m pyagy.agy_process.rpctrace <capture.jsonl> --stacks`.
+
+Observed (agy 1.0.16, one turn) — note the concurrency: background loops interleave with the
+model turn, and `StreamGenerateContent` **is** the model call:
+
+```
++0.0s  FetchLoadCodeAssistResponse / FetchUserInfo        (startup)
++1.5s  RetrieveUserQuotaSummary   ← store.(*Manager).quotaRefreshLoop        (background)
++1.7s  ListExperiments / FetchAvailableModels ← experiments.(*MendelStateCache).pollLoop
++2.1s  StreamGenerateContent  (THE MODEL TURN) ← codeassistclient.(*CodeAssistClient).GetChatMessage.func3
++3.4s  RecordConversationOffered / RecordTrajectorySegmentAnalytics ← AgentExecutor.recordTelemetryAfterExecution
+```
+
+This is the best **request / RPC-level** boundary (clean, app-named, one hook family). The
+same entry-only-trampoline limit applies to the *response* (a return value built during the
+call) — so responses stay on the wire (`http1sse`); stage 13 is the *what-agy-calls* view.
+
 ---
 
 ## Hybrid tools / mcp_context

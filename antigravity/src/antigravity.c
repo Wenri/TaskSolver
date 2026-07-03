@@ -213,8 +213,9 @@ static void install_hooks(int stage)
     /* stages 8/9/12: the cgocall-trampoline path (gohook.c) — NOT a gum attach. Collect
      * this stage's targets and redirect them through runtime.cgocall + a synthetic
      * moduledata (always installed) that keeps GC stack-unwind safe. (Stage 12 = the
-     * parking gemini_coder framework text funcs; probed with AGY_PROC_CGT_ARGS.) */
-    if (stage == 8 || stage == 9 || stage == 12) {
+     * parking gemini_coder framework text funcs; stage 13 = the parking CodeAssistClient
+     * RPC methods for the app-level trace; both probed with AGY_PROC_CGT_ARGS/STACK.) */
+    if (stage == 8 || stage == 9 || stage == 12 || stage == 13) {
         agy_gh_target tg[HK_COUNT];
         int nt = 0;
         for (int i = 0; i < HK_COUNT; i++) {

@@ -58,6 +58,22 @@ PROC_TARGETS = [
     # lower entryoff (0x4f52780), which is the one cgocall actually CALLs.
     "runtime.asmcgocall",
 
+    # --- stage 13: CodeAssistClient RPC trace (app-semantic backend boundary) ---
+    # (*CodeAssistClient).* is agy's single client to the CloudCode backend; each
+    # method = one named RPC with typed proto args. Trampoline (they park on the HTTP
+    # round-trip). Entry-arg walk (AGY_PROC_CGT_ARGS) captures the request proto; the
+    # RPC name IS the trace label. StreamGenerateContent is the model turn itself.
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).StreamGenerateContent",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).GenerateContent",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchLoadCodeAssistResponse",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchUserInfo",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchAvailableModels",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).ListExperiments",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RetrieveUserQuotaSummary",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordConversationOffered",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordTrajectorySegmentAnalytics",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).WriteTrajectoryACLs",
+
     # --- stage 12: model-text pipeline probe (gemini_coder framework) ---
     # The CLEAN assistant text flows through framework/{generator,core}, NOT the
     # jetski/cli/backend tail (callbackStreamer.Send, which only sees the wrapped
