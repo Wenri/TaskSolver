@@ -93,6 +93,20 @@ def on_cgt_args(stream_id, data):
     return None
 
 
+def on_callstack(stream_id, data):
+    # AGY_PROC_STACK: `data` = source-hook kind (NUL-terminated) + packed u64 frame
+    # link-vaddrs (pc - module_base). Record raw; symbolize offline via symbolize.py
+    # (the funcmap is too big to load inside agy).
+    import struct
+    nul = data.find(b"\0")
+    src = data[:nul].decode("utf-8", "replace") if nul >= 0 else "?"
+    raw = data[nul + 1:] if nul >= 0 else b""
+    m = len(raw) // 8
+    frames = list(struct.unpack("<%dQ" % m, raw[:m * 8])) if m else []
+    _rec.event({"kind": "callstack", "src": src, "frames": frames})
+    return None
+
+
 def _on_model_text(kind):
     # stage-11 leaf getters: `data` is the streamed assistant-text delta (a Go string).
     # Store the FULL text (the raw recorder would truncate to the preview len).
@@ -110,6 +124,7 @@ _ROUTER = {
     "dns": on_dns,
     "smoke": on_smoke,
     "cgt_args": on_cgt_args,
+    "callstack": on_callstack,
     "delta_ccpa": _on_model_text("delta_ccpa"),
     "delta_completion": _on_model_text("delta_completion"),
 }

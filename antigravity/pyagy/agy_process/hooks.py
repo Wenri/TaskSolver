@@ -88,6 +88,7 @@ DERIVED_KINDS = {
     "rewrite_skip": "a rewrite was skipped (length would change)",
     "rewrite_error": "a rewrite rule/func raised",
     "cgt_args": "AGY_PROC_CGT_ARGS diagnostic: a trampoline hook's arg-graph report",
+    "callstack": "AGY_PROC_STACK diagnostic: symbolizable Go call stack at a hook fire",
 }
 
 

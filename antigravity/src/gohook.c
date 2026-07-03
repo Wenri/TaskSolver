@@ -62,12 +62,66 @@ static const guint8 XORPS_XMM15[] = { 0x45, 0x0f, 0x57, 0xff };
  * process: process_vm_readv returns -1/EFAULT for unmapped pages instead of
  * segfaulting, so we can probe unknown arg registers without knowing the Go
  * signature. A plain syscall — safe on the g0 stack (no Go allocation). */
-static ssize_t agy_safe_read(uint64_t addr, void *dst, size_t n)
+long agy_safe_read(uint64_t addr, void *dst, unsigned long n)
 {
     if (addr < 0x1000) return -1;
     struct iovec local = { dst, n };
     struct iovec remote = { (void *)(uintptr_t)addr, n };
     return process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+}
+
+/* Walk the Go frame-pointer chain: [rbp]=saved caller rbp, [rbp+8]=return addr.
+ * Go keeps frame pointers (framepointer_enabled). Stores up to `max` return PCs
+ * (reduced to link vaddrs, pc-base). Fault-safe; terminates on rbp==0 / a
+ * non-monotonic (must strictly increase up the stack) / unreadable frame. */
+int agy_backtrace(uint64_t rbp, uint64_t base, uint64_t *out, int max)
+{
+    int n = 0;
+    uint64_t prev = 0;
+    for (int i = 0; i < max; i++) {
+        if (rbp < 0x10000 || (prev && rbp <= prev)) break;
+        uint64_t frame[2];                       /* [0]=saved rbp, [1]=return pc */
+        if (agy_safe_read(rbp, frame, 16) != 16) break;
+        if (frame[1] < 0x1000) break;
+        out[n++] = frame[1] - base;
+        prev = rbp;
+        rbp = frame[0];
+    }
+    return n;
+}
+
+/* Emit a "callstack" event (gated by AGY_PROC_STACK at the call sites): the source
+ * hook kind (NUL-terminated) followed by the packed u64 frame vaddrs.
+ *
+ * Hot hooks (crypto/tls decrypt runs per TLS record) repeat the *same* few call
+ * stacks thousands of times; emitting each would flood the worker queue and
+ * backpressure the TLS goroutine — which stalls the turn. So we DEDUP: each
+ * distinct (kind, stack) is emitted exactly once. We still walk per fire (cheap,
+ * fault-safe), but skip the expensive copy+enqueue for repeats. */
+void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base)
+{
+    uint64_t frames[48];
+    int n = agy_backtrace(rbp, base, frames, 48);
+    if (n <= 0) return;
+
+    uint64_t h = 1469598103934665603ULL ^ (uint64_t)(uintptr_t)src_kind;
+    for (int i = 0; i < n; i++) { h ^= frames[i]; h *= 1099511628211ULL; }
+    static uint64_t seen[1024];
+    static int nseen;
+    for (int i = 0; i < nseen; i++) if (seen[i] == h) return;   /* already emitted */
+    if (nseen < 1024) seen[nseen++] = h; else return;           /* set full → stop */
+
+    unsigned char buf[64 + 48 * 8];
+    size_t kl = strlen(src_kind);
+    if (kl > 48) kl = 48;
+    memcpy(buf, src_kind, kl);
+    buf[kl] = 0;
+    size_t off = kl + 1;
+    memcpy(buf + off, frames, (size_t)n * 8);
+    off += (size_t)n * 8;
+    agy_event_t ev = { .kind = "callstack", .stream_id = rbp,
+                       .data = buf, .len = off, .mode = AGY_ASYNC };
+    agy_py_emit(&ev);
 }
 
 /* Diagnostic (AGY_PROC_CGT_ARGS=1): build a human-readable report of the arg
@@ -179,9 +233,15 @@ static void cgt_diag(agy_block *b)
  * must not allocate Go memory; agy_py_emit() copies + enqueues to the worker.
  * Emits the receiver (RAX) as stream_id + the borrowed rodata kind tag. With
  * AGY_PROC_CGT_ARGS set, also emits a diagnostic arg-register report. */
+static uint64_t g_gh_base;   /* main-module base, for reducing PCs to link vaddrs */
+
 static void agy_cgo_hook(agy_block *b)
 {
     if (getenv("AGY_PROC_CGT_ARGS")) cgt_diag(b);
+    if (getenv("AGY_PROC_STACK"))    /* captured rbp = the CALLER's frame (target
+                                        prologue runs on the way out) → chain starts
+                                        one frame above the target (= the kind). */
+        agy_emit_stack((const char *)b->kind, b->regs.rbp, g_gh_base);
     agy_event_t ev = { .kind = (const char *)b->kind,
                        .stream_id = b->regs.rax, .mode = AGY_ASYNC };
     agy_py_emit(&ev);
@@ -210,6 +270,7 @@ int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_v
                        uint64_t md_vaddr, const agy_gh_target *targets, int n)
 {
     if (!cgocall_va) { GHLOG("runtime.cgocall unresolved; cannot build trampolines"); return 0; }
+    g_gh_base = base;                       /* for agy_emit_stack PC→vaddr reduction */
     uint64_t cgocall_abs = base + cgocall_va;
     uint64_t asmcgocall_abs = asmcgocall_va ? base + asmcgocall_va : 0;
     int asmcgo_on = getenv("AGY_PROC_ASMCGO") != NULL;

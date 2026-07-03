@@ -158,10 +158,12 @@ typedef struct go_moduledata {
 #define GO_PCLNTAB_MAGIC_GO120         0xFFFFFFF1u   /* == CurrentPCLnTabMagic; copied from the live pcHeader, not hardcoded */
 
 /* Registers we snapshot into the trampoline frame (= the block the C hook reads).
- * Order is the Go internal register ABI arg order so the hook can name fields. */
+ * Order is the Go internal register ABI arg order so the hook can name fields.
+ * `rbp` is the 11th slot (OFF_RBP = GH_SPILL+88) — the trampoline already spills it;
+ * naming it lets the stack unwinder read the caller frame pointer. */
 typedef struct {
-    uint64_t rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11, rdx;
-} agy_go_regs;   /* 80 bytes; lives in the trampoline locals region (all-ones scanned) */
+    uint64_t rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11, rdx, rbp;
+} agy_go_regs;   /* 88 bytes; lives in the trampoline locals region (all-ones scanned) */
 
 /* The block the trampoline builds on its stack and passes to the C hook (RDI).
  * `kind` is a borrowed const char* (the proc.def kind tag) baked into the
@@ -191,6 +193,21 @@ int  agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
                        uint32_t slot_size, int nslots,
                        uint32_t frame, uint32_t frame_lo, uint32_t frame_hi);
 void agy_gomod_ensure(void);
+
+/* ---- frame-pointer stack unwinder (gohook.c) ----------------------------------
+ * Fault-safe read of `n` bytes from a possibly-bogus address in our own process
+ * (process_vm_readv → EFAULT instead of SIGSEGV). Returns bytes read or -1. */
+long agy_safe_read(uint64_t addr, void *dst, unsigned long n);
+
+/* Walk the Go frame-pointer chain from `rbp` (Go keeps rbp: [rbp]=saved caller rbp,
+ * [rbp+8]=return address). Stores up to `max` return PCs, each reduced to a link
+ * vaddr (pc - base), into `out`. Terminates on rbp==0 / non-monotonic / unreadable.
+ * Returns the number of frames captured. */
+int  agy_backtrace(uint64_t rbp, uint64_t base, uint64_t *out, int max);
+
+/* Emit a "callstack" event: src_kind (NUL-terminated) followed by the packed u64
+ * frame vaddrs from agy_backtrace(rbp,base). No-op-safe if rbp is bogus. */
+void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base);
 
 /* ---- cgocall-trampoline installer (gohook.c, uses frida-gum) ------------- */
 typedef struct { uint64_t entry; uint32_t skip; const char *kind; } agy_gh_target;

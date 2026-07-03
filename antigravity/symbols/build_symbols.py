@@ -221,6 +221,7 @@ def main():
 
     name2addr = {}
     catalog = {k: [] for k in CATALOG}
+    funcmap = []                         # (addr, name) for EVERY func → stack symbolization
     for i in range(nfunc):
         eo = u32(FT + i * 8)
         fo = u32(FT + i * 8 + 4)
@@ -228,6 +229,7 @@ def main():
         addr = text_base + eo
         if nm not in name2addr:
             name2addr[nm] = addr
+        funcmap.append((addr, nm))
         for fam, pred in CATALOG.items():
             if pred(nm) and len(catalog[fam]) < CATALOG_CAP:
                 catalog[fam].append({"name": nm, "addr": addr})
@@ -306,7 +308,20 @@ def main():
     with open(outpath, "w") as f:
         json.dump(out, f, indent=2)
 
+    # Full sorted funcmap (addr → name for EVERY function) for offline stack
+    # symbolization (pyagy.agy_process.symbolize). Gzipped, gitignored, regenerated
+    # by `make symbols`. Keyed by absolute link vaddr so it's ASLR-independent:
+    # a captured runtime PC maps via link_vaddr = pc - module_base, then bisect.
+    import gzip
+    import os as _os
+    funcmap.sort()
+    fmpath = _os.path.join(_os.path.dirname(_os.path.abspath(outpath)), "funcmap.tsv.gz")
+    with gzip.open(fmpath, "wt", encoding="utf-8") as f:
+        for addr, nm in funcmap:
+            f.write(f"{addr:x}\t{nm}\n")
+
     print(f"wrote {outpath}")
+    print(f"  funcmap:    {fmpath} ({len(funcmap)} funcs)")
     print(f"  build-id:   {out['build_id']}")
     print(f"  moduledata: {md_vaddr:#x}   text_base: {text_base:#x}   minpc: {minpc:#x}" if minpc else
           f"  moduledata: {md_vaddr:#x}   text_base: {text_base:#x}")

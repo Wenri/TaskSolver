@@ -39,6 +39,8 @@ static FILE *g_logf;
 
 static int g_tls_write_sync;   /* AGY_PROC_TLS_WRITE_SYNC=1 → allow modifying egress */
 static int g_dryrun;           /* AGY_PROC_DRYRUN=1 → hooks fire but do nothing (isolate gum vs emit) */
+static int g_stack;            /* AGY_PROC_STACK=1 → emit a "callstack" event per hook fire */
+static uint64_t g_base;        /* main-module base (for PC→link-vaddr reduction) */
 
 /* ---- build-id of the main executable (via PT_NOTE, no file IO) ------------ */
 struct bid { char hex[80]; int done; };
@@ -81,6 +83,10 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
     if (g_dryrun) return;
     int id = (int)(gsize)gum_invocation_context_get_listener_function_data(ic) - 1;
     GumCpuContext *cpu = ic->cpu_context;
+    /* AGY_PROC_STACK: dump the call stack leading INTO this hook. gum fires
+     * post-prologue, so cpu->rbp is the target's own frame → complete upward chain
+     * (this is the exact function context around tls_write / decrypt). */
+    if (g_stack) agy_emit_stack(HOOKS[id].kind, cpu->rbp, g_base);
     switch (id) {
     case HK_SMOKE_GETENV: {
         /* os.Getenv(key string): key.ptr=RAX, key.len=RBX — send the key so we
@@ -201,6 +207,7 @@ static void install_hooks(int stage)
     GumInvocationListener *l_full  = gum_make_call_listener(on_enter, on_leave, NULL, NULL);
     GumModule *mainmod = gum_process_get_main_module();
     GumAddress base = gum_module_get_range(mainmod)->base_address;
+    g_base = (uint64_t)base;       /* for agy_emit_stack PC→link-vaddr reduction */
     LOG("main module base = 0x%llx", (unsigned long long)base);
 
     /* stages 8/9/12: the cgocall-trampoline path (gohook.c) — NOT a gum attach. Collect
@@ -283,6 +290,7 @@ static void agy_init(void)
     if (logpath && *logpath) g_logf = fopen(logpath, "ae");
     g_tls_write_sync = getenv("AGY_PROC_TLS_WRITE_SYNC") != NULL;
     g_dryrun = getenv("AGY_PROC_DRYRUN") != NULL;
+    g_stack = getenv("AGY_PROC_STACK") != NULL;
 
     int stage = 3;
     const char *st = getenv("AGY_PROC_STAGE");
