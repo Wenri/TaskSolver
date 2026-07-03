@@ -23,6 +23,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <sys/uio.h>
 
 #define GHLOG(...) do { fprintf(stderr, "[antigravity/gohook] " __VA_ARGS__); \
                         fputc('\n', stderr); fflush(stderr); } while (0)
@@ -57,12 +58,130 @@ enum { OFF_KIND = GH_SPILL,      OFF_RAX = GH_SPILL + 8,  OFF_RBX = GH_SPILL + 1
  * boundary; emitted verbatim into both call paths below. */
 static const guint8 XORPS_XMM15[] = { 0x45, 0x0f, 0x57, 0xff };
 
+/* Fault-safe read of up to n bytes from a possibly-bogus address in our OWN
+ * process: process_vm_readv returns -1/EFAULT for unmapped pages instead of
+ * segfaulting, so we can probe unknown arg registers without knowing the Go
+ * signature. A plain syscall — safe on the g0 stack (no Go allocation). */
+static ssize_t agy_safe_read(uint64_t addr, void *dst, size_t n)
+{
+    if (addr < 0x1000) return -1;
+    struct iovec local = { dst, n };
+    struct iovec remote = { (void *)(uintptr_t)addr, n };
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+}
+
+/* Diagnostic (AGY_PROC_CGT_ARGS=1): build a human-readable report of the arg
+ * registers + fault-safe memory samples so we can reverse-engineer which register
+ * holds the message / response-delta (agy is stripped → signatures unknown). ALL
+ * dereferencing happens here, in-process — the JSONL is read after agy exits. */
+static void cgt_diag_append_string(char *rep, size_t cap, size_t *o,
+                                    const char *label, uint64_t ptr, uint64_t len)
+{
+    if (*o >= cap || len == 0 || len > 4096) return;
+    unsigned char tmp[256];
+    size_t n = len < sizeof(tmp) ? (size_t)len : sizeof(tmp);
+    if (agy_safe_read(ptr, tmp, n) != (ssize_t)n) return;
+    /* only report if it looks like text (mostly printable) */
+    size_t printable = 0;
+    for (size_t i = 0; i < n; i++)
+        if (tmp[i] == '\t' || tmp[i] == '\n' || (tmp[i] >= 0x20 && tmp[i] < 0x7f)) printable++;
+    if (printable * 10 < n * 8) return;                     /* <80% printable → skip */
+    *o += snprintf(rep + *o, cap - *o, "  %s(len=%llu)=\"", label,
+                   (unsigned long long)len);
+    for (size_t i = 0; i < n && *o < cap - 2; i++)
+        rep[(*o)++] = (tmp[i] >= 0x20 && tmp[i] < 0x7f) ? (char)tmp[i] :
+                      (tmp[i] == '\n' ? ' ' : '.');
+    if (*o < cap - 2) rep[(*o)++] = '"';
+    if (*o < cap - 2) rep[(*o)++] = '\n';
+    rep[*o] = 0;
+}
+
+/* Recursively walk the Go object graph from an arg register, reporting any
+ * printable (ptr,len) Go-string header found, with its access path. Bounded by a
+ * read budget + a visited set (cycle guard); depth-limited. */
+struct walkctx { char *rep; size_t cap; size_t *o; int budget; uint64_t seen[1024]; int nseen; };
+
+static int cgt_seen(struct walkctx *c, uint64_t a)
+{
+    for (int i = 0; i < c->nseen; i++) if (c->seen[i] == a) return 1;
+    if (c->nseen < 1024) c->seen[c->nseen++] = a;
+    return 0;
+}
+
+static void cgt_walk(struct walkctx *c, uint64_t addr, int depth, const char *path)
+{
+    if (c->budget <= 0 || addr < 0x10000 || *c->o > c->cap - 400) return;
+    if (cgt_seen(c, addr)) return;
+    unsigned char buf[64];
+    c->budget--;
+    if (agy_safe_read(addr, buf, sizeof(buf)) != (ssize_t)sizeof(buf)) return;
+    /* adjacent (ptr,len) word pairs → candidate Go strings */
+    for (int w = 0; w + 1 < 8; w++) {
+        uint64_t p, l;
+        memcpy(&p, buf + w * 8, 8);
+        memcpy(&l, buf + (w + 1) * 8, 8);
+        char lbl[72];
+        snprintf(lbl, sizeof(lbl), "%s+%d", path, w * 8);
+        cgt_diag_append_string(c->rep, c->cap, c->o, lbl, p, l);
+    }
+    if (depth <= 0) return;
+    for (int w = 0; w < 8; w++) {
+        uint64_t p;
+        memcpy(&p, buf + w * 8, 8);
+        if (p > 0x10000 && p != addr) {
+            char np[72];
+            snprintf(np, sizeof(np), "%s+%d", path, w * 8);
+            cgt_walk(c, p, depth - 1, np);
+        }
+    }
+}
+
+static void cgt_diag(agy_block *b)
+{
+    char rep[16384];
+    size_t o = 0;
+    const char *ds = getenv("AGY_PROC_CGT_DEPTH");
+    const char *bs = getenv("AGY_PROC_CGT_BUDGET");
+    int depth = ds ? atoi(ds) : 3;
+    int budget = bs ? atoi(bs) : 220;
+    uint64_t r[10] = { b->regs.rax, b->regs.rbx, b->regs.rcx, b->regs.rdi, b->regs.rsi,
+                       b->regs.r8, b->regs.r9, b->regs.r10, b->regs.r11, b->regs.rdx };
+    static const char *nm[10] = { "rax", "rbx", "rcx", "rdi", "rsi",
+                                  "r8", "r9", "r10", "r11", "rdx" };
+    o += snprintf(rep + o, sizeof(rep) - o, "kind=%s recv=0x%llx\n",
+                  (const char *)b->kind, (unsigned long long)r[0]);
+    /* per-register value + 24-byte pointee ascii preview */
+    for (int i = 0; i < 10 && o < sizeof(rep) - 80; i++) {
+        unsigned char s[24];
+        char asc[25];
+        int got = agy_safe_read(r[i], s, sizeof(s)) == (ssize_t)sizeof(s);
+        if (got) {
+            for (size_t k = 0; k < sizeof(s); k++)
+                asc[k] = (s[k] >= 0x20 && s[k] < 0x7f) ? (char)s[k] : '.';
+            asc[sizeof(s)] = 0;
+        }
+        o += snprintf(rep + o, sizeof(rep) - o, " %s=0x%llx%s%s\n", nm[i],
+                      (unsigned long long)r[i], got ? " ~" : "", got ? asc : "");
+    }
+    /* immediate (ptr,len) arg-pair strings, then a bounded object-graph walk from
+     * each likely arg container (rbx/rcx/rdi/rsi) to surface nested text. */
+    for (int i = 1; i < 9; i++)
+        cgt_diag_append_string(rep, sizeof(rep), &o, nm[i], r[i], r[i + 1]);
+    struct walkctx c = { rep, sizeof(rep), &o, budget, {0}, 0 };
+    for (int i = 0; i <= 4; i++)                 /* rax(receiver), rbx, rcx, rdi, rsi */
+        cgt_walk(&c, r[i], depth, nm[i]);
+    agy_event_t ev = { .kind = "cgt_args", .stream_id = r[0],
+                       .data = (const uint8_t *)rep, .len = o, .mode = AGY_ASYNC };
+    agy_py_emit(&ev);
+}
+
 /* The C hook — runs on the g0/system stack during cgocall. MUST stay light and
  * must not allocate Go memory; agy_py_emit() copies + enqueues to the worker.
- * Emits the receiver (RAX) as stream_id + the borrowed rodata kind tag; decoded
- * payload extraction lands next. */
+ * Emits the receiver (RAX) as stream_id + the borrowed rodata kind tag. With
+ * AGY_PROC_CGT_ARGS set, also emits a diagnostic arg-register report. */
 static void agy_cgo_hook(agy_block *b)
 {
+    if (getenv("AGY_PROC_CGT_ARGS")) cgt_diag(b);
     agy_event_t ev = { .kind = (const char *)b->kind,
                        .stream_id = b->regs.rax, .mode = AGY_ASYNC };
     agy_py_emit(&ev);

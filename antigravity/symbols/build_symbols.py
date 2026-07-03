@@ -57,6 +57,26 @@ PROC_TARGETS = [
     # transition. Two same-named entries exist (BOLT hot/cold); build picks the
     # lower entryoff (0x4f52780), which is the one cgocall actually CALLs.
     "runtime.asmcgocall",
+
+    # --- stage 12: model-text pipeline probe (gemini_coder framework) ---
+    # The CLEAN assistant text flows through framework/{generator,core}, NOT the
+    # jetski/cli/backend tail (callbackStreamer.Send, which only sees the wrapped
+    # AgentStateUpdate proto). These framed funcs are on the parking stream-consumer
+    # path → hooked via the cgocall trampoline; AGY_PROC_CGT_ARGS walks their args.
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse",
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",
+    "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",
+]
+
+# Nosplit/frameless leaf getters that RETURN the streamed model text as a Go string
+# (RAX=ptr, RBX=len on return) — the cleanest possible signal, zero struct-offset
+# fragility. They legitimately lack a push-rbp/stack-split prologue, so they're
+# resolved with skip=0 and exempt from the is_prologue assert. Hooked via gum-attach
+# on_leave (CPU-only leaf → re-entry-safe). Stage 11.
+NOSPLIT_TARGETS = [
+    "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText",
+    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText",
 ]
 
 # Reference groups emitted for picking further hook points (not hooked by default).
@@ -259,6 +279,13 @@ def main():
         skips[nm] = prologue_skip(a)
         if not is_prologue(a):
             unverified.append(nm)
+    # nosplit leaf getters: resolve with skip=0, exempt from the prologue assert.
+    for nm in NOSPLIT_TARGETS:
+        if nm not in name2addr:
+            missing.append(nm)
+            continue
+        hooks[nm] = name2addr[nm]
+        skips[nm] = 0
 
     for fam in catalog:
         catalog[fam].sort(key=lambda x: x["name"])
@@ -271,8 +298,8 @@ def main():
         "text_base": text_base,
         "minpc": minpc,
         "total_funcs": nfunc,
-        "hooks": {k: hooks[k] for k in PROC_TARGETS if k in hooks},
-        "skips": {k: skips[k] for k in PROC_TARGETS if k in hooks},
+        "hooks": {k: hooks[k] for k in PROC_TARGETS + NOSPLIT_TARGETS if k in hooks},
+        "skips": {k: skips[k] for k in PROC_TARGETS + NOSPLIT_TARGETS if k in hooks},
         "missing": missing,
         "catalog": catalog,
     }
@@ -284,11 +311,12 @@ def main():
     print(f"  moduledata: {md_vaddr:#x}   text_base: {text_base:#x}   minpc: {minpc:#x}" if minpc else
           f"  moduledata: {md_vaddr:#x}   text_base: {text_base:#x}")
     print(f"  funcs:      {nfunc}")
-    print(f"  hooks:      {len(hooks)}/{len(PROC_TARGETS)}"
+    print(f"  hooks:      {len(hooks)}/{len(PROC_TARGETS) + len(NOSPLIT_TARGETS)}"
           + (f"  MISSING={missing}" if missing else ""))
-    for nm in PROC_TARGETS:
+    for nm in PROC_TARGETS + NOSPLIT_TARGETS:
         if nm in hooks:
-            flag = "  !! NOT A PROLOGUE" if nm in unverified else ""
+            flag = "  !! NOT A PROLOGUE" if nm in unverified else \
+                   "  (nosplit)" if nm in NOSPLIT_TARGETS else ""
             print(f"    {hooks[nm]:#012x} (+{skips[nm]:2d})  {nm}{flag}")
     for fam, lst in catalog.items():
         print(f"  catalog[{fam}]: {len(lst)}")

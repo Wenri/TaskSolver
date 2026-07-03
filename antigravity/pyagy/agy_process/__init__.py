@@ -83,12 +83,35 @@ def on_smoke(stream_id, data):
     return None
 
 
+def on_cgt_args(stream_id, data):
+    # Diagnostic (AGY_PROC_CGT_ARGS): the C hook already rendered a readable arg
+    # report; print it in full (the raw recorder would truncate to the preview len)
+    # and store the whole text so it survives in the capture JSONL.
+    report = data.decode("utf-8", "replace")
+    print("[cgt_args] " + report.replace("\n", "\n[cgt_args] "), file=sys.stderr, flush=True)
+    _rec.event({"kind": "cgt_args", "stream": stream_id, "report": report})
+    return None
+
+
+def _on_model_text(kind):
+    # stage-11 leaf getters: `data` is the streamed assistant-text delta (a Go string).
+    # Store the FULL text (the raw recorder would truncate to the preview len).
+    def handler(stream_id, data):
+        _rec.event({"kind": kind, "stream": stream_id,
+                    "text": data.decode("utf-8", "replace")})
+        return None
+    return handler
+
+
 _ROUTER = {
     "tls_write": on_tls_write,
     "tls_read": on_tls_read,
     "http_rt": on_http_rt,
     "dns": on_dns,
     "smoke": on_smoke,
+    "cgt_args": on_cgt_args,
+    "delta_ccpa": _on_model_text("delta_ccpa"),
+    "delta_completion": _on_model_text("delta_completion"),
 }
 
 

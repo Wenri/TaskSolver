@@ -52,6 +52,32 @@ HOOKS = [
      "note": "cgocall-trampoline app-boundary hook (observe)"},
     {"id": "CGT_GETENV", "symbol": "os.Getenv", "mode": "async", "kind": "cgt_getenv",
      "stage": 9, "leave": False, "note": "cgocall-trampoline mechanism validator"},
+    # stages 11-12: model-text pipeline probe (diagnostic/RE only — the response data
+    # path stays on the wire via http1sse; see README "App-boundary text probe").
+    {"id": "GET_DELTA_CCPA",
+     "symbol": "…api_server_go_proto.(*GetChatMessageResponse).GetDeltaText",
+     "mode": "async", "kind": "delta_ccpa", "stage": 11, "leave": True,
+     "note": "leaf getter, returns delta text (on_leave); inactive ccpa provider — doesn't fire on 1.0.16"},
+    {"id": "GET_DELTA_CMPL",
+     "symbol": "…codeium_common_go_proto.(*CompletionDelta).GetDeltaText",
+     "mode": "async", "kind": "delta_completion", "stage": 11, "leave": True,
+     "note": "leaf getter, returns delta text (on_leave); inactive provider — doesn't fire"},
+    {"id": "FH_FINALIZE",
+     "symbol": "…generator.(*streamResponseHandler).finalizePlannerResponse",
+     "mode": "async", "kind": "fh_finalize", "stage": 12, "leave": False,
+     "note": "framework choke point (trampoline); fires, but output text is built during the call → not in entry args"},
+    {"id": "FH_UPDATE",
+     "symbol": "…generator.(*streamResponseHandler).updateWithStep",
+     "mode": "async", "kind": "fh_update", "stage": 12, "leave": False,
+     "note": "framework per-step (trampoline); input context only in entry args"},
+    {"id": "FH_PROCESS",
+     "symbol": "…generator.(*streamResponseHandler).processStream",
+     "mode": "async", "kind": "fh_process", "stage": 12, "leave": False,
+     "note": "framework stream consumer (trampoline)"},
+    {"id": "CORE_PLANSTEP",
+     "symbol": "…core.createPlannerResponseStep",
+     "mode": "async", "kind": "core_planstep", "stage": 12, "leave": False,
+     "note": "builds assistant Step (trampoline); inlined/off-path — fired 0× in probe"},
 ]
 
 # Kinds the correlator/decoder synthesize (not raw hooks) — emitted into the capture.
@@ -61,6 +87,7 @@ DERIVED_KINDS = {
     "rewrite_applied": "a SYNC egress rewrite was applied",
     "rewrite_skip": "a rewrite was skipped (length would change)",
     "rewrite_error": "a rewrite rule/func raised",
+    "cgt_args": "AGY_PROC_CGT_ARGS diagnostic: a trampoline hook's arg-graph report",
 }
 
 

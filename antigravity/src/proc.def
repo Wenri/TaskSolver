@@ -65,3 +65,19 @@ HOOK(CGT_STREAM_SEND,   "google3/third_party/jetski/cli/backend/backend.(*callba
  * and SendUserMessage/Send (stage 8) are simply intolerant of a syscall transition
  * at entry. Uses the same gohook.c path as stage 8. */
 HOOK(CGT_GETENV, "os.Getenv", AGY_ASYNC, "cgt_getenv", 9, 0)
+
+/* stage 11: model-TEXT leaf getters (gemini_coder pipeline). These frameless nosplit
+ * getters RETURN the streamed assistant text as a Go string (on_leave RAX=ptr,RBX=len)
+ * — the cleanest signal, zero struct-offset fragility. CPU-only leaves → gum-attach
+ * on_leave is re-entry-safe. Two provider variants; whichever fires at runtime wins.
+ * (build_symbols NOSPLIT_TARGETS resolves them skip=0, exempt from the prologue assert.) */
+HOOK(GET_DELTA_CCPA, "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText", AGY_ASYNC, "delta_ccpa", 11, 1)
+HOOK(GET_DELTA_CMPL, "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText", AGY_ASYNC, "delta_completion", 11, 1)
+
+/* stage 12: model-TEXT framework choke points (provider-agnostic). On the parking
+ * stream-consumer path → cgocall trampoline; AGY_PROC_CGT_ARGS walks their args to
+ * locate the accumulated/per-delta assistant text. finalize = full per-turn text. */
+HOOK(FH_FINALIZE, "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse", AGY_ASYNC, "fh_finalize", 12, 0)
+HOOK(FH_UPDATE,   "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",          AGY_ASYNC, "fh_update",   12, 0)
+HOOK(FH_PROCESS,  "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",           AGY_ASYNC, "fh_process",  12, 0)
+HOOK(CORE_PLANSTEP, "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",                                AGY_ASYNC, "core_planstep", 12, 0)

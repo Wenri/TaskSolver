@@ -20,7 +20,13 @@
     "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage": 115558560,
     "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 115552544,
     "runtime.cgocall": 83738784,
-    "runtime.asmcgocall": 83785600
+    "runtime.asmcgocall": 83785600,
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse": 107587616,
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep": 107586816,
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream": 107577792,
+    "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep": 94242848,
+    "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText": 93880512,
+    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText": 91762816
   },
   "skips": {
     "crypto/tls.(*Conn).Write": 15,
@@ -36,7 +42,13 @@
     "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage": 15,
     "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 18,
     "runtime.cgocall": 0,
-    "runtime.asmcgocall": 0
+    "runtime.asmcgocall": 0,
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse": 10,
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep": 10,
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream": 18,
+    "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep": 10,
+    "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText": 0,
+    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText": 0
   },
   "missing": [],
   "catalog": {

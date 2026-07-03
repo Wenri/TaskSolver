@@ -169,9 +169,11 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
                                .mode = AGY_ASYNC };
             agy_py_emit(&ev);
         }
-    } else if (id == HK_SER_ROOT || id == HK_MAR_PROMPT || id == HK_PROTO_MARSHAL) {
-        /* Go []byte return: RAX=ptr, RBX=len (CPU-only funcs). proto.Marshal is
-         * hot; skip tiny protos to cut noise (the model request is large). */
+    } else if (id == HK_SER_ROOT || id == HK_MAR_PROMPT || id == HK_PROTO_MARSHAL ||
+               id == HK_GET_DELTA_CCPA || id == HK_GET_DELTA_CMPL) {
+        /* Go []byte/string return: RAX=ptr, RBX=len (CPU-only funcs). proto.Marshal is
+         * hot; skip tiny protos to cut noise. The GET_DELTA_* getters return the
+         * streamed assistant text as a Go string — the cleanest response signal. */
         uint64_t ptr = cpu->rax, len = cpu->rbx;
         uint64_t minlen = (id == HK_PROTO_MARSHAL) ? 256 : 1;
         if (ptr && len >= minlen && len < (16u << 20)) {
@@ -201,10 +203,11 @@ static void install_hooks(int stage)
     GumAddress base = gum_module_get_range(mainmod)->base_address;
     LOG("main module base = 0x%llx", (unsigned long long)base);
 
-    /* stages 8/9: the cgocall-trampoline path (gohook.c) — NOT a gum attach. Collect
+    /* stages 8/9/12: the cgocall-trampoline path (gohook.c) — NOT a gum attach. Collect
      * this stage's targets and redirect them through runtime.cgocall + a synthetic
-     * moduledata (always installed) that keeps GC stack-unwind safe. */
-    if (stage == 8 || stage == 9) {
+     * moduledata (always installed) that keeps GC stack-unwind safe. (Stage 12 = the
+     * parking gemini_coder framework text funcs; probed with AGY_PROC_CGT_ARGS.) */
+    if (stage == 8 || stage == 9 || stage == 12) {
         agy_gh_target tg[HK_COUNT];
         int nt = 0;
         for (int i = 0; i < HK_COUNT; i++) {

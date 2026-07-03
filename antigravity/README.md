@@ -173,6 +173,36 @@ installed for these stages. (Two earlier bring-up rungs — a naive gum attach o
 funcs, and a `runtime.cgocall` gateway probe — were removed once this path proved out; the
 trampoline is park-safe precisely because it never intercepts the return.)
 
+### App-boundary text probe (stages 11–12) — why the wire (`http1sse`) wins for the response
+
+We evaluated hooking agy's **app boundary** to get the model response as pre-decoded Go
+values instead of parsing HTTP/1.1+SSE. The `AGY_PROC_CGT_ARGS` diagnostic (a fault-safe
+`process_vm_readv` recursive object-graph string-finder in `gohook.c`, gated on that env; the
+report lands as a `cgt_args` capture event) let us dump any trampoline hook's argument graph
+and reverse-engineer where text lives. Fanning out over the **whole** enumerated model-text
+pipeline (`gemini_coder/framework/{generator,core}` + `jetski/language_server/modelapi*`, not
+just the `jetski/cli/backend` tail) settled it:
+
+- **`callbackStreamer.Send` (stage 8) is the pipeline tail** — it only ever sees the response
+  already wrapped in a noisy `exa.jetski_cortex_pb.AgentStateUpdate` proto (text at a deep,
+  per-build-fragile offset like `rbx+56+0`, amid tool schemas / cost categories / re-sent
+  context). The clean text flows through the framework *upstream* of it.
+- **Leaf getters that return the delta as a plain Go string** (`GetChatMessageResponse.GetDeltaText`,
+  `CompletionDelta.GetDeltaText`; stage 11, gum-attach `on_leave`, zero struct-offset fragility)
+  **don't fire** — they belong to the ccpa/codeium provider path, but agy 1.0.16 uses the
+  gemini/cloudcode provider.
+- **Provider-agnostic framework choke points** (`streamResponseHandler.{finalizePlannerResponse,
+  updateWithStep,processStream}`, `core.createPlannerResponseStep`; stage 12, trampoline) **fire**,
+  but the assistant **output** text is *built during* the call — so it is a return value /
+  post-call state, **not** in the entry-arg registers the trampoline reads (a depth-8 walk of
+  `rax`→`rsi` surfaced only the *input* context/config/tool-schemas, never the answer).
+
+Net: the entry-arg trampoline structurally can't see text assembled during the call, and the
+functions that *return* it as a clean string are the inactive provider's. `crypto/tls.(*halfConn).decrypt`
++ `http1sse` already decode the exact output cleanly and stably off the wire, so **the response
+data path stays on the wire**; stages 11–12 remain as diagnostic/RE scaffolding
+(`AGY_PROC_CGT_ARGS` re-derives the layout in one command on a future agy build).
+
 ---
 
 ## Hybrid tools / mcp_context
