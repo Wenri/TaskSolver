@@ -16,9 +16,10 @@ SHIM = os.path.join(ROOT, "vendor", "antigravity.so")
 
 # agy self-updates in the background: it re-downloads the binary, which changes the
 # build-id (breaking the pinned symbols.json) AND undoes the WSL1 mmap byte-patch. Turn
-# it off on EVERY launch via agy's own opt-out env var (one of its AGY_CLI_* knobs). "1"
-# is truthy under both a bool-parse and a plain non-empty check.
-_NO_UPDATE = {"AGY_CLI_DISABLE_AUTO_UPDATE": "1"}
+# it off on EVERY launch via agy's own opt-out env var (one of its AGY_CLI_* knobs).
+# Value is `true` per the official CLI troubleshooting guide
+# (antigravity.google/docs/cli/troubleshooting) — not "1", in case agy compares literally.
+_NO_UPDATE = {"AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
 
 
 def _prepend(env, key, value, sep=os.pathsep):
