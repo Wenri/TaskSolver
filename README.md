@@ -28,7 +28,7 @@ pixi run python test_scripts/text_only.py --model claude-code
 pixi shell                                                # drop into the environment
 ```
 
-The pixi workspace is configured in `pyproject.toml`: it pins Python 3.13 and builds TaskSolver itself as an **editable** package via the `pixi-build` backend (so source edits are live). It defines a single merged environment carrying the full stack — core API / Claude Code backends, the local HuggingFace + torch (cu130) adapters, the legacy UI/plotting tools, and flash-attn — so `pixi install` needs a CUDA 13 GPU and **builds flash-attn from source on first run** (uv caches the wheel afterward).
+The pixi workspace is configured in `pyproject.toml`: it pins Python 3.13 and builds TaskSolver itself as an **editable** package via the `pixi-build` backend (so source edits are live). It defines **two** environments: the **default** env (`pixi install`) carries the core API / Claude Code / Gemini backends plus the UI/plotting tools and builds the `antigravity` shim — **no GPU required**; the **`cuda`** env (`pixi install -e cuda`) adds the local HuggingFace + torch (cu130) adapters and **flash-attn**, so it needs a CUDA 13 GPU and builds flash-attn from source on first run (uv caches the wheel afterward).
 
 For à-la-carte use, the same groups are portable `[project.optional-dependencies]` extras — `tasksolver[local]` (torch + HuggingFace adapters, **including flash-attn**) and `tasksolver[app]` (UI/plotting) — so the package stays installable as a dependency by uv and pixi (a consumer points at its own torch index). Core dependencies are unpinned so the consuming workspace owns version resolution; `flash-attn` has no prebuilt wheels for new Pythons and builds from source, so `tasksolver[local]` needs CUDA.
 
@@ -66,6 +66,10 @@ print(parsed)
 ```
 
 To dispatch by model-id instead of importing an adapter directly, use `tasksolver.agent.Agent(api_key, task, vision_model="claude-code-sonnet-4-6")` and call `agent.visual_interface.run_once(question)`. Runnable text-only and vision examples live in [`test_scripts/`](test_scripts/).
+
+## Antigravity (`agy`) instrumentation
+
+[`antigravity/`](antigravity/) is a research subsystem that instruments Google's Antigravity CLI (`agy`) in-process via an `LD_PRELOAD` shim (frida-gum inline hooks + an embedded CPython), and also exposes `agy` as a TaskSolver-style backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the cgocall-trampoline hook mechanism for parking Go functions, and build/validation notes — validated on both WSL1 and a real cloud kernel (6.18.5, agy 1.0.15), including a gdb instruction-level root-cause proof.
 
 ## License
 

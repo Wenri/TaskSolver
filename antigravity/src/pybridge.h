@@ -42,6 +42,5 @@ void agy_py_emit(agy_event_t *ev);
 void agy_py_free(agy_event_t *ev);
 
 int  agy_py_ready(void);
-void agy_py_stop(void);
 
 #endif

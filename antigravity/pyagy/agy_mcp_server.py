@@ -6,10 +6,16 @@ adds custom tools and context WITHOUT patching the binary.
 Implements just enough of MCP (newline-delimited JSON-RPC 2.0 over stdio):
 initialize, tools/list, tools/call, resources/list, resources/read.
 
-Stdlib-only so it runs anywhere. To back a tool with TaskSolver, import and call
-it inside the tool handler (see `tool_tasksolver_query`).
+Stdlib-only so it runs anywhere. Two ways to define what it serves:
+  * AGY_MCP_SPEC=<path> — a JSON spec (written by pyagy.config.write_mcp_config)
+    with ``tools`` (each backed by a static ``response`` or a ``handler`` =
+    ``module:func`` dotted path this server imports) and ``resources`` (context,
+    each with inline ``text``).
+  * unset — the built-in ``tasksolver_query`` stub below (a template to edit).
 """
+import importlib
 import json
+import os
 import sys
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -20,8 +26,8 @@ def log(*a):
     print("[agy_mcp]", *a, file=sys.stderr, flush=True)
 
 
-# ---- custom tools ---------------------------------------------------------
-TOOLS = [
+# ---- built-in stub (used when no AGY_MCP_SPEC is provided) -----------------
+_STUB_TOOLS = [
     {
         "name": "tasksolver_query",
         "description": "Route a prompt through TaskSolver (provider-agnostic VLM query flow).",
@@ -50,18 +56,67 @@ def tool_tasksolver_query(args):
     return f"[stub] TaskSolver({model}) would answer: {prompt!r}"
 
 
-TOOL_IMPL = {"tasksolver_query": tool_tasksolver_query}
-
-# ---- custom mcp_context (resources) ---------------------------------------
-RESOURCES = [
+_STUB_IMPL = {"tasksolver_query": tool_tasksolver_query}
+_STUB_RESOURCES = [
     {"uri": "agy://context/notes", "name": "Custom context notes",
      "mimeType": "text/plain"},
 ]
+_STUB_RESOURCE_TEXT = {
+    "agy://context/notes": "Custom context injected into agy via MCP. Replace with your own.",
+}
+
+
+def _resolve_handler(spec):
+    """Turn a ``module:func`` (or ``module.func``) dotted string into a callable."""
+    mod, _, name = spec.partition(":")
+    if not name:
+        mod, _, name = spec.rpartition(".")
+    return getattr(importlib.import_module(mod), name)
+
+
+def _load_spec(path):
+    """Build (TOOLS, TOOL_IMPL, RESOURCES, RESOURCE_TEXT) from an AGY_MCP_SPEC file."""
+    with open(path) as f:
+        spec = json.load(f)
+    tools, impl = [], {}
+    for t in spec.get("tools", []) or []:
+        name = t["name"]
+        tools.append({"name": name, "description": t.get("description", ""),
+                      "inputSchema": t.get("inputSchema") or {"type": "object"}})
+        if "handler" in t:
+            fn = _resolve_handler(t["handler"])
+            impl[name] = lambda args, fn=fn: str(fn(args))
+        else:
+            text = t.get("response", "")
+            impl[name] = lambda args, text=text: text
+    resources, rtext = [], {}
+    for r in spec.get("resources", []) or []:
+        uri = r["uri"]
+        resources.append({"uri": uri, "name": r.get("name") or uri,
+                          "mimeType": r.get("mimeType", "text/plain")})
+        rtext[uri] = r.get("text", "")
+    info = spec.get("server_info") or {}
+    return tools, impl, resources, rtext, info
+
+
+_spec_path = os.environ.get("AGY_MCP_SPEC")
+if _spec_path:
+    try:
+        TOOLS, TOOL_IMPL, RESOURCES, _RESOURCE_TEXT, _info = _load_spec(_spec_path)
+        if _info:
+            SERVER_INFO = {**SERVER_INFO, **_info}
+    except Exception as e:
+        log(f"failed to load AGY_MCP_SPEC={_spec_path!r}: {e}; using stub")
+        TOOLS, TOOL_IMPL, RESOURCES, _RESOURCE_TEXT = (
+            _STUB_TOOLS, _STUB_IMPL, _STUB_RESOURCES, _STUB_RESOURCE_TEXT)
+else:
+    TOOLS, TOOL_IMPL, RESOURCES, _RESOURCE_TEXT = (
+        _STUB_TOOLS, _STUB_IMPL, _STUB_RESOURCES, _STUB_RESOURCE_TEXT)
 
 
 def resource_read(uri):
-    if uri == "agy://context/notes":
-        return "Custom context injected into agy via MCP. Replace with your own."
+    if uri in _RESOURCE_TEXT:
+        return _RESOURCE_TEXT[uri]
     raise KeyError(uri)
 
 

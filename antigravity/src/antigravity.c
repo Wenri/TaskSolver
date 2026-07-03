@@ -39,6 +39,8 @@ static FILE *g_logf;
 
 static int g_tls_write_sync;   /* AGY_PROC_TLS_WRITE_SYNC=1 → allow modifying egress */
 static int g_dryrun;           /* AGY_PROC_DRYRUN=1 → hooks fire but do nothing (isolate gum vs emit) */
+static int g_stack;            /* AGY_PROC_STACK=1 → emit a "callstack" event per hook fire */
+static uint64_t g_base;        /* main-module base (for PC→link-vaddr reduction) */
 
 /* ---- build-id of the main executable (via PT_NOTE, no file IO) ------------ */
 struct bid { char hex[80]; int done; };
@@ -81,6 +83,10 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
     if (g_dryrun) return;
     int id = (int)(gsize)gum_invocation_context_get_listener_function_data(ic) - 1;
     GumCpuContext *cpu = ic->cpu_context;
+    /* AGY_PROC_STACK: dump the call stack leading INTO this hook. gum fires
+     * post-prologue, so cpu->rbp is the target's own frame → complete upward chain
+     * (this is the exact function context around tls_write / decrypt). */
+    if (g_stack) agy_emit_stack(HOOKS[id].kind, cpu->rbp, g_base);
     switch (id) {
     case HK_SMOKE_GETENV: {
         /* os.Getenv(key string): key.ptr=RAX, key.len=RBX — send the key so we
@@ -138,28 +144,6 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         }
         break;
     }
-    case HK_SEND_USER_MSG: {
-        /* (*ServerBackend).SendUserMessage(...): receiver=RAX. Fire+stall probe only —
-         * arg layout unknown, so emit no payload (never deref a guessed pointer). */
-        agy_event_t ev = { .kind = "send_user_msg", .stream_id = cpu->rax, .mode = AGY_ASYNC };
-        agy_py_emit(&ev);
-        break;
-    }
-    case HK_CB_STREAM_SEND: {
-        /* (*callbackStreamer).Send(update): receiver=RAX. Fire+stall probe only. */
-        agy_event_t ev = { .kind = "stream_send", .stream_id = cpu->rax, .mode = AGY_ASYNC };
-        agy_py_emit(&ev);
-        break;
-    }
-    case HK_CGOCALL: {
-        /* runtime.cgocall(fn, arg unsafe.Pointer) int32: fn=RAX (C target), arg=RBX.
-         * Emit the C fn pointer as stream_id to see which C funcs agy calls via cgo.
-         * cgocall runs the C call + returns on the same M, so it's safe under the call
-         * listener (no goroutine migration between enter and return). */
-        agy_event_t ev = { .kind = "cgocall", .stream_id = cpu->rax, .mode = AGY_ASYNC };
-        agy_py_emit(&ev);
-        break;
-    }
     default: break;
     }
 }
@@ -191,9 +175,12 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
                                .mode = AGY_ASYNC };
             agy_py_emit(&ev);
         }
-    } else if (id == HK_SER_ROOT || id == HK_MAR_PROMPT || id == HK_PROTO_MARSHAL) {
-        /* Go []byte return: RAX=ptr, RBX=len (CPU-only funcs). proto.Marshal is
-         * hot; skip tiny protos to cut noise (the model request is large). */
+    } else if (id == HK_SER_ROOT || id == HK_MAR_PROMPT || id == HK_PROTO_MARSHAL ||
+               id == HK_GET_DELTA_CCPA || id == HK_GET_DELTA_CMPL ||
+               id == HK_RESP_TEXT || id == HK_RESP_THINKING || id == HK_RESP_VIEW) {
+        /* Go []byte/string return: RAX=ptr, RBX=len (CPU-only funcs). proto.Marshal is
+         * hot; skip tiny protos to cut noise. The GET_DELTA_* getters return the
+         * streamed assistant text as a Go string — the cleanest response signal. */
         uint64_t ptr = cpu->rax, len = cpu->rbx;
         uint64_t minlen = (id == HK_PROTO_MARSHAL) ? 256 : 1;
         if (ptr && len >= minlen && len < (16u << 20)) {
@@ -221,12 +208,15 @@ static void install_hooks(int stage)
     GumInvocationListener *l_full  = gum_make_call_listener(on_enter, on_leave, NULL, NULL);
     GumModule *mainmod = gum_process_get_main_module();
     GumAddress base = gum_module_get_range(mainmod)->base_address;
+    g_base = (uint64_t)base;       /* for agy_emit_stack PC→link-vaddr reduction */
     LOG("main module base = 0x%llx", (unsigned long long)base);
 
-    /* stages 8/9: the cgocall-trampoline path (gohook.c) — NOT a gum attach. Collect
+    /* stages 8/9/12: the cgocall-trampoline path (gohook.c) — NOT a gum attach. Collect
      * this stage's targets and redirect them through runtime.cgocall + a synthetic
-     * moduledata. Set AGY_PROC_MODULEDATA=1 to make it GC-unwind-safe. */
-    if (stage == 8 || stage == 9) {
+     * moduledata (always installed) that keeps GC stack-unwind safe. (Stage 12 = the
+     * parking gemini_coder framework text funcs; stage 13 = the parking CodeAssistClient
+     * RPC methods for the app-level trace; both probed with AGY_PROC_CGT_ARGS/STACK.) */
+    if (stage == 8 || stage == 9 || stage == 12 || stage == 13) {
         agy_gh_target tg[HK_COUNT];
         int nt = 0;
         for (int i = 0; i < HK_COUNT; i++) {
@@ -302,6 +292,7 @@ static void agy_init(void)
     if (logpath && *logpath) g_logf = fopen(logpath, "ae");
     g_tls_write_sync = getenv("AGY_PROC_TLS_WRITE_SYNC") != NULL;
     g_dryrun = getenv("AGY_PROC_DRYRUN") != NULL;
+    g_stack = getenv("AGY_PROC_STACK") != NULL;
 
     int stage = 3;
     const char *st = getenv("AGY_PROC_STAGE");

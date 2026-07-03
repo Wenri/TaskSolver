@@ -57,6 +57,59 @@ PROC_TARGETS = [
     # transition. Two same-named entries exist (BOLT hot/cold); build picks the
     # lower entryoff (0x4f52780), which is the one cgocall actually CALLs.
     "runtime.asmcgocall",
+
+    # --- stage 13: CodeAssistClient RPC trace (app-semantic backend boundary) ---
+    # (*CodeAssistClient).* is agy's single client to the CloudCode backend; each
+    # method = one named RPC with typed proto args. Trampoline (they park on the HTTP
+    # round-trip). Entry-arg walk (AGY_PROC_CGT_ARGS) captures the request proto; the
+    # RPC name IS the trace label. StreamGenerateContent is the model turn itself.
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).StreamGenerateContent",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).GenerateContent",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchLoadCodeAssistResponse",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchUserInfo",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchAvailableModels",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).ListExperiments",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RetrieveUserQuotaSummary",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordConversationOffered",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordTrajectorySegmentAnalytics",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).WriteTrajectoryACLs",
+
+    # --- stage 12: model-text pipeline probe (gemini_coder framework) ---
+    # The CLEAN assistant text flows through framework/{generator,core}, NOT the
+    # jetski/cli/backend tail (callbackStreamer.Send, which only sees the wrapped
+    # AgentStateUpdate proto). These framed funcs are on the parking stream-consumer
+    # path → hooked via the cgocall trampoline; AGY_PROC_CGT_ARGS walks their args.
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse",
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",
+    "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",
+    # consumer-entry hook for the RESPONSE: these take the completed *Step (with the
+    # assembled assistant text) as an entry ARG — sidesteps the return-value problem.
+    # (protoTrajectory.AppendStep did NOT fire in --print/interactive; the step commit
+    # goes through the framework/cortex trajectory + the step-changed callback instead.)
+    "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep",
+    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep",
+    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged",
+    # THE better consumer (Plan 7): one frame above OnStepsChanged in the CONSUMER
+    # goroutine, runExecution calls this with the completed *Step as a SHALLOW entry
+    # arg — the assembled assistant text is 3 proto-stable derefs away (Step+0x70 →
+    # deref → +0x8 ptr / +0x10 len), not behind AgentState internals + a mutex.
+    "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep",
+]
+
+# Nosplit/frameless leaf getters that RETURN the streamed model text as a Go string
+# (RAX=ptr, RBX=len on return) — the cleanest possible signal, zero struct-offset
+# fragility. They legitimately lack a push-rbp/stack-split prologue, so they're
+# resolved with skip=0 and exempt from the is_prologue assert. Hooked via gum-attach
+# on_leave (CPU-only leaf → re-entry-safe). Stage 11.
+NOSPLIT_TARGETS = [
+    "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText",
+    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText",
+    # RESPONSE getters (return the assembled assistant text as a plain Go string →
+    # gum on_leave, zero struct-offset fragility). The cortex step's response/thinking.
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse",
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking",
+    "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response",
 ]
 
 # Reference groups emitted for picking further hook points (not hooked by default).
@@ -201,6 +254,7 @@ def main():
 
     name2addr = {}
     catalog = {k: [] for k in CATALOG}
+    funcmap = []                         # (addr, name) for EVERY func → stack symbolization
     for i in range(nfunc):
         eo = u32(FT + i * 8)
         fo = u32(FT + i * 8 + 4)
@@ -208,6 +262,7 @@ def main():
         addr = text_base + eo
         if nm not in name2addr:
             name2addr[nm] = addr
+        funcmap.append((addr, nm))
         for fam, pred in CATALOG.items():
             if pred(nm) and len(catalog[fam]) < CATALOG_CAP:
                 catalog[fam].append({"name": nm, "addr": addr})
@@ -259,6 +314,13 @@ def main():
         skips[nm] = prologue_skip(a)
         if not is_prologue(a):
             unverified.append(nm)
+    # nosplit leaf getters: resolve with skip=0, exempt from the prologue assert.
+    for nm in NOSPLIT_TARGETS:
+        if nm not in name2addr:
+            missing.append(nm)
+            continue
+        hooks[nm] = name2addr[nm]
+        skips[nm] = 0
 
     for fam in catalog:
         catalog[fam].sort(key=lambda x: x["name"])
@@ -271,24 +333,38 @@ def main():
         "text_base": text_base,
         "minpc": minpc,
         "total_funcs": nfunc,
-        "hooks": {k: hooks[k] for k in PROC_TARGETS if k in hooks},
-        "skips": {k: skips[k] for k in PROC_TARGETS if k in hooks},
+        "hooks": {k: hooks[k] for k in PROC_TARGETS + NOSPLIT_TARGETS if k in hooks},
+        "skips": {k: skips[k] for k in PROC_TARGETS + NOSPLIT_TARGETS if k in hooks},
         "missing": missing,
         "catalog": catalog,
     }
     with open(outpath, "w") as f:
         json.dump(out, f, indent=2)
 
+    # Full sorted funcmap (addr → name for EVERY function) for offline stack
+    # symbolization (pyagy.agy_process.symbolize). Gzipped, gitignored, regenerated
+    # by `make symbols`. Keyed by absolute link vaddr so it's ASLR-independent:
+    # a captured runtime PC maps via link_vaddr = pc - module_base, then bisect.
+    import gzip
+    import os as _os
+    funcmap.sort()
+    fmpath = _os.path.join(_os.path.dirname(_os.path.abspath(outpath)), "funcmap.tsv.gz")
+    with gzip.open(fmpath, "wt", encoding="utf-8") as f:
+        for addr, nm in funcmap:
+            f.write(f"{addr:x}\t{nm}\n")
+
     print(f"wrote {outpath}")
+    print(f"  funcmap:    {fmpath} ({len(funcmap)} funcs)")
     print(f"  build-id:   {out['build_id']}")
     print(f"  moduledata: {md_vaddr:#x}   text_base: {text_base:#x}   minpc: {minpc:#x}" if minpc else
           f"  moduledata: {md_vaddr:#x}   text_base: {text_base:#x}")
     print(f"  funcs:      {nfunc}")
-    print(f"  hooks:      {len(hooks)}/{len(PROC_TARGETS)}"
+    print(f"  hooks:      {len(hooks)}/{len(PROC_TARGETS) + len(NOSPLIT_TARGETS)}"
           + (f"  MISSING={missing}" if missing else ""))
-    for nm in PROC_TARGETS:
+    for nm in PROC_TARGETS + NOSPLIT_TARGETS:
         if nm in hooks:
-            flag = "  !! NOT A PROLOGUE" if nm in unverified else ""
+            flag = "  !! NOT A PROLOGUE" if nm in unverified else \
+                   "  (nosplit)" if nm in NOSPLIT_TARGETS else ""
             print(f"    {hooks[nm]:#012x} (+{skips[nm]:2d})  {nm}{flag}")
     for fam, lst in catalog.items():
         print(f"  catalog[{fam}]: {len(lst)}")

@@ -166,38 +166,32 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     return 0;
 }
 
-#define EMIT(K) do { agy_event_t ev = { .kind = (K), .mode = AGY_ASYNC }; agy_py_emit(&ev); } while (0)
 void agy_gomod_ensure(void)
 {
-    EMIT("gomod_enter");                                            /* DEBUG */
     if (__atomic_load_n(&g_done, __ATOMIC_ACQUIRE)) return;          /* fast path */
     int expected = 0;
-    if (!__atomic_compare_exchange_n(&g_claimed, &expected, 1, 0,
-                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-        while (!__atomic_load_n(&g_done, __ATOMIC_ACQUIRE)) __builtin_ia32_pause();
-        return;
+    while (!__atomic_compare_exchange_n(&g_claimed, &expected, 1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        /* Lost the claim to another thread. If it finished the splice, we're done.
+         * Otherwise it may have hit the pre-init retry path and dropped g_claimed back
+         * to 0 WITHOUT setting g_done — so loop and try to become the splicer ourselves
+         * rather than wait forever on a g_done the claimer is not obligated to set. */
+        if (__atomic_load_n(&g_done, __ATOMIC_ACQUIRE)) return;
+        __builtin_ia32_pause();
+        expected = 0;
     }
 
     go_moduledata *md  = g_md;
     go_moduledata *fmd = (go_moduledata *)(uintptr_t)g_firstmd_addr;
-    EMIT("gomod_s1");                                               /* about to read fmd->pcHeader */
     go_pcHeader   *fph = fmd ? fmd->pcHeader : NULL;
-    EMIT(fph ? "gomod_fph_ok" : "gomod_fph_null");                  /* is pcHeader relocated? */
     int magic_ok = fph && !((uintptr_t)fph & 7) && fph->magic == GO_PCLNTAB_MAGIC_GO120;
-    EMIT("gomod_s2");                                               /* deref of fph->magic survived */
     int ok = md && fmd && magic_ok
              && fmd->minpc < fmd->maxpc && fmd->text
              && fmd->minpc <= g_cgocall_rt && g_cgocall_rt < fmd->maxpc;
-    EMIT("gomod_s3");                                               /* range check survived */
     if (ok) {
         go_moduledata *tail = fmd;
         while (tail->next) tail = tail->next;                       /* @560, correct go1.27 offset */
-        EMIT("gomod_s4");                                           /* chain walked, about to store */
         __atomic_store_n(&tail->next, md, __ATOMIC_RELEASE);
-    }
-    agy_event_t ev = { .kind = ok ? "gomod_ok" : "gomod_bad", .mode = AGY_ASYNC };
-    agy_py_emit(&ev);
-    if (ok) {
         __atomic_store_n(&g_done, 1, __ATOMIC_RELEASE);
     } else {
         /* self-check failed (e.g. first hit was pre-runtime-init: firstmoduledata
