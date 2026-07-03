@@ -215,18 +215,35 @@ response) aren't in its registers. Two general return-capture designs were asses
   Not built — kept as the future general escape-hatch.
 
 Instead we take the **consumer-entry hook**: Go passes a result forward as an argument, so hook the
-*consumer* whose entry arg is the produced value. For the response this works — **`agent_state_component.(*AgentState).OnStepsChanged`** (stage 12) **fires** (once per step-change) and
-its entry-reachable graph contains the **full assembled answer** (verified: a 196-char prose answer
-surfaced by the `AGY_PROC_CGT_ARGS` walk at `rax+24+…`). `protoTrajectory.AppendStep`/
-`ToolContextTrajectory.AppendStep`/`traj.Trajectory.AddStep` and the response getters
-(`CortexStepPlannerResponse.GetResponse/GetThinking`, `PlannerResponseStepView.Response`) were tried
-and **don't fire** in `--print`/interactive (direct field access / different concrete type).
+*consumer* whose entry arg is the produced value. To pick the *best* consumer we mapped the complete
+ordered chain from where `http1sse` observes (the TLS read) up to the terminal observer, which crosses
+**two goroutines joined by a channel**:
 
-So the response IS observable at the app boundary via `OnStepsChanged` — but **reliable extraction is
-fragile**: the text sits behind a deep per-build-specific offset path, and a "longest prose" heuristic
-is unreliable (the 3.5 KB tool-schema JSON in the same arg is longer than the answer). Therefore
-`http1sse` stays the **authoritative** response source; `OnStepsChanged` is committed as a stage-12
-probe target so `AGY_PROC_CGT_ARGS` surfaces the assembled answer at the app boundary for inspection.
+- **PRODUCER** (wire → decoded chunk → channel): `crypto/tls.(*Conn).Read` → `net/http` de-chunk →
+  `bufio.Scanner.Scan` → `codeassistclient.ProcessStreamChunks` → `getStreamingTextCompletion` →
+  push to channel.
+- **CONSUMER** (channel → assemble → build `*Step` → commit → observers): `AgentExecutor.Run` →
+  `Executor.Execute` → `runExecution` → `PlannerGenerator.Generate` → `attemptGenerate` →
+  `streamResponseHandler.processStream` (pulls the channel) → **`updateWithStep`** → `finalizePlannerResponse`
+  (builds the full response, RETURNS it) → up to `runExecution`, which wraps it in a fresh `*Step` and
+  calls `executor.(*ExecutionTrajectory).AppendStep` → observers → `AgentState.OnStepsChanged` (last).
+
+`OnStepsChanged` (the terminal observer) *does* carry the full answer, but 6 struct-hops deep into
+`AgentState` internals behind a mutex (`rax+24+32+16+48+32+32`) — fragile, and a "longest prose"
+heuristic there is unreliable (a 3.5 KB tool-schema JSON in the same arg is longer than the answer).
+The live `AGY_PROC_CGT_ARGS` probe found the **shallow** consumer: **`generator.(*streamResponseHandler).updateWithStep`** (stage 12) — its `RSI` arg points at the planner response, and the assistant
+text is a Go string at **`+0x8`(ptr)/`+0x10`(len), a single deref**, the stable cortex proto layout
+(thinking sits deeper at `+0x28`). `agy_cgo_hook` decodes that directly to an **`app_response`** event
+(the text-bearing fires carry the *full* answer, not per-delta fragments; empty-response fires are
+skipped by the length check). `AppendStep` is committed too (it fires on the `--print` path and anchors
+the chain) but its `*Step` text is 6 hops deep, so the clean decode lives on `updateWithStep`.
+
+This finally makes "prefer the app boundary for the RESPONSE" real: a **stage-12** `ask()` sets
+`AgyResponse.source == "app"` and `.app_text`/`.text` to the answer decoded at agy's own consumer
+boundary (one deref, no HTTP/SSE reassembly). Stages are mutually exclusive, so stage 12 trades the
+wire `genai_turn`/SYNC-rewrite (stage 3) for the app-boundary decode; when no `app_response` is present
+the client falls back to the wire turn and then the PTY transcript (`.source` `"wire"`/`"transcript"`).
+`http1sse` therefore remains the authoritative source for the structured request/usage and the default.
 
 ### Call-stack probe (`AGY_PROC_STACK=1`) — mapping HOW agy assembles a turn
 

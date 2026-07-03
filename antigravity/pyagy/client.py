@@ -91,9 +91,26 @@ class AgyResponse:
     workspace: str
     instrumented: bool
     instrumented_reason: str = ""
+    app_turns: list = field(default_factory=list)   # app-boundary answers (stage 12)
 
     def __str__(self):
         return self.text
+
+    @property
+    def app_text(self):
+        """The assembled answer captured at agy's own consumer boundary
+        (``updateWithStep``, a single shallow deref) — the app-boundary RESPONSE. Non-
+        empty only on a stage-12 run; ``""`` otherwise. The text-bearing fires carry
+        the full answer, so take the longest."""
+        return max(self.app_turns, key=len) if self.app_turns else ""
+
+    @property
+    def source(self):
+        """Where ``.text`` came from: ``"app"`` (app-boundary decode, preferred),
+        ``"wire"`` (http1sse genai_turn), or ``"transcript"`` (PTY fallback)."""
+        if self.app_turns:
+            return "app"
+        return "wire" if self.turns else "transcript"
 
     @property
     def primary(self):
@@ -174,26 +191,35 @@ def _prepare_rewrite(spec, workdir):
     return env, path
 
 
-def _load_turns(capture_path, since=0):
-    """Return (genai_turn dicts from line ``since`` onward, new line cursor)."""
-    turns = []
-    n = 0
+def _load_capture(capture_path, since=0):
+    """Single pass over the capture from line ``since`` onward. Returns
+    ``(genai_turns, app_texts, new_cursor)`` — ``genai_turns`` are the wire-decoded
+    model turns (http1sse), ``app_texts`` are the app-boundary ``app_response`` answer
+    strings (stage 12, updateWithStep). Both come from the same file so one cursor
+    covers a multi-turn session."""
+    turns, app_texts = [], []
+    n = since
     if not capture_path or not os.path.exists(capture_path):
-        return turns, since
+        return turns, app_texts, since
     with open(capture_path) as f:
         for n, line in enumerate(f, 1):
             if n <= since:
                 continue
             line = line.strip()
-            if not line or '"genai_turn"' not in line:
+            if not line or ('"genai_turn"' not in line and '"app_response"' not in line):
                 continue
             try:
                 obj = json.loads(line)
             except ValueError:
                 continue
-            if obj.get("kind") == "genai_turn":
+            kind = obj.get("kind")
+            if kind == "genai_turn":
                 turns.append(obj)
-    return turns, n
+            elif kind == "app_response":
+                t = obj.get("text", "")
+                if t:
+                    app_texts.append(t)
+    return turns, app_texts, n
 
 
 def _answer_text(transcript):
@@ -280,9 +306,12 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
             use_instr = False
             reason = "shim build-id != running agy (run `make -C antigravity symbols`)"
 
-    turns, _ = _load_turns(cap_path) if (cap_path and use_instr) else ([], 0)
+    turns, app_texts, _ = (_load_capture(cap_path) if (cap_path and use_instr)
+                           else ([], [], 0))
+    # Prefer the app-boundary answer (stage 12) when present; else the PTY transcript.
+    text = (max(app_texts, key=len) if app_texts else _answer_text(transcript))
     return AgyResponse(
-        text=_answer_text(transcript), transcript=transcript, turns=turns,
+        text=text, transcript=transcript, turns=turns, app_turns=app_texts,
         exit_status=proc.status, capture_path=cap_path, workspace=workspace,
         instrumented=use_instr, instrumented_reason=reason)
 
@@ -352,10 +381,12 @@ class Session:
             if "build-id ok" not in open(self.log_path, errors="replace").read():
                 self.instrumented = False
                 self.instrumented_reason = "shim build-id != running agy"
-        turns, self._cursor = (_load_turns(self.cap_path, self._cursor)
-                               if (self.cap_path and self.instrumented) else ([], self._cursor))
+        turns, app_texts, self._cursor = (
+            _load_capture(self.cap_path, self._cursor)
+            if (self.cap_path and self.instrumented) else ([], [], self._cursor))
+        text = (max(app_texts, key=len) if app_texts else _answer_text(transcript))
         return AgyResponse(
-            text=_answer_text(transcript), transcript=transcript, turns=turns,
+            text=text, transcript=transcript, turns=turns, app_turns=app_texts,
             exit_status=None, capture_path=self.cap_path, workspace=self.workspace,
             instrumented=self.instrumented, instrumented_reason=self.instrumented_reason)
 

@@ -77,7 +77,8 @@ HOOKS = [
     {"id": "FH_UPDATE",
      "symbol": "…generator.(*streamResponseHandler).updateWithStep",
      "mode": "async", "kind": "fh_update", "stage": 12, "leave": False,
-     "note": "framework per-step (trampoline); input context only in entry args"},
+     "note": "THE shallow response consumer: RSI→planner response, answer text at "
+             "+0x8/+0x10 (one deref) → decoded to `app_response` in agy_cgo_hook"},
     {"id": "FH_PROCESS",
      "symbol": "…generator.(*streamResponseHandler).processStream",
      "mode": "async", "kind": "fh_process", "stage": 12, "leave": False,
@@ -95,7 +96,11 @@ HOOKS = [
      "mode": "async", "kind": "traj_addstep", "stage": 12, "leave": False, "note": "doesn't fire"},
     {"id": "TRAJ_ONSTEPS", "symbol": "…agent_state_component.(*AgentState).OnStepsChanged",
      "mode": "async", "kind": "traj_onsteps", "stage": 12, "leave": False,
-     "note": "FIRES; entry graph holds the full assembled response (deep offset; extraction fragile → wire stays authoritative)"},
+     "note": "FIRES; entry graph holds the full assembled response (deep offset; extraction fragile → superseded by fh_update)"},
+    {"id": "TRAJ_APPENDSTEP_EXEC", "symbol": "…framework/executor/executor.(*ExecutionTrajectory).AppendStep",
+     "mode": "async", "kind": "traj_appendstep_exec", "stage": 12, "leave": False,
+     "note": "FIRES on the --print path; the commit point one frame above OnStepsChanged "
+             "(chain endpoint + stack anchor). *Step text is 6 hops deep → decode lives on fh_update"},
     # stage 13: CodeAssistClient RPC trace (trampoline; kind = RPC label). The
     # app-semantic backend boundary — request via AGY_PROC_CGT_ARGS, stack via
     # AGY_PROC_STACK. StreamGenerateContent is the model turn. See rpctrace.py.
@@ -132,6 +137,7 @@ DERIVED_KINDS = {
     "rewrite_error": "a rewrite rule/func raised",
     "cgt_args": "AGY_PROC_CGT_ARGS diagnostic: a trampoline hook's arg-graph report",
     "callstack": "AGY_PROC_STACK diagnostic: symbolizable Go call stack at a hook fire",
+    "app_response": "assembled assistant answer decoded at updateWithStep (rsi+0x8) — the app-boundary RESPONSE",
 }
 
 

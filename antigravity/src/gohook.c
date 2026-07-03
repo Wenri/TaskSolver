@@ -229,6 +229,38 @@ static void cgt_diag(agy_block *b)
     agy_py_emit(&ev);
 }
 
+/* Plan 7 — clean RESPONSE decode at the SHALLOW consumer boundary. The live probe
+ * (AGY_PROC_CGT_ARGS at stage 12) settled which framework function carries the
+ * assembled assistant text nearest the surface: NOT AppendStep/OnStepsChanged (both
+ * 6 struct-hops deep, AgentState-internal), but
+ * generator.(*streamResponseHandler).updateWithStep — its RSI arg points to the
+ * planner response whose text is a Go string at +0x8(ptr)/+0x10(len), ONE deref, the
+ * stable cortex proto layout (thinking sits deeper at +0x28). updateWithStep fires a
+ * few times/turn; the text-bearing fires carry the FULL answer (not per-delta
+ * fragments), the others have an empty response string → skipped by the len check.
+ * Fault-safe (agy_safe_read) + read into a local buffer (agy_py_emit copies it). */
+#define CGT_RESP_CAP 16384
+static void cgt_response_emit(agy_block *b)
+{
+    uint64_t s = b->regs.rsi;
+    if (s < 0x10000) return;
+    uint64_t hdr[3];                                   /* +0x0, +0x8(ptr), +0x10(len) */
+    if (agy_safe_read(s, hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr)) return;
+    uint64_t ptr = hdr[1], len = hdr[2];
+    if (ptr < 0x10000 || len == 0 || len > (16u << 20)) return;
+    char buf[CGT_RESP_CAP];
+    size_t n = len < CGT_RESP_CAP ? (size_t)len : CGT_RESP_CAP;
+    if (agy_safe_read(ptr, buf, n) != (ssize_t)n) return;
+    size_t printable = 0;                              /* reject non-text (wrong field) */
+    for (size_t i = 0; i < n; i++)
+        if (buf[i] == '\t' || buf[i] == '\n' || ((unsigned char)buf[i] >= 0x20 &&
+            (unsigned char)buf[i] < 0x7f)) printable++;
+    if (printable * 10 < n * 8) return;                /* <80% printable → not the text */
+    agy_event_t ev = { .kind = "app_response", .stream_id = b->regs.rax,
+                       .data = (const uint8_t *)buf, .len = n, .mode = AGY_ASYNC };
+    agy_py_emit(&ev);
+}
+
 /* The C hook — runs on the g0/system stack during cgocall. MUST stay light and
  * must not allocate Go memory; agy_py_emit() copies + enqueues to the worker.
  * Emits the receiver (RAX) as stream_id + the borrowed rodata kind tag. With
@@ -242,6 +274,10 @@ static void agy_cgo_hook(agy_block *b)
                                         prologue runs on the way out) → chain starts
                                         one frame above the target (= the kind). */
         agy_emit_stack((const char *)b->kind, b->regs.rbp, g_gh_base);
+    /* updateWithStep is the shallow response consumer → emit the clean answer text
+     * (in addition to the fire-count event below, which other kinds also emit). */
+    if (b->kind && strcmp((const char *)b->kind, "fh_update") == 0)
+        cgt_response_emit(b);
     agy_event_t ev = { .kind = (const char *)b->kind,
                        .stream_id = b->regs.rax, .mode = AGY_ASYNC };
     agy_py_emit(&ev);

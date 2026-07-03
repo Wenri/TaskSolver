@@ -90,6 +90,11 @@ PROC_TARGETS = [
     "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep",
     "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep",
     "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged",
+    # THE better consumer (Plan 7): one frame above OnStepsChanged in the CONSUMER
+    # goroutine, runExecution calls this with the completed *Step as a SHALLOW entry
+    # arg — the assembled assistant text is 3 proto-stable derefs away (Step+0x70 →
+    # deref → +0x8 ptr / +0x10 len), not behind AgentState internals + a mutex.
+    "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep",
 ]
 
 # Nosplit/frameless leaf getters that RETURN the streamed model text as a Go string

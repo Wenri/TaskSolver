@@ -130,6 +130,10 @@ _ROUTER = {
     "resp_text": _on_model_text("resp_text"),
     "resp_thinking": _on_model_text("resp_thinking"),
     "resp_view": _on_model_text("resp_view"),
+    # Plan 7: the assembled assistant answer decoded at the shallow consumer boundary
+    # (updateWithStep, rsi+0x8) — the app-boundary RESPONSE. Stored full (not preview-
+    # truncated) so the client can prefer it over the wire-reassembled genai_turn.text.
+    "app_response": _on_model_text("app_response"),
 }
 
 

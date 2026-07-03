@@ -84,6 +84,10 @@ HOOK(RESP_VIEW,     "google3/third_party/jetski/cortex/trajectory/trajectory.(*P
  * stream-consumer path → cgocall trampoline; AGY_PROC_CGT_ARGS walks their args to
  * locate the accumulated/per-delta assistant text. finalize = full per-turn text. */
 HOOK(FH_FINALIZE, "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse", AGY_ASYNC, "fh_finalize", 12, 0)
+/* THE clean response consumer (Plan 7 probe winner): updateWithStep's RSI arg points
+ * at the planner response; the assistant text is a Go string at +0x8/+0x10 — ONE
+ * deref, the stable cortex proto layout. agy_cgo_hook decodes it directly to
+ * `app_response` (far shallower than AppendStep/OnStepsChanged's 6-deep graphs). */
 HOOK(FH_UPDATE,   "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",          AGY_ASYNC, "fh_update",   12, 0)
 HOOK(FH_PROCESS,  "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",           AGY_ASYNC, "fh_process",  12, 0)
 HOOK(CORE_PLANSTEP, "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",                                AGY_ASYNC, "core_planstep", 12, 0)
@@ -94,6 +98,12 @@ HOOK(CORE_PLANSTEP, "google3/third_party/gemini_coder/framework/core/core.create
 HOOK(TRAJ_APPENDSTEP, "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep", AGY_ASYNC, "traj_appendstep", 12, 0)
 HOOK(TRAJ_ADDSTEP,    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep",                                             AGY_ASYNC, "traj_addstep",    12, 0)
 HOOK(TRAJ_ONSTEPS,    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged",     AGY_ASYNC, "traj_onsteps",    12, 0)
+/* Plan 7 — the commit point one frame above OnStepsChanged (runExecution → AppendStep
+ * → observers). Fires on the live --print path (unlike ToolContextTrajectory.AppendStep
+ * above). Kept as a documented chain endpoint + stack anchor; the live probe found its
+ * *Step text is 6 struct-hops deep (as fragile as OnStepsChanged), so the clean
+ * `app_response` decode lives on FH_UPDATE, not here. */
+HOOK(TRAJ_APPENDSTEP_EXEC, "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep",           AGY_ASYNC, "traj_appendstep_exec", 12, 0)
 
 /* stage 13: CodeAssistClient RPC trace. (*CodeAssistClient).* is agy's single client
  * to the CloudCode backend — each method is one named RPC with typed proto args. They
