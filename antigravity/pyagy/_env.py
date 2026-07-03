@@ -14,13 +14,6 @@ import os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHIM = os.path.join(ROOT, "vendor", "antigravity.so")
 
-# agy self-updates in the background: it re-downloads the binary, which changes the
-# build-id (breaking the pinned symbols.json) AND undoes the WSL1 mmap byte-patch. Turn
-# it off on EVERY launch via agy's own opt-out env var (one of its AGY_CLI_* knobs).
-# Value is `true` per the official CLI troubleshooting guide
-# (antigravity.google/docs/cli/troubleshooting) — not "1", in case agy compares literally.
-_NO_UPDATE = {"AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
-
 
 def _prepend(env, key, value, sep=os.pathsep):
     existing = env.get(key)
@@ -42,7 +35,10 @@ def clean_env(base=None):
         env["LD_PRELOAD"] = os.pathsep.join(kept)
     else:
         env.pop("LD_PRELOAD", None)
-    env.update(_NO_UPDATE)
+    # Disable agy's background self-update: it re-downloads the binary, drifting its
+    # build-id off the pinned symbols.json and undoing the WSL1 patch. `true` per the
+    # official CLI troubleshooting guide.
+    env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
     return env
 
 
@@ -64,7 +60,7 @@ def instrumented_env(stage=3, capture="agy-capture.jsonl", log=None,
         "AGY_PROC_CAPTURE": os.path.abspath(capture),
         "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),
         "TERM": env.get("TERM", "xterm-256color"),
-        **_NO_UPDATE,
+        "AGY_CLI_DISABLE_AUTO_UPDATE": "true",   # disable agy's background self-update
     })
     _prepend(env, "PYTHONPATH", root)
     _prepend(env, "LD_PRELOAD", shim)
