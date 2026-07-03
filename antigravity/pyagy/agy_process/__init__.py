@@ -149,3 +149,15 @@ def dispatch(kind, stream_id, data):
     except Exception:
         traceback.print_exc()
         return None
+
+
+# AgyProcess: when agy is launched as a multiprocessing-spawn-shaped child (AGY_MP_MODE=1),
+# run the pickled target on a daemon thread — separate from this dispatch worker so a
+# blocking recv() there can't starve hook dispatch. The capture pipeline above stays live,
+# so the target can consume decoded events in-process AND stream results over the Connection.
+if os.environ.get("AGY_MP_MODE") == "1":
+    try:
+        from . import mp_child
+        mp_child.start()
+    except Exception:
+        traceback.print_exc()

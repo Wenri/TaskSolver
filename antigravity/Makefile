@@ -13,6 +13,7 @@ SHELL := /bin/bash
 
 FRIDA_VER ?= 17.15.3
 CC        ?= gcc
+comma     := ,
 
 # Pinned agy release — the binary whose build-id matches the committed symbols.json.
 # agy self-updates in the background, so a local install's build-id DRIFTS; we vendor a
@@ -50,12 +51,14 @@ UAPI_REL := x86_64-conda-linux-gnu/sysroot/usr/include
 UAPI_HIT := $(firstword $(foreach p,$(CONDA_PREFIX) $(PREFIX) $(BUILD_PREFIX),$(wildcard $(p)/$(UAPI_REL)/linux/limits.h)))
 UAPI_INC := $(if $(wildcard /usr/include/linux/limits.h),,$(patsubst %/linux/limits.h,%,$(UAPI_HIT)))
 
-# Embed the SYSTEM libpython — the shim is LD_PRELOADed into agy run standalone, so
-# it must need a libpython that's always on the loader path (not a pixi env's).
-PYCFG   := $(shell command -v /usr/bin/python3-config || command -v python3-config)
+# Embed the pixi env's libpython 3.13 — unified with the pixi-3.13 driver so the
+# multiprocessing/pickle wire between them is same-version (AgyProcess). The RPATH
+# below points the shim at $(CONDA_PREFIX)/lib so agy finds libpython3.13 at runtime
+# (agy is always launched via pyagy/_env.py under the pixi env).
+PYCFG   := $(shell command -v "$(CONDA_PREFIX)/bin/python3-config" 2>/dev/null || command -v python3-config || command -v /usr/bin/python3-config)
 CFLAGS  := -O2 -g -fPIC -Wall -Wextra -std=gnu11 -fvisibility=hidden \
            -ffunction-sections -fdata-sections -I$(GUM) $(shell $(PYCFG) --includes) $(if $(UAPI_INC),-idirafter $(UAPI_INC))
-LDFLAGS := -shared -Wl,--exclude-libs,ALL -Wl,--gc-sections
+LDFLAGS := -shared -Wl,--exclude-libs,ALL -Wl,--gc-sections $(if $(CONDA_PREFIX),-Wl$(comma)-rpath$(comma)$(CONDA_PREFIX)/lib,)
 LIBS    := $(GUM)/libfrida-gum.a $(shell $(PYCFG) --ldflags --embed) -lrt -lresolv -ldl -lm -pthread
 
 .PHONY: all setup symbols agy-update clean
