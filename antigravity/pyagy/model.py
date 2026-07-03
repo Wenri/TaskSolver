@@ -17,13 +17,16 @@ from loguru import logger
 from tasksolver.common import ParsedAnswer, Question, TaskSpec, attach_response_metadata
 from tasksolver.exceptions import GPTMaxTriesExceededException, GPTOutputParseException
 
+from . import conversations as _conv
 from .session import run_print
 
 
 class AgyModel(object):
     def __init__(self, api_key: str = None, task: TaskSpec = None, model: str = None,
                  workspace: str = None, skip_permissions: bool = False,
-                 print_timeout: int = 300):
+                 print_timeout: int = 300, conversation_id: str = None,
+                 continue_latest: bool = False, multi_turn: bool = False,
+                 data_dir: str = None):
         self.api_key = api_key                       # unused (agy is logged in), kept for contract parity
         self.task: TaskSpec = task
         # normalize the generic alias to "let agy pick"
@@ -31,14 +34,26 @@ class AgyModel(object):
         self.workspace = workspace
         self.skip_permissions = skip_permissions
         self.print_timeout = print_timeout
+        # Opt-in multi-turn: continue ONE agy conversation across calls (see pyagy.Session).
+        # Off by default → each call is an independent one-shot (the classic adapter shape).
+        # Enabled implicitly when a conversation is being resumed.
+        self.conversation_id = conversation_id
+        self.continue_latest = continue_latest
+        self.multi_turn = bool(multi_turn or conversation_id or continue_latest)
+        self.data_dir = data_dir              # scope the conversation store to a project repo
+        self._conv_lock = threading.Lock()
 
     def _query_once(self, payload: dict) -> dict:
+        snap = _conv.snapshot(home=self.data_dir) if self.multi_turn else None
         r = run_print(
             payload["prompt"],
             workdir=payload.get("workspace") or self.workspace,
             model=self.model,
             timeout=self.print_timeout,
             skip_permissions=self.skip_permissions,
+            conversation_id=self.conversation_id,
+            continue_latest=(self.continue_latest and self.conversation_id is None),
+            data_dir=self.data_dir,
         )
         if not r["result"]:
             raise RuntimeError(
@@ -47,6 +62,14 @@ class AgyModel(object):
                 "Ensure agy is logged in (~/.gemini/antigravity-cli/) and reachable. "
                 f"Transcript head:\n{r['transcript'][:500]}"
             )
+        # Latch onto the conversation the first turn created, so subsequent multi_turn calls
+        # resume it (--conversation=<id>) and accumulate context. (n_choices=1 semantics;
+        # parallel sampling doesn't define a single conversation.)
+        if self.multi_turn and self.conversation_id is None:
+            with self._conv_lock:
+                if self.conversation_id is None:
+                    self.conversation_id = _conv.capture_conversation_id(snap, home=self.data_dir)
+        r["conversation_id"] = self.conversation_id
         return r
 
     def ask(self, payload: dict, n_choices: int = 1) -> Tuple[List[dict], List[dict]]:
@@ -155,3 +178,19 @@ class AgyModel(object):
     def run_once(self, question: Question, max_tokens=1000, **kwargs):
         q = self.task.first_question(question)
         return self.rough_guess(q, max_tokens=max_tokens, **kwargs)
+
+    def session(self, **kwargs):
+        """A first-class :class:`pyagy.Session` bound to this model — for rich multi-turn
+        use (``.conversation_id``, ``.history()``, decoded ``.turns``). Inherits the model,
+        workspace, and skip-permissions, and resumes this model's ``conversation_id`` if it
+        has latched one. ``**kwargs`` override the Session defaults."""
+        from .client import Session
+        kw = dict(model=self.model, workspace=self.workspace,
+                  skip_permissions=self.skip_permissions, timeout=self.print_timeout,
+                  data_dir=self.data_dir)
+        if self.conversation_id:
+            kw["conversation_id"] = self.conversation_id
+        elif self.continue_latest:
+            kw["continue_latest"] = True
+        kw.update(kwargs)
+        return Session(**kw)

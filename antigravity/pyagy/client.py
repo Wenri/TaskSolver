@@ -39,6 +39,7 @@ from functools import cached_property
 
 from . import _env
 from . import config as _config
+from . import conversations as _conv
 from ._pty import PtyProcess
 from ._term import strip_ansi
 from .session import AGY_BIN, ensure_git_workspace
@@ -124,6 +125,7 @@ class AgyResponse:
     instrumented_reason: str = ""
     app_turns: list = field(default_factory=list)   # app-boundary answers (stage 12)
     funcmap: str = None                              # symbols/funcmap.tsv.gz for .stacks
+    conversation_id: str = None                      # agy's native conversation id (resumable)
 
     def __str__(self):
         return self.text
@@ -339,10 +341,19 @@ def _answer_text(transcript):
     return "\n".join(lines).strip()
 
 
-def _argv(agy, flag, prompt, model, skip_permissions, extra_flags):
+def _argv(agy, flag, prompt, model, skip_permissions, extra_flags,
+          conversation_id=None, continue_latest=False):
+    """agy argv. ``conversation_id`` → ``--conversation=<id>`` (resume that stored
+    conversation); ``continue_latest`` → ``--continue`` (resume the most recent). Both
+    compose with ``--print`` and ``--prompt-interactive`` (verified: agy recalls prior
+    context either way)."""
     argv = [agy, flag, prompt]
     if model:
         argv += ["--model", model]
+    if conversation_id:
+        argv.append(f"--conversation={conversation_id}")
+    elif continue_latest:
+        argv.append("--continue")
     if skip_permissions:
         argv += ["--dangerously-skip-permissions"]
     if extra_flags:
@@ -387,18 +398,32 @@ def _inject_config(tools, context):
 def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
         capture=True, instrumented=None, timeout=300, skip_permissions=False,
         agy_bin=None, extra_env=None, stage=3, stack=False, arg_probe=False,
-        funcmap=None):
+        funcmap=None, conversation_id=None, continue_latest=False, data_dir=None,
+        trust=True):
     """Run one ``agy --print`` turn and return a decoded :class:`AgyResponse`.
 
     ``stage`` selects what the shim captures — an int or an alias
     (``"wire"``=3 default, ``"app"``/``"pipeline"``=12, ``"rpc"``=13, ``"smoke"``=2).
     The overlays ``stack=True`` / ``arg_probe=True`` add the diagnostic call-stack /
     trampoline arg-graph on top of any stage, surfaced on ``.stacks``/``.call_graph``
-    and ``.cgt_args``. ``funcmap`` overrides the symbol map used by ``.stacks``."""
+    and ``.cgt_args``. ``funcmap`` overrides the symbol map used by ``.stacks``.
+
+    ``conversation_id`` resumes a stored conversation (``--conversation=<id>``, works in
+    print mode) and ``continue_latest`` resumes the most recent one (``--continue``); the
+    resulting :attr:`AgyResponse.conversation_id` is the id this run created/continued, so
+    a later ``ask(..., conversation_id=r.conversation_id)`` continues it.
+
+    ``data_dir`` scopes agy's whole conversation store under that directory (a project repo)
+    instead of the global ``~/.gemini`` — login is preserved by seeding credentials (see
+    :func:`pyagy.conversations.prepare_scoped_home`). ``trust`` (default on) pre-registers the
+    workspace in agy's ``trustedWorkspaces`` so interactive mode never blocks on the
+    folder-trust prompt."""
     stage = _resolve_stage(stage)
     workspace = ensure_git_workspace(workspace)
     agy = agy_bin or AGY_BIN
     use_instr, reason = _resolve_instrumented(instrumented)
+    home, env_ovr = _conv.scope_for_run(workspace, data_dir, trust=trust)
+    snap = _conv.snapshot(home=home)
 
     cap_path = None
     if use_instr and capture:
@@ -412,11 +437,14 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
                         stack=stack, arg_probe=arg_probe)
     if log_path:
         env["AGY_PROC_LOG"] = log_path
+    env.update(env_ovr)                 # HOME override for a repo-scoped data dir (if any)
 
     cleanup = _inject_config(tools, context) if use_instr else lambda: None
     try:
         proc = PtyProcess().spawn(_argv(agy, "--print", prompt, model,
-                                        skip_permissions, extra_flags=None),
+                                        skip_permissions, extra_flags=None,
+                                        conversation_id=conversation_id,
+                                        continue_latest=continue_latest),
                                   workspace, env)
         transcript = proc.read_until_exit(timeout=timeout)
         proc.close(interrupt=False)
@@ -434,22 +462,35 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
                            else ([], [], 0))
     # Prefer the app-boundary answer (stage 12) when present; else the PTY transcript.
     text = (max(app_texts, key=len) if app_texts else _answer_text(transcript))
+    cid = _conv.capture_conversation_id(snap, home=home)
     return AgyResponse(
         text=text, transcript=transcript, turns=turns, app_turns=app_texts,
         exit_status=proc.status, capture_path=cap_path, workspace=workspace,
-        instrumented=use_instr, instrumented_reason=reason, funcmap=funcmap)
+        instrumented=use_instr, instrumented_reason=reason, funcmap=funcmap,
+        conversation_id=cid)
 
 
 # --- multi-turn --------------------------------------------------------------
 class Session:
-    """A multi-turn agy session. Same kwargs as :func:`ask`; ``ask(prompt)`` starts
-    it on first call. ``set_rewrite(spec)`` updates the live rewrite rules (picked up
-    in-agy on mtime). Use as a context manager to guarantee cleanup."""
+    """A multi-turn agy session — **the first-class object of pyagy**. Same kwargs as
+    :func:`ask`; ``ask(prompt)`` starts it on first call and continues it thereafter.
+
+    In-run turns ride one live ``agy --prompt-interactive`` process. Across a restart,
+    agy's *native* conversation store keeps context: pass ``conversation_id=`` (resume a
+    specific stored conversation) or ``continue_latest=True`` (resume the most recent),
+    or use the module helpers :func:`resume` / :func:`continue_latest`. After the first
+    turn, :attr:`conversation_id` holds this session's id — persist it to resume later,
+    and read :meth:`history` for the stored transcript.
+
+    ``set_rewrite(spec)`` updates the live rewrite rules (picked up in-agy on mtime). Use
+    as a context manager to guarantee cleanup."""
 
     def __init__(self, *, model=None, workspace=None, tools=None, context=None,
                  rewrite=None, capture=True, instrumented=None, timeout=180,
                  idle=25.0, agy_bin=None, extra_env=None, stage=3, stack=False,
-                 arg_probe=False, funcmap=None):
+                 arg_probe=False, funcmap=None, conversation_id=None,
+                 continue_latest=False, skip_permissions=False, data_dir=None,
+                 trust=True):
         self.workspace = ensure_git_workspace(workspace)
         self.agy = agy_bin or AGY_BIN
         self.model = model
@@ -465,6 +506,13 @@ class Session:
         self._tools = tools
         self._context = context
         self.instrumented, self.instrumented_reason = _resolve_instrumented(instrumented)
+        self.continue_latest = continue_latest      # start with --continue (most recent)
+        self.skip_permissions = skip_permissions
+        self._data_dir = data_dir                    # scope the conversation store to a repo
+        self._trust = trust                          # pre-trust the workspace (no folder prompt)
+        self._home = None                            # resolved scoped home (None = global store)
+        self._conversation_id = conversation_id      # resume this id; else captured after turn 1
+        self._snap = None                            # store snapshot taken at launch
         self.cap_path = None
         self.log_path = None
         self.rules_path = None
@@ -491,9 +539,13 @@ class Session:
         if self.log_path:
             env["AGY_PROC_LOG"] = self.log_path
         self._cleanup = _inject_config(self._tools, self._context) if self.instrumented else (lambda: None)
-        argv = [self.agy, "--prompt-interactive", prompt]
-        if self.model:
-            argv += ["--model", self.model]
+        self._home, env_ovr = _conv.scope_for_run(self.workspace, self._data_dir, trust=self._trust)
+        env.update(env_ovr)                          # HOME override for a repo-scoped data dir
+        self._snap = _conv.snapshot(home=self._home)
+        argv = _argv(self.agy, "--prompt-interactive", prompt, self.model,
+                     self.skip_permissions, extra_flags=None,
+                     conversation_id=self._conversation_id,
+                     continue_latest=self.continue_latest)
         self.proc = PtyProcess()
         self.proc.spawn(argv, self.workspace, env)
 
@@ -513,12 +565,29 @@ class Session:
         turns, app_texts, self._cursor = (
             _load_capture(self.cap_path, self._cursor)
             if (self.cap_path and self.instrumented) else ([], [], self._cursor))
+        if self._conversation_id is None:            # first turn of a fresh session
+            self._conversation_id = _conv.capture_conversation_id(self._snap, home=self._home)
         text = (max(app_texts, key=len) if app_texts else _answer_text(transcript))
         return AgyResponse(
             text=text, transcript=transcript, turns=turns, app_turns=app_texts,
             exit_status=None, capture_path=self.cap_path, workspace=self.workspace,
             instrumented=self.instrumented, instrumented_reason=self.instrumented_reason,
-            funcmap=self.funcmap)
+            funcmap=self.funcmap, conversation_id=self._conversation_id)
+
+    @property
+    def conversation_id(self):
+        """agy's native conversation id for this session — the resumed id, or the one
+        captured after the first turn. Persist it and pass to :func:`resume` to continue
+        this conversation in a later process."""
+        return self._conversation_id
+
+    def history(self):
+        """The stored transcript for this conversation, read from agy's own store — a list
+        of ``{step_index, role, type, status, created_at, content}`` (see
+        :func:`pyagy.conversations.read_transcript`). Empty until an id is known."""
+        if not self._conversation_id:
+            return []
+        return _conv.read_transcript(self._conversation_id, home=self._home)
 
     def set_rewrite(self, spec):
         """Replace the live rewrite spec. For a RewriteRule list this rewrites the
@@ -544,3 +613,21 @@ class Session:
                 self.proc.close(interrupt=True)
         finally:
             self._cleanup()
+
+
+# --- session entry points (Session is the first-class object of pyagy) -------
+def resume(conversation_id, **kwargs):
+    """A :class:`Session` that resumes the stored conversation ``conversation_id``
+    (``agy --conversation=<id>``). Its first ``.ask()`` continues that conversation with
+    full prior context — even in a brand-new process. ``**kwargs`` are :class:`Session`'s."""
+    return Session(conversation_id=conversation_id, **kwargs)
+
+
+def continue_latest(**kwargs):
+    """A :class:`Session` resuming agy's most recent conversation (``agy --continue``)."""
+    return Session(continue_latest=True, **kwargs)
+
+
+# Read-only store helpers, re-exported so `pyagy.list_conversations()` / `.latest_...` work.
+list_conversations = _conv.list_conversations
+latest_conversation_id = _conv.latest_conversation_id

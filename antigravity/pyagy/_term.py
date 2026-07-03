@@ -60,3 +60,23 @@ def answer_queries(raw, qpos, writer) -> int:
         except OSError:
             return qpos
         qpos = m.end()
+
+
+# The folder-trust menu agy shows at interactive startup on an untrusted workspace
+# ("Antigravity CLI requires permission to read, edit, and execute files here." with
+# "> Yes, I trust this folder" pre-selected). It BLOCKS the TUI until answered, which is
+# the main cause of interactive hangs. `--print` never shows it.
+_TRUST_MENU = re.compile(rb"trust this folder", re.IGNORECASE)
+
+
+def answer_trust(raw, writer) -> bool:
+    """If the folder-trust menu is present, press Enter once (its default selection is
+    "Yes, I trust this folder") to unblock the TUI. Returns True once it has answered so
+    the caller can stop trying (the menu redraws, so answer at most once)."""
+    if not _TRUST_MENU.search(raw):
+        return False
+    try:
+        writer(b"\r")
+    except OSError:
+        return False
+    return True

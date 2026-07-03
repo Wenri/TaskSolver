@@ -601,7 +601,60 @@ didn't capture that kind:
   `test_symbolize.py`, plus the `rewrite`/`config` offline suites. **Live** (skip cleanly
   per `test_trampoline.py`): `test_rewrite.py` round-trips a redaction on the wire;
   `test_trampoline.py` asserts a stage-3 `genai_turn` decodes; `test_agyprocess.py` drives
-  agy as a `multiprocessing` child (round-trip + exception + stream + persistent).
+  agy as a `multiprocessing` child (round-trip + exception + stream + persistent);
+  `test_agy_session.py` drives resume / list / continue + repo-scoped `data_dir` + pre-trust.
+
+## Sessions: resume, list, and scope agy's native conversation store
+
+agy persists every conversation to disk (`~/.gemini/antigravity-cli/conversations/<uuid>.db`
++ a readable `brain/<uuid>/…/transcript.jsonl`) and can resume one on a fresh launch. `pyagy`
+surfaces that: **`Session` is the first-class object**, `ask()` is one-shot sugar over a
+transient one, and both carry a resumable `conversation_id`.
+
+```python
+import pyagy
+s = pyagy.Session()                      # live `agy --prompt-interactive`; in-run turns over the PTY
+s.ask("Remember the code word BANANA.")
+cid = s.conversation_id                   # captured id (agy has persisted the conversation on disk)
+s.close()
+
+# a fresh process, later — context restored from agy's own store:
+pyagy.resume(cid).ask("What's the code word?")     # `agy … --conversation=<cid>`  -> BANANA
+pyagy.continue_latest().ask("…")                    # `agy … --continue`  (most recent)
+for c in pyagy.list_conversations(limit=10):        # id, title, step_count, last_modified
+    print(c)
+print(pyagy.read_transcript(cid))                    # stored turns (also s.history())
+```
+
+- **Turn model:** in-run turns ride one live `--prompt-interactive` process (as before); the
+  durable part is **capturing** the `conversation_id` and **resuming** a stored conversation on
+  a *new* launch via `--conversation=<id>` / `--continue` — both verified to recall context, in
+  `--print` and interactive mode. The id is resolved from the store by mtime (agy 1.0.16 does
+  not expose it in-process). `ask(..., conversation_id=…/continue_latest=True)` resumes in
+  one-shot `--print`; `AgyResponse.conversation_id` is always the id the run created/continued.
+- **`AgyProcess(conversation_id=…)`** (the multiprocessing child) and
+  **`AgyModel(multi_turn=True | conversation_id=…)`** (the TaskSolver backend — then continues
+  one conversation across calls, exposes `.session()`) are session-capable too.
+
+**Workspace trust (default on).** agy blocks interactive startup on an *untrusted* workspace
+with a "trust this folder" menu — the real cause of past interactive hangs. There is **no env
+var and no trust flag** (only the blunt `--dangerously-skip-permissions`); the clean mechanism
+is the config list `settings.json → trustedWorkspaces`. So every interactive launch
+**pre-registers its workspace** there (`trust=True`, via `pyagy.trust_workspace`, atomic +
+idempotent). Pass `trust=False` to opt out, or `skip_permissions=True` for the flag.
+
+**Scope the data dir to a project repo (`data_dir=`).** Keep a project's conversations *with
+the project* instead of the global `~/.gemini`:
+
+```python
+pyagy.Session(workspace=repo, data_dir=repo).ask("…")   # store at <repo>/.gemini/antigravity-cli/
+```
+
+agy hardcodes GeminiDir = `$HOME/.gemini` (`GEMINI_DIR`/`GEMINI_HOME` env are ignored) and
+`--app_data_dir` is relative-only, so `data_dir=` scopes via an **HOME override** and seeds the
+scoped tree with symlinks to the real login token + `config/` (so agy stays logged in — verified).
+The global store is left untouched; `list_conversations(home=data_dir)` reads the scoped one.
+Add the scoped `.gemini/` to `.gitignore`. `data_dir=None` (default) uses the global store.
 
 ## `AgyProcess`: agy as a `multiprocessing.spawn` child
 

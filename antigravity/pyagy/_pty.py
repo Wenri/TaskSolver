@@ -13,15 +13,16 @@ import select
 import signal
 import time
 
-from ._term import answer_queries, strip_ansi
+from ._term import answer_queries, answer_trust, strip_ansi
 
 
 class PtyProcess:
     """A child forked under a pty. Read via ``read_until_exit`` (one-shot) or
     ``read_until_idle`` (interactive); both strip ANSI and auto-answer the
-    terminal-capability queries agy blocks on."""
+    terminal-capability queries agy blocks on. When ``trust`` is set, also answers the
+    interactive folder-trust menu (the main source of interactive hangs)."""
 
-    def __init__(self, echo=False, winsize=(50, 200)):
+    def __init__(self, echo=False, winsize=(50, 200), trust=True):
         self.pid = None
         self.fd = None
         self.raw = bytearray()        # every byte read from the pty
@@ -29,6 +30,8 @@ class PtyProcess:
         self._qpos = 0                # terminal-query scan position
         self.echo = echo
         self.winsize = winsize
+        self.trust = trust            # auto-answer the folder-trust menu
+        self._trust_answered = False
 
     def spawn(self, argv, workdir, env):
         pid, fd = pty.fork()
@@ -52,6 +55,8 @@ class PtyProcess:
 
     def _answer(self):
         self._qpos = answer_queries(self.raw, self._qpos, lambda b: os.write(self.fd, b))
+        if self.trust and not self._trust_answered:
+            self._trust_answered = answer_trust(self.raw, lambda b: os.write(self.fd, b))
 
     def pump(self, timeout):
         """Read whatever is available for up to ``timeout`` seconds; return it."""

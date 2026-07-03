@@ -1,11 +1,16 @@
 """pyagy — drive the Antigravity `agy` CLI as a TaskSolver-contract backend.
 
-- `ask` / `Session` : the end-user client. Run a turn and get a decoded
+- `Session` : **the first-class object** — a multi-turn conversation. In-run turns ride one
+                live `agy` process; across restarts, agy's native store keeps context.
+                `resume(id)` / `continue_latest()` reopen a stored conversation, `s.conversation_id`
+                is its resumable id, `s.history()` its stored transcript, and
+                `list_conversations()` enumerates past ones.
+- `ask` : one-shot sugar over a transient Session — run a turn and get a decoded
                 `AgyResponse`; `stage=` (int or alias `"wire"`/`"app"`/`"rpc"`/`"smoke"`)
                 and the `stack=`/`arg_probe=` overlays choose what it captures —
                 wire turn (`.turns`), app answer (`.app_text`), RPC timeline
                 (`.rpc_trace`), symbolized stacks (`.stacks`/`.call_graph`), or the
-                arg-graph diagnostic (`.cgt_args`).
+                arg-graph diagnostic (`.cgt_args`). `.conversation_id` is resumable.
 - `AgyModel`  : TaskSolver adapter (prepare_payload/ask/rough_guess/run_once/…),
                 mirroring tasksolver.claude_code.ClaudeCodeModel.
 - `run_print` : one-shot `agy --print` under a PTY (used by AgyModel).
@@ -21,14 +26,23 @@ import model/session (they pull tasksolver, which that embedded interpreter can'
 The catalog names below live in `agy_process.hooks` (stdlib-pure), also lazily.
 """
 _LAZY = {
-    # high-level client (the end-user API)
-    "ask": ".client",
+    # high-level client (the end-user API); Session is the first-class object
     "Session": ".client",
+    "ask": ".client",
+    "resume": ".client",
+    "continue_latest": ".client",
     "AgyResponse": ".client",
     "Usage": ".client",
     "ToolSpec": ".client",
     "ContextResource": ".client",
     "RewriteRule": ".client",
+    # native conversation store (read-only readers + trust/scope write helpers; stdlib-pure)
+    "list_conversations": ".conversations",
+    "latest_conversation_id": ".conversations",
+    "read_transcript": ".conversations",
+    "ConversationInfo": ".conversations",
+    "trust_workspace": ".conversations",
+    "prepare_scoped_home": ".conversations",
     # TaskSolver backend + lower-level drivers
     "AgyModel": ".model",
     "run_print": ".session",

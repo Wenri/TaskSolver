@@ -29,6 +29,7 @@ from multiprocessing import reduction, spawn as mp_spawn
 from multiprocessing.context import SpawnProcess, set_spawning_popen
 from multiprocessing.popen_fork import Popen as _ForkPopen
 
+from . import conversations as _conv
 from ._env import ROOT, instrumented_env
 from ._pty import PtyProcess
 from .session import ensure_git_workspace
@@ -50,15 +51,20 @@ class AgyPopen(_ForkPopen):
         agy = getattr(process_obj, "_agy_bin", None) or _VENDOR_AGY
         workdir = ensure_git_workspace(getattr(process_obj, "_workdir", None))
         capture = getattr(process_obj, "_capture", None) or os.path.join(workdir, "agy-capture.jsonl")
+        self._home, env_ovr = _conv.scope_for_run(
+            workdir, getattr(process_obj, "_data_dir", None),
+            trust=getattr(process_obj, "_trust", True))     # repo-scoped store + workspace trust
         env = instrumented_env(stage=getattr(process_obj, "_stage", 1), capture=capture,
                                extra_env={"AGY_MP_MODE": "1",
                                           "AGY_MP_CHAN_FD": str(child_conn.fileno()),
-                                          "AGY_MP_BOOT_FD": str(boot_r)})
+                                          "AGY_MP_BOOT_FD": str(boot_r),
+                                          **env_ovr})        # HOME override for a scoped data dir
         argv = [agy, *(getattr(process_obj, "_agy_args", None) or ["--print", "agy-mp"])]
 
         self._parent_conn = parent_conn
         self._stop = threading.Event()
         self._last_output = time.time()   # last time agy wrote to the PTY (turn-boundary idle)
+        self._snap = _conv.snapshot(home=self._home)   # pre-launch store snapshot → conversation_id
         self._pty = PtyProcess()
         self._pty.spawn(argv, workdir, env)                  # pty.fork + execve(agy); child inherits the fds
         self.pid = self._pty.pid
@@ -133,7 +139,8 @@ class AgyProcess(SpawnProcess):
 
     def __init__(self, target=None, name=None, args=(), kwargs=None, *,
                  agy_bin=None, agy_args=None, prompt=None, workdir=None, stage=1,
-                 capture=None, persistent=False, daemon=None):
+                 capture=None, persistent=False, conversation_id=None,
+                 continue_latest=False, data_dir=None, trust=True, daemon=None):
         super().__init__(group=None, target=target, name=name,
                          args=args, kwargs=(kwargs or {}), daemon=daemon)
         if agy_args is None:
@@ -141,12 +148,20 @@ class AgyProcess(SpawnProcess):
             # `agy --prompt-interactive <prompt>` — drive follow-ups with .ask()/.send().
             flag = "--prompt-interactive" if persistent else "--print"
             agy_args = [flag, prompt if prompt is not None else "agy-mp"]
+            # resume agy's native conversation store across a restart (see pyagy.Session)
+            if conversation_id:
+                agy_args.append(f"--conversation={conversation_id}")
+            elif continue_latest:
+                agy_args.append("--continue")
         self._agy_bin = agy_bin        # agy binary (default: the pinned vendor/agy)
         self._agy_args = agy_args      # agy argv tail
         self._workdir = workdir        # git workspace (default: a throwaway repo)
         self._stage = stage            # AGY_PROC_STAGE for the shim capture pipeline
         self._capture = capture
         self._persistent = persistent  # long-lived interactive agy (drive via .ask()/.send())
+        self._conversation_id = conversation_id  # resume id; else captured after first turn
+        self._data_dir = data_dir      # scope the conversation store to a project repo
+        self._trust = trust            # pre-trust the workspace (no folder-trust prompt)
 
     # --- parent-side result channel (native Python objects sent by the child target) ---
     def recv(self):
@@ -158,6 +173,18 @@ class AgyProcess(SpawnProcess):
     @property
     def connection(self):
         return self._popen._parent_conn
+
+    @property
+    def conversation_id(self):
+        """agy's native conversation id for this run — the resume id, or the one captured
+        after launch (from the shim's conversation_id event, else the newest store db).
+        Persist it and pass ``conversation_id=`` to a new AgyProcess (or ``pyagy.resume``)
+        to continue this conversation with full prior context."""
+        if self._conversation_id is None and getattr(self, "_popen", None) is not None:
+            self._conversation_id = _conv.capture_conversation_id(
+                getattr(self._popen, "_snap", None),
+                home=getattr(self._popen, "_home", None))
+        return self._conversation_id
 
     # --- persistent (multi-turn TUI) driving: type prompts into agy, collect decoded turns ---
     def send(self, prompt):

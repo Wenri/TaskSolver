@@ -17,6 +17,7 @@ import os
 import subprocess
 import tempfile
 
+from . import conversations as _conv
 from ._env import clean_env
 from ._pty import PtyProcess
 from ._term import strip_ansi  # re-exported (public API)
@@ -49,19 +50,31 @@ def ensure_git_workspace(path=None) -> str:
 
 
 def run_print(prompt, workdir=None, model=None, timeout=300, skip_permissions=False,
-              extra_flags=None, env=None):
+              extra_flags=None, env=None, conversation_id=None, continue_latest=False,
+              data_dir=None, trust=True):
     """One-shot `agy --print <prompt>`. Returns dict(result, transcript, exit_status,
-    workspace). ``env`` defaults to a clean (uninstrumented) environment."""
+    workspace). ``env`` defaults to a clean (uninstrumented) environment. ``conversation_id``
+    resumes a stored conversation (``--conversation=<id>``, works in print mode) and
+    ``continue_latest`` resumes the most recent (``--continue``). ``data_dir`` scopes the
+    conversation store to a project repo (HOME override + seeded login); ``trust`` pre-trusts
+    the workspace (both via :mod:`pyagy.conversations`)."""
     workdir = ensure_git_workspace(workdir)
+    home, env_ovr = _conv.scope_for_run(workdir, data_dir, trust=trust)
     argv = [AGY_BIN, "--print", prompt]
     if model:
         argv += ["--model", model]
+    if conversation_id:
+        argv.append(f"--conversation={conversation_id}")
+    elif continue_latest:
+        argv.append("--continue")
     if skip_permissions:
         argv += ["--dangerously-skip-permissions"]
     if extra_flags:
         argv += list(extra_flags)
 
-    proc = PtyProcess().spawn(argv, workdir, env if env is not None else clean_env())
+    env = dict(env) if env is not None else clean_env()
+    env.update(env_ovr)                     # HOME override for a repo-scoped data dir (if any)
+    proc = PtyProcess().spawn(argv, workdir, env)
     transcript = proc.read_until_exit(timeout=timeout)
     proc.close(interrupt=False)
 
@@ -81,6 +94,7 @@ class InteractiveSession:
         self.proc = PtyProcess()
 
     def start(self, prompt):
+        _conv.trust_workspace(self.workdir)      # pre-trust so the folder-trust menu won't block
         argv = [AGY_BIN, "--prompt-interactive", prompt]
         if self.model:
             argv += ["--model", self.model]
