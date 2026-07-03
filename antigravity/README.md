@@ -56,7 +56,7 @@ silently applied to a different build. Re-run the extractor after any `agy` upda
         │           │ enqueue (+ block if SYNC)                              │
         │           ▼                                                        │
         │   ┌───────────────────────────────────────────┐                   │
-        │   │ pyworker pthread  (LARGE 16MB stack)        │  ← libpython3.12  │
+        │   │ pyworker pthread  (LARGE 16MB stack)        │  ← libpython3.13  │
         │   │  Py_InitializeEx(0); import pyagy.agy_process │    lives only     │
         │   │  loop: pop req → PyGILState_Ensure →        │    here (one      │
         │   │        call on_tls_write/read/http/tool →   │    PyThreadState) │
@@ -395,10 +395,12 @@ pixi run make -C antigravity symbols   # re-resolve symbols.json from the new ag
 pixi run make -C antigravity           # recompile the shim (also runs `make setup` first)
 ```
 
-**Building without pixi (system toolchain).** The shim embeds the **system** libpython
-(`/usr/bin/python3-config`), so it builds and runs without a pixi env — `make -C antigravity`
-on a host with `gcc`, `python3.x`+dev headers, and `/usr/include/linux/limits.h` is enough
-(pixi's role is the *Python* environment, not the shim itself). `make setup` fetches the
+**libpython / Python version.** The shim embeds the **pixi env's libpython 3.13**
+(`$(CONDA_PREFIX)/bin/python3-config`), unified with the pixi-3.13 driver so the
+multiprocessing/pickle wire between them is same-version (see *AgyProcess* below). It links
+`-Wl,-rpath,$(CONDA_PREFIX)/lib` so agy finds `libpython3.13.so.1.0` at runtime (agy is always
+launched via `pyagy/_env.py` under the pixi env). Build with `pixi run make -C antigravity`
+(needs `gcc` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). `make setup` fetches the
 **frida-gum devkit** from GitHub releases; where GitHub egress is blocked (e.g. a locked-down
 cloud container), vendor it manually into `vendor/frida-gum/` (`libfrida-gum.a`, `frida-gum.h`,
 `VERSION`) and `make` finds it. `pyagy.agy_process` needs `hpack`/`brotli` only for stage-3
@@ -598,7 +600,57 @@ didn't capture that kind:
   `test_config.py`, `test_client.py`, `test_appresponse.py`, `test_rpctrace.py`,
   `test_symbolize.py`, plus the `rewrite`/`config` offline suites. **Live** (skip cleanly
   per `test_trampoline.py`): `test_rewrite.py` round-trips a redaction on the wire;
-  `test_trampoline.py` asserts a stage-3 `genai_turn` decodes.
+  `test_trampoline.py` asserts a stage-3 `genai_turn` decodes; `test_agyprocess.py` drives
+  agy as a `multiprocessing` child (round-trip + exception + stream + persistent).
+
+## `AgyProcess`: agy as a `multiprocessing.spawn` child
+
+`AgyProcess` runs agy as a genuine `multiprocessing` spawn child, so a `target` executes
+*inside* agy's embedded interpreter and streams **native Python objects** home over a
+`multiprocessing.connection` — no JSONL round-trip.
+
+```python
+from pyagy.agyprocess import AgyProcess
+from pyagy.agy_process.mp_child import stream_turns, get_result_conn
+
+# one-shot: stream agy's decoded model turns home as native dicts
+p = AgyProcess(target=stream_turns, stage=3, prompt="What is 2+2?"); p.start()
+while p.poll(1.0) or p.is_alive():
+    try: turn = p.recv()             # {"kind":"genai_turn","text":…,"usage":…,"request":…}
+    except EOFError: break           # agy exited
+
+# persistent, multi-turn (context retained)
+p = AgyProcess(target=stream_turns, stage=3, persistent=True, prompt="What is 2+2?"); p.start()
+t1 = p.ask()                         # submit the prefilled prompt          -> "4"
+t2 = p.ask("multiply that by 10")    # follow-up (agy remembers)            -> "40"
+
+# arbitrary target: fn runs inside agy; send whatever you like home
+def work(x): get_result_conn().send({"x": x})
+p = AgyProcess(target=work, args=(41,)); p.start(); print(p.recv())
+```
+
+**How it works** (`pyagy/agyprocess.py` + `pyagy/agy_process/mp_child.py`):
+- `AgyProcess(SpawnProcess)` + a custom `AgyPopen(popen_fork.Popen)` whose `_launch` execs agy
+  under a PTY (`_pty.PtyProcess`), hands the child a result `Pipe` + a boot pipe (both
+  `os.set_inheritable`) via `AGY_MP_{MODE,CHAN_FD,BOOT_FD}`, and pickles `(prep, process_obj)`
+  under `set_spawning_popen`. `start/join/exitcode/terminate` are inherited from
+  `popen_fork.Popen` and track **agy's** pid; the *task result* flows over the Connection
+  (agy owns process lifetime, so completion is signalled on the channel, not by process death).
+- Inside agy (the shim's worker imports `agy_process`, which starts a daemon thread when
+  `AGY_MP_MODE=1`), the child runs the **real** `proc._bootstrap()` with three surgical
+  neutralizations so it can't tear agy down: `sys.stdin=None` (defeats `util._close_stdin`,
+  which would close the PTY's fd 0), `threading._shutdown`→no-op, and a trimmed `prepare()`
+  (authkey/name only — no `sys.path=`/`chdir`/`_fixup_main`). `_bootstrap` is called directly,
+  which skips `spawn_main`'s `sys.exit` and the `is_forking(argv)` assert.
+- The PTY stays **parent-owned** (a pump thread answers agy's terminal-capability queries);
+  persistent mode types prompts in and uses PTY-idle as the turn/ready boundary.
+- **Python 3.13 both ends** (shim embeds pixi's `libpython3.13`), so parent↔child pickle is
+  same-version and `pyagy` classes round-trip via the shared `PYTHONPATH`.
+
+**WSL1:** the channel is `multiprocessing.connection` (`Pipe` — fd + pickle, **no semaphores**),
+which works on WSL1; `Queue`/`Lock`/`SharedMemory` (POSIX `sem_open` → `EPERM` on the 4.4
+kernel) are **cloud-only**. Runs the pinned `vendor/agy` (its build-id must match the shim).
+Tests: `test_scripts/test_agyprocess.py`.
 
 ## Using agy as a TaskSolver backend (`pyagy`)
 
