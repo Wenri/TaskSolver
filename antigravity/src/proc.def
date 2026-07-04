@@ -35,19 +35,24 @@ HOOK(FILE_OPEN,    "os.OpenFile",                     AGY_ASYNC, "file_open", AG
  * (per-hook skip from symbols.json) — it doesn't park, so no morestack re-entry
  * and no park-while-hooked hazard. Captures the full model REQUEST. */
 HOOK(TLS_WRITE,    "crypto/tls.(*Conn).Write",        AGY_ASYNC, "tls_write", AGY_GUM,   0)
-/* AGY_OFF — http2 pipe.Write gets each de-framed response body chunk as []byte
- * (RBX=ptr,RCX=len) — BUT it takes a sync.Mutex/cond and PARKS under
- * reader/writer contention, so hooking it stalls agy. Use TLS_DECRYPT for the
- * response instead. Disabled; kept for reference. */
-HOOK(H2_PIPE_WRITE,"net/http/internal/http2.(*pipe).Write", AGY_ASYNC, "resp",   AGY_OFF,   0)
+/* http2 pipe.Write gets each de-framed response body chunk as []byte (receiver=RAX,
+ * p.ptr=RBX, p.len=RCX). It PARKS under reader/writer mutex/cond contention, so a gum
+ * attach stalls agy — hooked via the park-safe cgocall trampoline instead (the chunk is
+ * an ENTRY arg, safe-read off the g0 stack in agy_cgo_hook). A more-direct HTTP/2 body
+ * capture; overlaps the TLS_DECRYPT → h2reassemble path. */
+HOOK(H2_PIPE_WRITE,"net/http/internal/http2.(*pipe).Write", AGY_ASYNC, "resp",   AGY_TRAMP, 0)
 /* ingress RESPONSE via TLS decrypt (CPU-only, post-read → doesn't park). on_leave
  * []byte = decrypted inbound record (HTTP/2 frames of the response). */
 HOOK(TLS_DECRYPT,  "crypto/tls.(*halfConn).decrypt",   AGY_ASYNC, "tls_read",  AGY_GUM,   1)
-/* AGY_OFF — these STALL agy: tls_read/RoundTrip PARK the goroutine while hooked
- * (even on-enter-only, past-prologue). Kept for reference; response capture uses
- * the non-parking TLS_DECRYPT above or the PTY transcript. */
+/* AGY_OFF — tls_read PARKS while hooked AND its payload is the RETURN value (leave=1),
+ * which the entry-only trampoline can't capture. Kept for reference; the response is
+ * captured at the non-parking TLS_DECRYPT above (or the PTY transcript). */
 HOOK(TLS_READ,     "crypto/tls.(*Conn).Read",         AGY_ASYNC, "tls_read",  AGY_OFF,   1)
-HOOK(HTTP_RT,      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   AGY_OFF,   0)
+/* RoundTrip(t=RAX, req=RBX) PARKS on the round-trip → park-safe cgocall trampoline;
+ * emits an http_rt marker keyed by the request ptr. The response is a RETURN the
+ * trampoline can't read and the request is already captured via TLS_WRITE, so this is a
+ * fire/timing marker more than new data. */
+HOOK(HTTP_RT,      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   AGY_TRAMP, 0)
 
 /* app-layer capture R&D — CPU-only funcs returning []byte (readable). Do not fire for
  * the model request in practice, but park-safe leaves, so installed as part of the union. */

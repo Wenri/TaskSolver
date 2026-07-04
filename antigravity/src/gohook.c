@@ -261,6 +261,21 @@ static void cgt_response_emit(agy_block *b)
     agy_py_emit(&ev);
 }
 
+/* Emit an entry-arg []byte (ptr/len already sitting in arg registers) as a capture
+ * event — the trampoline analog of the gum on_enter []byte path. We can't deref a Go
+ * pointer directly on the g0 stack, so safe-read a bounded copy (truncates at
+ * CGT_RESP_CAP; for chunked response bodies the reassembler stitches successive fires). */
+static void cgt_bytes_emit(const char *kind, uint64_t id, uint64_t ptr, uint64_t len)
+{
+    if (ptr < 0x10000 || len == 0 || len > (16u << 20)) return;
+    char buf[CGT_RESP_CAP];
+    size_t n = len < CGT_RESP_CAP ? (size_t)len : CGT_RESP_CAP;
+    if (agy_safe_read(ptr, buf, n) != (long)n) return;
+    agy_event_t ev = { .kind = kind, .stream_id = id,
+                       .data = (const uint8_t *)buf, .len = n, .mode = AGY_ASYNC };
+    agy_py_emit(&ev);
+}
+
 /* The C hook — runs on the g0/system stack during cgocall. MUST stay light and
  * must not allocate Go memory; agy_py_emit() copies + enqueues to the worker.
  * Emits the receiver (RAX) as stream_id + the borrowed rodata kind tag. With
@@ -278,6 +293,19 @@ static void agy_cgo_hook(agy_block *b)
      * (in addition to the fire-count event below, which other kinds also emit). */
     if (b->kind && strcmp((const char *)b->kind, "fh_update") == 0)
         cgt_response_emit(b);
+    /* Entry-arg hooks migrated off gum because they PARK (the trampoline is park-safe).
+     * These emit their own full event and return — no generic fire event below. */
+    if (b->kind && strcmp((const char *)b->kind, "resp") == 0) {
+        /* http2 (*pipe).Write(p []byte): receiver=rax, p.ptr=rbx, p.len=rcx */
+        cgt_bytes_emit("resp", b->regs.rax, b->regs.rbx, b->regs.rcx);
+        return;
+    }
+    if (b->kind && strcmp((const char *)b->kind, "http_rt") == 0) {
+        /* net/http.(*Transport).RoundTrip(t=rax, req=rbx): marker keyed by the request ptr */
+        agy_event_t rt = { .kind = "http_rt", .stream_id = b->regs.rbx, .mode = AGY_ASYNC };
+        agy_py_emit(&rt);
+        return;
+    }
     agy_event_t ev = { .kind = (const char *)b->kind,
                        .stream_id = b->regs.rax, .mode = AGY_ASYNC };
     agy_py_emit(&ev);
