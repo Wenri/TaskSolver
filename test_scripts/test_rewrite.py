@@ -165,7 +165,7 @@ def test_live_roundtrip():
     # Baseline turn to confirm auth + capture the exact user text to target.
     cap0 = os.path.join(wd, "base.jsonl")
     log0 = os.path.join(wd, "base.log")
-    s0 = AgySession(stage=3, capture=cap0, log=log0, workdir=wd)
+    s0 = AgySession(capture=cap0, log=log0, workdir=wd)
     s0.start(["--print", PROMPT])
     out0 = s0.read_until_idle(idle=25, timeout=160)
     s0.close()
@@ -181,7 +181,7 @@ def test_live_roundtrip():
     with open(rules, "w") as f:      # default match covers streamGenerateContent
         json.dump({"rules": [{"find": "ZORPLE", "replace": "ZQRPLE"}]}, f)
     cap1 = os.path.join(wd, "rw.jsonl")
-    s1 = AgySession(stage=3, capture=cap1, workdir=wd, extra_env={
+    s1 = AgySession(capture=cap1, workdir=wd, extra_env={
         "AGY_PROC_TLS_WRITE_SYNC": "1", "AGY_PROC_REWRITE_RULES": rules})
     s1.start(["--print", PROMPT])
     out1 = s1.read_until_idle(idle=25, timeout=160)
@@ -213,7 +213,7 @@ def test_live_roundtrip():
     with open(grow, "w") as f:
         json.dump({"rules": [{"find": "ZORPLE", "replace": "ZORPLE-XL"}]}, f)
     cap2 = os.path.join(wd, "grow.jsonl")
-    s2 = AgySession(stage=3, capture=cap2, workdir=wd, extra_env={
+    s2 = AgySession(capture=cap2, workdir=wd, extra_env={
         "AGY_PROC_TLS_WRITE_SYNC": "1", "AGY_PROC_REWRITE_RULES": grow})
     s2.start(["--print", PROMPT])
     out2 = s2.read_until_idle(idle=25, timeout=160)

@@ -20,14 +20,17 @@
 #include "gomod.h"
 
 /* ---- hook table generated from proc.def ---------------------------------- */
+/* How each hook is installed (see the MECH column in proc.def + install_hooks).
+ * AGY_OFF must be 0 so a hook is only ever installed when explicitly GUM/TRAMP. */
+typedef enum { AGY_OFF = 0, AGY_GUM, AGY_TRAMP } agy_mech_t;
 enum {
-#define HOOK(ID, NAME, MODE, KIND, STAGE, LEAVE) HK_##ID,
+#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE) HK_##ID,
 #include "proc.def"
 #undef HOOK
     HK_COUNT
 };
-static const struct { const char *name; agy_mode_t mode; const char *kind; int stage; int leave; } HOOKS[] = {
-#define HOOK(ID, NAME, MODE, KIND, STAGE, LEAVE) [HK_##ID] = { NAME, MODE, KIND, STAGE, LEAVE },
+static const struct { const char *name; agy_mode_t mode; const char *kind; agy_mech_t mech; int leave; } HOOKS[] = {
+#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE) [HK_##ID] = { NAME, MODE, KIND, MECH, LEAVE },
 #include "proc.def"
 #undef HOOK
 };
@@ -218,7 +221,7 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
     }
 }
 
-static void install_hooks(int stage)
+static void install_hooks(void)
 {
     gum_init_embedded();
     GumInterceptor *interceptor = gum_interceptor_obtain();
@@ -226,9 +229,9 @@ static void install_hooks(int stage)
      *  - PROBE (enter-only, leave=0 hooks): a true fire-on-enter listener that installs
      *    NO return trampoline. gum_make_call_listener(on_enter, NULL) does NOT achieve
      *    this — it still intercepts the return (restores the clobbered return addr + pops
-     *    its per-thread invocation context), which is what stalled the parking funcs at
-     *    stages 5/6. A probe listener leaves the return untouched, so the goroutine can
-     *    park and resume on another OS thread without corrupting gum's bookkeeping.
+     *    its per-thread invocation context), which is what stalled the parking funcs.
+     *    A probe listener leaves the return untouched, so the goroutine can park and
+     *    resume on another OS thread without corrupting gum's bookkeeping.
      *  - CALL (enter+leave, leave=1 hooks): used only where we need the []byte return. */
     GumInvocationListener *l_enter = gum_make_probe_listener(on_enter, NULL, NULL);
     GumInvocationListener *l_full  = gum_make_call_listener(on_enter, on_leave, NULL, NULL);
@@ -237,16 +240,17 @@ static void install_hooks(int stage)
     g_base = (uint64_t)base;       /* for agy_emit_stack PC→link-vaddr reduction */
     LOG("main module base = 0x%llx", (unsigned long long)base);
 
-    /* stages 8/9/12: the cgocall-trampoline path (gohook.c) — NOT a gum attach. Collect
-     * this stage's targets and redirect them through runtime.cgocall + a synthetic
-     * moduledata (always installed) that keeps GC stack-unwind safe. (Stage 12 = the
-     * parking gemini_coder framework text funcs; stage 13 = the parking CodeAssistClient
-     * RPC methods for the app-level trace; both probed with AGY_PROC_CGT_ARGS/STACK.) */
-    if (stage == 8 || stage == 9 || stage == 12 || stage == 13) {
+    /* AGY_TRAMP hooks: the cgocall-trampoline path (gohook.c) — NOT a gum attach. These are
+     * the parking scheduling-path funcs (SendUserMessage/Send, the gemini_coder framework
+     * consumers, the CodeAssistClient RPCs); redirect them through runtime.cgocall + a
+     * synthetic moduledata that keeps GC stack-unwind safe. This MUST be a SINGLE install
+     * over the whole union: agy_gohook_install / agy_gomod_prepare hold process singletons,
+     * so a second call would leave the first region's trampoline PCs uncovered under GC. */
+    {
         agy_gh_target tg[HK_COUNT];
         int nt = 0;
         for (int i = 0; i < HK_COUNT; i++) {
-            if (HOOKS[i].stage != stage) continue;
+            if (HOOKS[i].mech != AGY_TRAMP) continue;
             uint64_t va = agy_sym(HOOKS[i].name);
             if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
             tg[nt].entry = va;
@@ -254,20 +258,21 @@ static void install_hooks(int stage)
             tg[nt].kind  = HOOKS[i].kind;
             nt++;
         }
-        int made = agy_gohook_install((uint64_t)base, agy_sym("runtime.cgocall"),
-                                      agy_sym("runtime.asmcgocall"),
-                                      AGY_MODULEDATA_VADDR, tg, nt);
-        LOG("cgocall-trampoline stage: installed %d/%d target(s)%s", made, nt,
-            getenv("AGY_PROC_ASMCGO") ? " [asmcgocall variant]" : "");
-        return;
+        if (nt > 0) {
+            int made = agy_gohook_install((uint64_t)base, agy_sym("runtime.cgocall"),
+                                          agy_sym("runtime.asmcgocall"),
+                                          AGY_MODULEDATA_VADDR, tg, nt);
+            LOG("cgocall-trampoline: installed %d/%d target(s)%s", made, nt,
+                getenv("AGY_PROC_ASMCGO") ? " [asmcgocall variant]" : "");
+        }
     }
 
+    /* AGY_GUM hooks: frida-gum inline attach on the non-parking CPU funcs. */
     gum_interceptor_begin_transaction(interceptor);
     for (int i = 0; i < HK_COUNT; i++) {
-        /* AGY_PROC_STAGE selects EXACTLY that stage's hooks (isolates each group) */
-        if (HOOKS[i].stage != stage) continue;
-        /* FILE_OPEN is a stage-3 hook but an OVERLAY: only install it when the caller asked
-         * for conversation-id capture, so a plain stage-3 run isn't burdened by os.OpenFile. */
+        if (HOOKS[i].mech != AGY_GUM) continue;
+        /* FILE_OPEN is an OVERLAY: only install it when the caller asked for conversation-id
+         * capture, so an ordinary run isn't burdened by os.OpenFile. */
         if (i == HK_FILE_OPEN && !g_conv_id) continue;
         uint64_t va = agy_sym(HOOKS[i].name);
         if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
@@ -324,10 +329,6 @@ static void agy_init(void)
     g_stack = getenv("AGY_PROC_STACK") != NULL;
     g_conv_id = getenv("AGY_PROC_CONV_ID") != NULL;
 
-    int stage = 3;
-    const char *st = getenv("AGY_PROC_STAGE");
-    if (st && *st) stage = atoi(st);
-
     /* build-id guard: refuse to apply offsets to a different agy build */
     struct bid b = { .hex = "" };
     dl_iterate_phdr(bid_cb, &b);
@@ -338,14 +339,17 @@ static void agy_init(void)
             b.hex[0] ? b.hex : "<none>", AGY_BUILD_ID);
         if (!getenv("AGY_PROC_FORCE")) return;
     } else {
-        LOG("build-id ok (%s), stage=%d", b.hex, stage);
+        LOG("build-id ok (%s)", b.hex);
     }
 
-    if (stage >= 1) {
-        if (agy_py_start() != 0) { LOG("python bridge failed to start; not installing hooks"); return; }
-    }
-    if (stage >= 2) {
-        install_hooks(stage);
+    /* Always start the embedded Python bridge. Then install the full hook union unless the
+     * caller opted out with AGY_PROC_NOHOOK — the bridge-only path (e.g. the AgyProcess
+     * embed child, which runs a target in-process but wants no capture hooks). */
+    if (agy_py_start() != 0) { LOG("python bridge failed to start; not installing hooks"); return; }
+    if (getenv("AGY_PROC_NOHOOK")) {
+        LOG("AGY_PROC_NOHOOK set — bridge only, no capture hooks");
+    } else {
+        install_hooks();
     }
     LOG("initialized");
 }

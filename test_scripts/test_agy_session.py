@@ -138,7 +138,7 @@ def case_agyprocess_resume():
         print("  NOTE agyprocess: shim not built (run `make -C antigravity`); skipped")
         return
     from pyagy.agyprocess import AgyProcess
-    p = AgyProcess(prompt=f"Remember the code word {WORD}. Reply with only: OK", stage=3)
+    p = AgyProcess(prompt=f"Remember the code word {WORD}. Reply with only: OK", hooks=True)
     try:
         p.start()
         # let agy run the turn, then resolve the id (capture event or newest store db)

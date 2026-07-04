@@ -87,13 +87,22 @@ def main():
 
 def start():
     """Run the child on a daemon thread (called from agy_process import under AGY_MP_MODE)."""
+    try:
+        boot = int(os.environ.get("AGY_MP_BOOT_FD", "-1"))
+        chan = int(os.environ.get("AGY_MP_CHAN_FD", "-1"))
+        if boot < 0 or chan < 0:
+            return
+        os.fstat(boot)
+        os.fstat(chan)
+    except (KeyError, ValueError, OSError):
+        return
     threading.Thread(target=main, name="agy-mp-child", daemon=True).start()
 
 
 def stream_turns(kinds=None, max_wait=300):
     """Built-in AgyProcess target: stream agy's DECODED model turns home over the Connection
     as they're produced, until agy exits (the parent then sees EOF on recv()) or max_wait.
-    Needs an instrumented stage that decodes turns (stage>=3 → genai_turn). Uses a subscribe
+    Needs the capture hooks installed (AgyProcess(hooks=True) → genai_turn). Uses a subscribe
     → in-process queue → single-sender loop, so the send side has no Connection race."""
     import queue as _q
     from . import subscribe as _subscribe

@@ -55,11 +55,13 @@ class AgyPopen(_ForkPopen):
         self._home, env_ovr = _conv.scope_for_run(
             workdir, getattr(process_obj, "_data_dir", None),
             trust=getattr(process_obj, "_trust", True))     # repo-scoped store + workspace trust
-        env = instrumented_env(stage=getattr(process_obj, "_stage", 1), capture=capture,
-                               extra_env={"AGY_MP_MODE": "1",
-                                          "AGY_MP_CHAN_FD": str(child_conn.fileno()),
-                                          "AGY_MP_BOOT_FD": str(boot_r),
-                                          **env_ovr})        # HOME override for a scoped data dir
+        mp_env = {"AGY_MP_MODE": "1",
+                  "AGY_MP_CHAN_FD": str(child_conn.fileno()),
+                  "AGY_MP_BOOT_FD": str(boot_r),
+                  **env_ovr}                                 # HOME override for a scoped data dir
+        if not getattr(process_obj, "_hooks", False):
+            mp_env["AGY_PROC_NOHOOK"] = "1"   # bridge only: run the target, install no capture hooks
+        env = instrumented_env(capture=capture, extra_env=mp_env)
         argv = [agy, *(getattr(process_obj, "_agy_args", None) or ["--print", "agy-mp"])]
 
         self._parent_conn = parent_conn
@@ -139,7 +141,7 @@ class AgyProcess(SpawnProcess):
         return AgyPopen(process_obj)
 
     def __init__(self, target=None, name=None, args=(), kwargs=None, *,
-                 agy_bin=None, agy_args=None, prompt=None, workdir=None, stage=1,
+                 agy_bin=None, agy_args=None, prompt=None, workdir=None, hooks=False,
                  capture=None, persistent=False, conversation_id=None,
                  continue_latest=False, data_dir=None, trust=True, daemon=None):
         super().__init__(group=None, target=target, name=name,
@@ -157,7 +159,7 @@ class AgyProcess(SpawnProcess):
         self._agy_bin = agy_bin        # agy binary (default: the pinned vendor/agy)
         self._agy_args = agy_args      # agy argv tail
         self._workdir = workdir        # git workspace (default: a throwaway repo)
-        self._stage = stage            # AGY_PROC_STAGE for the shim capture pipeline
+        self._hooks = hooks            # install the capture-hook union (False → bridge only, no hooks)
         self._capture = capture
         self._persistent = persistent  # long-lived interactive agy (drive via .ask()/.send())
         self._conversation_id = conversation_id  # resume id; else captured after first turn

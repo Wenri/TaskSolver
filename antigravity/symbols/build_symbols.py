@@ -49,12 +49,12 @@ PROC_TARGETS = [
     # generic protobuf marshal: CPU-only, returns []byte — captures the marshaled
     # StreamGenerateChat request (and every other proto) before the network send.
     "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",
-    # --- stage 6: agy-native application boundary (fire+stall probe) ---
+    # --- agy-native application boundary (cgocall-trampoline app-boundary hooks) ---
     # ServerBackend is agy's own client to the model backend; these run in-process on
-    # fully-decoded Go data (no HTTP/2/HPACK/gzip). Testing whether they fire and stall.
+    # fully-decoded Go data (no HTTP/2/HPACK/gzip). Parking funcs → cgocall trampoline.
     "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage",
     "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",
-    # --- stage 7: cgo gateway probe (proper safe hook point first) ---
+    # --- cgocall gateway: the trampoline's runtime entry points (resolved, not hooked) ---
     "runtime.cgocall",
     # asmcgocall: the g0-stack-switch INNER half of cgocall, WITHOUT entersyscall/
     # exitsyscall (no _Gsyscall, no P handoff, no reschedule). Called (not hooked)
@@ -63,7 +63,7 @@ PROC_TARGETS = [
     # lower entryoff (0x4f52780), which is the one cgocall actually CALLs.
     "runtime.asmcgocall",
 
-    # --- stage 13: CodeAssistClient RPC trace (app-semantic backend boundary) ---
+    # --- CodeAssistClient RPC trace (app-semantic backend boundary; trampoline) ---
     # (*CodeAssistClient).* is agy's single client to the CloudCode backend; each
     # method = one named RPC with typed proto args. Trampoline (they park on the HTTP
     # round-trip). Entry-arg walk (AGY_PROC_CGT_ARGS) captures the request proto; the
@@ -79,7 +79,7 @@ PROC_TARGETS = [
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordTrajectorySegmentAnalytics",
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).WriteTrajectoryACLs",
 
-    # --- stage 12: model-text pipeline probe (gemini_coder framework) ---
+    # --- model-text pipeline (gemini_coder framework; cgocall-trampoline) ---
     # The CLEAN assistant text flows through framework/{generator,core}, NOT the
     # jetski/cli/backend tail (callbackStreamer.Send, which only sees the wrapped
     # AgentStateUpdate proto). These framed funcs are on the parking stream-consumer
@@ -106,7 +106,7 @@ PROC_TARGETS = [
 # (RAX=ptr, RBX=len on return) — the cleanest possible signal, zero struct-offset
 # fragility. They legitimately lack a push-rbp/stack-split prologue, so they're
 # resolved with skip=0 and exempt from the is_prologue assert. Hooked via gum-attach
-# on_leave (CPU-only leaf → re-entry-safe). Stage 11.
+# on_leave (CPU-only leaf → re-entry-safe).
 NOSPLIT_TARGETS = [
     "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText",
     "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText",

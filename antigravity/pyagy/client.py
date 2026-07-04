@@ -15,15 +15,16 @@ Two modify mechanisms compose here (the package accepts *both*, per the design):
     (framing-safe; additive changes are impossible — use tools/context for those).
   * ``tools=`` / ``context=`` — additive, via an injected MCP server (config.py).
 
-What a call captures is chosen by ``stage`` (int or alias) and two overlays:
-  * ``stage="wire"`` (3, default) → ``.turns``/``.request``/``.usage``/``.model`` from
-    the decoded wire model turn (and the ``rewrite=`` surface);
-  * ``stage="app"`` (12) → ``.app_text``/``.source`` from agy's own consumer boundary;
-  * ``stage="rpc"`` (13) → ``.rpc_trace``, the labeled backend-RPC timeline;
+Every call installs the full working hook union, so one run captures all surfaces at once:
+  * ``.turns``/``.request``/``.usage``/``.model`` — the decoded wire model turn (and the
+    ``rewrite=`` SYNC-substitution surface);
+  * ``.app_text``/``.source`` — the answer decoded at agy's own consumer boundary;
+  * ``.rpc_trace`` — the labeled backend-RPC timeline;
   * ``stack=True`` → ``.stacks``/``.call_graph`` (symbolized Go call stacks);
   * ``arg_probe=True`` → ``.cgt_args`` (trampoline arg-graph reports).
-The diagnostic accessors are lazy: reading one decodes its capture on demand (and
-returns empty/None when this run didn't capture that kind).
+The accessors are lazy: reading one decodes its capture on demand (and returns
+empty/None when this run didn't capture that kind). Because the app-boundary answer is
+now always captured, ``.text``/``.source`` prefer it over the wire transcript.
 
 When the shim isn't built (or agy's build-id doesn't match the pin), the call
 **degrades gracefully** to a clean PTY run: you still get ``.text``/``.transcript``,
@@ -45,26 +46,6 @@ from ._term import strip_ansi
 from .session import AGY_BIN, ensure_git_workspace
 
 _UNIQ = [0]
-
-# Semantic stage aliases → the AGY_PROC_STAGE the shim reads (see agy_process/hooks.py).
-# Callers may pass an int stage directly or one of these names; ints pass through.
-#   wire     → 3  : egress tls_write + ingress decrypt → wire genai_turn + SYNC rewrite
-#   smoke    → 2  : liveness only (os.Getenv), no network hooks
-#   pipeline → 12 : framework stream consumers (updateWithStep → app_response)
-#   app      → 12 : alias of pipeline; the app-boundary RESPONSE
-#   rpc      → 13 : CodeAssistClient RPC trace (rpc_* events, StreamGenerateContent)
-_STAGES = {"smoke": 2, "wire": 3, "pipeline": 12, "app": 12, "rpc": 13}
-
-
-def _resolve_stage(stage):
-    """Map a stage alias (str) to its AGY_PROC_STAGE int; pass ints through."""
-    if isinstance(stage, str):
-        try:
-            return _STAGES[stage]
-        except KeyError:
-            raise ValueError(
-                f"unknown stage {stage!r}; use an int or one of {sorted(_STAGES)}")
-    return int(stage)
 
 
 # --- declarative inputs ------------------------------------------------------
@@ -123,7 +104,7 @@ class AgyResponse:
     workspace: str
     instrumented: bool
     instrumented_reason: str = ""
-    app_turns: list = field(default_factory=list)   # app-boundary answers (stage 12)
+    app_turns: list = field(default_factory=list)   # app-boundary answers (fh_update)
     funcmap: str = None                              # symbols/funcmap.tsv.gz for .stacks
     conversation_id: str = None                      # agy's native conversation id (resumable)
 
@@ -133,8 +114,8 @@ class AgyResponse:
     @property
     def app_text(self):
         """The assembled answer captured at agy's own consumer boundary
-        (``updateWithStep``, a single shallow deref) — the app-boundary RESPONSE. Non-
-        empty only on a stage-12 run; ``""`` otherwise. The text-bearing fires carry
+        (``updateWithStep``, a single shallow deref) — the app-boundary RESPONSE. ``""``
+        when the capture holds no ``app_response`` events. The text-bearing fires carry
         the full answer, so take the longest."""
         return max(self.app_turns, key=len) if self.app_turns else ""
 
@@ -199,9 +180,9 @@ class AgyResponse:
 
     @cached_property
     def rpc_trace(self):
-        """A time-ordered, labeled RPC timeline for a stage-``"rpc"`` (13) run —
+        """A time-ordered, labeled RPC timeline from the ``CodeAssistClient`` hooks —
         ``StreamGenerateContent`` is the model turn. ``""`` when the capture holds no
-        ``rpc_*`` events (any other stage)."""
+        ``rpc_*`` events."""
         if not self._has_capture():
             return ""
         from .agy_process import rpctrace
@@ -305,7 +286,7 @@ def _load_capture(capture_path, since=0):
     """Single pass over the capture from line ``since`` onward. Returns
     ``(genai_turns, app_texts, new_cursor)`` — ``genai_turns`` are the wire-decoded
     model turns (http1sse), ``app_texts`` are the app-boundary ``app_response`` answer
-    strings (stage 12, updateWithStep). Both come from the same file so one cursor
+    strings (updateWithStep). Both come from the same file so one cursor
     covers a multi-turn session."""
     turns, app_texts = [], []
     n = since
@@ -361,14 +342,14 @@ def _argv(agy, flag, prompt, model, skip_permissions, extra_flags,
     return argv
 
 
-def _build_env(*, instrumented, stage, capture_path, rewrite, workspace, extra_env,
+def _build_env(*, instrumented, capture_path, rewrite, workspace, extra_env,
                stack=False, arg_probe=False):
     """Assemble the child env + (rules_path). Non-instrumented → a clean env. The
     ``stack``/``arg_probe`` overlays set the shim's diagnostic knobs (call-stack
-    unwind / trampoline arg-graph) on top of whatever base ``stage`` is selected."""
+    unwind / trampoline arg-graph) on top of the full hook union the shim installs."""
     if not instrumented:
         return _env.clean_env(), None
-    env = _env.instrumented_env(stage=stage, capture=capture_path, extra_env=extra_env)
+    env = _env.instrumented_env(capture=capture_path, extra_env=extra_env)
     if stack:
         env["AGY_PROC_STACK"] = "1"
     if arg_probe:
@@ -397,16 +378,17 @@ def _inject_config(tools, context):
 # --- one-shot ----------------------------------------------------------------
 def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
         capture=True, instrumented=None, timeout=300, skip_permissions=False,
-        agy_bin=None, extra_env=None, stage=3, stack=False, arg_probe=False,
+        agy_bin=None, extra_env=None, stack=False, arg_probe=False,
         funcmap=None, conversation_id=None, continue_latest=False, data_dir=None,
         trust=True):
     """Run one ``agy --print`` turn and return a decoded :class:`AgyResponse`.
 
-    ``stage`` selects what the shim captures — an int or an alias
-    (``"wire"``=3 default, ``"app"``/``"pipeline"``=12, ``"rpc"``=13, ``"smoke"``=2).
-    The overlays ``stack=True`` / ``arg_probe=True`` add the diagnostic call-stack /
-    trampoline arg-graph on top of any stage, surfaced on ``.stacks``/``.call_graph``
-    and ``.cgt_args``. ``funcmap`` overrides the symbol map used by ``.stacks``.
+    The shim installs the full working hook union, so one turn populates the wire
+    (``.turns``/``.request``/``.usage``/``.model``), app-boundary (``.app_text``), and
+    RPC-trace (``.rpc_trace``) surfaces together. The overlays ``stack=True`` /
+    ``arg_probe=True`` add the diagnostic call-stack / trampoline arg-graph, surfaced on
+    ``.stacks``/``.call_graph`` and ``.cgt_args``. ``funcmap`` overrides the symbol map
+    used by ``.stacks``.
 
     ``conversation_id`` resumes a stored conversation (``--conversation=<id>``, works in
     print mode) and ``continue_latest`` resumes the most recent one (``--continue``); the
@@ -418,7 +400,6 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
     :func:`pyagy.conversations.prepare_scoped_home`). ``trust`` (default on) pre-registers the
     workspace in agy's ``trustedWorkspaces`` so interactive mode never blocks on the
     folder-trust prompt."""
-    stage = _resolve_stage(stage)
     workspace = ensure_git_workspace(workspace)
     agy = agy_bin or AGY_BIN
     use_instr, reason = _resolve_instrumented(instrumented)
@@ -432,7 +413,7 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
         open(cap_path, "w").close()   # truncate so we only read this run's turns
 
     log_path = os.path.join(workspace, "pyagy-shim.log") if use_instr else None
-    env, _ = _build_env(instrumented=use_instr, stage=stage, capture_path=cap_path,
+    env, _ = _build_env(instrumented=use_instr, capture_path=cap_path,
                         rewrite=rewrite, workspace=workspace, extra_env=extra_env,
                         stack=stack, arg_probe=arg_probe)
     if log_path:
@@ -460,7 +441,7 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
 
     turns, app_texts, _ = (_load_capture(cap_path) if (cap_path and use_instr)
                            else ([], [], 0))
-    # Prefer the app-boundary answer (stage 12) when present; else the PTY transcript.
+    # Prefer the app-boundary answer (fh_update) when present; else the PTY transcript.
     text = (max(app_texts, key=len) if app_texts else _answer_text(transcript))
     cid = _conv.capture_conversation_id(snap, capture_path=cap_path if use_instr else None,
                                         home=home)
@@ -488,7 +469,7 @@ class Session:
 
     def __init__(self, *, model=None, workspace=None, tools=None, context=None,
                  rewrite=None, capture=True, instrumented=None, timeout=180,
-                 idle=25.0, agy_bin=None, extra_env=None, stage=3, stack=False,
+                 idle=25.0, agy_bin=None, extra_env=None, stack=False,
                  arg_probe=False, funcmap=None, conversation_id=None,
                  continue_latest=False, skip_permissions=False, data_dir=None,
                  trust=True):
@@ -498,7 +479,6 @@ class Session:
         self.timeout = timeout
         self.idle = idle
         self.capture = capture
-        self.stage = _resolve_stage(stage)
         self.stack = stack
         self.arg_probe = arg_probe
         self.funcmap = funcmap
@@ -534,7 +514,7 @@ class Session:
         self.log_path = (os.path.join(self.workspace, "pyagy-session.log")
                          if self.instrumented else None)
         env, self.rules_path = _build_env(
-            instrumented=self.instrumented, stage=self.stage, capture_path=self.cap_path,
+            instrumented=self.instrumented, capture_path=self.cap_path,
             rewrite=self.rewrite, workspace=self.workspace, extra_env=self.extra_env,
             stack=self.stack, arg_probe=self.arg_probe)
         if self.log_path:

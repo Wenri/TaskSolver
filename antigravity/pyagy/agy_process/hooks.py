@@ -1,136 +1,140 @@
 """Machine-readable mirror of the native hook table (src/proc.def).
 
 `proc.def` is the source of truth (it feeds the C X-macro); this is the Python-side
-copy so tooling and the client can reason about stages, kinds, and which hook is the
+copy so tooling and the client can reason about mechanisms, kinds, and which hook is the
 rewrite surface without parsing C. Keep the two in sync when you add/remove a hook.
 
 Fields per entry: ``id`` (C enum tag), ``symbol`` (Go symbol hooked), ``mode``
 (``async`` log-only / ``sync`` blocks for a modify verdict), ``kind`` (the string
-passed to ``dispatch``), ``stage`` (which AGY_PROC_STAGE enables it), ``leave``
+passed to ``dispatch``), ``mech`` (how it's installed: ``"gum"`` = frida-gum inline
+attach, ``"tramp"`` = cgocall trampoline, ``"off"`` = NOT installed — kept as
+documentation of a hook that stalls agy or collides with another), ``leave``
 (intercepts the return value), ``note``.
-"""
 
-# The package's recommended stage: tls_write (egress, sync-capable) + decrypt
-# (ingress) — enough to capture and rewrite the model turn, nothing that parks agy.
-DEFAULT_STAGE = 3
+The shim installs the union of every ``"gum"`` + ``"tramp"`` hook on each run (no stage
+selector). ``"off"`` hooks are the parking/stall funcs and the os.Getenv duplicate.
+"""
 
 HOOKS = [
     {"id": "SMOKE_GETENV", "symbol": "os.Getenv", "mode": "async", "kind": "smoke",
-     "stage": 2, "leave": False, "note": "liveness smoke; fires often, no network"},
+     "mech": "gum", "leave": False, "note": "liveness smoke; fires often, no network"},
     {"id": "FILE_OPEN", "symbol": "os.OpenFile", "mode": "async", "kind": "file_open",
-     "stage": 3, "leave": False,
+     "mech": "gum", "leave": False,
      "note": "OVERLAY (AGY_PROC_CONV_ID): enter-only probe reading OpenFile's path arg; "
              "C-filtered to conversations/·/brain/ paths → conversation_id event (the uuid "
-             "is in the path). Not installed by a plain stage-3 run."},
+             "is in the path). Only attaches when AGY_PROC_CONV_ID is set."},
     {"id": "TLS_WRITE", "symbol": "crypto/tls.(*Conn).Write", "mode": "async",
-     "kind": "tls_write", "stage": 3, "leave": False,
+     "kind": "tls_write", "mech": "gum", "leave": False,
      "note": "egress c2s; the ONLY rewrite surface (AGY_PROC_TLS_WRITE_SYNC); "
              "carries the full HTTP/1.1 model request"},
     {"id": "H2_PIPE_WRITE", "symbol": "net/http/internal/http2.(*pipe).Write",
-     "mode": "async", "kind": "resp", "stage": 5, "leave": False,
-     "note": "parks under contention → reference only"},
+     "mode": "async", "kind": "resp", "mech": "off", "leave": False,
+     "note": "OFF: parks under contention → stalls agy (reference only)"},
     {"id": "TLS_DECRYPT", "symbol": "crypto/tls.(*halfConn).decrypt", "mode": "async",
-     "kind": "tls_read", "stage": 3, "leave": True,
+     "kind": "tls_read", "mech": "gum", "leave": True,
      "note": "ingress s2c (decrypted inbound records); carries the SSE response"},
     {"id": "TLS_READ", "symbol": "crypto/tls.(*Conn).Read", "mode": "async",
-     "kind": "tls_read", "stage": 5, "leave": True, "note": "parks while hooked → STALL"},
+     "kind": "tls_read", "mech": "off", "leave": True, "note": "OFF: parks while hooked → STALL"},
     {"id": "HTTP_RT", "symbol": "net/http.(*Transport).RoundTrip", "mode": "async",
-     "kind": "http_rt", "stage": 5, "leave": False, "note": "parks while hooked → STALL"},
+     "kind": "http_rt", "mech": "off", "leave": False, "note": "OFF: parks while hooked → STALL"},
     {"id": "SER_ROOT",
      "symbol": "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",
-     "mode": "async", "kind": "serialize", "stage": 4, "leave": True,
+     "mode": "async", "kind": "serialize", "mech": "gum", "leave": True,
      "note": "app-layer R&D; empirically does not fire for the model request"},
     {"id": "MAR_PROMPT",
      "symbol": "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON",
-     "mode": "async", "kind": "marshal", "stage": 4, "leave": True, "note": "app-layer R&D"},
+     "mode": "async", "kind": "marshal", "mech": "gum", "leave": True, "note": "app-layer R&D"},
     {"id": "PROTO_MARSHAL",
      "symbol": "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",
-     "mode": "async", "kind": "proto_marshal", "stage": 4, "leave": True,
-     "note": "app-layer R&D"},
+     "mode": "async", "kind": "proto_marshal", "mech": "gum", "leave": True,
+     "note": "app-layer R&D; hot path (fires on every proto marshal ≥256B)"},
     {"id": "CGT_SEND_USER_MSG",
      "symbol": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage",
-     "mode": "async", "kind": "send_user_msg", "stage": 8, "leave": False,
+     "mode": "async", "kind": "send_user_msg", "mech": "tramp", "leave": False,
      "note": "cgocall-trampoline app-boundary hook (observe)"},
     {"id": "CGT_STREAM_SEND",
      "symbol": "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",
-     "mode": "async", "kind": "stream_send", "stage": 8, "leave": False,
+     "mode": "async", "kind": "stream_send", "mech": "tramp", "leave": False,
      "note": "cgocall-trampoline app-boundary hook (observe)"},
     {"id": "CGT_GETENV", "symbol": "os.Getenv", "mode": "async", "kind": "cgt_getenv",
-     "stage": 9, "leave": False, "note": "cgocall-trampoline mechanism validator"},
-    # stages 11-12: model-text pipeline probe (diagnostic/RE only — the response data
-    # path stays on the wire via http1sse; see README "App-boundary text probe").
+     "mech": "off", "leave": False,
+     "note": "OFF: os.Getenv is already gum-hooked by SMOKE_GETENV; installing both would "
+             "double-patch one entry (overlapping SMC → crash). Trampoline validator, redundant."},
+    # model-text pipeline probe (diagnostic/RE only — the response data path stays on the
+    # wire via http1sse; see README "App-boundary text probe"). Installed (park-safe) but
+    # empirically inert on 1.0.16.
     {"id": "GET_DELTA_CCPA",
      "symbol": "…api_server_go_proto.(*GetChatMessageResponse).GetDeltaText",
-     "mode": "async", "kind": "delta_ccpa", "stage": 11, "leave": True,
+     "mode": "async", "kind": "delta_ccpa", "mech": "gum", "leave": True,
      "note": "leaf getter, returns delta text (on_leave); inactive ccpa provider — doesn't fire on 1.0.16"},
     {"id": "GET_DELTA_CMPL",
      "symbol": "…codeium_common_go_proto.(*CompletionDelta).GetDeltaText",
-     "mode": "async", "kind": "delta_completion", "stage": 11, "leave": True,
+     "mode": "async", "kind": "delta_completion", "mech": "gum", "leave": True,
      "note": "leaf getter, returns delta text (on_leave); inactive provider — doesn't fire"},
     # RESPONSE getters (return the assembled text as a plain string on_leave). Tried for
     # the return-value problem; DON'T fire on 1.0.16 (framework reads the field directly).
     {"id": "RESP_TEXT", "symbol": "…cortex_go_proto.(*CortexStepPlannerResponse).GetResponse",
-     "mode": "async", "kind": "resp_text", "stage": 11, "leave": True, "note": "response getter — doesn't fire (direct field access)"},
+     "mode": "async", "kind": "resp_text", "mech": "gum", "leave": True, "note": "response getter — doesn't fire (direct field access)"},
     {"id": "RESP_THINKING", "symbol": "…cortex_go_proto.(*CortexStepPlannerResponse).GetThinking",
-     "mode": "async", "kind": "resp_thinking", "stage": 11, "leave": True, "note": "thinking getter — doesn't fire"},
+     "mode": "async", "kind": "resp_thinking", "mech": "gum", "leave": True, "note": "thinking getter — doesn't fire"},
     {"id": "RESP_VIEW", "symbol": "…trajectory.(*PlannerResponseStepView).Response",
-     "mode": "async", "kind": "resp_view", "stage": 11, "leave": True, "note": "response view — doesn't fire"},
+     "mode": "async", "kind": "resp_view", "mech": "gum", "leave": True, "note": "response view — doesn't fire"},
     {"id": "FH_FINALIZE",
      "symbol": "…generator.(*streamResponseHandler).finalizePlannerResponse",
-     "mode": "async", "kind": "fh_finalize", "stage": 12, "leave": False,
+     "mode": "async", "kind": "fh_finalize", "mech": "tramp", "leave": False,
      "note": "framework choke point (trampoline); fires, but output text is built during the call → not in entry args"},
     {"id": "FH_UPDATE",
      "symbol": "…generator.(*streamResponseHandler).updateWithStep",
-     "mode": "async", "kind": "fh_update", "stage": 12, "leave": False,
+     "mode": "async", "kind": "fh_update", "mech": "tramp", "leave": False,
      "note": "THE shallow response consumer: RSI→planner response, answer text at "
              "+0x8/+0x10 (one deref) → decoded to `app_response` in agy_cgo_hook"},
     {"id": "FH_PROCESS",
      "symbol": "…generator.(*streamResponseHandler).processStream",
-     "mode": "async", "kind": "fh_process", "stage": 12, "leave": False,
+     "mode": "async", "kind": "fh_process", "mech": "tramp", "leave": False,
      "note": "framework stream consumer (trampoline)"},
     {"id": "CORE_PLANSTEP",
      "symbol": "…core.createPlannerResponseStep",
-     "mode": "async", "kind": "core_planstep", "stage": 12, "leave": False,
+     "mode": "async", "kind": "core_planstep", "mech": "tramp", "leave": False,
      "note": "builds assistant Step (trampoline); inlined/off-path — fired 0× in probe"},
     # consumer-entry hooks for the RESPONSE (return-value problem). OnStepsChanged FIRES
     # and its entry-reachable graph holds the full assembled answer (via AGY_PROC_CGT_ARGS);
     # the AppendStep/AddStep variants don't fire (different concrete type / --print path).
     {"id": "TRAJ_APPENDSTEP", "symbol": "…integration.(*ToolContextTrajectory).AppendStep",
-     "mode": "async", "kind": "traj_appendstep", "stage": 12, "leave": False, "note": "doesn't fire in --print/interactive"},
+     "mode": "async", "kind": "traj_appendstep", "mech": "tramp", "leave": False, "note": "doesn't fire in --print/interactive"},
     {"id": "TRAJ_ADDSTEP", "symbol": "…cortex/traj/traj.(*Trajectory).AddStep",
-     "mode": "async", "kind": "traj_addstep", "stage": 12, "leave": False, "note": "doesn't fire"},
+     "mode": "async", "kind": "traj_addstep", "mech": "tramp", "leave": False, "note": "doesn't fire"},
     {"id": "TRAJ_ONSTEPS", "symbol": "…agent_state_component.(*AgentState).OnStepsChanged",
-     "mode": "async", "kind": "traj_onsteps", "stage": 12, "leave": False,
+     "mode": "async", "kind": "traj_onsteps", "mech": "tramp", "leave": False,
      "note": "FIRES; entry graph holds the full assembled response (deep offset; extraction fragile → superseded by fh_update)"},
     {"id": "TRAJ_APPENDSTEP_EXEC", "symbol": "…framework/executor/executor.(*ExecutionTrajectory).AppendStep",
-     "mode": "async", "kind": "traj_appendstep_exec", "stage": 12, "leave": False,
+     "mode": "async", "kind": "traj_appendstep_exec", "mech": "tramp", "leave": False,
      "note": "FIRES on the --print path; the commit point one frame above OnStepsChanged "
              "(chain endpoint + stack anchor). *Step text is 6 hops deep → decode lives on fh_update"},
-    # stage 13: CodeAssistClient RPC trace (trampoline; kind = RPC label). The
-    # app-semantic backend boundary — request via AGY_PROC_CGT_ARGS, stack via
-    # AGY_PROC_STACK. StreamGenerateContent is the model turn. See rpctrace.py.
+    # CodeAssistClient RPC trace (trampoline; kind = RPC label). The app-semantic backend
+    # boundary — request via AGY_PROC_CGT_ARGS, stack via AGY_PROC_STACK.
+    # StreamGenerateContent is the model turn. See rpctrace.py.
     {"id": "RPC_STREAM_GEN", "symbol": "…codeassistclient.(*CodeAssistClient).StreamGenerateContent",
-     "mode": "async", "kind": "rpc_stream_generate", "stage": 13, "leave": False,
+     "mode": "async", "kind": "rpc_stream_generate", "mech": "tramp", "leave": False,
      "note": "the model turn (streaming); request proto at entry"},
     {"id": "RPC_GEN", "symbol": "…(*CodeAssistClient).GenerateContent",
-     "mode": "async", "kind": "rpc_generate", "stage": 13, "leave": False, "note": "non-streaming generate"},
+     "mode": "async", "kind": "rpc_generate", "mech": "tramp", "leave": False, "note": "non-streaming generate"},
     {"id": "RPC_LOAD_CA", "symbol": "…(*CodeAssistClient).FetchLoadCodeAssistResponse",
-     "mode": "async", "kind": "rpc_load_code_assist", "stage": 13, "leave": False, "note": "startup"},
+     "mode": "async", "kind": "rpc_load_code_assist", "mech": "tramp", "leave": False, "note": "startup"},
     {"id": "RPC_USERINFO", "symbol": "…(*CodeAssistClient).FetchUserInfo",
-     "mode": "async", "kind": "rpc_fetch_userinfo", "stage": 13, "leave": False, "note": "startup"},
+     "mode": "async", "kind": "rpc_fetch_userinfo", "mech": "tramp", "leave": False, "note": "startup"},
     {"id": "RPC_MODELS", "symbol": "…(*CodeAssistClient).FetchAvailableModels",
-     "mode": "async", "kind": "rpc_fetch_models", "stage": 13, "leave": False, "note": "MendelStateCache pollLoop"},
+     "mode": "async", "kind": "rpc_fetch_models", "mech": "tramp", "leave": False, "note": "MendelStateCache pollLoop"},
     {"id": "RPC_EXPERIMENTS", "symbol": "…(*CodeAssistClient).ListExperiments",
-     "mode": "async", "kind": "rpc_list_experiments", "stage": 13, "leave": False, "note": "MendelStateCache pollLoop"},
+     "mode": "async", "kind": "rpc_list_experiments", "mech": "tramp", "leave": False, "note": "MendelStateCache pollLoop"},
     {"id": "RPC_QUOTA", "symbol": "…(*CodeAssistClient).RetrieveUserQuotaSummary",
-     "mode": "async", "kind": "rpc_quota", "stage": 13, "leave": False, "note": "store quotaRefreshLoop"},
+     "mode": "async", "kind": "rpc_quota", "mech": "tramp", "leave": False, "note": "store quotaRefreshLoop"},
     {"id": "RPC_REC_OFFERED", "symbol": "…(*CodeAssistClient).RecordConversationOffered",
-     "mode": "async", "kind": "rpc_record_offered", "stage": 13, "leave": False, "note": "telemetry"},
+     "mode": "async", "kind": "rpc_record_offered", "mech": "tramp", "leave": False, "note": "telemetry"},
     {"id": "RPC_REC_TRAJ", "symbol": "…(*CodeAssistClient).RecordTrajectorySegmentAnalytics",
-     "mode": "async", "kind": "rpc_record_trajectory", "stage": 13, "leave": False,
+     "mode": "async", "kind": "rpc_record_trajectory", "mech": "tramp", "leave": False,
      "note": "post-turn telemetry (AgentExecutor.recordTelemetryAfterExecution)"},
     {"id": "RPC_WRITE_ACLS", "symbol": "…(*CodeAssistClient).WriteTrajectoryACLs",
-     "mode": "async", "kind": "rpc_write_acls", "stage": 13, "leave": False, "note": "trajectory ACLs"},
+     "mode": "async", "kind": "rpc_write_acls", "mech": "tramp", "leave": False, "note": "trajectory ACLs"},
 ]
 
 # Kinds the correlator/decoder synthesize (not raw hooks) — emitted into the capture.
@@ -153,8 +157,14 @@ def by_kind(kind):
     return None
 
 
-def by_stage(stage):
-    return [h for h in HOOKS if h["stage"] == stage]
+def by_mech(mech):
+    """Hooks installed via a given mechanism: ``"gum"``, ``"tramp"``, or ``"off"``."""
+    return [h for h in HOOKS if h["mech"] == mech]
+
+
+def enabled_hooks():
+    """The hooks actually installed on each run (the full working union)."""
+    return [h for h in HOOKS if h["mech"] != "off"]
 
 
 def sync_capable():

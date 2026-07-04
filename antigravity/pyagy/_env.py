@@ -42,26 +42,28 @@ def clean_env(base=None):
     return env
 
 
-def instrumented_env(stage=3, capture="agy-capture.jsonl", log=None,
+def instrumented_env(capture="agy-capture.jsonl", log=None,
                      module="pyagy.agy_process", root=None, shim=None,
                      base=None, extra_env=None):
     """Environment that LD_PRELOADs the antigravity shim and points its embedded
     interpreter at ``module`` (default ``pyagy.agy_process``), writing hook events to
-    the ``capture`` JSONL. Mirrors run-agy.sh / the old AgySession._env; ``extra_env``
-    (applied last) can override any of the AGY_PROC* knobs."""
+    the ``capture`` JSONL. The shim installs the full working hook union (wire + app +
+    rpc) on every run — there is no stage selector. Pass ``AGY_PROC_NOHOOK`` via
+    ``extra_env`` for a bridge-only run (embedded interpreter, no capture hooks).
+    Mirrors run-agy.sh; ``extra_env`` (applied last) can override any AGY_PROC* knob."""
     root = root or ROOT
     shim = shim or os.path.join(root, "vendor", "antigravity.so")
     env = dict(base if base is not None else os.environ)
+    env.pop("AGY_PROC_NOHOOK", None)
     env.update({
         "AGY_PROC_ENABLE": "1",
-        "AGY_PROC_STAGE": str(stage),
         "AGY_PROC_MODULE": module,
         "AGY_PROC_PYTHONPATH": root,
         "AGY_PROC_CAPTURE": os.path.abspath(capture),
         # install the os.OpenFile conversation-id probe (overlay) so instrumented runs learn
         # the exact conversation id in-process (agy doesn't expose it via env); mtime is the
-        # fallback. Fires only on the gum-attach stages (3), and its C-side path filter keeps
-        # it cheap (Python sees only conversation-store opens).
+        # fallback. The FILE_OPEN gum hook only attaches when this is set, and its C-side
+        # path filter keeps it cheap (Python sees only conversation-store opens).
         "AGY_PROC_CONV_ID": "1",
         "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),
         "TERM": env.get("TERM", "xterm-256color"),

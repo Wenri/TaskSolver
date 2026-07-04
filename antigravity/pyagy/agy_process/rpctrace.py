@@ -1,6 +1,6 @@
-"""Render a time-ordered RPC trace from a stage-13 capture.
+"""Render a time-ordered RPC trace from a capture.
 
-Stage 13 trampolines agy's `(*CodeAssistClient).*` methods — one hook per backend
+The shim trampolines agy's `(*CodeAssistClient).*` methods — one hook per backend
 RPC — emitting an `rpc_<name>` event when each fires. This tool prints them as a
 labeled, time-ordered timeline of a turn (the app-level view that sits alongside the
 wire `genai_turn` decode), optionally enriched with:
@@ -15,7 +15,7 @@ Stdlib only. CLI:
 import json
 import sys
 
-# rpc_<kind> -> readable RPC name (mirrors proc.def stage 13).
+# rpc_<kind> -> readable RPC name (mirrors the CodeAssistClient hooks in proc.def).
 RPC_KINDS = {
     "rpc_stream_generate": "StreamGenerateContent  (the model turn)",
     "rpc_generate": "GenerateContent",
@@ -82,7 +82,7 @@ def trace(capture_path, funcmap=None, with_stacks=False):
     rows = [(t - t0, k, label) for t, k, label in rows]
 
     out = [f"=== RPC trace: {len(rows)} events over {rows[-1][0]:.2f}s ==="
-           if rows else "=== RPC trace: no rpc_*/context events (run at AGY_PROC_STAGE=13) ==="]
+           if rows else "=== RPC trace: no rpc_*/context events in this capture ==="]
     for dt, k, label in rows:
         out.append(f"  +{dt:7.3f}s  {label}")
         if k in stacks:

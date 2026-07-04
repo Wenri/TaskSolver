@@ -1,131 +1,128 @@
 /* proc.def — declarative hook table (X-macro).
  *
- *   HOOK(ID, "go.symbol.Name", MODE, "kind", STAGE, LEAVE)
+ *   HOOK(ID, "go.symbol.Name", MODE, "kind", MECH, LEAVE)
  *
  * ID     enum tag used in the on_enter/on_leave switch (register semantics are
  *        coded per-ID in antigravity.c — different funcs read different registers).
  * MODE   AGY_ASYNC (log, non-blocking) or AGY_SYNC (block for a modify verdict).
  * kind   string tag passed to Python dispatch(kind, stream_id, data).
- * STAGE  which AGY_PROC_STAGE this hook belongs to (incremental WSL1 bring-up):
- *          stage 1 = python only; stage 2 = ONLY stage-2 hooks (smoke);
- *          stage >=3 = ONLY stage->=3 hooks (the real ones).
+ * MECH   how the hook is installed (see install_hooks in antigravity.c):
+ *          AGY_GUM   = frida-gum inline attach (non-parking CPU funcs).
+ *          AGY_TRAMP = cgocall trampoline (gohook.c; park-safe for scheduling-path funcs).
+ *          AGY_OFF   = NOT installed. Kept here (line + on_enter/on_leave case) as
+ *                      documentation of a hook that stalls agy or collides with another.
+ *        The shim installs the union of every AGY_GUM + AGY_TRAMP hook on each run;
+ *        there is no per-stage selection anymore.
  * LEAVE  1 => needs on_leave (return-value interception). Costs a return-address
  *        rewrite that Go's stack unwinder can trip on, so keep it to hooks that
  *        truly need the return value. NEVER hook runtime-special funcs
  *        (runtime.main, goroutine entries) — Go validates their return PC.
  */
 
-/* STAGE now selects EXACTLY that stage's hooks (2=smoke, 3=tls/http, 4=serializers).
- * Safe ordinary startup function; fires many times, no auth/network needed. */
-HOOK(SMOKE_GETENV, "os.Getenv",                      AGY_ASYNC, "smoke",     2, 0)
+/* Safe ordinary startup function; fires many times, no auth/network needed. Liveness smoke.
+ * (os.Getenv is ALSO a trampoline target below (CGT_GETENV) — that one is AGY_OFF to avoid
+ * double-patching the same entry; we keep the lighter gum probe here.) */
+HOOK(SMOKE_GETENV, "os.Getenv",                      AGY_ASYNC, "smoke",     AGY_GUM,   0)
 
-/* conversation-id capture (overlay, gated by AGY_PROC_CONV_ID — NOT installed by a plain
- * stage-3 run). os.OpenFile(name string, ...) reads name.ptr=RAX/len=RBX (same shape as
+/* conversation-id capture (overlay, gated by AGY_PROC_CONV_ID — skipped unless that is set).
+ * os.OpenFile(name string, ...) reads name.ptr=RAX/len=RBX (same shape as
  * os.Getenv); agy opens .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
  * so the uuid is in the path. Enter-only probe → park-safe across the openat syscall; the
  * on_enter case filters to conversation paths in C so Python only sees the match. */
-HOOK(FILE_OPEN,    "os.OpenFile",                     AGY_ASYNC, "file_open", 3, 0)
+HOOK(FILE_OPEN,    "os.OpenFile",                     AGY_ASYNC, "file_open", AGY_GUM,   0)
 
-/* stage 3: egress capture. tls_write is safe once we attach PAST the prologue
+/* egress capture. tls_write is safe once we attach PAST the prologue
  * (per-hook skip from symbols.json) — it doesn't park, so no morestack re-entry
  * and no park-while-hooked hazard. Captures the full model REQUEST. */
-HOOK(TLS_WRITE,    "crypto/tls.(*Conn).Write",        AGY_ASYNC, "tls_write", 3, 0)
-/* http2 pipe.Write gets each de-framed response body chunk as []byte
+HOOK(TLS_WRITE,    "crypto/tls.(*Conn).Write",        AGY_ASYNC, "tls_write", AGY_GUM,   0)
+/* AGY_OFF — http2 pipe.Write gets each de-framed response body chunk as []byte
  * (RBX=ptr,RCX=len) — BUT it takes a sync.Mutex/cond and PARKS under
- * reader/writer contention, so hooking it stalls agy (stage 5, reference only,
- * same park hazard as tls_read). Use TLS_DECRYPT for the response instead. */
-HOOK(H2_PIPE_WRITE,"net/http/internal/http2.(*pipe).Write", AGY_ASYNC, "resp",   5, 0)
+ * reader/writer contention, so hooking it stalls agy. Use TLS_DECRYPT for the
+ * response instead. Disabled; kept for reference. */
+HOOK(H2_PIPE_WRITE,"net/http/internal/http2.(*pipe).Write", AGY_ASYNC, "resp",   AGY_OFF,   0)
 /* ingress RESPONSE via TLS decrypt (CPU-only, post-read → doesn't park). on_leave
  * []byte = decrypted inbound record (HTTP/2 frames of the response). */
-HOOK(TLS_DECRYPT,  "crypto/tls.(*halfConn).decrypt",   AGY_ASYNC, "tls_read",  3, 1)
-/* stage 5: these STALL agy — tls_read/RoundTrip PARK the goroutine while hooked
- * (even on-enter-only, past-prologue). Kept for reference; response capture must
- * use a non-parking CPU func (codecV2.Unmarshal) or the PTY transcript. */
-HOOK(TLS_READ,     "crypto/tls.(*Conn).Read",         AGY_ASYNC, "tls_read",  5, 1)
-HOOK(HTTP_RT,      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   5, 0)
+HOOK(TLS_DECRYPT,  "crypto/tls.(*halfConn).decrypt",   AGY_ASYNC, "tls_read",  AGY_GUM,   1)
+/* AGY_OFF — these STALL agy: tls_read/RoundTrip PARK the goroutine while hooked
+ * (even on-enter-only, past-prologue). Kept for reference; response capture uses
+ * the non-parking TLS_DECRYPT above or the PTY transcript. */
+HOOK(TLS_READ,     "crypto/tls.(*Conn).Read",         AGY_ASYNC, "tls_read",  AGY_OFF,   1)
+HOOK(HTTP_RT,      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   AGY_OFF,   0)
 
-/* stage 4: app-layer capture R&D — CPU-only funcs returning []byte (readable). */
-HOOK(SER_ROOT,     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",    AGY_ASYNC, "serialize", 4, 1)
-HOOK(MAR_PROMPT,   "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON", AGY_ASYNC, "marshal",   4, 1)
-HOOK(PROTO_MARSHAL,"google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            AGY_ASYNC, "proto_marshal", 4, 1)
+/* app-layer capture R&D — CPU-only funcs returning []byte (readable). Do not fire for
+ * the model request in practice, but park-safe leaves, so installed as part of the union. */
+HOOK(SER_ROOT,     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",    AGY_ASYNC, "serialize", AGY_GUM,   1)
+HOOK(MAR_PROMPT,   "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON", AGY_ASYNC, "marshal",   AGY_GUM,   1)
+HOOK(PROTO_MARSHAL,"google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            AGY_ASYNC, "proto_marshal", AGY_GUM,   1)
 
-/* RATIONALE (former stages 6-7, removed once the trampoline below proved out): a naive
- * gum attach on the parking funcs `SendUserMessage`/`callbackStreamer.Send` (stage 6) and
- * a cgo-gateway probe on `runtime.cgocall` (stage 7) were experiments. Both parking funcs
- * FIRE in-process, but a gum attach makes agy's turn produce NO answer — they're on the
- * goroutine-scheduling path, so gum's per-thread return-tracking corrupts the turn (same
- * hazard as stage 5). Stage 8 hooks the SAME targets via the cgocall trampoline instead,
- * which never intercepts the return and so is park-safe. */
+/* cgocall-TRAMPOLINE app-boundary hooks (Approach A — the robust general mechanism).
+ * The parking targets (SendUserMessage/callbackStreamer.Send): instead of a gum
+ * attach (whose return-tracking breaks on park/reschedule) we redirect them through
+ * runtime.cgocall via a generated trampoline (gohook.c) + a synthetic moduledata so GC
+ * stack-unwind is safe. MODE/leave are advisory here — the trampoline path reads args
+ * on the g0 stack and never intercepts the return. */
+HOOK(CGT_SEND_USER_MSG, "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage", AGY_ASYNC, "send_user_msg", AGY_TRAMP, 0)
+HOOK(CGT_STREAM_SEND,   "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",          AGY_ASYNC, "stream_send",   AGY_TRAMP, 0)
 
-/* stage 8: cgocall-TRAMPOLINE hooks (Approach A — the robust general mechanism).
- * The parking targets (SendUserMessage/callbackStreamer.Send), but instead of a gum
- * attach (whose return-tracking breaks on park/reschedule) we redirect them through runtime.cgocall via
- * a generated trampoline (gohook.c) + a synthetic moduledata (set AGY_PROC_MODULEDATA=1)
- * so GC stack-unwind is safe. MODE/leave are advisory here — the trampoline path
- * reads args on the g0 stack and never intercepts the return. */
-HOOK(CGT_SEND_USER_MSG, "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage", AGY_ASYNC, "send_user_msg", 8, 0)
-HOOK(CGT_STREAM_SEND,   "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",          AGY_ASYNC, "stream_send",   8, 0)
+/* AGY_OFF — cgocall-trampoline validation probe on the BENIGN os.Getenv. Disabled because
+ * os.Getenv is ALSO hooked by SMOKE_GETENV (gum) above; installing both would patch one
+ * function entry with a gum inline hook AND a trampoline redirect (overlapping SMC → crash).
+ * The trampoline mechanism is exercised by the real AGY_TRAMP hooks; this validator is redundant. */
+HOOK(CGT_GETENV, "os.Getenv", AGY_ASYNC, "cgt_getenv", AGY_OFF, 0)
 
-/* stage 9: cgocall-trampoline TOOL validation on a BENIGN function. os.Getenv is
- * CPU-only, non-parking, not on agy's request/response concurrency path — if the
- * trampoline works here (agy answers + hook fires many times) the tool is sound
- * and SendUserMessage/Send (stage 8) are simply intolerant of a syscall transition
- * at entry. Uses the same gohook.c path as stage 8. */
-HOOK(CGT_GETENV, "os.Getenv", AGY_ASYNC, "cgt_getenv", 9, 0)
-
-/* stage 11: model-TEXT leaf getters (gemini_coder pipeline). These frameless nosplit
+/* model-TEXT leaf getters (gemini_coder pipeline). These frameless nosplit
  * getters RETURN the streamed assistant text as a Go string (on_leave RAX=ptr,RBX=len)
  * — the cleanest signal, zero struct-offset fragility. CPU-only leaves → gum-attach
  * on_leave is re-entry-safe. Two provider variants; whichever fires at runtime wins.
  * (build_symbols NOSPLIT_TARGETS resolves them skip=0, exempt from the prologue assert.) */
-HOOK(GET_DELTA_CCPA, "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText", AGY_ASYNC, "delta_ccpa", 11, 1)
-HOOK(GET_DELTA_CMPL, "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText", AGY_ASYNC, "delta_completion", 11, 1)
+HOOK(GET_DELTA_CCPA, "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText", AGY_ASYNC, "delta_ccpa", AGY_GUM,   1)
+HOOK(GET_DELTA_CMPL, "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText", AGY_ASYNC, "delta_completion", AGY_GUM,   1)
 /* RESPONSE getters: return the assembled assistant text as a plain Go string (on_leave
  * RAX=ptr,RBX=len) — the clean, zero-struct-offset answer to the return-value problem
  * IF they fire (proto getters can be bypassed by direct field access; probe first). */
-HOOK(RESP_TEXT,     "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse", AGY_ASYNC, "resp_text",     11, 1)
-HOOK(RESP_THINKING, "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking", AGY_ASYNC, "resp_thinking", 11, 1)
-HOOK(RESP_VIEW,     "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response",   AGY_ASYNC, "resp_view",     11, 1)
+HOOK(RESP_TEXT,     "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse", AGY_ASYNC, "resp_text",     AGY_GUM,   1)
+HOOK(RESP_THINKING, "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking", AGY_ASYNC, "resp_thinking", AGY_GUM,   1)
+HOOK(RESP_VIEW,     "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response",   AGY_ASYNC, "resp_view",     AGY_GUM,   1)
 
-/* stage 12: model-TEXT framework choke points (provider-agnostic). On the parking
+/* model-TEXT framework choke points (provider-agnostic). On the parking
  * stream-consumer path → cgocall trampoline; AGY_PROC_CGT_ARGS walks their args to
  * locate the accumulated/per-delta assistant text. finalize = full per-turn text. */
-HOOK(FH_FINALIZE, "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse", AGY_ASYNC, "fh_finalize", 12, 0)
+HOOK(FH_FINALIZE, "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse", AGY_ASYNC, "fh_finalize", AGY_TRAMP, 0)
 /* THE clean response consumer (Plan 7 probe winner): updateWithStep's RSI arg points
  * at the planner response; the assistant text is a Go string at +0x8/+0x10 — ONE
  * deref, the stable cortex proto layout. agy_cgo_hook decodes it directly to
  * `app_response` (far shallower than AppendStep/OnStepsChanged's 6-deep graphs). */
-HOOK(FH_UPDATE,   "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",          AGY_ASYNC, "fh_update",   12, 0)
-HOOK(FH_PROCESS,  "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",           AGY_ASYNC, "fh_process",  12, 0)
-HOOK(CORE_PLANSTEP, "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",                                AGY_ASYNC, "core_planstep", 12, 0)
+HOOK(FH_UPDATE,   "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",          AGY_ASYNC, "fh_update",   AGY_TRAMP, 0)
+HOOK(FH_PROCESS,  "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",           AGY_ASYNC, "fh_process",  AGY_TRAMP, 0)
+HOOK(CORE_PLANSTEP, "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",                                AGY_ASYNC, "core_planstep", AGY_TRAMP, 0)
 /* consumer-entry hook for the RESPONSE (solves the return-value problem without
  * capturing a return): AppendStep/SetStep take the completed *Step — with the
  * assembled assistant text (GetPlannerResponse→GetResponse) — as an ENTRY arg.
  * Trampoline (they park committing to the trajectory); walk with AGY_PROC_CGT_ARGS. */
-HOOK(TRAJ_APPENDSTEP, "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep", AGY_ASYNC, "traj_appendstep", 12, 0)
-HOOK(TRAJ_ADDSTEP,    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep",                                             AGY_ASYNC, "traj_addstep",    12, 0)
-HOOK(TRAJ_ONSTEPS,    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged",     AGY_ASYNC, "traj_onsteps",    12, 0)
+HOOK(TRAJ_APPENDSTEP, "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep", AGY_ASYNC, "traj_appendstep", AGY_TRAMP, 0)
+HOOK(TRAJ_ADDSTEP,    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep",                                             AGY_ASYNC, "traj_addstep",    AGY_TRAMP, 0)
+HOOK(TRAJ_ONSTEPS,    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged",     AGY_ASYNC, "traj_onsteps",    AGY_TRAMP, 0)
 /* Plan 7 — the commit point one frame above OnStepsChanged (runExecution → AppendStep
  * → observers). Fires on the live --print path (unlike ToolContextTrajectory.AppendStep
  * above). Kept as a documented chain endpoint + stack anchor; the live probe found its
  * *Step text is 6 struct-hops deep (as fragile as OnStepsChanged), so the clean
  * `app_response` decode lives on FH_UPDATE, not here. */
-HOOK(TRAJ_APPENDSTEP_EXEC, "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep",           AGY_ASYNC, "traj_appendstep_exec", 12, 0)
+HOOK(TRAJ_APPENDSTEP_EXEC, "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep",           AGY_ASYNC, "traj_appendstep_exec", AGY_TRAMP, 0)
 
-/* stage 13: CodeAssistClient RPC trace. (*CodeAssistClient).* is agy's single client
+/* CodeAssistClient RPC trace. (*CodeAssistClient).* is agy's single client
  * to the CloudCode backend — each method is one named RPC with typed proto args. They
  * park on the HTTP round-trip → cgocall trampoline. The kind is the RPC label (→ a
  * time-ordered app-level trace); AGY_PROC_STACK adds the call stack, AGY_PROC_CGT_ARGS
  * walks the request proto at entry. StreamGenerateContent is the model turn itself. */
 #define CAC "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient)."
-HOOK(RPC_STREAM_GEN,   CAC "StreamGenerateContent",            AGY_ASYNC, "rpc_stream_generate",   13, 0)
-HOOK(RPC_GEN,          CAC "GenerateContent",                  AGY_ASYNC, "rpc_generate",          13, 0)
-HOOK(RPC_LOAD_CA,      CAC "FetchLoadCodeAssistResponse",      AGY_ASYNC, "rpc_load_code_assist",  13, 0)
-HOOK(RPC_USERINFO,     CAC "FetchUserInfo",                    AGY_ASYNC, "rpc_fetch_userinfo",    13, 0)
-HOOK(RPC_MODELS,       CAC "FetchAvailableModels",             AGY_ASYNC, "rpc_fetch_models",      13, 0)
-HOOK(RPC_EXPERIMENTS,  CAC "ListExperiments",                  AGY_ASYNC, "rpc_list_experiments",  13, 0)
-HOOK(RPC_QUOTA,        CAC "RetrieveUserQuotaSummary",         AGY_ASYNC, "rpc_quota",             13, 0)
-HOOK(RPC_REC_OFFERED,  CAC "RecordConversationOffered",        AGY_ASYNC, "rpc_record_offered",    13, 0)
-HOOK(RPC_REC_TRAJ,     CAC "RecordTrajectorySegmentAnalytics", AGY_ASYNC, "rpc_record_trajectory", 13, 0)
-HOOK(RPC_WRITE_ACLS,   CAC "WriteTrajectoryACLs",              AGY_ASYNC, "rpc_write_acls",        13, 0)
+HOOK(RPC_STREAM_GEN,   CAC "StreamGenerateContent",            AGY_ASYNC, "rpc_stream_generate",   AGY_TRAMP, 0)
+HOOK(RPC_GEN,          CAC "GenerateContent",                  AGY_ASYNC, "rpc_generate",          AGY_TRAMP, 0)
+HOOK(RPC_LOAD_CA,      CAC "FetchLoadCodeAssistResponse",      AGY_ASYNC, "rpc_load_code_assist",  AGY_TRAMP, 0)
+HOOK(RPC_USERINFO,     CAC "FetchUserInfo",                    AGY_ASYNC, "rpc_fetch_userinfo",    AGY_TRAMP, 0)
+HOOK(RPC_MODELS,       CAC "FetchAvailableModels",             AGY_ASYNC, "rpc_fetch_models",      AGY_TRAMP, 0)
+HOOK(RPC_EXPERIMENTS,  CAC "ListExperiments",                  AGY_ASYNC, "rpc_list_experiments",  AGY_TRAMP, 0)
+HOOK(RPC_QUOTA,        CAC "RetrieveUserQuotaSummary",         AGY_ASYNC, "rpc_quota",             AGY_TRAMP, 0)
+HOOK(RPC_REC_OFFERED,  CAC "RecordConversationOffered",        AGY_ASYNC, "rpc_record_offered",    AGY_TRAMP, 0)
+HOOK(RPC_REC_TRAJ,     CAC "RecordTrajectorySegmentAnalytics", AGY_ASYNC, "rpc_record_trajectory", AGY_TRAMP, 0)
+HOOK(RPC_WRITE_ACLS,   CAC "WriteTrajectoryACLs",              AGY_ASYNC, "rpc_write_acls",        AGY_TRAMP, 0)
 #undef CAC

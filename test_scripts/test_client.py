@@ -111,35 +111,22 @@ def test_resolve_instrumented():
         check(use is False and reason, "resolve: None + no shim → fallback with reason")
 
 
-def test_stage_aliases():
-    print("[offline] stage alias resolution")
-    check(C._resolve_stage("wire") == 3, "alias: wire -> 3")
-    check(C._resolve_stage("app") == 12 and C._resolve_stage("pipeline") == 12,
-          "alias: app/pipeline -> 12")
-    check(C._resolve_stage("rpc") == 13, "alias: rpc -> 13")
-    check(C._resolve_stage("smoke") == 2, "alias: smoke -> 2")
-    check(C._resolve_stage(5) == 5, "int passes through")
-    try:
-        C._resolve_stage("nope")
-        check(False, "unknown alias: rejected")
-    except ValueError as e:
-        check("unknown stage" in str(e), "unknown alias: clear ValueError")
-
-
 def test_build_env_overlays():
     print("[offline] stack/arg_probe overlays wire the shim env knobs")
     d = tempfile.mkdtemp()
     cap = os.path.join(d, "c.jsonl")
-    env, _ = C._build_env(instrumented=True, stage=13, capture_path=cap, rewrite=None,
+    env, _ = C._build_env(instrumented=True, capture_path=cap, rewrite=None,
                           workspace=d, extra_env=None, stack=True, arg_probe=True)
     check(env.get("AGY_PROC_STACK") == "1", "stack=True -> AGY_PROC_STACK=1")
     check(env.get("AGY_PROC_CGT_ARGS") == "1", "arg_probe=True -> AGY_PROC_CGT_ARGS=1")
-    check(env.get("AGY_PROC_STAGE") == "13", "stage threaded into env")
-    env2, _ = C._build_env(instrumented=True, stage=3, capture_path=cap, rewrite=None,
+    check(env.get("AGY_PROC_ENABLE") == "1" and "AGY_PROC_STAGE" not in env
+          and "AGY_PROC_NOHOOK" not in env,
+          "instrumented run enables the full hook union (no stage selector, no nohook)")
+    env2, _ = C._build_env(instrumented=True, capture_path=cap, rewrite=None,
                            workspace=d, extra_env=None)
     check("AGY_PROC_STACK" not in env2 and "AGY_PROC_CGT_ARGS" not in env2,
           "no overlays -> knobs absent")
-    clean, _ = C._build_env(instrumented=False, stage=3, capture_path=cap, rewrite=None,
+    clean, _ = C._build_env(instrumented=False, capture_path=cap, rewrite=None,
                             workspace=d, extra_env=None, stack=True)
     check("AGY_PROC_STACK" not in clean, "uninstrumented: no diagnostic knobs")
 
@@ -249,7 +236,6 @@ def main():
     test_rewrite_rule()
     test_prepare_rewrite()
     test_resolve_instrumented()
-    test_stage_aliases()
     test_build_env_overlays()
     test_diagnostic_accessors()
     test_diagnostic_graceful_empty()

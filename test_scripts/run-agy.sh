@@ -5,9 +5,8 @@
 #
 # Env knobs (all optional):
 #   AGY_BIN                 path to agy            (default ~/.local/bin/agy)
-#   AGY_PROC_STAGE          1=python+DNS only (default), 2=+smoke hook,
-#                           3=+tls_write+decrypt (request+response capture),
-#                           4=serializer/proto R&D, 5=parking hooks (STALL agy)
+#   AGY_PROC_NOHOOK         set to run bridge-only (no capture hooks); default installs
+#                           the full working hook union (wire + app + rpc)
 #   AGY_PROC_CAPTURE        JSONL output           (default ./agy-capture.jsonl)
 #   AGY_PROC_LOG            native shim log        (default ./antigravity.log)
 #   AGY_PROC_TLS_WRITE_SYNC set to enable synchronous egress rewrite
@@ -27,7 +26,6 @@ sys.path.insert(0, ${ANTIGRAVITY@Q})
 from pyagy._env import instrumented_env
 agy, *args = sys.argv[1:]
 env = instrumented_env(
-    stage=os.environ.get("AGY_PROC_STAGE", "1"),
     capture=os.environ.get("AGY_PROC_CAPTURE", os.path.join(os.getcwd(), "agy-capture.jsonl")),
     log=os.environ.get("AGY_PROC_LOG", os.path.join(os.getcwd(), "antigravity.log")),
     module=os.environ.get("AGY_PROC_MODULE", "pyagy.agy_process"),

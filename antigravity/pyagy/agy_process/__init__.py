@@ -15,8 +15,8 @@ kind values with special handling: "tls_write"/"tls_read" are recorded raw AND f
 to the correlator, which sniffs each connection and routes HTTP/1.1 (the model
 endpoint → genai_turn events) vs HTTP/2 (agy's gRPC conns → h2msg events). "smoke"
 prints. Any other kind the shim emits — "dns", "http_rt", "resp", "serialize",
-"marshal", "proto_marshal", the stage-8 "send_user_msg"/"stream_send", the stage-9
-"cgt_getenv", or a new one — is recorded by the default path (never silently dropped).
+"marshal", "proto_marshal", the trampoline "send_user_msg"/"stream_send", or a new
+one — is recorded by the default path (never silently dropped).
 
 Knobs: AGY_PROC_H2=0 disables HTTP/2 reassembly; AGY_PROC_CORRELATE=0 disables the
 genai-turn correlator (raw capture only).
@@ -135,7 +135,7 @@ def on_callstack(stream_id, data):
 
 
 def _on_model_text(kind):
-    # stage-11 leaf getters: `data` is the streamed assistant-text delta (a Go string).
+    # model-text leaf getters: `data` is the streamed assistant-text delta (a Go string).
     # Store the FULL text (the raw recorder would truncate to the preview len).
     def handler(stream_id, data):
         _rec.event({"kind": kind, "stream": stream_id,
@@ -183,7 +183,7 @@ def dispatch(kind, stream_id, data):
 # run the pickled target on a daemon thread — separate from this dispatch worker so a
 # blocking recv() there can't starve hook dispatch. The capture pipeline above stays live,
 # so the target can consume decoded events in-process AND stream results over the Connection.
-if os.environ.get("AGY_MP_MODE") == "1":
+if os.environ.get("AGY_MP_MODE") == "1" and getattr(sys, "is_agy_shim", False):
     try:
         from . import mp_child
         mp_child.start()

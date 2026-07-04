@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Smoke test for the cgocall-trampoline app-hooks (stages 8/9).
+"""Smoke test for the full working hook union (gum + cgocall-trampoline).
 
-Runs real `agy --print` turns under the LD_PRELOAD shim and asserts the trampoline
-installs, fires, and does not corrupt the turn:
+The shim installs every working hook in one pass — no stage selector. This runs a real
+`agy --print` turn under it and asserts the union installs, fires, and does not corrupt
+the turn:
 
-  stage 9  os.Getenv via the trampoline  — validates the MECHANISM without a login
-           (fires at startup; a corrupt register block shows up as `$HOME is not
-           defined`, a wrong `kind` as a worker UnicodeDecodeError, a bad GC unwind
-           as throw("unknown pc")).
-  stage 8  SendUserMessage + callbackStreamer.Send via the trampoline — the parking
-           app-boundary funcs; needs an authenticated agy to complete a model turn.
+  login-independent — the shim installs and a hook fires end-to-end at startup
+      (os.Getenv → the gum "smoke" hook, recorded to the capture). A corrupt register
+      block shows up as `$HOME is not defined`, a wrong `kind` as a worker
+      UnicodeDecodeError, a bad GC unwind as throw("unknown pc").
+  login-gated — with the WHOLE union active at once (never exercised under the old
+      per-stage runs), the model turn must still complete AND every surface decode from
+      the one capture: SendUserMessage/Send (trampoline app-boundary), genai_turn (wire),
+      app_response (app boundary), and the StreamGenerateContent RPC (rpc trace).
 
 This is the regression guard for an agy update: after `make -C antigravity symbols`
-re-resolves offsets for a new build, run this to confirm the trampoline still works.
+re-resolves offsets for a new build, run this to confirm the union still works. It is
+also the primary check that the combined install doesn't destabilize a turn.
 
 It SKIPS (exit 0), rather than fails, when the environment can't run it — no agy
 binary, shim not built, or the running agy's build-id doesn't match symbols.json
-(the shim then refuses to hook; re-run `make -C antigravity symbols`). Stage-8 turn
+(the shim then refuses to hook; re-run `make -C antigravity symbols`). Model-turn
 checks are skipped when agy isn't logged in.
 
     python3 test_scripts/test_trampoline.py            # cgocall (default) + baseline
@@ -34,6 +38,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from agy_session import AgySession  # noqa: E402
+from pyagy import trust_workspace   # noqa: E402  (pre-trust the PTY workspace)
 
 ROOT = os.path.join(os.path.dirname(HERE), "antigravity")
 SHIM = os.path.join(ROOT, "vendor", "antigravity.so")
@@ -47,18 +52,18 @@ def skip(msg):
     sys.exit(0)
 
 
-def run(stage, extra, workdir, idle=25.0, timeout=160.0):
-    """Run one agy --print turn; return a dict of signals."""
-    label = "-".join(f"{k}={v}" for k, v in sorted(extra.items())) or "plain"
-    cap = os.path.join(workdir, f"cap_s{stage}_{label}.jsonl")
-    log = os.path.join(workdir, f"log_s{stage}_{label}.log")
+def run(extra, workdir, timeout=200.0):
+    """Run one agy --print turn under the shim to completion; return a dict of signals."""
+    label = "-".join(f"{k}={v or 'empty'}" for k, v in sorted(extra.items())) or "union"
+    cap = os.path.join(workdir, f"cap_{label}.jsonl")
+    log = os.path.join(workdir, f"log_{label}.log")
     for f in (cap, log):
         if os.path.exists(f):
             os.remove(f)
-    s = AgySession(stage=stage, capture=cap, log=log, workdir=workdir, extra_env=extra)
+    s = AgySession(agy=AGY, capture=cap, log=log, workdir=workdir, extra_env=extra)
     try:
         s.start(["--print", PROMPT])
-        out = s.read_until_idle(idle=idle, timeout=timeout)
+        out = s.proc.read_until_exit(timeout=timeout)   # --print is one-shot: wait for agy to exit
     finally:
         s.close()
     logtxt = open(log, errors="replace").read() if os.path.exists(log) else ""
@@ -101,6 +106,7 @@ def main():
     subprocess.run("git init -q && printf x > f && git add -A && "
                    "git -c user.email=t@t -c user.name=t commit -qm init",
                    shell=True, cwd=wd, check=False)  # agy hangs in a non-git dir
+    trust_workspace(wd)   # pre-trust so agy under the PTY doesn't block on the folder-trust prompt
 
     failures = []
 
@@ -109,44 +115,42 @@ def main():
         if not cond:
             failures.append(name)
 
-    # Stage 9: the trampoline mechanism, login-independent (os.Getenv fires at startup).
-    print("[stage 9] os.Getenv via cgocall trampoline")
-    r9 = run(9, {"AGY_PROC_MODULEDATA": "1"}, wd)
-    if "build-id ok" not in r9["log"]:
+    # One run installs the full working hook union (gum wire hooks + trampoline app/rpc
+    # hooks). Validate the mechanism login-independently first: install + a hook firing
+    # end-to-end + no startup corruption. os.Getenv fires before any auth/network.
+    print("[union] full working hook union under one agy --print turn")
+    r = run({}, wd)
+    if "build-id ok" not in r["log"]:
         skip("shim build-id does not match the running agy — re-run "
              "`make -C antigravity symbols` && `make -C antigravity` (agy may have auto-updated)")
-    check("cgocall-trampoline stage: installed" in r9["log"], "stage9: trampoline installed")
-    check(r9["kinds"].get("cgt_getenv", 0) > 0, "stage9: os.Getenv hook fired")
-    check(r9["home_bad"] == 0, "stage9: no $HOME corruption (register block intact)")
-    check(r9["unicode_err"] == 0, "stage9: no worker UnicodeDecodeError (kind intact)")
-    check(r9["crashes"] == 0, "stage9: no throw/unknown-pc/panic (GC unwind safe)")
+    check("cgocall-trampoline: installed" in r["log"], "union: trampoline installed")
+    check(r["kinds"].get("smoke", 0) > 0, "union: gum os.Getenv hook fired end-to-end")
+    check(r["home_bad"] == 0, "union: no $HOME corruption (register block intact)")
+    check(r["unicode_err"] == 0, "union: no worker UnicodeDecodeError (kind intact)")
+    check(r["crashes"] == 0, "union: no throw/unknown-pc/panic (GC unwind safe)")
 
     # Auth probe: a plain (no-shim) turn must return ZORPLE, else agy isn't logged in.
-    authed = run(1, {"LD_PRELOAD": ""}, wd)["zorple"]
+    authed = run({"LD_PRELOAD": ""}, wd)["zorple"]
     if not authed:
-        print("NOTE: agy not authenticated — skipping stage-8 model-turn checks "
+        print("NOTE: agy not authenticated — skipping model-turn checks "
               "(run `agy` once to sign in to exercise them)")
     else:
-        check(r9["zorple"], "stage9: turn completes (ZORPLE) with hook active")
-        print("[stage 8] SendUserMessage + callbackStreamer.Send via cgocall trampoline")
-        r8 = run(8, {"AGY_PROC_MODULEDATA": "1"}, wd)
-        check(r8["kinds"].get("send_user_msg", 0) >= 1, "stage8: SendUserMessage fired")
-        check(r8["kinds"].get("stream_send", 0) >= 1, "stage8: callbackStreamer.Send fired")
-        check(r8["zorple"], "stage8: parking-func turn completes (ZORPLE)")
-        check(r8["crashes"] == 0, "stage8: no throw/unknown-pc/panic")
-        check(r8["unicode_err"] == 0, "stage8: no worker UnicodeDecodeError")
+        # THE critical assertion: with the ENTIRE union installed at once (gum tls + all
+        # trampoline app/rpc hooks — never combined under the old per-stage runs), the
+        # model turn still completes AND every surface decodes from the one capture.
+        check(r["zorple"], "union: turn completes (ZORPLE) with all hooks active")
+        check(r["kinds"].get("send_user_msg", 0) >= 1, "union: SendUserMessage fired (trampoline)")
+        check(r["kinds"].get("stream_send", 0) >= 1, "union: callbackStreamer.Send fired (trampoline)")
+        check(r["kinds"].get("genai_turn", 0) >= 1, "union: genai_turn emitted (wire)")
+        check("ZORPLE" in r["genai_text"], "union: decoded wire text is non-empty (ZORPLE)")
+        check(r["kinds"].get("app_response", 0) >= 1, "union: app_response decoded (app boundary)")
+        check(r["kinds"].get("rpc_stream_generate", 0) >= 1,
+              "union: StreamGenerateContent RPC traced (rpc)")
         if args.asmcgo:
-            print("[stage 8] asmcgocall variant cross-check")
-            r8a = run(8, {"AGY_PROC_MODULEDATA": "1", "AGY_PROC_ASMCGO": "1"}, wd)
-            check(r8a["zorple"] and r8a["crashes"] == 0,
-                  "stage8/asmcgo: completes, no crash (matches cgocall)")
-
-        # Stage 3: the tls_write/decrypt capture path — the correlator must decode the
-        # model turn (HTTP/1.1 + SSE) into a genai_turn whose assembled text is real.
-        print("[stage 3] genai_turn decode (HTTP/1.1 + SSE correlator)")
-        r3 = run(3, {}, wd)
-        check(r3["kinds"].get("genai_turn", 0) >= 1, "stage3: genai_turn emitted")
-        check("ZORPLE" in r3["genai_text"], "stage3: decoded model text is non-empty (ZORPLE)")
+            print("[union] asmcgocall variant cross-check")
+            ra = run({"AGY_PROC_ASMCGO": "1"}, wd)
+            check(ra["zorple"] and ra["crashes"] == 0,
+                  "union/asmcgo: completes, no crash (matches cgocall)")
 
     print()
     if failures:

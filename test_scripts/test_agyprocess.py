@@ -67,11 +67,11 @@ def case_exception():
 
 def case_stream():
     # The payoff: stream agy's DECODED model turns home as native objects. Needs a live
-    # model turn (network/auth) + stage 3; agy occasionally exits before completing a turn,
-    # so retry once. A turn with EMPTY text = a real decode bug (FAIL); no turns after
-    # retries = a live-model flake (NOTE, not a failure).
+    # model turn (network/auth) + capture hooks (capture=True); agy occasionally exits before
+    # completing a turn, so retry once. A turn with EMPTY text = a real decode bug (FAIL); no
+    # turns after retries = a live-model flake (NOTE, not a failure).
     for _ in range(2):
-        p = AgyProcess(target=stream_turns, stage=3,
+        p = AgyProcess(target=stream_turns, hooks=True,
                        agy_args=["--print", "What is 2+2? Reply with only the digits."])
         p.start()
         turns, end = [], time.time() + 75
@@ -98,7 +98,7 @@ def case_persistent():
     # Persistent multi-turn: agy stays alive interactive; drive follow-ups with .ask() and
     # collect the decoded turns per prompt. Flaky (two live turns), so PASS on both-turns-with-
     # text (context retained), else NOTE — decode itself is already asserted by case_stream.
-    p = AgyProcess(target=stream_turns, stage=3, persistent=True,
+    p = AgyProcess(target=stream_turns, hooks=True, persistent=True,
                    prompt="What is 2+2? Reply with only the digits.")
     p.start()
     t1 = p.ask()                                                    # submit the prefilled initial

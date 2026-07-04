@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline test for the stage-13 RPC-trace renderer (no agy).
+"""Offline test for the RPC-trace renderer (no agy).
 
 Feeds a synthetic capture of rpc_* + context events and asserts the timeline is
 time-ordered, labeled, and counted.

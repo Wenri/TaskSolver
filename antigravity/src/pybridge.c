@@ -92,15 +92,19 @@ static void *worker_main(void *arg)
 
     Py_InitializeEx(0);  /* no signal handlers — leave those to Go */
 
-    if (pypath && *pypath) {
-        PyObject *sys = PyImport_ImportModule("sys");
-        PyObject *path = sys ? PyObject_GetAttrString(sys, "path") : NULL;
-        if (path) {
-            PyObject *p = PyUnicode_FromString(pypath);
-            PyList_Insert(path, 0, p);
-            Py_XDECREF(p);
+    PyObject *sys = PyImport_ImportModule("sys");
+    if (sys) {
+        PyObject_SetAttrString(sys, "is_agy_shim", Py_True);
+        if (pypath && *pypath) {
+            PyObject *path = PyObject_GetAttrString(sys, "path");
+            if (path) {
+                PyObject *p = PyUnicode_FromString(pypath);
+                PyList_Insert(path, 0, p);
+                Py_XDECREF(p);
+                Py_DECREF(path);
+            }
         }
-        Py_XDECREF(path); Py_XDECREF(sys);
+        Py_DECREF(sys);
     }
 
     PyObject *mod = PyImport_ImportModule(modname);

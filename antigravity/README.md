@@ -125,7 +125,7 @@ survives agy updates.
 
 ---
 
-## Parking functions: the cgocall-trampoline path (stages 8–9)
+## Parking functions: the cgocall-trampoline path
 
 The v1 hooks above are gum `Interceptor` attaches — fine for **CPU-only** functions (they
 run and return on the same OS thread). But agy's most useful boundaries —
@@ -133,9 +133,10 @@ run and return on the same OS thread). But agy's most useful boundaries —
 `backend.(*callbackStreamer).Send` (decoded **response** chunks to the UI) — **park** the
 goroutine (blocking I/O, mutex/cond). A gum attach rewrites the return address and tracks it
 *per-OS-thread*; when a parked goroutine resumes on a **different** M, the intercepted return
-never matches → agy silently stalls (stages 5/6, reference only).
+never matches → agy silently stalls (which is why a gum attach on a parking func is disabled
+— `AGY_OFF` — and these targets are trampolined instead).
 
-**Approach A (`src/gohook.c` + `src/gomod.c`, stages 8–9)** avoids gum's return-tracking
+**Approach A (`src/gohook.c` + `src/gomod.c`)** avoids gum's return-tracking
 entirely. It redirects the target — **past its stack-check prologue** — into a generated
 trampoline that:
 1. snapshots the Go-ABI arg registers into a stack **block**,
@@ -166,14 +167,18 @@ transient sub would make the real spdelta disagree with the synthetic pcsp insid
 `_Gsyscall` window → `throw("unknown pc")`. cgocall always spills exactly 2 slots, so 16 bytes
 is exact and future-proof. (Directly confirmed under gdb — see Status.)
 
-`proc.def` isolates each rung as a separate `AGY_PROC_STAGE`: **8** = trampoline on
-`SendUserMessage`/`Send`, **9** = trampoline on the benign `os.Getenv` (a CPU-only validator
-— if it answers cleanly, the tool is sound). The GC-safe synthetic moduledata is always
-installed for these stages. (Two earlier bring-up rungs — a naive gum attach on the parking
-funcs, and a `runtime.cgocall` gateway probe — were removed once this path proved out; the
-trampoline is park-safe precisely because it never intercepts the return.)
+These trampoline targets (`SendUserMessage`/`Send`, the framework consumers, and the
+`CodeAssistClient` RPCs) are marked `AGY_TRAMP` in `proc.def` and installed as one set —
+`install_hooks` collects them into a **single** `agy_gohook_install` call (the `gomod.c`
+singletons make a second call unsafe). The GC-safe synthetic moduledata is always installed.
+`os.Getenv` was the benign CPU-only validator for this path during bring-up (a trampoline on
+it that answers cleanly proves the tool sound); it's now `AGY_OFF` because the gum `smoke`
+hook already covers `os.Getenv` and the real targets exercise the mechanism. (Two earlier
+bring-up rungs — a naive gum attach on the parking funcs, and a `runtime.cgocall` gateway
+probe — were removed once this path proved out; the trampoline is park-safe precisely because
+it never intercepts the return.)
 
-### App-boundary text probe (stages 11–12) — why the wire (`http1sse`) wins for the response
+### App-boundary text probe — why the wire (`http1sse`) wins for the response
 
 We evaluated hooking agy's **app boundary** to get the model response as pre-decoded Go
 values instead of parsing HTTP/1.1+SSE. The `AGY_PROC_CGT_ARGS` diagnostic (a fault-safe
@@ -183,16 +188,16 @@ and reverse-engineer where text lives. Fanning out over the **whole** enumerated
 pipeline (`gemini_coder/framework/{generator,core}` + `jetski/language_server/modelapi*`, not
 just the `jetski/cli/backend` tail) settled it:
 
-- **`callbackStreamer.Send` (stage 8) is the pipeline tail** — it only ever sees the response
+- **`callbackStreamer.Send` (a trampoline hook) is the pipeline tail** — it only ever sees the response
   already wrapped in a noisy `exa.jetski_cortex_pb.AgentStateUpdate` proto (text at a deep,
   per-build-fragile offset like `rbx+56+0`, amid tool schemas / cost categories / re-sent
   context). The clean text flows through the framework *upstream* of it.
 - **Leaf getters that return the delta as a plain Go string** (`GetChatMessageResponse.GetDeltaText`,
-  `CompletionDelta.GetDeltaText`; stage 11, gum-attach `on_leave`, zero struct-offset fragility)
+  `CompletionDelta.GetDeltaText`; gum-attach `on_leave`, zero struct-offset fragility)
   **don't fire** — they belong to the ccpa/codeium provider path, but agy 1.0.16 uses the
   gemini/cloudcode provider.
 - **Provider-agnostic framework choke points** (`streamResponseHandler.{finalizePlannerResponse,
-  updateWithStep,processStream}`, `core.createPlannerResponseStep`; stage 12, trampoline) **fire**,
+  updateWithStep,processStream}`, `core.createPlannerResponseStep`; trampoline) **fire**,
   but the assistant **output** text is *built during* the call — so it is a return value /
   post-call state, **not** in the entry-arg registers the trampoline reads (a depth-8 walk of
   `rax`→`rsi` surfaced only the *input* context/config/tool-schemas, never the answer).
@@ -202,7 +207,7 @@ functions that *return* it as a clean string are the inactive provider's. `crypt
 + `http1sse` already decode the exact output cleanly and stably off the wire, so **the response
 data path stays on the wire**; stages 11–12 remain as diagnostic/RE scaffolding
 (`AGY_PROC_CGT_ARGS` re-derives the layout in one command on a future agy build — from the
-client that's `ask("…", stage="app", arg_probe=True).cgt_args`, one rendered report per fire).
+client that's `ask("…", arg_probe=True).cgt_args`, one rendered report per fire).
 
 ### The return-value problem — can we capture a response the trampoline built *during* a call?
 
@@ -239,12 +244,12 @@ text is a Go string at **`+0x8`(ptr)/`+0x10`(len), a single deref**, the stable 
 skipped by the length check). `AppendStep` is committed too (it fires on the `--print` path and anchors
 the chain) but its `*Step` text is 6 hops deep, so the clean decode lives on `updateWithStep`.
 
-This finally makes "prefer the app boundary for the RESPONSE" real: a **stage-12** `ask()` sets
-`AgyResponse.source == "app"` and `.app_text`/`.text` to the answer decoded at agy's own consumer
-boundary (one deref, no HTTP/SSE reassembly). Stages are mutually exclusive, so stage 12 trades the
-wire `genai_turn`/SYNC-rewrite (stage 3) for the app-boundary decode; when no `app_response` is present
-the client falls back to the wire turn and then the PTY transcript (`.source` `"wire"`/`"transcript"`).
-`http1sse` therefore remains the authoritative source for the structured request/usage and the default.
+This finally makes "prefer the app boundary for the RESPONSE" real: `updateWithStep` fires on every
+run (it's in the hook union), so `AgyResponse.source == "app"` and `.app_text`/`.text` come from the
+answer decoded at agy's own consumer boundary (one deref, no HTTP/SSE reassembly). The wire
+`genai_turn`/SYNC-rewrite is captured in the *same* run; when no `app_response` is present the client
+falls back to the wire turn and then the PTY transcript (`.source` `"wire"`/`"transcript"`).
+`http1sse` therefore remains the authoritative source for the structured request/usage.
 
 ### Call-stack probe (`AGY_PROC_STACK=1`) — mapping HOW agy assembles a turn
 
@@ -280,19 +285,19 @@ ingress crypto/tls.(*Conn).Read   ← net/http.(*persistConn).Read ← chunkedRe
         ← io.ReadAll ← codeassistclient.doRequestAndUnmarshal ← …RecordConversationOffered / getStreamingTextCompletion.func1
 ```
 
-From the client (any stage): `ask("…", stack=True).stacks` returns the symbolized, grouped
+From the client: `ask("…", stack=True).stacks` returns the symbolized, grouped
 stacks and `.call_graph` the caller→callee edge `Counter`. Low-level path:
-`AGY_PROC_STAGE=3 AGY_PROC_STACK=1 test_scripts/run-agy.sh --print "…"` (or any stage),
+`AGY_PROC_STACK=1 test_scripts/run-agy.sh --print "…"`,
 then `python3 -m pyagy.agy_process.symbolize <capture.jsonl> [--graph]`. `.stacks` needs the
 funcmap (`make symbols`); when it's absent the accessor returns a short reason string.
 
-### RPC trace (stage 13) — the app-level backend timeline
+### RPC trace — the app-level backend timeline
 
 `(*CodeAssistClient).*` (jetski/language_server) is agy's single client to the CloudCode
-backend — each method is one **named** RPC with typed proto args. **Stage 13** trampolines
+backend — each method is one **named** RPC with typed proto args. The union trampolines
 them (they park on the HTTP round-trip) so each fires an `rpc_<name>` event, giving a
 labeled, time-ordered timeline of a turn that sits alongside the wire `genai_turn` decode.
-From the client: `ask("…", stage="rpc").rpc_trace` returns the rendered timeline; compose
+From the client: `ask("…").rpc_trace` returns the rendered timeline; compose
 with `stack=True` (call stack per RPC → `.stacks`) and `arg_probe=True` (walk the request
 proto at entry → `.cgt_args`). Low-level path: `python3 -m pyagy.agy_process.rpctrace
 <capture.jsonl> --stacks`.
@@ -403,17 +408,16 @@ launched via `pyagy/_env.py` under the pixi env). Build with `pixi run make -C a
 (needs `gcc` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). `make setup` fetches the
 **frida-gum devkit** from GitHub releases; where GitHub egress is blocked (e.g. a locked-down
 cloud container), vendor it manually into `vendor/frida-gum/` (`libfrida-gum.a`, `frida-gum.h`,
-`VERSION`) and `make` finds it. `pyagy.agy_process` needs `hpack`/`brotli` only for stage-3
-HTTP/2 body decode (both are guarded/lazy), so stages 8–9 import fine without them.
+`VERSION`) and `make` finds it. `pyagy.agy_process` needs `hpack`/`brotli` only for the
+HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
-Run agy under the hook via the launcher in `test_scripts/` (`AGY_PROC_STAGE`:
-1=python+DNS, 3=tls_write+decrypt request/response capture, 5=parking hooks that stall,
-8=cgocall-trampoline on `SendUserMessage`/`Send`, 9=cgocall-trampoline on `os.Getenv`
-(the GC-safe synthetic moduledata is always on for these; `AGY_PROC_ASMCGO=1` selects the
-asmcgocall variant):
+Run agy under the hook via the launcher in `test_scripts/` — it installs the full working
+hook union (gum wire hooks + cgocall-trampoline app/rpc hooks) in one pass; set
+`AGY_PROC_NOHOOK=1` for a bridge-only run, or `AGY_PROC_ASMCGO=1` to select the asmcgocall
+trampoline variant (the GC-safe synthetic moduledata is always on):
 
 ```bash
-AGY_PROC_STAGE=3 test_scripts/run-agy.sh <normal agy args...>   # capture request+response (authenticated agy)
+test_scripts/run-agy.sh <normal agy args...>   # capture request+response+app+rpc (authenticated agy)
 python3 test_scripts/analyze_capture.py agy-capture.jsonl --plot traffic.png
 ```
 
@@ -428,8 +432,8 @@ python3 test_scripts/analyze_capture.py agy-capture.jsonl --plot traffic.png
 - ✅ **Interactive session driving works** (`test_scripts/agy_session.py`): under a PTY
   (with a terminal-query responder) we ran a real multi-turn session against the
   logged-in agy — `"what is 2+2"` → `4`, then `"×10"` → `40` — reading agy's
-  rendered output and injecting follow-up input. This is stage 1 (no network hooks).
-- ✅ **In-process model-request capture works** (`AGY_PROC_STAGE=3`). Hooking
+  rendered output and injecting follow-up input (independent of the capture hooks).
+- ✅ **In-process model-request capture works.** Hooking
   `crypto/tls.(*Conn).Write` **past the stack-check prologue** (per-func `skip`)
   captures the full Gemini request (HTTP/2 + JSON) with no stall — validated:
   the prompt + `<USER_REQUEST>` framing + context show up in the captured egress.
@@ -477,9 +481,9 @@ The cgocall-trampoline path was re-verified end-to-end on a **real-kernel** clou
   window, so a too-aggressive idle cutoff looks like "no answer" — widen it or wait for
   process exit.
 
-## Capturing model traffic (given stage 3 is out)
+## Capturing model traffic
 
-**In-process request capture works** (`AGY_PROC_STAGE=3`). Two hazards had to be
+**In-process request capture works.** Two hazards had to be
 solved, both validated on full turns that reach `daily-cloudcode-pa.googleapis.com`:
 
 1. **morestack re-entry.** Hooking *at* a func entry: when the frame grows the
@@ -490,7 +494,7 @@ solved, both validated on full turns that reach `daily-cloudcode-pa.googleapis.c
 2. **park-while-hooked.** A hooked func that *parks* the goroutine on blocking
    I/O stalls agy even past-prologue and on-enter-only. `crypto/tls.(*Conn).Write`
    doesn't park → **safe**; `crypto/tls.(*Conn).Read` and `net/http.RoundTrip`
-   park → **stall** (stage 5, reference only).
+   park → **stall** (disabled — `AGY_OFF` in proc.def).
 
 **The rule (proven both directions):** hook the **crypto** step (CPU-only, runs
 after the I/O) — never the **I/O** step (which parks). So:
@@ -502,7 +506,7 @@ after the I/O) — never the **I/O** step (which parks). So:
   parked-and-resumed, on ciphertext already in memory, so it's CPU-only and
   doesn't park (validated: no stall, agy completes, ~150 KB inbound captured).
 
-Both are stage 3. `Read`/`net/http.RoundTrip`/`http2.(*pipe).Write` all **park**
+Both are gum-attach hooks in the union. `Read`/`net/http.RoundTrip`/`http2.(*pipe).Write` all **park**
 (netpoll / mutex / cond) and stall agy even on-enter-only past-prologue — that's
 why we hook decrypt, not read. `AGY_PROC_PREVIEW` sets capture bytes/event.
 
@@ -522,7 +526,7 @@ and response text. `h2reassemble.py` still applies to agy's *other* (gRPC/HTTP-2
 connections. (The PTY transcript / `AgyModel` also give the reply if you don't need raw.)
 
 CPU-only funcs (`os.Getenv`, `(*RootModel).Serialize`, `proto.Marshal`) also hook
-cleanly; the stage-4 examples show the `[]byte`-return capture (`on_leave`
+cleanly; the app-layer R&D examples show the `[]byte`-return capture (`on_leave`
 RAX=ptr, RBX=len).
 
 ## The `pyagy` client: interact / modify / decode
@@ -535,16 +539,15 @@ string/JSON response.
 ```python
 from pyagy import ask, Session, ToolSpec, ContextResource, RewriteRule
 
-r = ask("Summarize this repo.")                 # one-shot (stage "wire", the default)
-print(r.text)                                    # clean final answer
+r = ask("Summarize this repo.")                 # one turn; installs the full hook union
+print(r.text)                                    # clean final answer (prefers app→wire→transcript)
 print(r.model, r.usage.total_tokens)             # decoded from the model turn
 print(r.request["tools"], r.request["first_user_text"])   # the request as SENT
-print(len(r.turns), [t["text"][:20] for t in r.turns])    # every model turn decoded
-
-print(ask("…", stage="app").app_text)            # answer decoded at agy's consumer boundary
-print(ask("…", stage="rpc").rpc_trace)           # labeled backend-RPC timeline
-print(ask("…", stack=True).stacks)               # symbolized Go call stacks (any stage)
-print(ask("…", stage="rpc", arg_probe=True).cgt_args)   # trampoline arg-graph reports
+print(len(r.turns), [t["text"][:20] for t in r.turns])    # every wire model turn decoded
+print(r.app_text)                                # answer decoded at agy's consumer boundary
+print(r.rpc_trace)                               # labeled backend-RPC timeline
+print(ask("…", stack=True).stacks)               # symbolized Go call stacks (overlay)
+print(ask("…", arg_probe=True).cgt_args)         # trampoline arg-graph reports (overlay)
 
 with Session(tools=[ToolSpec("weather", handler="mytools:weather")]) as s:
     print(s.ask("Weather in Paris?").text)       # agy can call the injected tool
@@ -552,23 +555,22 @@ with Session(tools=[ToolSpec("weather", handler="mytools:weather")]) as s:
     print(s.ask("And there?").text)
 ```
 
-**One call, one result object — `stage` (int or alias) + two overlays pick what it
-captures.** Stages are mutually exclusive (one base capture per run); `stack=`/`arg_probe=`
-compose on top of any of them. The matching `AgyResponse` field is empty/None when this run
-didn't capture that kind:
+**One call, one result object.** Every run installs the full working hook union, so a
+single turn populates all capture surfaces at once; `stack=`/`arg_probe=` are optional
+diagnostic overlays on top. Each `AgyResponse` field is empty/None when this run didn't
+capture that kind (e.g. no `rpc_*` events):
 
-| `stage` (alias → int) | what fires | `AgyResponse` field |
+| surface | hooks | `AgyResponse` field |
 |---|---|---|
-| `"smoke"` → 2 | liveness only (`os.Getenv`), no network | — |
-| `"wire"` → 3 *(default)* | egress `tls_write` + ingress decrypt; **the `rewrite=` surface** | `.turns` / `.request` / `.events` / `.usage` / `.model` |
-| `"app"` / `"pipeline"` → 12 | framework consumer (`updateWithStep`) | `.app_text` (+ `.source=="app"`) |
-| `"rpc"` → 13 | `CodeAssistClient.*` backend RPCs | `.rpc_trace` |
+| wire *(the `rewrite=` surface)* | egress `tls_write` + ingress decrypt | `.turns` / `.request` / `.events` / `.usage` / `.model` |
+| app boundary | framework consumer (`updateWithStep`) | `.app_text` (+ `.source=="app"`) |
+| rpc trace | `CodeAssistClient.*` backend RPCs | `.rpc_trace` |
 | overlay `stack=True` | Go call-stack unwind at each fire | `.stacks` (rendered) / `.call_graph` (`Counter`) |
 | overlay `arg_probe=True` | trampoline arg-graph walk at entry | `.cgt_args` (list of reports) |
 
 - **Two modify mechanisms, composable** (the design accepts *both*):
   - `rewrite=` — a `RewriteRule` list, a `"module:func"` string, or a callable →
-    **live SYNC egress rewrite** (stage `"wire"`). Equal-length substitution only
+    **live SYNC egress rewrite** (the `tls_write` hook). Equal-length substitution only
     (framing-safe); a length-changing rule is skipped in-agy and recorded (`rewrite_skip`).
   - `tools=` / `context=` — **additive**, via an injected MCP server (`config.py`).
 - **`AgyResponse`**: `.text` (clean answer, prefers app→wire→transcript), `.source`,
@@ -578,14 +580,14 @@ didn't capture that kind:
   never costs the others, and `.stacks` loads the funcmap only when touched). Also
   `.transcript`, `.exit_status`, `.instrumented` (+`.instrumented_reason`). `.stacks` needs
   `symbols/funcmap.tsv.gz` (`make symbols`); pass `funcmap=` to override it.
-- **Introspect the capture surface**: `from pyagy import HOOKS, by_stage, by_kind,
-  sync_capable, DERIVED_KINDS` — the machine-readable mirror of `src/proc.def`
-  (which stage captures what, which kinds rewrite egress).
+- **Introspect the capture surface**: `from pyagy import HOOKS, by_mech, enabled_hooks,
+  by_kind, sync_capable, DERIVED_KINDS` — the machine-readable mirror of `src/proc.def`
+  (which hooks are installed, by mechanism, and which kinds rewrite egress).
 - **Env knobs** (set for you by the kwargs above; also usable with `run-agy.sh`):
 
   | env var | set by | effect |
   |---|---|---|
-  | `AGY_PROC_STAGE` | `stage=` | which hook set is enabled (see table above) |
+  | `AGY_PROC_NOHOOK` | `AgyProcess(hooks=False)` | bridge only — start the embedded interpreter, install no capture hooks |
   | `AGY_PROC_TLS_WRITE_SYNC` | `rewrite=` | make `tls_write` a SYNC (modify) hook |
   | `AGY_PROC_REWRITE_RULES` / `AGY_PROC_REWRITE` | `rewrite=` | rules-file path / `module:func` |
   | `AGY_PROC_STACK` | `stack=True` | emit deduped `callstack` events |
@@ -601,7 +603,7 @@ didn't capture that kind:
   `test_config.py`, `test_client.py`, `test_appresponse.py`, `test_rpctrace.py`,
   `test_symbolize.py`, plus the `rewrite`/`config` offline suites. **Live** (skip cleanly
   per `test_trampoline.py`): `test_rewrite.py` round-trips a redaction on the wire;
-  `test_trampoline.py` asserts a stage-3 `genai_turn` decodes; `test_agyprocess.py` drives
+  `test_trampoline.py` asserts the hook union completes a turn and decodes every surface; `test_agyprocess.py` drives
   agy as a `multiprocessing` child (round-trip + exception + stream + persistent);
   `test_agy_session.py` drives resume / list / continue + repo-scoped `data_dir` + pre-trust.
 
@@ -636,7 +638,7 @@ print(pyagy.read_transcript(cid))                    # stored turns (also s.hist
   `ANTIGRAVITY_CONVERSATION_ID` in its own env (it's per-conversation, injected only into child
   processes), and it isn't in any RPC/`SendUserMessage` entry-arg graph, but agy opens
   `conversations/<uuid>.db` / `brain/<uuid>/…`, so the **`FILE_OPEN` hook** (`os.OpenFile`,
-  a stage-3 overlay enabled by `AGY_PROC_CONV_ID`) reads the uuid straight from the path and
+  an overlay enabled by `AGY_PROC_CONV_ID`) reads the uuid straight from the path and
   emits a `conversation_id` event. Uninstrumented runs fall back to newest-`*.db`-by-mtime.
   (`capture_conversation_id` prefers the event; verified event == mtime.)
 - **`AgyProcess(conversation_id=…)`** (the multiprocessing child) and
@@ -673,14 +675,15 @@ Add the scoped `.gemini/` to `.gitignore`. `data_dir=None` (default) uses the gl
 from pyagy.agyprocess import AgyProcess
 from pyagy.agy_process.mp_child import stream_turns, get_result_conn
 
-# one-shot: stream agy's decoded model turns home as native dicts
-p = AgyProcess(target=stream_turns, stage=3, prompt="What is 2+2?"); p.start()
+# one-shot: stream agy's decoded model turns home as native dicts (hooks=True installs
+# the capture union; the default hooks=False is a bridge-only run with no capture)
+p = AgyProcess(target=stream_turns, hooks=True, prompt="What is 2+2?"); p.start()
 while p.poll(1.0) or p.is_alive():
     try: turn = p.recv()             # {"kind":"genai_turn","text":…,"usage":…,"request":…}
     except EOFError: break           # agy exited
 
 # persistent, multi-turn (context retained)
-p = AgyProcess(target=stream_turns, stage=3, persistent=True, prompt="What is 2+2?"); p.start()
+p = AgyProcess(target=stream_turns, hooks=True, persistent=True, prompt="What is 2+2?"); p.start()
 t1 = p.ask()                         # submit the prefilled prompt          -> "4"
 t2 = p.ask("multiply that by 10")    # follow-up (agy remembers)            -> "40"
 

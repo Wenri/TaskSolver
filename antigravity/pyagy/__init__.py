@@ -6,19 +6,20 @@
                 is its resumable id, `s.history()` its stored transcript, and
                 `list_conversations()` enumerates past ones.
 - `ask` : one-shot sugar over a transient Session — run a turn and get a decoded
-                `AgyResponse`; `stage=` (int or alias `"wire"`/`"app"`/`"rpc"`/`"smoke"`)
-                and the `stack=`/`arg_probe=` overlays choose what it captures —
-                wire turn (`.turns`), app answer (`.app_text`), RPC timeline
-                (`.rpc_trace`), symbolized stacks (`.stacks`/`.call_graph`), or the
-                arg-graph diagnostic (`.cgt_args`). `.conversation_id` is resumable.
+                `AgyResponse`. One run installs the full hook union, so it captures the
+                wire turn (`.turns`), app answer (`.app_text`), and RPC timeline
+                (`.rpc_trace`) together; the `stack=`/`arg_probe=` overlays add symbolized
+                stacks (`.stacks`/`.call_graph`) and the arg-graph diagnostic
+                (`.cgt_args`). `.conversation_id` is resumable.
 - `AgyModel`  : TaskSolver adapter (prepare_payload/ask/rough_guess/run_once/…),
                 mirroring tasksolver.claude_code.ClaudeCodeModel.
 - `run_print` : one-shot `agy --print` under a PTY (used by AgyModel).
 - `InteractiveSession` : drive a multi-turn agy TUI session.
 - `agy_process` : in-process recorder imported by the LD_PRELOADed shim.
-- `HOOKS`/`by_stage`/`by_kind`/`sync_capable`/`DERIVED_KINDS` : the machine-readable
-                stage→hook→kind catalog (mirror of src/proc.def), for introspecting
-                which stage captures what and which kinds can rewrite egress.
+- `HOOKS`/`by_mech`/`by_kind`/`enabled_hooks`/`sync_capable`/`DERIVED_KINDS` : the
+                machine-readable hook→kind catalog (mirror of src/proc.def), for
+                introspecting which hooks are installed (by mechanism) and which kinds
+                can rewrite egress.
 
 Top-level names are loaded lazily (PEP 562): `import pyagy.agy_process` — done by the
 shim under a minimal *system* libpython — runs this __init__, so it must NOT eagerly
@@ -52,10 +53,11 @@ _LAZY = {
     # config injection
     "write_mcp_config": ".config",
     "detect_config_path": ".config",
-    # hook/stage catalog (stdlib-pure; safe under the embedded interpreter)
+    # hook catalog (stdlib-pure; safe under the embedded interpreter)
     "HOOKS": ".agy_process.hooks",
     "DERIVED_KINDS": ".agy_process.hooks",
-    "by_stage": ".agy_process.hooks",
+    "by_mech": ".agy_process.hooks",
+    "enabled_hooks": ".agy_process.hooks",
     "by_kind": ".agy_process.hooks",
     "sync_capable": ".agy_process.hooks",
 }
