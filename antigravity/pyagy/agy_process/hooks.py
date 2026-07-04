@@ -35,7 +35,10 @@ HOOKS = [
      "note": "ingress s2c (decrypted inbound records); carries the SSE response"},
     {"id": "TLS_READ", "symbol": "crypto/tls.(*Conn).Read", "mode": "async",
      "kind": "tls_read", "mech": "off", "leave": True,
-     "note": "OFF: parks AND payload is the return value (leave=1) → entry-only trampoline can't capture"},
+     "note": "OFF: trampoline-hookable only via full cgocall (asmcgo stalls the turn 0/3 vs 2/2 "
+             "baseline; full cgocall completes 4/6 — inverts the 'asmcgo for hot funcs' rule). "
+             "Kept off anyway: no data (plaintext is the return value; response is on TLS_DECRYPT) "
+             "and ~135 cgocalls/turn. Parks under gum."},
     {"id": "HTTP_RT", "symbol": "net/http.(*Transport).RoundTrip", "mode": "async",
      "kind": "http_rt", "mech": "asmcgo", "leave": False,
      "note": "RoundTrip marker (req ptr = rbx); parks → trampoline. Hot + about to syscall → asmcgo"},

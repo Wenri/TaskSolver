@@ -49,10 +49,15 @@ HOOK(H2_PIPE_WRITE,"net/http/internal/http2.(*pipe).Write", AGY_ASYNC, "resp",  
 /* ingress RESPONSE via TLS decrypt (CPU-only, post-read → doesn't park). on_leave
  * []byte = decrypted inbound record (HTTP/2 frames of the response). */
 HOOK(TLS_DECRYPT,  "crypto/tls.(*halfConn).decrypt",   AGY_ASYNC, "tls_read",  AGY_GUM,   1)
-/* AGY_OFF — tls_read PARKS while hooked AND its payload is the RETURN value (leave=1),
- * which the entry-only trampoline can't capture. Kept for reference; the response is
- * captured at the non-parking TLS_DECRYPT above (or the PTY transcript). */
-HOOK(TLS_READ,     "crypto/tls.(*Conn).Read",         AGY_ASYNC, "tls_read",  AGY_OFF,   1)
+/* AGY_OFF — Conn.Read is trampoline-hookable ONLY via full cgocall, not asmcgo (tested):
+ * asmcgo (no P handoff) stalled the model turn 0/3 while the baseline was 2/2; full cgocall
+ * (entersyscall + P handoff) completed 4/6. The hot netpoll read path needs the P handed off
+ * on each fire, so the usual "asmcgo for hot funcs" heuristic is INVERTED here. Left OFF
+ * anyway: it yields NO data (the plaintext is the RETURN value the entry-only trampoline
+ * can't read; the response is already captured at the non-parking TLS_DECRYPT above), while
+ * full-cgo costs ~135 cgocalls/turn + as many _Gsyscall GC-scan windows on the read path —
+ * all for a bare fire marker. */
+HOOK(TLS_READ,     "crypto/tls.(*Conn).Read",         AGY_ASYNC, "tls_read",  AGY_OFF,    1)
 /* RoundTrip(t=RAX, req=RBX) PARKS on the round-trip → cgocall trampoline. Hot (fires per
  * HTTP request) and about to do its own syscalls, so it uses the lighter AGY_ASMCGO variant
  * (no entersyscall-at-entry). Emits an http_rt marker keyed by the request ptr; the response
