@@ -23,8 +23,7 @@ binary, shim not built, or the running agy's build-id doesn't match symbols.json
 (the shim then refuses to hook; re-run `make -C antigravity symbols`). Model-turn
 checks are skipped when agy isn't logged in.
 
-    python3 test_scripts/test_trampoline.py            # cgocall (default) + baseline
-    python3 test_scripts/test_trampoline.py --asmcgo   # also cross-check the asmcgocall variant
+    python3 test_scripts/test_trampoline.py            # validates the full union (mixed full-cgo + asmcgo)
 """
 import argparse
 import collections
@@ -92,10 +91,7 @@ def run(extra, workdir, timeout=200.0):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--asmcgo", action="store_true",
-                    help="also cross-check the asmcgocall variant (AGY_PROC_ASMCGO=1)")
-    args = ap.parse_args()
+    argparse.ArgumentParser(description="Smoke-test the antigravity hook union").parse_args()
 
     if not os.path.exists(AGY):
         skip(f"agy not found at {AGY} (set AGY_BIN)")
@@ -139,18 +135,14 @@ def main():
         # trampoline app/rpc hooks — never combined under the old per-stage runs), the
         # model turn still completes AND every surface decodes from the one capture.
         check(r["zorple"], "union: turn completes (ZORPLE) with all hooks active")
-        check(r["kinds"].get("send_user_msg", 0) >= 1, "union: SendUserMessage fired (trampoline)")
-        check(r["kinds"].get("stream_send", 0) >= 1, "union: callbackStreamer.Send fired (trampoline)")
+        check(r["kinds"].get("send_user_msg", 0) >= 1, "union: SendUserMessage fired (full-cgo trampoline)")
+        check(r["kinds"].get("stream_send", 0) >= 1, "union: callbackStreamer.Send fired (asmcgo trampoline)")
+        check(r["kinds"].get("http_rt", 0) >= 1, "union: RoundTrip fired (asmcgo trampoline)")
         check(r["kinds"].get("genai_turn", 0) >= 1, "union: genai_turn emitted (wire)")
         check("ZORPLE" in r["genai_text"], "union: decoded wire text is non-empty (ZORPLE)")
         check(r["kinds"].get("app_response", 0) >= 1, "union: app_response decoded (app boundary)")
         check(r["kinds"].get("rpc_stream_generate", 0) >= 1,
-              "union: StreamGenerateContent RPC traced (rpc)")
-        if args.asmcgo:
-            print("[union] asmcgocall variant cross-check")
-            ra = run({"AGY_PROC_ASMCGO": "1"}, wd)
-            check(ra["zorple"] and ra["crashes"] == 0,
-                  "union/asmcgo: completes, no crash (matches cgocall)")
+              "union: StreamGenerateContent RPC traced (rpc, full-cgo)")
 
     print()
     if failures:

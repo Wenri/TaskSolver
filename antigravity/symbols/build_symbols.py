@@ -23,7 +23,7 @@ import json
 import struct
 import sys
 
-# Functions the native shim hooks by default. Keep in sync with src/proc.def.
+# Functions the native shim hooks by default. Keep in sync with src/procdef.h.
 PROC_TARGETS = [
     "crypto/tls.(*Conn).Write",          # plaintext egress to the LLM backend
     "crypto/tls.(*Conn).Read",           # plaintext ingress from the backend
@@ -58,9 +58,9 @@ PROC_TARGETS = [
     "runtime.cgocall",
     # asmcgocall: the g0-stack-switch INNER half of cgocall, WITHOUT entersyscall/
     # exitsyscall (no _Gsyscall, no P handoff, no reschedule). Called (not hooked)
-    # by the trampoline as an ablation to isolate the g0 switch from the syscall
-    # transition. Two same-named entries exist (BOLT hot/cold); build picks the
-    # lower entryoff (0x4f52780), which is the one cgocall actually CALLs.
+    # by AGY_ASMCGO trampoline hooks (the lighter per-hook variant, for hot / syscall-
+    # at-entry-sensitive funcs). Two same-named entries exist (BOLT hot/cold); build picks
+    # the lower entryoff (0x4f52780), which is the one cgocall actually CALLs.
     "runtime.asmcgocall",
 
     # --- CodeAssistClient RPC trace (app-semantic backend boundary; trampoline) ---

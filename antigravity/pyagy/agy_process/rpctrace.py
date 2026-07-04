@@ -15,7 +15,7 @@ Stdlib only. CLI:
 import json
 import sys
 
-# rpc_<kind> -> readable RPC name (mirrors the CodeAssistClient hooks in proc.def).
+# rpc_<kind> -> readable RPC name (mirrors the CodeAssistClient hooks in procdef.h).
 RPC_KINDS = {
     "rpc_stream_generate": "StreamGenerateContent  (the model turn)",
     "rpc_generate": "GenerateContent",

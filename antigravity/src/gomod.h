@@ -166,7 +166,7 @@ typedef struct {
 } agy_go_regs;   /* 88 bytes; lives in the trampoline locals region (all-ones scanned) */
 
 /* The block the trampoline builds on its stack and passes to the C hook (RDI).
- * `kind` is a borrowed const char* (the proc.def kind tag) baked into the
+ * `kind` is a borrowed const char* (the procdef.h kind tag) baked into the
  * trampoline as an imm64; regs are the target's snapshotted arg registers. */
 typedef struct { uint64_t kind; agy_go_regs regs; } agy_block;
 
@@ -194,32 +194,8 @@ int  agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
                        uint32_t frame, uint32_t frame_lo, uint32_t frame_hi);
 void agy_gomod_ensure(void);
 
-/* ---- frame-pointer stack unwinder (gohook.c) ----------------------------------
- * Fault-safe read of `n` bytes from a possibly-bogus address in our own process
- * (process_vm_readv → EFAULT instead of SIGSEGV). Returns bytes read or -1. */
-long agy_safe_read(uint64_t addr, void *dst, unsigned long n);
-
-/* Walk the Go frame-pointer chain from `rbp` (Go keeps rbp: [rbp]=saved caller rbp,
- * [rbp+8]=return address). Stores up to `max` return PCs, each reduced to a link
- * vaddr (pc - base), into `out`. Terminates on rbp==0 / non-monotonic / unreadable.
- * Returns the number of frames captured. */
-int  agy_backtrace(uint64_t rbp, uint64_t base, uint64_t *out, int max);
-
-/* Emit a "callstack" event: src_kind (NUL-terminated) followed by the packed u64
- * frame vaddrs from agy_backtrace(rbp,base). No-op-safe if rbp is bogus. */
-void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base);
-
-/* ---- cgocall-trampoline installer (gohook.c, uses frida-gum) ------------- */
-typedef struct { uint64_t entry; uint32_t skip; const char *kind; } agy_gh_target;
-
-/* For each target, redirect (base+entry+skip) to a generated trampoline that
- * marshals the Go-ABI arg registers and CALLs runtime.cgocall(agy_cgo_hook,
- * &block), then resumes the original body. When AGY_PROC_MODULEDATA is set,
- * also registers the covering synthetic moduledata (agy_gomod_register) so the
- * trampolines are GC-unwind-safe. Returns the number of trampolines installed.
- * asmcgocall_va (may be 0) enables the AGY_PROC_ASMCGO ablation: call
- * runtime.asmcgocall (g0 switch, NO syscall transition) instead of cgocall. */
-int agy_gohook_install(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_va,
-                       uint64_t md_vaddr, const agy_gh_target *targets, int n);
+/* The frame-pointer unwinder (agy_safe_read/agy_backtrace/agy_emit_stack) and the
+ * cgocall-trampoline installer (agy_gohook_*) are cgotrampoline.c's API — see
+ * cgotrampoline.h. cgotrampoline.c includes this header for agy_gomod_prepare/ensure. */
 
 #endif /* AGY_GOMOD_H */

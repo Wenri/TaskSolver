@@ -17,7 +17,7 @@
 - `InteractiveSession` : drive a multi-turn agy TUI session.
 - `agy_process` : in-process recorder imported by the LD_PRELOADed shim.
 - `HOOKS`/`by_mech`/`by_kind`/`enabled_hooks`/`sync_capable`/`DERIVED_KINDS` : the
-                machine-readable hook→kind catalog (mirror of src/proc.def), for
+                machine-readable hook→kind catalog (mirror of src/procdef.h), for
                 introspecting which hooks are installed (by mechanism) and which kinds
                 can rewrite egress.
 

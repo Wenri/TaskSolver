@@ -17,21 +17,25 @@
 #include "frida-gum.h"
 #include "pybridge.h"
 #include "symbols_gen.h"
-#include "gomod.h"
+#include "cgotrampoline.h"
 
-/* ---- hook table generated from proc.def ---------------------------------- */
-/* How each hook is installed (see the MECH column in proc.def + install_hooks).
- * AGY_OFF must be 0 so a hook is only ever installed when explicitly GUM/TRAMP. */
-typedef enum { AGY_OFF = 0, AGY_GUM, AGY_TRAMP } agy_mech_t;
+/* ---- hook table generated from procdef.h ---------------------------------- */
+/* How each hook is installed (see the MECH column in procdef.h + install_hooks).
+ * AGY_OFF must be 0 so a hook is only ever installed when explicitly set.
+ * AGY_FULLCGO / AGY_ASMCGO are both cgocall-trampoline hooks; they pick the Go→C
+ * gateway per hook: full runtime.cgocall (robust, entersyscall + P handoff) vs
+ * runtime.asmcgocall (lighter g0-switch, no syscall transition — for hot/syscall-
+ * sensitive funcs). Both are collected into one agy_gohook_install call. */
+typedef enum { AGY_OFF = 0, AGY_GUM, AGY_FULLCGO, AGY_ASMCGO } agy_mech_t;
 enum {
 #define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE) HK_##ID,
-#include "proc.def"
+#include "procdef.h"
 #undef HOOK
     HK_COUNT
 };
 static const struct { const char *name; agy_mode_t mode; const char *kind; agy_mech_t mech; int leave; } HOOKS[] = {
 #define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE) [HK_##ID] = { NAME, MODE, KIND, MECH, LEAVE },
-#include "proc.def"
+#include "procdef.h"
 #undef HOOK
 };
 
@@ -237,31 +241,27 @@ static void install_hooks(void)
     g_base = (uint64_t)base;       /* for agy_emit_stack PC→link-vaddr reduction */
     LOG("main module base = 0x%llx", (unsigned long long)base);
 
-    /* AGY_TRAMP hooks: the cgocall-trampoline path (gohook.c) — NOT a gum attach. These are
-     * the parking scheduling-path funcs (SendUserMessage/Send, the gemini_coder framework
-     * consumers, the CodeAssistClient RPCs); redirect them through runtime.cgocall + a
-     * synthetic moduledata that keeps GC stack-unwind safe. This MUST be a SINGLE install
-     * over the whole union: agy_gohook_install / agy_gomod_prepare hold process singletons,
-     * so a second call would leave the first region's trampoline PCs uncovered under GC. */
+    /* Trampoline hooks (AGY_FULLCGO/AGY_ASMCGO): the cgocall-trampoline path
+     * (cgotrampoline.c) — NOT a gum attach. These are the parking scheduling-path funcs
+     * (SendUserMessage/Send, the gemini_coder framework consumers, the CodeAssistClient
+     * RPCs). Resolve + filter the union HERE and stream each into the builder — no
+     * intermediate array. It's a SINGLE region + synthetic moduledata (the gomod.c
+     * singletons make a second install unsafe), so all go through one begin/add/finalize. */
     {
-        agy_gh_target tg[HK_COUNT];
-        int nt = 0;
+        agy_gohook *gh = agy_gohook_begin((uint64_t)base, agy_sym("runtime.cgocall"),
+                                          agy_sym("runtime.asmcgocall"), HK_COUNT);
+        int n_tramp = 0, n_asm = 0;
         for (int i = 0; i < HK_COUNT; i++) {
-            if (HOOKS[i].mech != AGY_TRAMP) continue;
+            if (HOOKS[i].mech != AGY_FULLCGO && HOOKS[i].mech != AGY_ASMCGO) continue;
             uint64_t va = agy_sym(HOOKS[i].name);
             if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
-            tg[nt].entry = va;
-            tg[nt].skip  = agy_skip(HOOKS[i].name);
-            tg[nt].kind  = HOOKS[i].kind;
-            nt++;
+            int asmcgo = (HOOKS[i].mech == AGY_ASMCGO);
+            agy_gohook_add(gh, va, agy_skip(HOOKS[i].name), HOOKS[i].kind, asmcgo);
+            n_tramp++; n_asm += asmcgo;
         }
-        if (nt > 0) {
-            int made = agy_gohook_install((uint64_t)base, agy_sym("runtime.cgocall"),
-                                          agy_sym("runtime.asmcgocall"),
-                                          AGY_MODULEDATA_VADDR, tg, nt);
-            LOG("cgocall-trampoline: installed %d/%d target(s)%s", made, nt,
-                getenv("AGY_PROC_ASMCGO") ? " [asmcgocall variant]" : "");
-        }
+        int made = agy_gohook_finalize(gh, AGY_MODULEDATA_VADDR);
+        LOG("cgocall-trampoline: installed %d/%d target(s) (%d asmcgo, %d full-cgo)",
+            made, n_tramp, n_asm, n_tramp - n_asm);
     }
 
     /* AGY_GUM hooks: frida-gum inline attach on the non-parking CPU funcs. */
