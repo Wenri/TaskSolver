@@ -110,8 +110,6 @@ def main():
     ap.add_argument("--send", action="append", default=[], help="follow-up input (repeatable)")
     ap.add_argument("--idle", type=float, default=4.0)
     ap.add_argument("--timeout", type=float, default=120.0)
-    ap.add_argument("--no-hooks", action="store_true",
-                    help="bridge only — run agy under the shim but install no capture hooks")
     ap.add_argument("--capture", default="agy-capture.jsonl")
     ap.add_argument("--workdir", default=None)
     ap.add_argument("--echo", action="store_true", help="mirror agy output to our stdout live")
@@ -119,11 +117,9 @@ def main():
                     help="don't auto-press Enter after startup (interactive prefills the prompt)")
     args = ap.parse_args()
 
-    extra = {"AGY_PROC_NOHOOK": "1"} if args.no_hooks else None
-    s = AgySession(capture=args.capture, workdir=args.workdir, echo=args.echo, extra_env=extra)
+    s = AgySession(capture=args.capture, workdir=args.workdir, echo=args.echo)
     flag = "--print" if args.mode == "print" else "--prompt-interactive"
-    hooks = "no-hooks" if args.no_hooks else "full union"
-    print(f"[agy_session] starting: agy {flag} {args.prompt!r} ({hooks})", file=sys.stderr)
+    print(f"[agy_session] starting: agy {flag} {args.prompt!r} (full union)", file=sys.stderr)
     s.start([flag, args.prompt])
 
     print("\n===== turn 1 (initial prompt) =====")

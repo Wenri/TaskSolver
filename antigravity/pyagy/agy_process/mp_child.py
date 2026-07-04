@@ -102,7 +102,7 @@ def start():
 def stream_turns(kinds=None, max_wait=300):
     """Built-in AgyProcess target: stream agy's DECODED model turns home over the Connection
     as they're produced, until agy exits (the parent then sees EOF on recv()) or max_wait.
-    Needs the capture hooks installed (AgyProcess(hooks=True) → genai_turn). Uses a subscribe
+    The shim always installs the capture hooks, so genai_turn events flow. Uses a subscribe
     → in-process queue → single-sender loop, so the send side has no Connection race."""
     import queue as _q
     from . import subscribe as _subscribe

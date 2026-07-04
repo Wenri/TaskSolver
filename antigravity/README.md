@@ -413,8 +413,8 @@ HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
 Run agy under the hook via the launcher in `test_scripts/` — it installs the full working
 hook union (gum wire hooks + cgocall-trampoline app/rpc hooks) in one pass; set
-`AGY_PROC_NOHOOK=1` for a bridge-only run, or `AGY_PROC_ASMCGO=1` to select the asmcgocall
-trampoline variant (the GC-safe synthetic moduledata is always on):
+`AGY_PROC_ASMCGO=1` to select the asmcgocall trampoline variant (the GC-safe synthetic
+moduledata is always on):
 
 ```bash
 test_scripts/run-agy.sh <normal agy args...>   # capture request+response+app+rpc (authenticated agy)
@@ -587,7 +587,7 @@ capture that kind (e.g. no `rpc_*` events):
 
   | env var | set by | effect |
   |---|---|---|
-  | `AGY_PROC_NOHOOK` | `AgyProcess(hooks=False)` | bridge only — start the embedded interpreter, install no capture hooks |
+  | `AGY_PROC_ENABLE` | (auto, instrumented) | the sole gate — opt the shim in; installs the full hook union |
   | `AGY_PROC_TLS_WRITE_SYNC` | `rewrite=` | make `tls_write` a SYNC (modify) hook |
   | `AGY_PROC_REWRITE_RULES` / `AGY_PROC_REWRITE` | `rewrite=` | rules-file path / `module:func` |
   | `AGY_PROC_STACK` | `stack=True` | emit deduped `callstack` events |
@@ -675,15 +675,15 @@ Add the scoped `.gemini/` to `.gitignore`. `data_dir=None` (default) uses the gl
 from pyagy.agyprocess import AgyProcess
 from pyagy.agy_process.mp_child import stream_turns, get_result_conn
 
-# one-shot: stream agy's decoded model turns home as native dicts (hooks=True installs
-# the capture union; the default hooks=False is a bridge-only run with no capture)
-p = AgyProcess(target=stream_turns, hooks=True, prompt="What is 2+2?"); p.start()
+# one-shot: stream agy's decoded model turns home as native dicts (the shim always
+# installs the capture union, so genai_turn events flow)
+p = AgyProcess(target=stream_turns, prompt="What is 2+2?"); p.start()
 while p.poll(1.0) or p.is_alive():
     try: turn = p.recv()             # {"kind":"genai_turn","text":…,"usage":…,"request":…}
     except EOFError: break           # agy exited
 
 # persistent, multi-turn (context retained)
-p = AgyProcess(target=stream_turns, hooks=True, persistent=True, prompt="What is 2+2?"); p.start()
+p = AgyProcess(target=stream_turns, persistent=True, prompt="What is 2+2?"); p.start()
 t1 = p.ask()                         # submit the prefilled prompt          -> "4"
 t2 = p.ask("multiply that by 10")    # follow-up (agy remembers)            -> "40"
 

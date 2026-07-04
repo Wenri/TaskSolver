@@ -48,13 +48,11 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
     """Environment that LD_PRELOADs the antigravity shim and points its embedded
     interpreter at ``module`` (default ``pyagy.agy_process``), writing hook events to
     the ``capture`` JSONL. The shim installs the full working hook union (wire + app +
-    rpc) on every run — there is no stage selector. Pass ``AGY_PROC_NOHOOK`` via
-    ``extra_env`` for a bridge-only run (embedded interpreter, no capture hooks).
+    rpc) on every run — the only gate is ``AGY_PROC_ENABLE`` (set here).
     Mirrors run-agy.sh; ``extra_env`` (applied last) can override any AGY_PROC* knob."""
     root = root or ROOT
     shim = shim or os.path.join(root, "vendor", "antigravity.so")
     env = dict(base if base is not None else os.environ)
-    env.pop("AGY_PROC_NOHOOK", None)
     env.update({
         "AGY_PROC_ENABLE": "1",
         "AGY_PROC_MODULE": module,

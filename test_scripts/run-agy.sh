@@ -5,8 +5,6 @@
 #
 # Env knobs (all optional):
 #   AGY_BIN                 path to agy            (default ~/.local/bin/agy)
-#   AGY_PROC_NOHOOK         set to run bridge-only (no capture hooks); default installs
-#                           the full working hook union (wire + app + rpc)
 #   AGY_PROC_CAPTURE        JSONL output           (default ./agy-capture.jsonl)
 #   AGY_PROC_LOG            native shim log        (default ./antigravity.log)
 #   AGY_PROC_TLS_WRITE_SYNC set to enable synchronous egress rewrite

@@ -119,9 +119,8 @@ def test_build_env_overlays():
                           workspace=d, extra_env=None, stack=True, arg_probe=True)
     check(env.get("AGY_PROC_STACK") == "1", "stack=True -> AGY_PROC_STACK=1")
     check(env.get("AGY_PROC_CGT_ARGS") == "1", "arg_probe=True -> AGY_PROC_CGT_ARGS=1")
-    check(env.get("AGY_PROC_ENABLE") == "1" and "AGY_PROC_STAGE" not in env
-          and "AGY_PROC_NOHOOK" not in env,
-          "instrumented run enables the full hook union (no stage selector, no nohook)")
+    check(env.get("AGY_PROC_ENABLE") == "1" and "AGY_PROC_STAGE" not in env,
+          "instrumented run enables the full hook union (AGY_PROC_ENABLE, no stage selector)")
     env2, _ = C._build_env(instrumented=True, capture_path=cap, rewrite=None,
                            workspace=d, extra_env=None)
     check("AGY_PROC_STACK" not in env2 and "AGY_PROC_CGT_ARGS" not in env2,

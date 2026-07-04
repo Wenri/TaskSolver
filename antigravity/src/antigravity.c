@@ -41,7 +41,6 @@ static FILE *g_logf;
     fprintf(f, "[antigravity] " __VA_ARGS__); fputc('\n', f); fflush(f); } while (0)
 
 static int g_tls_write_sync;   /* AGY_PROC_TLS_WRITE_SYNC=1 → allow modifying egress */
-static int g_dryrun;           /* AGY_PROC_DRYRUN=1 → hooks fire but do nothing (isolate gum vs emit) */
 static int g_stack;            /* AGY_PROC_STACK=1 → emit a "callstack" event per hook fire */
 static int g_conv_id;          /* AGY_PROC_CONV_ID=1 → install the os.OpenFile conversation-id probe */
 static uint64_t g_base;        /* main-module base (for PC→link-vaddr reduction) */
@@ -94,7 +93,6 @@ static int mem_has(const char *h, size_t n, const char *needle)
 static void on_enter(GumInvocationContext *ic, gpointer user_data)
 {
     (void)user_data;
-    if (g_dryrun) return;
     int id = (int)(gsize)gum_invocation_context_get_listener_function_data(ic) - 1;
     GumCpuContext *cpu = ic->cpu_context;
     /* AGY_PROC_STACK: dump the call stack leading INTO this hook. gum fires
@@ -180,7 +178,6 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
 static void on_leave(GumInvocationContext *ic, gpointer user_data)
 {
     (void)user_data;
-    if (g_dryrun) return;
     int id = (int)(gsize)gum_invocation_context_get_listener_function_data(ic) - 1;
     GumCpuContext *cpu = ic->cpu_context;
     if (id == HK_TLS_READ) {
@@ -325,7 +322,6 @@ static void agy_init(void)
     const char *logpath = getenv("AGY_PROC_LOG");
     if (logpath && *logpath) g_logf = fopen(logpath, "ae");
     g_tls_write_sync = getenv("AGY_PROC_TLS_WRITE_SYNC") != NULL;
-    g_dryrun = getenv("AGY_PROC_DRYRUN") != NULL;
     g_stack = getenv("AGY_PROC_STACK") != NULL;
     g_conv_id = getenv("AGY_PROC_CONV_ID") != NULL;
 
@@ -342,14 +338,8 @@ static void agy_init(void)
         LOG("build-id ok (%s)", b.hex);
     }
 
-    /* Always start the embedded Python bridge. Then install the full hook union unless the
-     * caller opted out with AGY_PROC_NOHOOK — the bridge-only path (e.g. the AgyProcess
-     * embed child, which runs a target in-process but wants no capture hooks). */
+    /* Start the embedded Python bridge, then install the full working hook union. */
     if (agy_py_start() != 0) { LOG("python bridge failed to start; not installing hooks"); return; }
-    if (getenv("AGY_PROC_NOHOOK")) {
-        LOG("AGY_PROC_NOHOOK set — bridge only, no capture hooks");
-    } else {
-        install_hooks();
-    }
+    install_hooks();
     LOG("initialized");
 }
