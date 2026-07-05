@@ -36,12 +36,15 @@ from .conversations import ensure_git_workspace
 _VENDOR_AGY = os.path.join(ROOT, "vendor", "agy")   # the pinned agy whose build-id matches the shim
 
 
-def _close_agy(fd, conn):
-    """PtyPopen's finalizer callback. Module-level, closing over only ``fd``/``conn`` (never the
-    Popen) so weakref-based GC finalization still fires: closes the PTY master fd — which SIGHUPs
-    agy, doubling as teardown — and, in worker mode, the result Connection (``conn`` is None in
-    plain-CLI). Uses Connection.close() (not a raw os.close on its fileno) so the Connection object
-    stays in sync; both are idempotent, and the finalizer is one-shot."""
+def _close_agy(fd, conn, stop):
+    """PtyPopen's finalizer callback. Module-level, closing over only its args (never the Popen) so
+    weakref-based GC finalization still fires. In one shot it stops the PTY pump thread (``stop``,
+    worker only), closes the PTY master fd — which SIGHUPs agy, doubling as teardown — and closes
+    the result Connection (``conn``; ``stop``/``conn`` are None in plain-CLI). Closing the fd
+    unblocks the pump's read; Connection.close() (not a raw os.close on its fileno) keeps the
+    object in sync. Every step is idempotent and the finalizer is one-shot."""
+    if stop is not None:
+        stop.set()                  # tell the pump thread to exit (the fd close below unblocks it)
     try:
         os.close(fd)
     except OSError:
@@ -197,19 +200,20 @@ class PtyPopen(_ForkPopen):
         self._snap = _conv.snapshot(home=self._home)   # pre-launch store snapshot → conversation_id
         self._spawn_pty(argv, workdir, env)            # pty.fork + execve(agy); child inherits the fds
         self.sentinel = self.fd                        # PTY master EOFs on agy death (wait(timeout))
-        # Safety net (mirrors popen_fork's finalizer): if the caller forgets close(), the weakref
-        # on `self` fires this when the handle is GC'd — closing the PTY master (which SIGHUPs agy,
-        # doubling as teardown) and, in worker mode, the result Connection. exitpriority is None
-        # (like popen_fork), so it runs on GC of this handle or via close(), NOT at the atexit sweep
-        # (there the OS reclaims fds and _exit_function terminates agy via _children). One-shot, so
-        # it's the sole closer of both (no double-close).
-        self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn))
+        self._stop = threading.Event() if worker else None   # pump-thread gate (worker mode only)
+        # Safety net (mirrors popen_fork's finalizer): runs via close() or, once nothing references
+        # the handle, GC of `self` — it stops the pump thread and closes the PTY master (which
+        # SIGHUPs agy, doubling as teardown) + the result Connection. exitpriority is None (like
+        # popen_fork), so it does NOT run at the atexit sweep (there the OS reclaims fds and
+        # _exit_function terminates agy via _children). One-shot, so it's the sole closer of each.
+        # (Worker mode: the pump thread strong-refs `self`, so GC can't fire until close() runs —
+        # which sets _stop, letting the thread exit and the handle become collectable.)
+        self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn, self._stop))
 
         if not worker:
             return          # plain-CLI: the caller drives the PTY (read_until_exit/idle); no channel/pump
 
         # --- embedded worker: ship the pickled target in, stream results out over the Connection ---
-        self._stop = threading.Event()                 # stops the PTY pump thread on close
         self._last_output = time.time()                # last PTY write (turn-boundary idle for .ask())
 
         # Pickle (prep_data, process_obj) UNDER set_spawning_popen — BaseProcess.__reduce__ and the
@@ -247,11 +251,9 @@ class PtyPopen(_ForkPopen):
             pass
 
     def close(self, interrupt=False):
-        """Stop the pump (worker), then tear down: optional Ctrl-C (to break agy's TUI), SIGTERM,
-        reap, and run the finalizer (closes the PTY master fd + the result Connection). Safe if agy
-        was already reaped."""
-        if getattr(self, "_stop", None) is not None:
-            self._stop.set()                             # stop the pump thread (worker mode)
+        """Tear down: optional Ctrl-C (to break agy's TUI), SIGTERM, reap agy, then run the
+        finalizer (stops the pump thread + closes the PTY master fd + the result Connection).
+        Safe if agy was already reaped."""
         if getattr(self, "pid", None):
             if interrupt:
                 for _ in range(2):                       # Ctrl-C twice to break out of the TUI
