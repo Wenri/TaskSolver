@@ -9,7 +9,6 @@ workspace. No API key needed (agy is logged in via ~/.gemini/antigravity-cli/).
     model = AgyModel(api_key=None, task=my_task, model="gemini-3-pro")
     parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 """
-import threading
 from typing import List, Tuple
 
 from loguru import logger
@@ -17,7 +16,7 @@ from loguru import logger
 from tasksolver.common import ParsedAnswer, Question, TaskSpec, attach_response_metadata
 from tasksolver.exceptions import GPTMaxTriesExceededException, GPTOutputParseException
 
-from .client import ask as _agy_ask
+from .client import ask_many as _agy_ask_many
 
 
 class AgyModel(object):
@@ -40,11 +39,10 @@ class AgyModel(object):
         self.continue_latest = continue_latest
         self.multi_turn = bool(multi_turn or conversation_id or continue_latest)
         self.data_dir = data_dir              # scope the conversation store to a project repo
-        self._conv_lock = threading.Lock()
 
-    def _query_once(self, payload: dict) -> dict:
-        r = _agy_ask(
-            payload["prompt"],
+    def _call_kwargs(self, payload: dict) -> dict:
+        """Shared client.ask_many kwargs assembled from this model's config."""
+        return dict(
             workspace=payload.get("workspace") or self.workspace,
             model=self.model,
             timeout=self.print_timeout,
@@ -53,6 +51,11 @@ class AgyModel(object):
             continue_latest=(self.continue_latest and self.conversation_id is None),
             data_dir=self.data_dir,
         )
+
+    def _finish(self, r) -> dict:
+        """Validate one AgyResponse, latch the conversation id (multi_turn), and shape the
+        result dict. Single-threaded — ask() no longer spawns worker threads (AgyProcess is
+        already the native multiprocessing model), so the latch needs no lock."""
         if not r.text:
             raise RuntimeError(
                 "agy --print returned no output "
@@ -60,47 +63,23 @@ class AgyModel(object):
                 "Ensure agy is logged in (~/.gemini/antigravity-cli/) and reachable. "
                 f"Transcript head:\n{r.transcript[:500]}"
             )
-        # Latch onto the conversation the first turn created, so subsequent multi_turn calls
-        # resume it (--conversation=<id>) and accumulate context. AgyResponse.conversation_id
-        # is captured for us; the lock guards the first-writer race when n_choices > 1
-        # (parallel sampling doesn't define a single conversation).
+        # Latch onto the conversation the first turn created so later multi_turn calls resume it
+        # (--conversation=<id>). n_choices>1 is parallel sampling (no single conversation) — the
+        # first response's id is taken.
         if self.multi_turn and self.conversation_id is None:
-            with self._conv_lock:
-                if self.conversation_id is None:
-                    self.conversation_id = r.conversation_id
+            self.conversation_id = r.conversation_id
         return {"result": r.text, "transcript": r.transcript, "exit_status": r.exit_status,
                 "workspace": r.workspace, "conversation_id": self.conversation_id}
 
     def ask(self, payload: dict, n_choices: int = 1) -> Tuple[List[dict], List[dict]]:
-        def worker(idx, results):
-            try:
-                raw = self._query_once(payload)
-                results[idx] = {
-                    "message": {"role": "assistant", "content": raw["result"]},
-                    "metadata": raw,
-                }
-            except BaseException as e:  # stash to re-raise on the caller thread
-                results[idx] = e
-
         assert n_choices >= 1
-        results = [None] * n_choices
-        if n_choices > 1:
-            jobs = [threading.Thread(target=worker, args=(i, results)) for i in range(n_choices)]
-            for j in jobs:
-                j.start()
-            for j in jobs:
-                j.join()
-        else:
-            worker(0, results)
-
-        # Propagate the first worker error instead of crashing later on a None result.
-        for r in results:
-            if isinstance(r, BaseException):
-                raise r
-
-        messages = [res["message"] for res in results]
-        metadata = [res["metadata"] for res in results]
-        return messages, metadata
+        # AgyProcess is already a multiprocessing.Process (start() forks agy and returns), so
+        # parallel sampling needs no threads: ask_many start()s all n and services them in one
+        # event loop (n_choices == 1 is the plain one-shot).
+        responses = _agy_ask_many(payload["prompt"], n_choices, **self._call_kwargs(payload))
+        results = [self._finish(r) for r in responses]
+        messages = [{"role": "assistant", "content": res["result"]} for res in results]
+        return messages, results
 
     @staticmethod
     def prepare_payload(question: Question, max_tokens=1000, verbose: bool = False,

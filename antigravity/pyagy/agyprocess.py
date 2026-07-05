@@ -26,6 +26,7 @@ Connection, the transcript over the PTY (a byproduct on ``transcript``).
 """
 import time
 
+import multiprocessing.connection as _conn
 from multiprocessing.context import SpawnProcess
 
 from . import conversations as _conv
@@ -213,3 +214,51 @@ class AgyProcess(SpawnProcess):
     def close(self, interrupt=False):
         """Stop agy (``interrupt=True`` presses Ctrl-C first, for the TUI) and close the PTY."""
         self._popen.close(interrupt=interrupt)
+
+
+def collect_many(procs, timeout=300.0, kinds=_ANSWER_KINDS):
+    """One-shot collect from several already-``start()``ed AgyProcesses concurrently, in one
+    event loop — the native way to exploit that ``start()`` is non-blocking (it forks agy and
+    returns) and the result Connection + PTY are selectable fds. No threads: the forks happened
+    serially in the caller, so there is no fork-in-a-multithreaded-process hazard.
+
+    A single ``_conn.wait`` watches every live process's Connection + PTY master together, so all
+    PTYs are drained (none stalls on a full buffer) while each process's ``kinds`` objects are
+    gathered until it signals done (``_agy_done``/``_agy_exc``) or its Connection EOFs. Returns a
+    list parallel to ``procs`` — each entry is that process's collected dicts in arrival order
+    (possibly empty; use its ``.transcript`` as the fallback). Stops early once all are done, or
+    at ``timeout``."""
+    pops = [p._popen for p in procs]
+    got = [[] for _ in procs]
+    done = [False] * len(procs)
+    end = time.time() + timeout
+    while not all(done) and time.time() < end:
+        watch = {}                              # Connection/fd -> (index, is_conn)
+        for i, pop in enumerate(pops):
+            if done[i]:
+                continue
+            watch[pop._parent_conn] = (i, True)
+            if not pop._pty_dead:
+                watch[pop.fd] = (i, False)      # raw PTY master; drop it once it EOFs
+        if not watch:
+            break
+        for r in _conn.wait(list(watch), max(0.0, end - time.time())):
+            i, is_conn = watch[r]
+            pop = pops[i]
+            if not is_conn:                     # PTY readable: drain it (+ auto-answer prompts)
+                if not pop._read_available():
+                    pop._pty_dead = True
+                continue
+            try:                                # Connection readable: gather this proc's results
+                while pop._parent_conn.poll(0):
+                    o = pop._parent_conn.recv()
+                    if isinstance(o, tuple) and o and o[0] in ("_agy_done", "_agy_exc"):
+                        pop.exited()             # reap agy so exit_status is set
+                        done[i] = True
+                        break
+                    if isinstance(o, dict) and o.get("kind") in kinds:
+                        got[i].append(o)
+            except EOFError:
+                pop.exited()                     # agy exited — the normal completion signal
+                done[i] = True
+    return got

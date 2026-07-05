@@ -37,7 +37,7 @@ from functools import cached_property
 from . import config as _config
 from . import conversations as _conv
 from ._term import answer_text as _answer_text
-from .agyprocess import AgyProcess
+from .agyprocess import AgyProcess, collect_many
 from .conversations import ensure_git_workspace
 
 _UNIQ = [0]
@@ -395,6 +395,52 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
     return AgyResponse.from_objs(
         objs, transcript, exit_status=exit_status, capture_path=cap_path,
         workspace=workspace, funcmap=funcmap, conversation_id=cid)
+
+
+def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
+             capture=True, timeout=300, skip_permissions=False, agy_bin=None, extra_env=None,
+             stack=False, arg_probe=False, funcmap=None, conversation_id=None,
+             continue_latest=False, data_dir=None, trust=True):
+    """Run ``n`` independent ``agy --print`` turns of the same ``prompt`` concurrently and
+    return a list of ``n`` decoded :class:`AgyResponse` (parallel sampling — e.g. ``AgyModel``
+    with ``n_choices>1``). Same kwargs as :func:`ask`; all share one workspace + tools/context,
+    each gets its own capture file. No threads: every process is ``start()``ed (a fast, serial,
+    non-blocking fork), then :func:`pyagy.agyprocess.collect_many` services them all in one event
+    loop. ``n <= 1`` delegates to :func:`ask`."""
+    if n <= 1:
+        return [ask(prompt, model=model, workspace=workspace, tools=tools, context=context,
+                    rewrite=rewrite, capture=capture, timeout=timeout,
+                    skip_permissions=skip_permissions, agy_bin=agy_bin, extra_env=extra_env,
+                    stack=stack, arg_probe=arg_probe, funcmap=funcmap,
+                    conversation_id=conversation_id, continue_latest=continue_latest,
+                    data_dir=data_dir, trust=trust)]
+    workspace = ensure_git_workspace(workspace)
+    overlays, _ = _shim_overlays(rewrite, workspace, stack, arg_probe, extra_env)
+    overlays["AGY_PROC_LOG"] = os.path.join(workspace, "pyagy-shim.log")
+    cap_paths = [os.path.join(workspace, f"pyagy-capture-{i}.jsonl") if capture else None
+                 for i in range(n)]
+    for c in cap_paths:
+        if c:
+            open(c, "w").close()                 # truncate so each reads only its own run
+    cleanup = _inject_config(tools, context)     # one shared MCP config for all n
+    try:
+        procs = [AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
+                            agy_bin=agy_bin, workdir=workspace, capture=cap_paths[i],
+                            conversation_id=conversation_id, continue_latest=continue_latest,
+                            data_dir=data_dir, trust=trust, extra_env=overlays)
+                 for i in range(n)]
+        for p in procs:
+            p.start()                            # non-blocking fork; serial → no fork-in-thread
+        objs_list = collect_many(procs, timeout=timeout)   # one event loop services all n
+        responses = [AgyResponse.from_objs(
+                         objs, p.transcript, exit_status=p.exit_status, capture_path=cap,
+                         workspace=workspace, funcmap=funcmap, conversation_id=p.conversation_id)
+                     for p, objs, cap in zip(procs, objs_list, cap_paths)]
+        for p in procs:
+            p.close()
+        return responses
+    finally:
+        cleanup()
 
 
 # --- multi-turn --------------------------------------------------------------
