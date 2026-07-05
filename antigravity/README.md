@@ -359,18 +359,17 @@ antigravity/
     procdef.h                ← declarative hook table (id, symbol, mode, kind, mech, leave)
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
     __init__.py             ← lazy exports (PEP 562): ask/Session/AgyResponse/specs,
-                              AgyModel, run_print/InteractiveSession, write_mcp_config
+                              AgyModel, write_mcp_config
     client.py               ← public API: ask() (one-shot) + Session (multi-turn) +
                               AgyResponse + ToolSpec/ContextResource/RewriteRule/Usage
     config.py               ← MCP config-injection (write_mcp_config/validate_server)
-    model.py                ← AgyModel (prepare_payload/ask/rough_guess/run_once/…)
-    agyprocess.py           ← AgyProcess: the user-facing SpawnProcess handle (start/recv/ask/
-                              read_until_exit/…) + argv assembly — THE single agy front-door
-                              (plain-CLI reads the transcript; embedded-worker runs Python in agy)
+    model.py                ← AgyModel (prepare_payload/ask/rough_guess/run_once/…) over client.ask
+    agyprocess.py           ← AgyProcess: the user-facing SpawnProcess handle (start/collect/ask/
+                              recv/…) + argv assembly — THE single agy front-door; always runs an
+                              in-agy worker that streams the decoded answer home over a Connection
     _pty.py                 ← PtyPopen(popen_fork.Popen): AgyProcess's `_Popen` — execs agy under
-                              a PTY as the mp child, owns the PTY (fork/pump/read/answer) + the
+                              a PTY as the mp child, owns the PTY (fork/read/answer) + the
                               launch/lifecycle; always instrumented on the pinned vendor/agy
-    session.py              ← run_print (one-shot dict) + InteractiveSession — thin AgyProcess wrappers
     _term.py / _env.py      ← ANSI+terminal-query responder / instrumented-env wiring
     agy_process/__init__.py ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
     agy_process/http1sse.py ← HTTP/1.1 + SSE decoder for the MODEL endpoint (the right
@@ -678,15 +677,16 @@ Add the scoped `.gemini/` to `.gitignore`. `data_dir=None` (default) uses the gl
 ## `AgyProcess`: the single agy launcher
 
 `AgyProcess` is the one front-door every agy launch goes through (always instrumented, on the
-pinned `vendor/agy`). It has two modes:
+pinned `vendor/agy`). It always runs an in-agy worker `target`:
 
-- **plain-CLI** (`target=None`, the default) — run agy as an external process and read its PTY
-  transcript with `read_until_exit` (one-shot) / `read_until_idle` (interactive). Backs
-  `session.run_print`, `session.InteractiveSession`, `pyagy.ask` / `pyagy.Session`, and the
-  `AgySession` capture harness.
-- **embedded-worker** (`target=callable`) — a `target` executes *inside* agy's embedded
-  interpreter and streams **native Python objects** home over a `multiprocessing.connection`
-  (no JSONL round-trip).
+- **default target** (`stream_turns`) — streams agy's decoded answer (`genai_turn` +
+  `app_response`) home over a `multiprocessing.connection`; the parent collects it with
+  `collect()` (one-shot) / `ask()` (interactive). Backs `pyagy.ask` / `pyagy.Session`, `AgyModel`,
+  and the `AgySession` capture harness. The PTY transcript is drained as a diagnostic byproduct
+  (`.transcript`).
+- **custom target** (`target=callable`) — your callable executes *inside* agy's embedded
+  interpreter and streams **native Python objects** home over the same Connection (no JSONL
+  round-trip).
 
 ```python
 from pyagy.agyprocess import AgyProcess
@@ -760,7 +760,7 @@ parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 `[tool.setuptools.packages.find]` (the editable install's finder maps `pyagy` →
 `antigravity/pyagy`; no `PYTHONPATH` needed). Smoke test: `pixi run python
 test_scripts/example_agy_backend.py`. For multi-turn scripting use
-`pyagy.InteractiveSession` (PTY + terminal-query responder).
+`pyagy.Session` (the first-class multi-turn object).
 
 **pixi/WSL1 note:** `pixi install` builds tasksolver as a conda package; on this
 WSL1 host the setuptools link step needs the `wsl1-exec.so` shim (already in the

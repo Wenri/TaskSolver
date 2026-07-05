@@ -3,7 +3,7 @@ shim + capture JSONL, on the pinned vendor/agy), and always runs an in-agy worke
 streams agy's DECODED answer home over a Connection.
 
 A ``target`` (default: ``agy_process.mp_child.stream_turns``) runs inside agy's embedded interpreter
-and sends decoded objects home; the parent collects them with ``run()`` (one-shot) / ``ask()``
+and sends decoded objects home; the parent collects them with ``collect()`` (one-shot) / ``ask()``
 (persistent multi-turn), or reads raw objects with ``recv``/``poll``. The PTY transcript is drained
 as a byproduct and kept on ``transcript`` for diagnostics (crashes, and a fallback answer when no
 turn decodes).
@@ -56,7 +56,7 @@ def _agy_argv(prompt, persistent, model, skip_permissions, extra_flags,
 
 class AgyProcess(SpawnProcess):
     """`multiprocessing.Process`-shaped handle for an agy run (always instrumented, always a
-    worker). Collect the decoded answer with ``run()`` (one-shot) / ``ask()`` (persistent), or
+    worker). Collect the decoded answer with ``collect()`` (one-shot) / ``ask()`` (persistent), or
     read raw objects a custom ``target`` sends with ``recv``/``poll``. The PTY transcript is a
     byproduct on ``transcript`` (used for crash/fallback diagnostics)."""
 

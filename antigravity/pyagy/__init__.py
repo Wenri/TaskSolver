@@ -13,8 +13,6 @@
                 (`.cgt_args`). `.conversation_id` is resumable.
 - `AgyModel`  : TaskSolver adapter (prepare_payload/ask/rough_guess/run_once/…),
                 mirroring tasksolver.claude_code.ClaudeCodeModel.
-- `run_print` : one-shot `agy --print` under a PTY (used by AgyModel).
-- `InteractiveSession` : drive a multi-turn agy TUI session.
 - `agy_process` : in-process recorder imported by the LD_PRELOADed shim.
 - `HOOKS`/`by_mech`/`by_kind`/`enabled_hooks`/`sync_capable`/`DERIVED_KINDS` : the
                 machine-readable hook→kind catalog (mirror of src/procdef.h), for
@@ -23,7 +21,7 @@
 
 Top-level names are loaded lazily (PEP 562): `import pyagy.agy_process` — done by the
 shim under a minimal *system* libpython — runs this __init__, so it must NOT eagerly
-import model/session (they pull tasksolver, which that embedded interpreter can't load).
+import model (it pulls tasksolver, which that embedded interpreter can't load).
 The catalog names below live in `agy_process.hooks` (stdlib-pure), also lazily.
 """
 _LAZY = {
@@ -46,10 +44,8 @@ _LAZY = {
     "prepare_scoped_home": ".conversations",
     # TaskSolver backend + lower-level drivers
     "AgyModel": ".model",
-    "run_print": ".session",
-    "InteractiveSession": ".session",
-    "ensure_git_workspace": ".session",
-    "strip_ansi": ".session",
+    "ensure_git_workspace": ".conversations",
+    "strip_ansi": "._term",
     # config injection
     "write_mcp_config": ".config",
     "detect_config_path": ".config",

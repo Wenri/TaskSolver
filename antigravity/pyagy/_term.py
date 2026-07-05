@@ -2,9 +2,9 @@
 
 `agy` is a TUI: it emits ANSI escapes we must strip to read its output, and it
 sends terminal-capability queries at startup that it *blocks on* until answered.
-Both the one-shot (`session.run_print`) and multi-turn (`session.InteractiveSession`,
+Both the one-shot (`client.ask`) and multi-turn (`client.Session`,
 `test_scripts/agy_session.py`) drivers need the exact same two things, so they live
-here once instead of being copied three times.
+here once instead of being copied.
 """
 import re
 

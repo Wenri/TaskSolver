@@ -38,7 +38,7 @@ from . import config as _config
 from . import conversations as _conv
 from ._term import answer_text as _answer_text
 from .agyprocess import AgyProcess
-from .session import ensure_git_workspace
+from .conversations import ensure_git_workspace
 
 _UNIQ = [0]
 
@@ -106,6 +106,21 @@ class AgyResponse:
     def __str__(self):
         return self.text
 
+    @classmethod
+    def from_objs(cls, objs, transcript, **meta):
+        """Build a response from the decoded objects the worker streamed home + the PTY
+        transcript. One answer policy: the app-boundary text (longest ``app_response``), else
+        the wire turn (longest ``genai_turn`` text), else the filtered transcript — so ``.text``
+        and ``.source`` always agree. ``**meta`` supplies exit_status/capture_path/workspace/
+        funcmap/conversation_id (``instrumented`` defaults True)."""
+        turns = [o for o in objs if o.get("kind") == "genai_turn"]
+        app_texts = [o["text"] for o in objs if o.get("kind") == "app_response" and o.get("text")]
+        wire_texts = [o["text"] for o in turns if o.get("text")]
+        text = (max(app_texts, key=len) if app_texts else
+                max(wire_texts, key=len) if wire_texts else _answer_text(transcript))
+        meta.setdefault("instrumented", True)
+        return cls(text=text, transcript=transcript, turns=turns, app_turns=app_texts, **meta)
+
     @property
     def app_text(self):
         """The assembled answer captured at agy's own consumer boundary
@@ -117,10 +132,13 @@ class AgyResponse:
     @property
     def source(self):
         """Where ``.text`` came from: ``"app"`` (app-boundary decode, preferred),
-        ``"wire"`` (http1sse genai_turn), or ``"transcript"`` (PTY fallback)."""
+        ``"wire"`` (http1sse genai_turn), or ``"transcript"`` (PTY fallback). Matches the
+        answer policy in :meth:`from_objs`."""
         if self.app_turns:
             return "app"
-        return "wire" if self.turns else "transcript"
+        if any(t.get("text") for t in self.turns):
+            return "wire"
+        return "transcript"
 
     @property
     def primary(self):
@@ -374,14 +392,9 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
     finally:
         cleanup()
 
-    turns = [o for o in objs if o.get("kind") == "genai_turn"]
-    app_texts = [o["text"] for o in objs if o.get("kind") == "app_response" and o.get("text")]
-    # Prefer the app-boundary answer (fh_update) when present; else the PTY transcript.
-    text = max(app_texts, key=len) if app_texts else _answer_text(transcript)
-    return AgyResponse(
-        text=text, transcript=transcript, turns=turns, app_turns=app_texts,
-        exit_status=exit_status, capture_path=cap_path, workspace=workspace,
-        instrumented=True, instrumented_reason="", funcmap=funcmap, conversation_id=cid)
+    return AgyResponse.from_objs(
+        objs, transcript, exit_status=exit_status, capture_path=cap_path,
+        workspace=workspace, funcmap=funcmap, conversation_id=cid)
 
 
 # --- multi-turn --------------------------------------------------------------
@@ -460,17 +473,13 @@ class Session:
             objs = self._agy.ask(None, idle=self.idle, timeout=self.timeout)   # submit the prefill
         else:
             objs = self._agy.ask(prompt, idle=self.idle, timeout=self.timeout)
-        turns = [o for o in objs if o.get("kind") == "genai_turn"]
-        app_texts = [o["text"] for o in objs if o.get("kind") == "app_response" and o.get("text")]
         transcript = self._agy.transcript
         if self._conversation_id is None:            # first turn of a fresh session
             self._conversation_id = self._agy.conversation_id
-        text = max(app_texts, key=len) if app_texts else _answer_text(transcript)
-        return AgyResponse(
-            text=text, transcript=transcript, turns=turns, app_turns=app_texts,
-            exit_status=None, capture_path=self.cap_path, workspace=self.workspace,
-            instrumented=True, instrumented_reason="",
-            funcmap=self.funcmap, conversation_id=self._conversation_id)
+        return AgyResponse.from_objs(
+            objs, transcript, exit_status=None, capture_path=self.cap_path,
+            workspace=self.workspace, funcmap=self.funcmap,
+            conversation_id=self._conversation_id)
 
     @property
     def conversation_id(self):

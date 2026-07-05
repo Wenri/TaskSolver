@@ -81,10 +81,11 @@ def test_response_preference():
     check(r.source == "app", "source == app when app_turns present")
     check(r.app_text == "the longer full answer", "app_text is the longest snapshot")
 
-    # no app, wire turns present → 'wire'
-    r2 = AgyResponse(text="t", transcript="t", turns=[{}], exit_status=0,
+    # no app, wire turn carries text → 'wire' (and .text is that wire text; .source agrees)
+    r2 = AgyResponse(text="the wire answer", transcript="t",
+                     turns=[{"text": "the wire answer"}], exit_status=0,
                      capture_path=None, workspace="/w", instrumented=True, app_turns=[])
-    check(r2.source == "wire", "source == wire when only genai_turns present")
+    check(r2.source == "wire", "source == wire when wire turns carry text")
     check(r2.app_text == "", "app_text empty without app_turns")
 
     # nothing decoded → 'transcript'

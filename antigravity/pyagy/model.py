@@ -17,8 +17,7 @@ from loguru import logger
 from tasksolver.common import ParsedAnswer, Question, TaskSpec, attach_response_metadata
 from tasksolver.exceptions import GPTMaxTriesExceededException, GPTOutputParseException
 
-from . import conversations as _conv
-from .session import run_print
+from .client import ask as _agy_ask
 
 
 class AgyModel(object):
@@ -44,10 +43,9 @@ class AgyModel(object):
         self._conv_lock = threading.Lock()
 
     def _query_once(self, payload: dict) -> dict:
-        snap = _conv.snapshot(home=self.data_dir) if self.multi_turn else None
-        r = run_print(
+        r = _agy_ask(
             payload["prompt"],
-            workdir=payload.get("workspace") or self.workspace,
+            workspace=payload.get("workspace") or self.workspace,
             model=self.model,
             timeout=self.print_timeout,
             skip_permissions=self.skip_permissions,
@@ -55,22 +53,23 @@ class AgyModel(object):
             continue_latest=(self.continue_latest and self.conversation_id is None),
             data_dir=self.data_dir,
         )
-        if not r["result"]:
+        if not r.text:
             raise RuntimeError(
                 "agy --print returned no output "
-                f"(exit_status={r['exit_status']}, workspace={r['workspace']}). "
+                f"(exit_status={r.exit_status}, workspace={r.workspace}). "
                 "Ensure agy is logged in (~/.gemini/antigravity-cli/) and reachable. "
-                f"Transcript head:\n{r['transcript'][:500]}"
+                f"Transcript head:\n{r.transcript[:500]}"
             )
         # Latch onto the conversation the first turn created, so subsequent multi_turn calls
-        # resume it (--conversation=<id>) and accumulate context. (n_choices=1 semantics;
-        # parallel sampling doesn't define a single conversation.)
+        # resume it (--conversation=<id>) and accumulate context. AgyResponse.conversation_id
+        # is captured for us; the lock guards the first-writer race when n_choices > 1
+        # (parallel sampling doesn't define a single conversation).
         if self.multi_turn and self.conversation_id is None:
             with self._conv_lock:
                 if self.conversation_id is None:
-                    self.conversation_id = _conv.capture_conversation_id(snap, home=self.data_dir)
-        r["conversation_id"] = self.conversation_id
-        return r
+                    self.conversation_id = r.conversation_id
+        return {"result": r.text, "transcript": r.transcript, "exit_status": r.exit_status,
+                "workspace": r.workspace, "conversation_id": self.conversation_id}
 
     def ask(self, payload: dict, n_choices: int = 1) -> Tuple[List[dict], List[dict]]:
         def worker(idx, results):
