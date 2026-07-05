@@ -141,7 +141,7 @@ def case_agyprocess_resume():
     p = AgyProcess(prompt=f"Remember the code word {WORD}. Reply with only: OK")
     try:
         p.start()
-        p.read_until_exit(timeout=60)          # one-shot --print: drain the PTY until agy exits
+        p.collect(timeout=60)                  # one-shot --print: drive to completion, collect the turn
         cid = p.conversation_id
         ok = bool(cid)
         print(f"  {'ok  ' if ok else 'NOTE'} agyprocess: conversation_id={cid}")

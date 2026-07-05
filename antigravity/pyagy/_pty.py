@@ -2,24 +2,22 @@
 
 `agy` inspects its controlling terminal and refuses to behave without a real TTY, so we fork it
 under a pty; it also blocks on terminal-capability queries + the folder-trust menu until answered.
-This class owns that fork, the winsize, the select-based read loop, and the terminal-query
-auto-reply — and, by subclassing `multiprocessing.popen_fork.Popen`, the process lifecycle too
-(`poll`/`wait`/`terminate`/`kill` are inherited and act on agy's pid + the PTY-master sentinel;
-only `_launch`/`close` are ours). Every launch is instrumented (LD_PRELOAD shim + capture on the
-pinned vendor/agy). Two modes, chosen by whether the driving `AgyProcess` set a `target`:
+This class owns that fork, the winsize, and the terminal-query auto-reply — and, by subclassing
+`multiprocessing.popen_fork.Popen`, the process lifecycle too (`poll`/`wait`/`terminate`/`kill`
+are inherited and act on agy's pid + the PTY-master sentinel; only `_launch`/`close` are ours).
 
-  * plain-CLI (`target=None`) — just run agy; the caller reads the transcript
-    (`read_until_exit` one-shot / `read_until_idle` interactive).
-  * embedded-worker (`target` set) — also wire a result Pipe + a boot pipe carrying the pickled
-    target (`AGY_MP_*`). The PTY is serviced (drained + queries answered) inside `AgyProcess`'s
-    poll()/ask() via `_service`, which waits on the Connection and the PTY together — so no
-    background thread is needed. See `agy_process/mp_child.py`.
+Every launch is instrumented (LD_PRELOAD shim + capture on the pinned vendor/agy) and always wires
+the embedded-worker channel — a result Pipe + a boot pipe carrying the pickled target (`AGY_MP_*`),
+inherited across agy's execve. The target streams agy's decoded answer home; the parent collects it
+with `AgyProcess.collect()` / `ask()`, which service the PTY (drain + answer queries) in the same
+`_service` wait they use to read the Connection, so no background thread is needed. The PTY
+transcript is kept on `self.raw` (via `transcript`) as a diagnostic byproduct. See
+`agy_process/mp_child.py`.
 
 `AgyProcess` (pyagy/agyprocess.py) is the user-facing `SpawnProcess` handle; this is its `_Popen`.
 """
 import os
 import pty
-import select
 import signal
 import time
 
@@ -99,48 +97,6 @@ class PtyPopen(_ForkPopen):
                 os.write(1, chunk)
         return chunk
 
-    def pump(self, timeout):
-        """Read whatever is available for up to `timeout` s; append to `raw`; auto-answer; return
-        it. Used by the plain-CLI readers (read_until_exit / read_until_idle)."""
-        got = bytearray()
-        end = time.time() + timeout
-        while time.time() < end:
-            r, _, _ = select.select([self.fd], [], [], min(0.3, max(0.0, end - time.time())))
-            if not r:
-                break
-            chunk = self._read_available()
-            if not chunk:
-                break
-            got += chunk
-        return got
-
-    def read_until_idle(self, idle=3.0, timeout=120.0):
-        """Read until no new output for `idle` s (or agy exits / `timeout`); return this call's
-        bytes, ANSI-stripped."""
-        start = last = time.time()
-        buf = bytearray()
-        while time.time() - start < timeout:
-            chunk = self.pump(min(idle, 1.0))
-            if chunk:
-                buf += chunk
-                last = time.time()
-            elif time.time() - last >= idle:
-                break
-            if self.pid and self.exited():
-                buf += self.pump(0.5)
-                break
-        return strip_ansi(bytes(buf))
-
-    def read_until_exit(self, timeout=300.0):
-        """Read until agy exits (or `timeout`); return the full transcript, ANSI-stripped."""
-        start = time.time()
-        while time.time() - start < timeout:
-            self.pump(0.5)
-            if self.exited():
-                self.pump(0.5)                # drain trailing output post-exit
-                break
-        return strip_ansi(bytes(self.raw))
-
     @property
     def transcript(self):
         """The full ANSI-stripped transcript seen so far."""
@@ -166,7 +122,6 @@ class PtyPopen(_ForkPopen):
 
     # --- launch + lifecycle (the parts that differ from the stock fork Popen) ---
     def _launch(self, process_obj):
-        worker = process_obj._target is not None             # embedded-worker mode vs plain-CLI
         # instrumentation needs the build-id-matched binary: prefer an explicit agy_bin, then
         # the AGY_BIN env override (tests/run-agy.sh point it at vendor/agy), else the pin.
         agy = getattr(process_obj, "_agy_bin", None) or os.environ.get("AGY_BIN") or _VENDOR_AGY
@@ -177,31 +132,31 @@ class PtyPopen(_ForkPopen):
         self._home, env_ovr = _conv.scope_for_run(
             workdir, getattr(process_obj, "_data_dir", None),
             trust=getattr(process_obj, "_trust", True))     # repo-scoped store + workspace trust
-        # caller overlays (shim knobs / rewrite) + the scoped-HOME override, applied last.
-        extra = {**(getattr(process_obj, "_extra_env", None) or {}), **env_ovr}
 
-        parent_conn = None
-        if worker:
-            # embedded-worker channel: a result Pipe + a boot pipe carrying the pickled target,
-            # both inherited across agy's execve (CLOEXEC off). See agy_process/mp_child.py.
-            parent_conn, child_conn = _conn.Pipe(duplex=True)   # bare socketpair (no semaphore → WSL1-ok)
-            boot_r, boot_w = os.pipe()
-            os.set_inheritable(child_conn.fileno(), True)
-            os.set_inheritable(boot_r, True)
-            extra.update({"AGY_MP_MODE": "1",
-                          "AGY_MP_CHAN_FD": str(child_conn.fileno()),
-                          "AGY_MP_BOOT_FD": str(boot_r)})
+        # Always wire the embedded-worker channel: a result Pipe + a boot pipe carrying the pickled
+        # target, both inherited across agy's execve (CLOEXEC off). See agy_process/mp_child.py.
+        parent_conn, child_conn = _conn.Pipe(duplex=True)   # bare socketpair (no semaphore → WSL1-ok)
+        boot_r, boot_w = os.pipe()
+        os.set_inheritable(child_conn.fileno(), True)
+        os.set_inheritable(boot_r, True)
+        # caller overlays (shim knobs / rewrite) + scoped-HOME override + the MP channel fds.
+        extra = {**(getattr(process_obj, "_extra_env", None) or {}), **env_ovr,
+                 "AGY_MP_MODE": "1",
+                 "AGY_MP_CHAN_FD": str(child_conn.fileno()),
+                 "AGY_MP_BOOT_FD": str(boot_r)}
 
         env = instrumented_env(capture=capture, extra_env=extra)
         argv = [agy, *(getattr(process_obj, "_agy_args", None) or ["--print", "agy-mp"])]
 
         # PTY state, then fork agy under the pty.
-        self.raw = bytearray()          # every byte read from the PTY
+        self.raw = bytearray()          # every byte read from the PTY (transcript byproduct)
         self.status = None              # agy's raw exit status once reaped (AgyProcess.exit_status)
         self._qpos = 0                  # terminal-query scan position
         self._trust_answered = False
         self._echo = getattr(process_obj, "_echo", False)   # mirror agy's PTY output to our stdout
         self._parent_conn = parent_conn
+        self._last_output = time.time() # last PTY write (turn-boundary idle for .ask())
+        self._pty_dead = False          # set once the master EOFs → _service drops it
         self._snap = _conv.snapshot(home=self._home)   # pre-launch store snapshot → conversation_id
         self._spawn_pty(argv, workdir, env)            # pty.fork + execve(agy); child inherits the fds
         self.sentinel = self.fd                        # PTY master EOFs on agy death (wait(timeout))
@@ -209,19 +164,13 @@ class PtyPopen(_ForkPopen):
         # the handle, GC of `self` — closes the PTY master (which SIGHUPs agy, doubling as teardown)
         # + the result Connection. exitpriority is None (like popen_fork), so it does NOT run at the
         # atexit sweep (there the OS reclaims fds and _exit_function terminates agy via _children).
-        # One-shot, so it's the sole closer of each. (No pump thread holds `self`, so the GC path
-        # works in worker mode too.)
+        # One-shot, so it's the sole closer of each. (No pump thread holds `self`, so GC works.)
         self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn))
 
-        if not worker:
-            return          # plain-CLI: the caller drives the PTY (read_until_exit/idle); no channel/pump
-
-        # --- embedded worker: ship the pickled target in, stream results out over the Connection ---
-        self._last_output = time.time()                # last PTY write (turn-boundary idle for .ask())
-        self._pty_dead = False                         # set once the master EOFs → _service drops it
-
-        # Pickle (prep_data, process_obj) UNDER set_spawning_popen — BaseProcess.__reduce__ and the
-        # AuthenticationString refuse to pickle outside the spawning context (stock _launch does the same).
+        # Ship the pickled target over the boot pipe. Pickle UNDER set_spawning_popen — the process's
+        # AuthenticationString refuses to pickle outside the spawning context (stock spawn does the
+        # same). The payload is a small function+args pickle, << the 64 KB pipe buffer, so this single
+        # write lands in the kernel buffer without blocking even though agy reads it late.
         import io
         prep = mp_spawn.get_preparation_data(process_obj._name)
         buf = io.BytesIO()
@@ -231,9 +180,6 @@ class PtyPopen(_ForkPopen):
             reduction.dump(process_obj, buf)
         finally:
             set_spawning_popen(None)
-        # Write the whole payload into the boot pipe now (closing our end = EOF for the in-agy
-        # reader). It's a small function+args pickle, << the 64 KB pipe buffer, so this single
-        # write lands in the kernel buffer without blocking even though agy reads it late.
         with os.fdopen(boot_w, "wb", closefd=True) as f:
             f.write(buf.getvalue())
 
@@ -242,7 +188,7 @@ class PtyPopen(_ForkPopen):
             os.close(boot_r)                                 # child has its own inherited copy
         except OSError:
             pass
-        # No pump thread: AgyProcess.poll()/ask() drain the PTY via _service() (waiting on the
+        # No pump thread: AgyProcess.collect()/poll()/ask() drain the PTY via _service() (waiting on the
         # Connection and the PTY together), so agy stays unblocked while we consume results.
 
     def _service(self, timeout):

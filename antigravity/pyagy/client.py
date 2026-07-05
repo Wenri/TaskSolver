@@ -367,13 +367,15 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
                        conversation_id=conversation_id, continue_latest=continue_latest,
                        data_dir=data_dir, trust=trust, extra_env=overlays)
         p.start()
-        transcript = p.read_until_exit(timeout=timeout)
+        objs = p.collect(timeout=timeout)           # decoded answer streamed home over the Connection
+        transcript = p.transcript                   # raw PTY (fallback / diagnostics)
         cid, exit_status = p.conversation_id, p.exit_status
         p.close()
     finally:
         cleanup()
 
-    turns, app_texts, _ = _load_capture(cap_path) if cap_path else ([], [], 0)
+    turns = [o for o in objs if o.get("kind") == "genai_turn"]
+    app_texts = [o["text"] for o in objs if o.get("kind") == "app_response" and o.get("text")]
     # Prefer the app-boundary answer (fh_update) when present; else the PTY transcript.
     text = max(app_texts, key=len) if app_texts else _answer_text(transcript)
     return AgyResponse(
@@ -423,7 +425,6 @@ class Session:
         self._conversation_id = conversation_id      # resume this id; else captured after turn 1
         self.cap_path = None
         self.rules_path = None
-        self._cursor = 0
         self._cleanup = lambda: None
         self._agy = None                             # the AgyProcess (persistent), set on first ask
 
@@ -452,15 +453,16 @@ class Session:
 
     def ask(self, prompt):
         """Send ``prompt`` (starting the session on first call) and return the
-        :class:`AgyResponse` for the turn(s) it produced."""
+        :class:`AgyResponse` for the turn it produced (decoded objects streamed home over the
+        Connection; the PTY transcript is the fallback)."""
         if self._agy is None:
             self._start(prompt)
+            objs = self._agy.ask(None, idle=self.idle, timeout=self.timeout)   # submit the prefill
         else:
-            self._agy.send_line(prompt)
-        transcript = self._agy.read_until_idle(idle=self.idle, timeout=self.timeout)
-        turns, app_texts, self._cursor = (
-            _load_capture(self.cap_path, self._cursor)
-            if self.cap_path else ([], [], self._cursor))
+            objs = self._agy.ask(prompt, idle=self.idle, timeout=self.timeout)
+        turns = [o for o in objs if o.get("kind") == "genai_turn"]
+        app_texts = [o["text"] for o in objs if o.get("kind") == "app_response" and o.get("text")]
+        transcript = self._agy.transcript
         if self._conversation_id is None:            # first turn of a fresh session
             self._conversation_id = self._agy.conversation_id
         text = max(app_texts, key=len) if app_texts else _answer_text(transcript)
@@ -495,13 +497,6 @@ class Session:
             with open(self.rules_path, "w") as f:
                 json.dump({"rules": rules}, f)
         return self
-
-    def send(self, data):
-        self._agy.write(data if isinstance(data, (bytes, bytearray)) else str(data).encode())
-
-    def read(self, idle=None, timeout=None):
-        return self._agy.read_until_idle(idle=idle or self.idle,
-                                         timeout=timeout or self.timeout)
 
     def close(self):
         try:

@@ -167,7 +167,8 @@ def test_live_roundtrip():
     log0 = os.path.join(wd, "base.log")
     s0 = AgySession(capture=cap0, log=log0, workdir=wd)
     s0.start(["--print", PROMPT])
-    out0 = s0.read_until_idle(idle=25, timeout=160)
+    s0.collect(timeout=160)
+    out0 = s0.transcript
     s0.close()
     logtxt = open(log0, errors="replace").read() if os.path.exists(log0) else ""
     if "build-id ok" not in logtxt:
@@ -184,7 +185,8 @@ def test_live_roundtrip():
     s1 = AgySession(capture=cap1, workdir=wd, extra_env={
         "AGY_PROC_TLS_WRITE_SYNC": "1", "AGY_PROC_REWRITE_RULES": rules})
     s1.start(["--print", PROMPT])
-    out1 = s1.read_until_idle(idle=25, timeout=160)
+    s1.collect(timeout=160)
+    out1 = s1.transcript
     s1.close()
 
     applied, turns, skips = [], [], []
@@ -216,7 +218,8 @@ def test_live_roundtrip():
     s2 = AgySession(capture=cap2, workdir=wd, extra_env={
         "AGY_PROC_TLS_WRITE_SYNC": "1", "AGY_PROC_REWRITE_RULES": grow})
     s2.start(["--print", PROMPT])
-    out2 = s2.read_until_idle(idle=25, timeout=160)
+    s2.collect(timeout=160)
+    out2 = s2.transcript
     s2.close()
     grow_skips = [json.loads(l) for l in open(cap2)
                   if l.strip() and '"rewrite_skip"' in l]

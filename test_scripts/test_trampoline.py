@@ -62,7 +62,8 @@ def run(extra, workdir, timeout=200.0):
     s = AgySession(agy=AGY, capture=cap, log=log, workdir=workdir, extra_env=extra)
     try:
         s.start(["--print", PROMPT])
-        out = s.proc.read_until_exit(timeout=timeout)   # --print is one-shot: wait for agy to exit
+        s.collect(timeout=timeout)      # one-shot: drive to completion (drains the PTY + collects turns)
+        out = s.transcript              # rendered transcript (ZORPLE + any crash traceback)
     finally:
         s.close()
     logtxt = open(log, errors="replace").read() if os.path.exists(log) else ""
