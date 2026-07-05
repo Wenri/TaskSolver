@@ -9,9 +9,9 @@ Two channels of "output":
   * network capture — the actual Gemini request/response (via crypto/tls hooks),
                       written to the AGY_PROC_CAPTURE JSONL. Cleaner for content.
 
-The PTY pump, ANSI/terminal-query handling, and instrumented env wiring now live in
-the shared `pyagy._pty` / `pyagy._term` / `pyagy._env` modules; this is a thin agy-
-instrumentation front-end over them (kept here as the CLI used in capture experiments).
+The PTY fork/pump, ANSI/terminal-query handling, and instrumented env wiring now live in
+`pyagy.AgyProcess` (plain-CLI mode) over `_pty.PtyPopen`; this is a thin façade that takes the
+agy argv directly, kept here as the CLI used in capture experiments.
 
 Usage:
     python3 agy_session.py --mode interactive --prompt "what is 2+2" \
@@ -55,18 +55,18 @@ class AgySession:
         self.echo = echo
         self.proc = None                    # the AgyProcess, set on start()
 
-    # --- back-compat shims over the underlying PtyProcess ----------------------
+    # --- back-compat shims over the underlying PtyPopen ------------------------
     @property
     def pid(self):
         return self.proc.pid if self.proc else None
 
     @property
     def fd(self):
-        return self.proc._popen._pty.fd if self.proc else None
+        return self.proc._popen.fd if self.proc else None
 
     @property
     def raw(self):
-        return self.proc._popen._pty.raw if self.proc else bytearray()
+        return self.proc._popen.raw if self.proc else bytearray()
 
     def start(self, args):
         """Fork agy under a pty with the given argv tail (e.g. ``["--print", prompt]``)."""

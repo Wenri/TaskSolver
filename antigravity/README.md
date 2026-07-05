@@ -364,12 +364,14 @@ antigravity/
                               AgyResponse + ToolSpec/ContextResource/RewriteRule/Usage
     config.py               ← MCP config-injection (write_mcp_config/validate_server)
     model.py                ← AgyModel (prepare_payload/ask/rough_guess/run_once/…)
-    agyprocess.py           ← THE single agy launcher (SpawnProcess): plain-CLI (read the
-                              PTY transcript) or embedded-worker (Python target inside agy);
-                              always instrumented on the pinned vendor/agy
+    agyprocess.py           ← AgyProcess: the user-facing SpawnProcess handle (start/recv/ask/
+                              read_until_exit/…) + argv assembly — THE single agy front-door
+                              (plain-CLI reads the transcript; embedded-worker runs Python in agy)
+    _pty.py                 ← PtyPopen(popen_fork.Popen): AgyProcess's `_Popen` — execs agy under
+                              a PTY as the mp child, owns the PTY (fork/pump/read/answer) + the
+                              launch/lifecycle; always instrumented on the pinned vendor/agy
     session.py              ← run_print (one-shot dict) + InteractiveSession — thin AgyProcess wrappers
-    _term.py / _pty.py / _env.py ← shared PTY glue (ANSI+query responder, spawn+pump,
-                              instrumented env) — the building blocks under AgyProcess
+    _term.py / _env.py      ← ANSI+terminal-query responder / instrumented-env wiring
     agy_process/__init__.py ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
     agy_process/http1sse.py ← HTTP/1.1 + SSE decoder for the MODEL endpoint (the right
                               one — the model turn is not HTTP/2)
@@ -712,10 +714,11 @@ p = AgyProcess(target=work, args=(41,)); p.start(); print(p.recv())
 ```
 
 **How it works** (`pyagy/agyprocess.py` + `pyagy/agy_process/mp_child.py`):
-- `AgyProcess(SpawnProcess)` + a custom `AgyPopen(popen_fork.Popen)` whose `_launch` execs agy
-  under a PTY (`_pty.PtyProcess`) with the instrumented env. In **plain-CLI** mode that is all it
-  does — the caller drives the PTY (`read_until_exit`/`read_until_idle`); there is no worker
-  channel or pump thread. In **embedded-worker** mode (`target` set) it additionally hands the
+- `AgyProcess(SpawnProcess)` + a custom `_pty.PtyPopen(popen_fork.Popen)` whose `_launch` execs
+  agy under a PTY with the instrumented env — PtyPopen owns both the PTY (fork/pump/read/answer)
+  and the process lifecycle. In **plain-CLI** mode that is all it does — the caller drives the PTY
+  (`read_until_exit`/`read_until_idle`); there is no worker channel or pump thread. In
+  **embedded-worker** mode (`target` set) it additionally hands the
   child a result `Pipe` + a boot pipe (both `os.set_inheritable`) via `AGY_MP_{MODE,CHAN_FD,BOOT_FD}`,
   pickles `(prep, process_obj)` under `set_spawning_popen`, and runs a pump thread.
   `start/join/exitcode/terminate` are inherited from `popen_fork.Popen` and track **agy's** pid;
