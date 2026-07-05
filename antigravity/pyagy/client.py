@@ -171,8 +171,16 @@ class AgyResponse:
 
     @property
     def model(self):
-        r = self.request
-        return r.get("model") if r else None
+        """The requested model id (from the wire request), falling back to the served
+        ``modelVersion`` decoded from the response — so a request too large for the shim's
+        per-fire capture cap still yields a model id off the response side."""
+        p = self.primary
+        if not p:
+            return None
+        r = p.get("request")
+        if r and r.get("model"):
+            return r["model"]
+        return p.get("model")
 
     @property
     def usage(self):

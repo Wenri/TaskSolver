@@ -11,12 +11,15 @@ Contract:
       to leave unchanged. Keep SYNC handlers fast/CPU-bound (they block a Go
       goroutine — see README's GC-stall note).
 
-kind values with special handling: "tls_write"/"tls_read" are recorded raw AND fed
-to the correlator, which sniffs each connection and routes HTTP/1.1 (the model
-endpoint → genai_turn events) vs HTTP/2 (agy's gRPC conns → h2msg events). "smoke"
-prints. Any other kind the shim emits — "dns", "http_rt", "resp", "serialize",
-"marshal", "proto_marshal", the trampoline "send_user_msg"/"stream_send", or a new
-one — is recorded by the default path (never silently dropped).
+kind values with special handling: "tls_write" is recorded raw AND fed to the
+correlator as the model REQUEST (egress); the correlator sniffs each connection and
+routes HTTP/1.1 (the model endpoint) vs HTTP/2 (agy's gRPC conns → h2msg events).
+"resp_chunk" is the model RESPONSE: agy's SSE parser hands us each decoded `data:` line
+(the pull-based transport read has no entry-arg source), which the correlator accumulates
+into the `genai_turn` it emits paired with the request. "smoke" prints. Any other kind the
+shim emits — "dns", "http_rt", "resp", "serialize", "marshal", "proto_marshal", the
+trampoline "send_user_msg"/"stream_send", or a new one — is recorded by the default path
+(never silently dropped).
 
 Knobs: AGY_PROC_H2=0 disables HTTP/2 reassembly; AGY_PROC_CORRELATE=0 disables the
 genai-turn correlator (raw capture only).
@@ -71,6 +74,16 @@ def on_tls_read(stream_id, data):
     _rec.record("tls_read", stream_id, data)
     if _corr:
         _corr.feed("s2c", stream_id, data, time.time())
+    return None
+
+
+def on_resp_chunk(stream_id, data):
+    # The wire RESPONSE: one decoded SSE `data:` line per fire (toStreamResponseChunk).
+    # Hand it to the correlator, which accumulates the stream and emits a genai_turn at
+    # the terminal event. stream_id is the Go string pointer (not a connection id) — agy
+    # runs one model turn at a time, so the correlator keys off arrival order, not id.
+    if _corr:
+        _corr.feed_resp_chunk(data, time.time())
     return None
 
 
@@ -155,6 +168,7 @@ def _on_model_text(kind):
 _ROUTER = {
     "tls_write": on_tls_write,
     "tls_read": on_tls_read,
+    "resp_chunk": on_resp_chunk,
     "http_rt": on_http_rt,
     "dns": on_dns,
     "smoke": on_smoke,

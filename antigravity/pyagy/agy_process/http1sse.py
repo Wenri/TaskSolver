@@ -183,6 +183,16 @@ def finish_reason(events):
     return None
 
 
+def model_version(events):
+    """The served model id from the response (Gemini's ``modelVersion``, e.g.
+    ``gemini-3.1-flash-lite``). Present in every event; take the last seen."""
+    for e in reversed(events):
+        mv = e.get("response", e).get("modelVersion")
+        if mv:
+            return mv
+    return None
+
+
 def summarize_request(req_json):
     """Compact summary of a streamGenerateContent request body (already json.loads'd)."""
     req = req_json.get("request", {}) or {}
@@ -354,12 +364,22 @@ def _pair(requests, responses):
 def build_turn(req, resp):
     """Assemble a ``genai_turn`` dict from a (request, response) message pair.
     ``req`` may be ``None`` if no matching request was captured."""
-    events = parse_sse(resp[2].body)
+    return build_turn_from_events(parse_sse(resp[2].body), resp[0], resp[1], req)
+
+
+def build_turn_from_events(events, resp_t, resp_stream, req):
+    """Assemble a ``genai_turn`` dict from already-parsed SSE events plus an optional
+    request. The live correlator uses this directly: HTTP/1.1 SSE is pull-based, so the
+    transport read has no entry-arg the trampoline can capture — instead agy's
+    ``toStreamResponseChunk`` hands us each decoded ``data:`` line, which we parse into
+    events as they stream, rather than re-decoding a whole HTTP response body. ``req`` may
+    be ``None`` if no matching request was captured."""
     turn = {
         "kind": "genai_turn",
-        "t": resp[0],
-        "resp_stream": resp[1],
+        "t": resp_t,
+        "resp_stream": resp_stream,
         "text": assemble_text(events),
+        "model": model_version(events),   # served model id, straight from the response
         "usage": extract_usage(events),
         "finish_reason": finish_reason(events),
         "n_events": len(events),

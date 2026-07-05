@@ -156,6 +156,51 @@ def test_correlator_cross_stream():
         check(turn["usage"].get("totalTokenCount") == 13, "correlator: usage attached")
 
 
+def test_correlator_resp_chunk():
+    print("[correlator] live resp_chunk path — request off the wire, response via SSE lines")
+
+    class FakeRec:
+        def __init__(self):
+            self.events = []
+
+        def event(self, obj):
+            self.events.append(obj)
+
+    # The response side no longer arrives on s2c (that transport read is retired); agy's
+    # toStreamResponseChunk hook hands us each decoded `data:` line one at a time.
+    resp_lines = [
+        b'data: ' + json.dumps({"response": {"modelVersion": "gemini-3-pro", "candidates": [
+            {"content": {"parts": [{"text": "ZOR"}]}}]}}).encode(),
+        b'data: ' + json.dumps({"response": {"modelVersion": "gemini-3-pro", "candidates": [
+            {"content": {"parts": [{"text": "PLE"}]}}]}}).encode(),
+        b'data: ' + json.dumps({"response": {"modelVersion": "gemini-3-pro",
+            "candidates": [{"content": {"parts": []}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 1,
+                              "totalTokenCount": 13}}}).encode(),
+        b'data: [DONE]',
+    ]
+
+    rec = FakeRec()
+    corr = capture.Correlator(rec, reassembler=None)
+    corr.feed("c2s", 0xAAAA, REQUEST_BYTES, t=100.0)     # request off the wire (tls_write)
+    for i, ln in enumerate(resp_lines):                  # response, one SSE line per fire
+        corr.feed_resp_chunk(ln, t=100.5 + i * 0.01)
+    turns = [e for e in rec.events if e.get("kind") == "genai_turn"]
+    check(len(turns) == 1, "resp_chunk: exactly one genai_turn (emitted on finishReason)")
+    if turns:
+        turn = turns[0]
+        check(turn["text"] == "ZORPLE", "resp_chunk: text assembles across lines")
+        check(turn["finish_reason"] == "STOP", "resp_chunk: finishReason STOP")
+        check(turn["model"] == "gemini-3-pro", "resp_chunk: served model decoded from response")
+        check(turn["usage"].get("totalTokenCount") == 13, "resp_chunk: usage extracted")
+        check(turn["req_stream"] == 0xAAAA, "resp_chunk: paired with the wire request")
+        check(turn.get("request", {}).get("requestId") == "req-abc-123",
+              "resp_chunk: request summary attached")
+    # a trailing [DONE] after the finishReason emit must not start/emit a second turn
+    check(len([e for e in rec.events if e.get("kind") == "genai_turn"]) == 1,
+          "resp_chunk: [DONE] after finish does not emit a second turn")
+
+
 def test_import_purity():
     print("[purity] agy_process imports under python3 -S with no tasksolver")
     code = ("import sys; sys.path.insert(0, %r); import pyagy.agy_process; "
@@ -174,6 +219,7 @@ def main():
     test_inflate_gzip()
     test_classify()
     test_correlator_cross_stream()
+    test_correlator_resp_chunk()
     test_import_purity()
     print()
     if _failures:

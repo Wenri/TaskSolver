@@ -11,6 +11,14 @@ Each stream is sniffed once (`http1sse.classify`) and routed:
   * HTTP/1.1  → ``http1sse.StreamDecoder`` (the model endpoint) → genai turns.
   * HTTP/2    → the existing ``h2reassemble.Reassembler`` (agy's gRPC connections).
 
+The request side (egress) still comes off the wire via the ``tls_write`` entry-arg hook.
+The response side does *not*: HTTP/1.1 SSE is pull-based, so the decrypted inbound bytes
+are a return value with no entry-arg source a trampoline can read (the old ``tls_read``
+leave hook that fed s2c is retired — it destabilized agy's GC). Instead agy's own SSE
+parser, ``toStreamResponseChunk``, hands us each decoded ``data:`` line as an entry arg;
+``feed_resp_chunk`` accumulates those events and emits the ``genai_turn`` at the terminal
+(``finishReason``) event, paired with the pending request.
+
 Unlike offline decode from the capture JSONL, this runs *inside* agy with the full
 plaintext bytes, so it emits complete ``genai_turn`` events regardless of the
 recorder's preview limit.
@@ -26,6 +34,8 @@ class Correlator:
         self._pre = {}           # (dir, stream) -> bytearray (pre-classification buffer)
         self._dec = {}           # (dir, stream) -> StreamDecoder (http1 only)
         self._pending = []       # recent requests: [(t, host, requestId, msg)]
+        self._resp_events = []   # SSE events accumulated for the in-flight response (resp_chunk)
+        self._resp_t = None      # timestamp of the first resp_chunk of the current response
 
     def feed(self, direction, stream_id, data, t):
         # Ingress (s2c) is keyed by *halfConn and its decrypted byte stream begins with
@@ -60,12 +70,42 @@ class Correlator:
             dec = self._dec[(direction, stream_id)] = http1sse.StreamDecoder()
         for msg in dec.feed(data):
             if msg.is_request and http1sse.is_generate_content(msg.start_line):
+                # A new request means the previous response is over: flush it if it never
+                # saw a finishReason (aborted stream), so its events can't bleed into this
+                # turn. It still pairs with the previous request (most-recent in _pending).
+                if self._resp_events:
+                    self._emit_chunked_turn()
                 self._pending.append((t, msg.headers.get("host"), stream_id, msg))
                 # keep only the recent tail
                 if len(self._pending) > 32:
                     self._pending = self._pending[-32:]
             elif not msg.is_request and msg.is_event_stream:
                 self._emit_turn(stream_id, t, msg)
+
+    def feed_resp_chunk(self, data, t):
+        """Accumulate one decoded SSE response line from agy's ``toStreamResponseChunk``
+        hook (the wire response's only entry-arg source — see module docstring). Each line
+        is a single ``data: {...}`` event; when the terminal event (a ``finishReason``, which
+        cloudcode co-emits with the final ``usageMetadata``) arrives, pair with the pending
+        request and emit the ``genai_turn``."""
+        events = http1sse.parse_sse(data)
+        if not events:
+            return
+        if not self._resp_events:
+            self._resp_t = t
+        self._resp_events.extend(events)
+        if http1sse.finish_reason(self._resp_events):
+            self._emit_chunked_turn()
+
+    def _emit_chunked_turn(self):
+        req = self._match(self._resp_t, None)
+        turn = http1sse.build_turn_from_events(
+            self._resp_events, self._resp_t, None,
+            (req[0], req[2], req[3]) if req else None,
+        )
+        self._resp_events = []
+        self._resp_t = None
+        self.rec.event(turn)
 
     def _emit_turn(self, resp_stream, resp_t, resp_msg):
         req = self._match(resp_t, resp_msg.headers.get("host"))
