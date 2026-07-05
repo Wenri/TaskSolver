@@ -364,9 +364,12 @@ antigravity/
                               AgyResponse + ToolSpec/ContextResource/RewriteRule/Usage
     config.py               ← MCP config-injection (write_mcp_config/validate_server)
     model.py                ← AgyModel (prepare_payload/ask/rough_guess/run_once/…)
-    session.py              ← run_print (one-shot) + InteractiveSession (multi-turn PTY)
+    agyprocess.py           ← THE single agy launcher (SpawnProcess): plain-CLI (read the
+                              PTY transcript) or embedded-worker (Python target inside agy);
+                              always instrumented on the pinned vendor/agy
+    session.py              ← run_print (one-shot dict) + InteractiveSession — thin AgyProcess wrappers
     _term.py / _pty.py / _env.py ← shared PTY glue (ANSI+query responder, spawn+pump,
-                              clean/instrumented env) — one home for all agy launchers
+                              instrumented env) — the building blocks under AgyProcess
     agy_process/__init__.py ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
     agy_process/http1sse.py ← HTTP/1.1 + SSE decoder for the MODEL endpoint (the right
                               one — the model turn is not HTTP/2)
@@ -599,10 +602,11 @@ capture that kind (e.g. no `rpc_*` events):
   | `AGY_PROC_CONV_ID` | (auto, instrumented) | install the `os.OpenFile` probe → `conversation_id` event (exact id) |
   | `AGY_PROC_H2` / `AGY_PROC_CORRELATE` | — | `=0` disables HTTP/2 reassembly / the genai-turn correlator |
 
-- **Graceful degrade:** `instrumented=None` auto-detects the shim and confirms the
-  build-id from the shim log after the run; if the shim is missing or agy has
-  auto-updated past the pin, the call falls back to a clean PTY run (transcript-only
-  `AgyResponse`) with the reason on `.instrumented_reason` — never a hard failure.
+- **Always instrumented:** every launch goes through `AgyProcess` and loads the shim on the
+  pinned `vendor/agy` (build-id-matched) — there is no clean/degrade path. `instrumented_env`
+  puts `$CONDA_PREFIX/lib` on `LD_LIBRARY_PATH` so the `LD_PRELOAD` always resolves libpython;
+  `AgyResponse.instrumented` is therefore always `True`. The shim + `vendor/agy` are a
+  prerequisite (`make -C antigravity`).
 - **Offline tests** (no agy/network/creds): `test_scripts/test_http1sse.py`,
   `test_config.py`, `test_client.py`, `test_appresponse.py`, `test_rpctrace.py`,
   `test_symbolize.py`, plus the `rewrite`/`config` offline suites. **Live** (skip cleanly
@@ -643,8 +647,8 @@ print(pyagy.read_transcript(cid))                    # stored turns (also s.hist
   processes), and it isn't in any RPC/`SendUserMessage` entry-arg graph, but agy opens
   `conversations/<uuid>.db` / `brain/<uuid>/…`, so the **`FILE_OPEN` hook** (`os.OpenFile`,
   an overlay enabled by `AGY_PROC_CONV_ID`) reads the uuid straight from the path and
-  emits a `conversation_id` event. Uninstrumented runs fall back to newest-`*.db`-by-mtime.
-  (`capture_conversation_id` prefers the event; verified event == mtime.)
+  emits a `conversation_id` event. If a run's capture lacks that event, resolution falls back
+  to newest-`*.db`-by-mtime. (`capture_conversation_id` prefers the event; verified event == mtime.)
 - **`AgyProcess(conversation_id=…)`** (the multiprocessing child) and
   **`AgyModel(multi_turn=True | conversation_id=…)`** (the TaskSolver backend — then continues
   one conversation across calls, exposes `.session()`) are session-capable too.
@@ -669,15 +673,26 @@ scoped tree with symlinks to the real login token + `config/` (so agy stays logg
 The global store is left untouched; `list_conversations(home=data_dir)` reads the scoped one.
 Add the scoped `.gemini/` to `.gitignore`. `data_dir=None` (default) uses the global store.
 
-## `AgyProcess`: agy as a `multiprocessing.spawn` child
+## `AgyProcess`: the single agy launcher
 
-`AgyProcess` runs agy as a genuine `multiprocessing` spawn child, so a `target` executes
-*inside* agy's embedded interpreter and streams **native Python objects** home over a
-`multiprocessing.connection` — no JSONL round-trip.
+`AgyProcess` is the one front-door every agy launch goes through (always instrumented, on the
+pinned `vendor/agy`). It has two modes:
+
+- **plain-CLI** (`target=None`, the default) — run agy as an external process and read its PTY
+  transcript with `read_until_exit` (one-shot) / `read_until_idle` (interactive). Backs
+  `session.run_print`, `session.InteractiveSession`, `pyagy.ask` / `pyagy.Session`, and the
+  `AgySession` capture harness.
+- **embedded-worker** (`target=callable`) — a `target` executes *inside* agy's embedded
+  interpreter and streams **native Python objects** home over a `multiprocessing.connection`
+  (no JSONL round-trip).
 
 ```python
 from pyagy.agyprocess import AgyProcess
 from pyagy.agy_process.mp_child import stream_turns, get_result_conn
+
+# plain-CLI: run one --print turn, read the transcript (this is what pyagy.ask wraps)
+p = AgyProcess(prompt="What is 2+2?"); p.start()
+print(p.read_until_exit()); p.close()
 
 # one-shot: stream agy's decoded model turns home as native dicts (the shim always
 # installs the capture union, so genai_turn events flow)
@@ -698,11 +713,14 @@ p = AgyProcess(target=work, args=(41,)); p.start(); print(p.recv())
 
 **How it works** (`pyagy/agyprocess.py` + `pyagy/agy_process/mp_child.py`):
 - `AgyProcess(SpawnProcess)` + a custom `AgyPopen(popen_fork.Popen)` whose `_launch` execs agy
-  under a PTY (`_pty.PtyProcess`), hands the child a result `Pipe` + a boot pipe (both
-  `os.set_inheritable`) via `AGY_MP_{MODE,CHAN_FD,BOOT_FD}`, and pickles `(prep, process_obj)`
-  under `set_spawning_popen`. `start/join/exitcode/terminate` are inherited from
-  `popen_fork.Popen` and track **agy's** pid; the *task result* flows over the Connection
-  (agy owns process lifetime, so completion is signalled on the channel, not by process death).
+  under a PTY (`_pty.PtyProcess`) with the instrumented env. In **plain-CLI** mode that is all it
+  does — the caller drives the PTY (`read_until_exit`/`read_until_idle`); there is no worker
+  channel or pump thread. In **embedded-worker** mode (`target` set) it additionally hands the
+  child a result `Pipe` + a boot pipe (both `os.set_inheritable`) via `AGY_MP_{MODE,CHAN_FD,BOOT_FD}`,
+  pickles `(prep, process_obj)` under `set_spawning_popen`, and runs a pump thread.
+  `start/join/exitcode/terminate` are inherited from `popen_fork.Popen` and track **agy's** pid;
+  the *task result* flows over the Connection (agy owns lifetime, so completion is signalled on
+  the channel, not by process death).
 - Inside agy (the shim's worker imports `agy_process`, which starts a daemon thread when
   `AGY_MP_MODE=1`), the child runs the **real** `proc._bootstrap()` with three surgical
   neutralizations so it can't tear agy down: `sys.stdin=None` (defeats `util._close_stdin`,

@@ -26,24 +26,19 @@ The accessors are lazy: reading one decodes its capture on demand (and returns
 empty/None when this run didn't capture that kind). Because the app-boundary answer is
 now always captured, ``.text``/``.source`` prefer it over the wire transcript.
 
-When the shim isn't built (or agy's build-id doesn't match the pin), the call
-**degrades gracefully** to a clean PTY run: you still get ``.text``/``.transcript``,
-just no decoded ``.turns``/``.request``/rewrite — with the reason on
-``.instrumented_reason``. Detection is post-hoc from the shim log, so an agy
-auto-update never turns a call into a hard failure.
+Every call is instrumented (shim + capture on the pinned vendor/agy) via
+:class:`pyagy.agyprocess.AgyProcess` — the single agy launcher.
 """
 import json
 import os
-import tempfile
 from dataclasses import dataclass, field
 from functools import cached_property
 
-from . import _env
 from . import config as _config
 from . import conversations as _conv
-from ._pty import PtyProcess
-from ._term import strip_ansi
-from .session import AGY_BIN, ensure_git_workspace
+from ._term import answer_text as _answer_text
+from .agyprocess import AgyProcess
+from .session import ensure_git_workspace
 
 _UNIQ = [0]
 
@@ -247,18 +242,6 @@ class AgyResponse:
 
 
 # --- helpers -----------------------------------------------------------------
-def _resolve_instrumented(instrumented):
-    """(use_instrumented, reason). None auto-detects from the shim presence; the
-    build-id verdict is confirmed post-run from the shim log."""
-    if instrumented is False:
-        return False, "instrumented=False"
-    if not os.path.exists(_env.SHIM):
-        if instrumented is True:
-            return True, "shim missing (run `make -C antigravity`) — will fall back"
-        return False, "shim not built"
-    return True, ""
-
-
 def _prepare_rewrite(spec, workdir):
     """Return (env_updates, rules_path). rules_path is None for func/callable specs."""
     env = {"AGY_PROC_TLS_WRITE_SYNC": "1"}
@@ -313,43 +296,12 @@ def _load_capture(capture_path, since=0):
     return turns, app_texts, n
 
 
-def _answer_text(transcript):
-    """The clean final answer from the PTY transcript (drop our own log lines)."""
-    lines = [ln for ln in transcript.splitlines()
-             if ln.strip() and "[antigravity" not in ln
-             and "[agy_process]" not in ln and "gohook" not in ln
-             and "gomod" not in ln]
-    return "\n".join(lines).strip()
-
-
-def _argv(agy, flag, prompt, model, skip_permissions, extra_flags,
-          conversation_id=None, continue_latest=False):
-    """agy argv. ``conversation_id`` → ``--conversation=<id>`` (resume that stored
-    conversation); ``continue_latest`` → ``--continue`` (resume the most recent). Both
-    compose with ``--print`` and ``--prompt-interactive`` (verified: agy recalls prior
-    context either way)."""
-    argv = [agy, flag, prompt]
-    if model:
-        argv += ["--model", model]
-    if conversation_id:
-        argv.append(f"--conversation={conversation_id}")
-    elif continue_latest:
-        argv.append("--continue")
-    if skip_permissions:
-        argv += ["--dangerously-skip-permissions"]
-    if extra_flags:
-        argv += list(extra_flags)
-    return argv
-
-
-def _build_env(*, instrumented, capture_path, rewrite, workspace, extra_env,
-               stack=False, arg_probe=False):
-    """Assemble the child env + (rules_path). Non-instrumented → a clean env. The
-    ``stack``/``arg_probe`` overlays set the shim's diagnostic knobs (call-stack
-    unwind / trampoline arg-graph) on top of the full hook union the shim installs."""
-    if not instrumented:
-        return _env.clean_env(), None
-    env = _env.instrumented_env(capture=capture_path, extra_env=extra_env)
+def _shim_overlays(rewrite, workspace, stack, arg_probe, extra_env):
+    """Shim knobs layered onto AgyProcess's instrumented env (passed as its ``extra_env``):
+    the ``stack``/``arg_probe`` diagnostics (call-stack unwind / trampoline arg-graph) and
+    the ``rewrite`` spec. Returns ``(overlay_env, rules_path)`` — ``rules_path`` is the live
+    rewrite-rules file the in-agy side hot-reloads (or None for func/str/no rewrite)."""
+    env = dict(extra_env or {})
     if stack:
         env["AGY_PROC_STACK"] = "1"
     if arg_probe:
@@ -377,10 +329,9 @@ def _inject_config(tools, context):
 
 # --- one-shot ----------------------------------------------------------------
 def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
-        capture=True, instrumented=None, timeout=300, skip_permissions=False,
-        agy_bin=None, extra_env=None, stack=False, arg_probe=False,
-        funcmap=None, conversation_id=None, continue_latest=False, data_dir=None,
-        trust=True):
+        capture=True, timeout=300, skip_permissions=False, agy_bin=None, extra_env=None,
+        stack=False, arg_probe=False, funcmap=None, conversation_id=None,
+        continue_latest=False, data_dir=None, trust=True):
     """Run one ``agy --print`` turn and return a decoded :class:`AgyResponse`.
 
     The shim installs the full working hook union, so one turn populates the wire
@@ -401,55 +352,34 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
     workspace in agy's ``trustedWorkspaces`` so interactive mode never blocks on the
     folder-trust prompt."""
     workspace = ensure_git_workspace(workspace)
-    agy = agy_bin or AGY_BIN
-    use_instr, reason = _resolve_instrumented(instrumented)
-    home, env_ovr = _conv.scope_for_run(workspace, data_dir, trust=trust)
-    snap = _conv.snapshot(home=home)
-
     cap_path = None
-    if use_instr and capture:
+    if capture:
         cap_path = capture if isinstance(capture, str) else \
             os.path.join(workspace, "pyagy-capture.jsonl")
         open(cap_path, "w").close()   # truncate so we only read this run's turns
+    overlays, _ = _shim_overlays(rewrite, workspace, stack, arg_probe, extra_env)
+    overlays["AGY_PROC_LOG"] = os.path.join(workspace, "pyagy-shim.log")  # shim logs off the PTY
 
-    log_path = os.path.join(workspace, "pyagy-shim.log") if use_instr else None
-    env, _ = _build_env(instrumented=use_instr, capture_path=cap_path,
-                        rewrite=rewrite, workspace=workspace, extra_env=extra_env,
-                        stack=stack, arg_probe=arg_probe)
-    if log_path:
-        env["AGY_PROC_LOG"] = log_path
-    env.update(env_ovr)                 # HOME override for a repo-scoped data dir (if any)
-
-    cleanup = _inject_config(tools, context) if use_instr else lambda: None
+    cleanup = _inject_config(tools, context)
     try:
-        proc = PtyProcess().spawn(_argv(agy, "--print", prompt, model,
-                                        skip_permissions, extra_flags=None,
-                                        conversation_id=conversation_id,
-                                        continue_latest=continue_latest),
-                                  workspace, env)
-        transcript = proc.read_until_exit(timeout=timeout)
-        proc.close(interrupt=False)
+        p = AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
+                       agy_bin=agy_bin, workdir=workspace, capture=cap_path,
+                       conversation_id=conversation_id, continue_latest=continue_latest,
+                       data_dir=data_dir, trust=trust, extra_env=overlays)
+        p.start()
+        transcript = p.read_until_exit(timeout=timeout)
+        cid, exit_status = p.conversation_id, p.exit_status
+        p.close()
     finally:
         cleanup()
 
-    # Confirm the shim actually hooked (build-id match) for the instrumented flag.
-    if use_instr and log_path and os.path.exists(log_path):
-        logtxt = open(log_path, errors="replace").read()
-        if "build-id ok" not in logtxt:
-            use_instr = False
-            reason = "shim build-id != running agy (run `make -C antigravity symbols`)"
-
-    turns, app_texts, _ = (_load_capture(cap_path) if (cap_path and use_instr)
-                           else ([], [], 0))
+    turns, app_texts, _ = _load_capture(cap_path) if cap_path else ([], [], 0)
     # Prefer the app-boundary answer (fh_update) when present; else the PTY transcript.
-    text = (max(app_texts, key=len) if app_texts else _answer_text(transcript))
-    cid = _conv.capture_conversation_id(snap, capture_path=cap_path if use_instr else None,
-                                        home=home)
+    text = max(app_texts, key=len) if app_texts else _answer_text(transcript)
     return AgyResponse(
         text=text, transcript=transcript, turns=turns, app_turns=app_texts,
-        exit_status=proc.status, capture_path=cap_path, workspace=workspace,
-        instrumented=use_instr, instrumented_reason=reason, funcmap=funcmap,
-        conversation_id=cid)
+        exit_status=exit_status, capture_path=cap_path, workspace=workspace,
+        instrumented=True, instrumented_reason="", funcmap=funcmap, conversation_id=cid)
 
 
 # --- multi-turn --------------------------------------------------------------
@@ -468,13 +398,12 @@ class Session:
     as a context manager to guarantee cleanup."""
 
     def __init__(self, *, model=None, workspace=None, tools=None, context=None,
-                 rewrite=None, capture=True, instrumented=None, timeout=180,
-                 idle=25.0, agy_bin=None, extra_env=None, stack=False,
-                 arg_probe=False, funcmap=None, conversation_id=None,
-                 continue_latest=False, skip_permissions=False, data_dir=None,
-                 trust=True):
+                 rewrite=None, capture=True, timeout=180, idle=25.0, agy_bin=None,
+                 extra_env=None, stack=False, arg_probe=False, funcmap=None,
+                 conversation_id=None, continue_latest=False, skip_permissions=False,
+                 data_dir=None, trust=True):
         self.workspace = ensure_git_workspace(workspace)
-        self.agy = agy_bin or AGY_BIN
+        self.agy_bin = agy_bin
         self.model = model
         self.timeout = timeout
         self.idle = idle
@@ -486,20 +415,17 @@ class Session:
         self.rewrite = rewrite
         self._tools = tools
         self._context = context
-        self.instrumented, self.instrumented_reason = _resolve_instrumented(instrumented)
         self.continue_latest = continue_latest      # start with --continue (most recent)
         self.skip_permissions = skip_permissions
         self._data_dir = data_dir                    # scope the conversation store to a repo
         self._trust = trust                          # pre-trust the workspace (no folder prompt)
         self._home = None                            # resolved scoped home (None = global store)
         self._conversation_id = conversation_id      # resume this id; else captured after turn 1
-        self._snap = None                            # store snapshot taken at launch
         self.cap_path = None
-        self.log_path = None
         self.rules_path = None
         self._cursor = 0
         self._cleanup = lambda: None
-        self.proc = None
+        self._agy = None                             # the AgyProcess (persistent), set on first ask
 
     def __enter__(self):
         return self
@@ -508,53 +434,40 @@ class Session:
         self.close()
 
     def _start(self, prompt):
-        if self.instrumented and self.capture:
+        if self.capture:
             self.cap_path = os.path.join(self.workspace, "pyagy-session.jsonl")
             open(self.cap_path, "w").close()
-        self.log_path = (os.path.join(self.workspace, "pyagy-session.log")
-                         if self.instrumented else None)
-        env, self.rules_path = _build_env(
-            instrumented=self.instrumented, capture_path=self.cap_path,
-            rewrite=self.rewrite, workspace=self.workspace, extra_env=self.extra_env,
-            stack=self.stack, arg_probe=self.arg_probe)
-        if self.log_path:
-            env["AGY_PROC_LOG"] = self.log_path
-        self._cleanup = _inject_config(self._tools, self._context) if self.instrumented else (lambda: None)
-        self._home, env_ovr = _conv.scope_for_run(self.workspace, self._data_dir, trust=self._trust)
-        env.update(env_ovr)                          # HOME override for a repo-scoped data dir
-        self._snap = _conv.snapshot(home=self._home)
-        argv = _argv(self.agy, "--prompt-interactive", prompt, self.model,
-                     self.skip_permissions, extra_flags=None,
-                     conversation_id=self._conversation_id,
-                     continue_latest=self.continue_latest)
-        self.proc = PtyProcess()
-        self.proc.spawn(argv, self.workspace, env)
+        overlays, self.rules_path = _shim_overlays(self.rewrite, self.workspace,
+                                                   self.stack, self.arg_probe, self.extra_env)
+        overlays["AGY_PROC_LOG"] = os.path.join(self.workspace, "pyagy-session.log")
+        self._cleanup = _inject_config(self._tools, self._context)
+        self._agy = AgyProcess(persistent=True, prompt=prompt, model=self.model,
+                               skip_permissions=self.skip_permissions, agy_bin=self.agy_bin,
+                               workdir=self.workspace, capture=self.cap_path,
+                               conversation_id=self._conversation_id,
+                               continue_latest=self.continue_latest,
+                               data_dir=self._data_dir, trust=self._trust, extra_env=overlays)
+        self._agy.start()
+        self._home = self._agy.home                  # scoped store home (for .history())
 
     def ask(self, prompt):
         """Send ``prompt`` (starting the session on first call) and return the
         :class:`AgyResponse` for the turn(s) it produced."""
-        if self.proc is None:
+        if self._agy is None:
             self._start(prompt)
-            transcript = self.proc.read_until_idle(idle=self.idle, timeout=self.timeout)
         else:
-            self.proc.send_line(prompt)
-            transcript = self.proc.read_until_idle(idle=self.idle, timeout=self.timeout)
-        if self.instrumented and self.log_path and os.path.exists(self.log_path):
-            if "build-id ok" not in open(self.log_path, errors="replace").read():
-                self.instrumented = False
-                self.instrumented_reason = "shim build-id != running agy"
+            self._agy.send_line(prompt)
+        transcript = self._agy.read_until_idle(idle=self.idle, timeout=self.timeout)
         turns, app_texts, self._cursor = (
             _load_capture(self.cap_path, self._cursor)
-            if (self.cap_path and self.instrumented) else ([], [], self._cursor))
+            if self.cap_path else ([], [], self._cursor))
         if self._conversation_id is None:            # first turn of a fresh session
-            self._conversation_id = _conv.capture_conversation_id(
-                self._snap, capture_path=self.cap_path if self.instrumented else None,
-                home=self._home)
-        text = (max(app_texts, key=len) if app_texts else _answer_text(transcript))
+            self._conversation_id = self._agy.conversation_id
+        text = max(app_texts, key=len) if app_texts else _answer_text(transcript)
         return AgyResponse(
             text=text, transcript=transcript, turns=turns, app_turns=app_texts,
             exit_status=None, capture_path=self.cap_path, workspace=self.workspace,
-            instrumented=self.instrumented, instrumented_reason=self.instrumented_reason,
+            instrumented=True, instrumented_reason="",
             funcmap=self.funcmap, conversation_id=self._conversation_id)
 
     @property
@@ -584,16 +497,16 @@ class Session:
         return self
 
     def send(self, data):
-        self.proc.write(data if isinstance(data, (bytes, bytearray)) else str(data).encode())
+        self._agy.write(data if isinstance(data, (bytes, bytearray)) else str(data).encode())
 
     def read(self, idle=None, timeout=None):
-        return self.proc.read_until_idle(idle=idle or self.idle,
+        return self._agy.read_until_idle(idle=idle or self.idle,
                                          timeout=timeout or self.timeout)
 
     def close(self):
         try:
-            if self.proc is not None:
-                self.proc.close(interrupt=True)
+            if self._agy is not None:
+                self._agy.close(interrupt=True)
         finally:
             self._cleanup()
 

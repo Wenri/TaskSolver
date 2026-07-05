@@ -100,34 +100,26 @@ def test_prepare_rewrite():
         check(True, "locals: callable rejected with clear error")
 
 
-def test_resolve_instrumented():
-    print("[offline] instrumented resolution")
-    check(C._resolve_instrumented(False) == (False, "instrumented=False"),
-          "resolve: explicit False")
-    use, reason = C._resolve_instrumented(None)
-    if os.path.exists(SHIM):
-        check(use is True, "resolve: None + shim present → instrumented")
-    else:
-        check(use is False and reason, "resolve: None + no shim → fallback with reason")
-
-
-def test_build_env_overlays():
-    print("[offline] stack/arg_probe overlays wire the shim env knobs")
+def test_shim_overlays():
+    print("[offline] shim overlays + instrumented env (full hook union, no stage selector)")
     d = tempfile.mkdtemp()
-    cap = os.path.join(d, "c.jsonl")
-    env, _ = C._build_env(instrumented=True, capture_path=cap, rewrite=None,
-                          workspace=d, extra_env=None, stack=True, arg_probe=True)
+    env, rules = C._shim_overlays(None, d, stack=True, arg_probe=True, extra_env={"K": "v"})
     check(env.get("AGY_PROC_STACK") == "1", "stack=True -> AGY_PROC_STACK=1")
     check(env.get("AGY_PROC_CGT_ARGS") == "1", "arg_probe=True -> AGY_PROC_CGT_ARGS=1")
-    check(env.get("AGY_PROC_ENABLE") == "1" and "AGY_PROC_STAGE" not in env,
-          "instrumented run enables the full hook union (AGY_PROC_ENABLE, no stage selector)")
-    env2, _ = C._build_env(instrumented=True, capture_path=cap, rewrite=None,
-                           workspace=d, extra_env=None)
+    check(env.get("K") == "v" and rules is None,
+          "extra_env passed through; no rewrite -> no rules file")
+    env2, r2 = C._shim_overlays(None, d, stack=False, arg_probe=False, extra_env=None)
     check("AGY_PROC_STACK" not in env2 and "AGY_PROC_CGT_ARGS" not in env2,
           "no overlays -> knobs absent")
-    clean, _ = C._build_env(instrumented=False, capture_path=cap, rewrite=None,
-                            workspace=d, extra_env=None, stack=True)
-    check("AGY_PROC_STACK" not in clean, "uninstrumented: no diagnostic knobs")
+    env3, rules3 = C._shim_overlays([RewriteRule("x", "y")], d, False, False, None)
+    check(env3.get("AGY_PROC_TLS_WRITE_SYNC") == "1" and rules3 and os.path.exists(rules3),
+          "rewrite spec -> SYNC enabled + rules file written")
+    # AgyProcess always instruments: the shim installs the full hook union, gated only by
+    # AGY_PROC_ENABLE (the removed AGY_PROC_STAGE selector must not reappear).
+    from pyagy import _env
+    ienv = _env.instrumented_env(capture=os.path.join(d, "c.jsonl"))
+    check(ienv.get("AGY_PROC_ENABLE") == "1" and "AGY_PROC_STAGE" not in ienv,
+          "instrumented_env: AGY_PROC_ENABLE set, no stage selector")
 
 
 # synthetic funcmap for the .stacks/.call_graph decoders (link vaddr -> name)
@@ -234,8 +226,7 @@ def main():
     test_answer_filter()
     test_rewrite_rule()
     test_prepare_rewrite()
-    test_resolve_instrumented()
-    test_build_env_overlays()
+    test_shim_overlays()
     test_diagnostic_accessors()
     test_diagnostic_graceful_empty()
     test_live_ask()

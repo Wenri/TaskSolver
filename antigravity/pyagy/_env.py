@@ -1,12 +1,6 @@
-"""Environment wiring shared by every agy launcher.
-
-Two shapes of environment, previously copied across `session._clean_env`,
-`test_scripts/agy_session.AgySession._env`, and `test_scripts/run-agy.sh`:
-
-  * ``clean_env()``        — a *non*-instrumented run: strip our AGY_PROC* knobs and
-                             remove the antigravity.so entry from LD_PRELOAD.
-  * ``instrumented_env()`` — LD_PRELOAD the shim and wire the in-process Python
-                             subsystem (pyagy.agy_process) + capture JSONL.
+"""Environment wiring for an instrumented agy run: LD_PRELOAD the shim and wire the
+in-process Python subsystem (``pyagy.agy_process``) + capture JSONL. Used by
+:class:`pyagy.agyprocess.AgyProcess` (the single agy launcher) and test_scripts/run-agy.sh.
 """
 import os
 
@@ -18,28 +12,6 @@ SHIM = os.path.join(ROOT, "vendor", "antigravity.so")
 def _prepend(env, key, value, sep=os.pathsep):
     existing = env.get(key)
     env[key] = value + (sep + existing if existing else "")
-
-
-def clean_env(base=None):
-    """Environment for a plain (uninstrumented) agy run: drops every AGY_PROC* knob
-    and removes only *our* antigravity.so from LD_PRELOAD (any other preload is kept),
-    and guarantees TERM is set."""
-    env = dict(base if base is not None else os.environ)
-    env["TERM"] = env.get("TERM", "xterm-256color")
-    for k in list(env):
-        if k.startswith("AGY_PROC"):
-            env.pop(k, None)
-    kept = [p for p in env.get("LD_PRELOAD", "").split(os.pathsep)
-            if p and "antigravity" not in p]
-    if kept:
-        env["LD_PRELOAD"] = os.pathsep.join(kept)
-    else:
-        env.pop("LD_PRELOAD", None)
-    # Disable agy's background self-update: it re-downloads the binary, drifting its
-    # build-id off the pinned symbols.json and undoing the WSL1 patch. `true` per the
-    # official CLI troubleshooting guide.
-    env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
-    return env
 
 
 def instrumented_env(capture="agy-capture.jsonl", log=None,
@@ -69,6 +41,12 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
     })
     _prepend(env, "PYTHONPATH", root)
     _prepend(env, "LD_PRELOAD", shim)
+    # The shim is linked with an RPATH to the build-time $CONDA_PREFIX/lib, but a pixi run
+    # leaves LD_LIBRARY_PATH empty — add it so the LD_PRELOAD always resolves libpython
+    # (else the preload fails with "libpython3.13.so: cannot open shared object").
+    conda = env.get("CONDA_PREFIX")
+    if conda:
+        _prepend(env, "LD_LIBRARY_PATH", os.path.join(conda, "lib"))
     if log:
         env["AGY_PROC_LOG"] = os.path.abspath(log)
     if extra_env:

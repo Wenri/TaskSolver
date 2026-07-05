@@ -28,6 +28,20 @@ def strip_ansi(b) -> str:
     return _ANSI.sub("", b)
 
 
+# Our own shim/log lines that leak onto agy's PTY (the shim logs to stderr, which the pty
+# merges with stdout); an instrumented run's transcript carries them, so drop them to
+# recover the clean answer text.
+_LOG_MARKERS = ("[antigravity", "[agy_process]", "gohook", "gomod")
+
+
+def answer_text(transcript) -> str:
+    """The clean answer from a (possibly instrumented) PTY transcript: drop our shim log
+    lines and blank lines, keep the rest."""
+    lines = [ln for ln in transcript.splitlines()
+             if ln.strip() and not any(m in ln for m in _LOG_MARKERS)]
+    return "\n".join(lines).strip()
+
+
 # Terminal-capability queries agy sends and blocks on; reply like a real terminal.
 # (DECRQM, XTVERSION, kitty-kbd, secondary/primary DA, cursor-pos, device-status.)
 _QUERIES = [

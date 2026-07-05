@@ -51,14 +51,14 @@ def case_ask_resume():
     # The core proof: resume a stored conversation in one-shot --print mode (deterministic
     # process exit; the reliable path). Hard-assert id capture + id continuity; soft-note recall.
     r1 = pyagy.ask(f"Remember this: the secret code word is {WORD}. Reply with only: OK",
-                   instrumented=False, timeout=120)
+                   timeout=120)
     cid = r1.conversation_id
     if not cid:
         print("  FAIL ask-resume: no conversation_id captured from turn 1")
         _fail.append("ask_resume")
         return
     r2 = pyagy.ask("What is the secret code word? Reply with only that word.",
-                   conversation_id=cid, instrumented=False, timeout=120)
+                   conversation_id=cid, timeout=120)
     id_ok = r2.conversation_id == cid                    # resume kept the same conversation
     print(f"  {'ok  ' if id_ok else 'FAIL'} ask-resume: cid={cid} continuity={id_ok}")
     if not id_ok:
@@ -72,7 +72,7 @@ def case_ask_resume():
 
 def case_continue_latest():
     # --continue resumes the most recent conversation.
-    s = pyagy.continue_latest(instrumented=False, idle=8.0, timeout=120, skip_permissions=True)
+    s = pyagy.continue_latest(idle=8.0, timeout=120, skip_permissions=True)
     try:
         r = s.ask("Reply with only the digits: what is 3+4?")
         got = (r.text or "").strip()
@@ -89,7 +89,7 @@ def case_continue_latest():
 def case_session_resume():
     # Live interactive Session across TWO processes: seed in one, resume by id in a fresh
     # Session. Soft-note recall (interactive + live model). Hard-assert id continuity.
-    s1 = pyagy.Session(instrumented=False, idle=8.0, timeout=120, skip_permissions=True)
+    s1 = pyagy.Session(idle=8.0, timeout=120, skip_permissions=True)
     try:
         s1.ask(f"Remember: the code word is {WORD}. Reply with only: OK")
         cid = s1.conversation_id
@@ -98,7 +98,7 @@ def case_session_resume():
     if not cid:
         print("  NOTE session-resume: turn-1 produced no conversation_id (flake); skipped")
         return
-    s2 = pyagy.resume(cid, instrumented=False, idle=8.0, timeout=120, skip_permissions=True)
+    s2 = pyagy.resume(cid, idle=8.0, timeout=120, skip_permissions=True)
     try:
         r = s2.ask("What is the code word? Reply with only that word.")
         cont_ok = s2.conversation_id == cid
@@ -133,7 +133,7 @@ def case_agymodel_resume():
 
 
 def case_agyprocess_resume():
-    # AgyProcess (multiprocessing child) exposes a resumable conversation_id. Needs the shim.
+    # AgyProcess in plain-CLI mode (no target) exposes a resumable conversation_id. Needs the shim.
     if not os.path.exists(_env.SHIM):
         print("  NOTE agyprocess: shim not built (run `make -C antigravity`); skipped")
         return
@@ -141,11 +141,7 @@ def case_agyprocess_resume():
     p = AgyProcess(prompt=f"Remember the code word {WORD}. Reply with only: OK")
     try:
         p.start()
-        # let agy run the turn, then resolve the id (capture event or newest store db)
-        import time
-        deadline = time.time() + 60
-        while time.time() < deadline and p.is_alive():
-            time.sleep(1.0)
+        p.read_until_exit(timeout=60)          # one-shot --print: drain the PTY until agy exits
         cid = p.conversation_id
         ok = bool(cid)
         print(f"  {'ok  ' if ok else 'NOTE'} agyprocess: conversation_id={cid}")
@@ -154,11 +150,7 @@ def case_agyprocess_resume():
     except Exception as e:
         print(f"  NOTE agyprocess: {type(e).__name__}: {e}")
     finally:
-        try:
-            p.terminate(); p.join(timeout=10)
-            p._popen.close()
-        except Exception:
-            pass
+        p.close()
 
 
 def case_scoped():
@@ -169,7 +161,7 @@ def case_scoped():
     try:
         g_before = C.latest_conversation_id()
         r1 = pyagy.ask(f"Remember: the animal is {WORD}. Reply with only: OK",
-                       data_dir=scope, instrumented=False, timeout=120)
+                       data_dir=scope, timeout=120)
         cid = r1.conversation_id
         in_scope = cid in {i.id for i in C.list_conversations(home=scope)}
         isolated = (g_before == C.latest_conversation_id())        # global store untouched
@@ -181,7 +173,7 @@ def case_scoped():
         if not ok:
             _fail.append("scoped")
         r2 = pyagy.ask("What is the animal? Reply with only that word.",
-                       conversation_id=cid, data_dir=scope, instrumented=False, timeout=120)
+                       conversation_id=cid, data_dir=scope, timeout=120)
         print(f"       {'ok   recall' if _recalled(r2.text) else 'NOTE recall (flake)'}: "
               f"scoped resume continuity={r2.conversation_id == cid}")
     except Exception as e:
@@ -210,7 +202,7 @@ def case_trust():
     print(f"  {'ok  ' if wrote else 'FAIL'} trust: trust_workspace wrote settings.json entry")
     if not wrote:
         _fail.append("trust")
-    s = pyagy.Session(workspace=fresh, instrumented=False, idle=8.0, timeout=90)  # NO skip_permissions
+    s = pyagy.Session(workspace=fresh, idle=8.0, timeout=90)  # NO skip_permissions
     try:
         r = s.ask("Reply with only the digits: what is 6+1?")
         done = bool((r.text or "").strip())

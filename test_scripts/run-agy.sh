@@ -4,7 +4,7 @@
 #   test_scripts/run-agy.sh [agy args...]
 #
 # Env knobs (all optional):
-#   AGY_BIN                 path to agy            (default ~/.local/bin/agy)
+#   AGY_BIN                 path to agy            (default: the pinned antigravity/vendor/agy)
 #   AGY_PROC_CAPTURE        JSONL output           (default ./agy-capture.jsonl)
 #   AGY_PROC_LOG            native shim log        (default ./antigravity.log)
 #   AGY_PROC_TLS_WRITE_SYNC set to enable synchronous egress rewrite
@@ -16,7 +16,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANTIGRAVITY="$(cd "$HERE/../antigravity" && pwd)"   # the shim (vendor/) + python subsystem live here
 
-: "${AGY_BIN:=$HOME/.local/bin/agy}"
+: "${AGY_BIN:=$ANTIGRAVITY/vendor/agy}"   # the pinned, build-id-matched binary (instrumentation needs it)
 
 exec python3 - "$AGY_BIN" "$@" <<PY
 import os, sys

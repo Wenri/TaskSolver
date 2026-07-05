@@ -35,43 +35,47 @@ _ANTIGRAVITY = os.path.join(os.path.dirname(_HERE), "antigravity")
 if _ANTIGRAVITY not in sys.path:
     sys.path.insert(0, _ANTIGRAVITY)   # make `pyagy` importable without an install
 
-from pyagy._env import instrumented_env  # noqa: E402
-from pyagy._pty import PtyProcess         # noqa: E402
+from pyagy.agyprocess import AgyProcess   # noqa: E402
 from pyagy._term import strip_ansi        # noqa: E402  (re-exported for callers)
 
 
 class AgySession:
+    """Instrumented agy under a PTY for capture experiments — a thin façade over
+    :class:`AgyProcess` (plain-CLI mode) that takes the agy argv tail directly via
+    ``start(args)``. ``.proc`` is the underlying AgyProcess (use ``.proc.read_until_exit``
+    for one-shot ``--print`` turns; ``.read_until_idle`` for interactive)."""
+
     def __init__(self, agy=None, capture="agy-capture.jsonl",
                  log=None, workdir=None, extra_env=None, echo=False):
-        self.root = _ANTIGRAVITY            # repo/antigravity — shim + pyagy live here
-        self.agy = agy or os.path.expanduser("~/.local/bin/agy")
+        self.agy = agy
         self.capture = os.path.abspath(capture)
         self.log = os.path.abspath(log) if log else None
         self.workdir = workdir or os.getcwd()
-        self.extra_env = extra_env or {}
-        self.proc = PtyProcess(echo=echo)
+        self.extra_env = dict(extra_env or {})
+        self.echo = echo
+        self.proc = None                    # the AgyProcess, set on start()
 
-    # --- back-compat shims over PtyProcess -------------------------------------
+    # --- back-compat shims over the underlying PtyProcess ----------------------
     @property
     def pid(self):
-        return self.proc.pid
+        return self.proc.pid if self.proc else None
 
     @property
     def fd(self):
-        return self.proc.fd
+        return self.proc._popen._pty.fd if self.proc else None
 
     @property
     def raw(self):
-        return self.proc.raw
-
-    def _env(self):
-        return instrumented_env(capture=self.capture, log=self.log,
-                                root=self.root, extra_env=self.extra_env)
+        return self.proc._popen._pty.raw if self.proc else bytearray()
 
     def start(self, args):
-        """Fork agy under a pty. `args` are appended after the agy binary."""
-        argv = [self.agy] + list(args)
-        self.proc.spawn(argv, self.workdir, self._env())
+        """Fork agy under a pty with the given argv tail (e.g. ``["--print", prompt]``)."""
+        extra = dict(self.extra_env)
+        if self.log:
+            extra["AGY_PROC_LOG"] = self.log
+        self.proc = AgyProcess(agy_bin=self.agy, agy_args=list(args), workdir=self.workdir,
+                               capture=self.capture, extra_env=extra, echo=self.echo)
+        self.proc.start()
         return self
 
     def read_until_idle(self, idle=3.0, timeout=120.0):
@@ -84,7 +88,8 @@ class AgySession:
         self.proc.send_line(text)
 
     def close(self):
-        self.proc.close(interrupt=True)
+        if self.proc is not None:
+            self.proc.close(interrupt=True)
 
 
 def _summarize_capture(path):
