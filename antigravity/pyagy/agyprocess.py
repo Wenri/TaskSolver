@@ -93,7 +93,9 @@ class AgyProcess(SpawnProcess):
         return self._popen._parent_conn.recv()
 
     def poll(self, timeout=0.0):
-        return self._popen._parent_conn.poll(timeout)
+        """True if a result is waiting on the Connection. Drains agy's PTY (+ auto-answers) while it
+        waits, so a poll()/recv() loop keeps agy unblocked without a background pump thread."""
+        return self._popen._service(timeout)
 
     @property
     def connection(self):
@@ -168,7 +170,7 @@ class AgyProcess(SpawnProcess):
         pop = self._popen
         rstart = time.time()                 # wait until agy is ready (TUI drawn / prior turn done)
         while time.time() - rstart < 30 and time.time() - pop._last_output < ready:
-            time.sleep(0.2)
+            pop._service(0.2)                # drain the PTY while waiting for agy to settle
         if prompt is None:
             pop.write(b"\r")                 # submit the prefilled initial prompt
         else:
@@ -177,18 +179,18 @@ class AgyProcess(SpawnProcess):
         conn = pop._parent_conn
         turns, last_turn, start = [], None, time.time()
         while time.time() - start < timeout:
-            while conn.poll(0):
-                try:
-                    o = conn.recv()
-                except EOFError:
-                    return turns
-                if isinstance(o, dict) and o.get("kind") == "genai_turn":
-                    turns.append(o)
-                    last_turn = time.time()
+            if pop._service(0.2):            # drains the PTY; True once a result is ready
+                while conn.poll(0):
+                    try:
+                        o = conn.recv()
+                    except EOFError:
+                        return turns
+                    if isinstance(o, dict) and o.get("kind") == "genai_turn":
+                        turns.append(o)
+                        last_turn = time.time()
             now = time.time()
             if last_turn is not None and now - last_turn >= idle:
                 break                        # turn(s) settled
             if last_turn is None and now - pop._last_output >= pty_idle:
                 break                        # agy went idle without producing a turn
-            time.sleep(0.2)
         return turns

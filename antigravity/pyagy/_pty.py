@@ -11,8 +11,9 @@ pinned vendor/agy). Two modes, chosen by whether the driving `AgyProcess` set a 
   * plain-CLI (`target=None`) — just run agy; the caller reads the transcript
     (`read_until_exit` one-shot / `read_until_idle` interactive).
   * embedded-worker (`target` set) — also wire a result Pipe + a boot pipe carrying the pickled
-    target (`AGY_MP_*`), and run a pump thread to service the PTY while results stream over the
-    Connection. See `agy_process/mp_child.py`.
+    target (`AGY_MP_*`). The PTY is serviced (drained + queries answered) inside `AgyProcess`'s
+    poll()/ask() via `_service`, which waits on the Connection and the PTY together — so no
+    background thread is needed. See `agy_process/mp_child.py`.
 
 `AgyProcess` (pyagy/agyprocess.py) is the user-facing `SpawnProcess` handle; this is its `_Popen`.
 """
@@ -20,7 +21,6 @@ import os
 import pty
 import select
 import signal
-import threading
 import time
 
 import multiprocessing.connection as _conn
@@ -36,15 +36,12 @@ from .conversations import ensure_git_workspace
 _VENDOR_AGY = os.path.join(ROOT, "vendor", "agy")   # the pinned agy whose build-id matches the shim
 
 
-def _close_agy(fd, conn, stop):
-    """PtyPopen's finalizer callback. Module-level, closing over only its args (never the Popen) so
-    weakref-based GC finalization still fires. In one shot it stops the PTY pump thread (``stop``,
-    worker only), closes the PTY master fd — which SIGHUPs agy, doubling as teardown — and closes
-    the result Connection (``conn``; ``stop``/``conn`` are None in plain-CLI). Closing the fd
-    unblocks the pump's read; Connection.close() (not a raw os.close on its fileno) keeps the
-    object in sync. Every step is idempotent and the finalizer is one-shot."""
-    if stop is not None:
-        stop.set()                  # tell the pump thread to exit (the fd close below unblocks it)
+def _close_agy(fd, conn):
+    """PtyPopen's finalizer callback. Module-level, closing over only ``fd``/``conn`` (never the
+    Popen) so weakref-based GC finalization still fires: closes the PTY master fd — which SIGHUPs
+    agy, doubling as teardown — and the result Connection (``conn`` is None in plain-CLI). Uses
+    Connection.close() (not a raw os.close on its fileno) so the object stays in sync; both are
+    idempotent and the finalizer is one-shot."""
     try:
         os.close(fd)
     except OSError:
@@ -88,25 +85,33 @@ class PtyPopen(_ForkPopen):
         if not self._trust_answered:
             self._trust_answered = answer_trust(self.raw, lambda b: os.write(self.fd, b))
 
+    def _read_available(self):
+        """Read + auto-answer whatever is on the PTY right now (the fd is assumed readable) and
+        append it to `raw`. Returns the bytes, or b'' on EOF / a closed master (agy gone)."""
+        try:
+            chunk = os.read(self.fd, 65536)
+        except OSError:
+            return b""
+        if chunk:
+            self.raw += chunk
+            self._answer()
+            if self._echo:
+                os.write(1, chunk)
+        return chunk
+
     def pump(self, timeout):
-        """Read whatever is available for up to `timeout` s; append to `raw`; auto-answer; return it."""
+        """Read whatever is available for up to `timeout` s; append to `raw`; auto-answer; return
+        it. Used by the plain-CLI readers (read_until_exit / read_until_idle)."""
         got = bytearray()
         end = time.time() + timeout
         while time.time() < end:
             r, _, _ = select.select([self.fd], [], [], min(0.3, max(0.0, end - time.time())))
             if not r:
                 break
-            try:
-                chunk = os.read(self.fd, 65536)
-            except OSError:
-                break
+            chunk = self._read_available()
             if not chunk:
                 break
             got += chunk
-            self.raw += chunk
-            self._answer()
-            if self._echo:
-                os.write(1, chunk)
         return got
 
     def read_until_idle(self, idle=3.0, timeout=120.0):
@@ -200,21 +205,20 @@ class PtyPopen(_ForkPopen):
         self._snap = _conv.snapshot(home=self._home)   # pre-launch store snapshot → conversation_id
         self._spawn_pty(argv, workdir, env)            # pty.fork + execve(agy); child inherits the fds
         self.sentinel = self.fd                        # PTY master EOFs on agy death (wait(timeout))
-        self._stop = threading.Event() if worker else None   # pump-thread gate (worker mode only)
         # Safety net (mirrors popen_fork's finalizer): runs via close() or, once nothing references
-        # the handle, GC of `self` — it stops the pump thread and closes the PTY master (which
-        # SIGHUPs agy, doubling as teardown) + the result Connection. exitpriority is None (like
-        # popen_fork), so it does NOT run at the atexit sweep (there the OS reclaims fds and
-        # _exit_function terminates agy via _children). One-shot, so it's the sole closer of each.
-        # (Worker mode: the pump thread strong-refs `self`, so GC can't fire until close() runs —
-        # which sets _stop, letting the thread exit and the handle become collectable.)
-        self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn, self._stop))
+        # the handle, GC of `self` — closes the PTY master (which SIGHUPs agy, doubling as teardown)
+        # + the result Connection. exitpriority is None (like popen_fork), so it does NOT run at the
+        # atexit sweep (there the OS reclaims fds and _exit_function terminates agy via _children).
+        # One-shot, so it's the sole closer of each. (No pump thread holds `self`, so the GC path
+        # works in worker mode too.)
+        self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn))
 
         if not worker:
             return          # plain-CLI: the caller drives the PTY (read_until_exit/idle); no channel/pump
 
         # --- embedded worker: ship the pickled target in, stream results out over the Connection ---
         self._last_output = time.time()                # last PTY write (turn-boundary idle for .ask())
+        self._pty_dead = False                         # set once the master EOFs → _service drops it
 
         # Pickle (prep_data, process_obj) UNDER set_spawning_popen — BaseProcess.__reduce__ and the
         # AuthenticationString refuse to pickle outside the spawning context (stock _launch does the same).
@@ -238,22 +242,35 @@ class PtyPopen(_ForkPopen):
             os.close(boot_r)                                 # child has its own inherited copy
         except OSError:
             pass
-        threading.Thread(target=self._pump, name="agy-mp-pty", daemon=True).start()
+        # No pump thread: AgyProcess.poll()/ask() drain the PTY via _service() (waiting on the
+        # Connection and the PTY together), so agy stays unblocked while we consume results.
 
-    def _pump(self):
-        """Worker mode: drain agy's PTY + auto-answer prompts so its TUI proceeds; track the
-        last-output time for turn-boundary (idle) detection in `AgyProcess.ask()`."""
-        try:
-            while not self._stop.is_set():
-                if self.pump(0.3):
+    def _service(self, timeout):
+        """Worker mode: drain agy's PTY (+ auto-answer, tracking `_last_output`) while waiting up to
+        `timeout` s for a result on the Connection; return True once the Connection has data.
+        Replaces the old background pump thread — `AgyProcess.poll()`/`ask()` call this in the same
+        wait they use to read results, so agy's PTY stays drained without a separate thread.
+        `_conn.wait` watches the Connection and the raw PTY fd together; once the master EOFs it is
+        dropped from the wait set (no busy-spin)."""
+        conn = self._parent_conn
+        end = time.time() + timeout
+        while True:
+            watch = [conn] if self._pty_dead else [conn, self.fd]
+            ready = _conn.wait(watch, max(0.0, end - time.time()))
+            if not self._pty_dead and self.fd in ready:
+                if self._read_available():
                     self._last_output = time.time()
-        except Exception:
-            pass
+                else:
+                    self._pty_dead = True          # master EOF/closed — stop watching it
+            if conn in ready:
+                return True
+            if time.time() >= end:
+                return False
 
     def close(self, interrupt=False):
         """Tear down: optional Ctrl-C (to break agy's TUI), SIGTERM, reap agy, then run the
-        finalizer (stops the pump thread + closes the PTY master fd + the result Connection).
-        Safe if agy was already reaped."""
+        finalizer (closes the PTY master fd + the result Connection). Safe if agy was already
+        reaped."""
         if getattr(self, "pid", None):
             if interrupt:
                 for _ in range(2):                       # Ctrl-C twice to break out of the TUI
