@@ -197,9 +197,12 @@ class PtyPopen(_ForkPopen):
         self._snap = _conv.snapshot(home=self._home)   # pre-launch store snapshot → conversation_id
         self._spawn_pty(argv, workdir, env)            # pty.fork + execve(agy); child inherits the fds
         self.sentinel = self.fd                        # PTY master EOFs on agy death (wait(timeout))
-        # Safety net (mirrors popen_fork's finalizer): on GC / at exit / in close() — if the caller
-        # forgets — close the PTY master (which SIGHUPs agy, doubling as teardown) and, in worker
-        # mode, the result Connection. One-shot, so it's the sole closer of both (no double-close).
+        # Safety net (mirrors popen_fork's finalizer): if the caller forgets close(), the weakref
+        # on `self` fires this when the handle is GC'd — closing the PTY master (which SIGHUPs agy,
+        # doubling as teardown) and, in worker mode, the result Connection. exitpriority is None
+        # (like popen_fork), so it runs on GC of this handle or via close(), NOT at the atexit sweep
+        # (there the OS reclaims fds and _exit_function terminates agy via _children). One-shot, so
+        # it's the sole closer of both (no double-close).
         self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn))
 
         if not worker:
