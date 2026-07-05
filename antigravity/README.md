@@ -715,23 +715,24 @@ p = AgyProcess(target=work, args=(41,)); p.start(); print(p.recv())
 
 **How it works** (`pyagy/agyprocess.py` + `pyagy/agy_process/mp_child.py`):
 - `AgyProcess(SpawnProcess)` + a custom `_pty.PtyPopen(popen_fork.Popen)` whose `_launch` execs
-  agy under a PTY with the instrumented env — PtyPopen owns both the PTY (fork/pump/read/answer)
-  and the process lifecycle. In **plain-CLI** mode that is all it does — the caller drives the PTY
-  (`read_until_exit`/`read_until_idle`); there is no worker channel or pump thread. In
-  **embedded-worker** mode (`target` set) it additionally hands the
-  child a result `Pipe` + a boot pipe (both `os.set_inheritable`) via `AGY_MP_{MODE,CHAN_FD,BOOT_FD}`,
-  pickles `(prep, process_obj)` under `set_spawning_popen`, and runs a pump thread.
-  `start/join/exitcode/terminate` are inherited from `popen_fork.Popen` and track **agy's** pid;
-  the *task result* flows over the Connection (agy owns lifetime, so completion is signalled on
-  the channel, not by process death).
+  agy under a PTY with the instrumented env — PtyPopen owns both the PTY (fork/read/answer)
+  and the process lifecycle. Every launch is a worker: it hands the child a result `Pipe` + a
+  boot pipe (both `os.set_inheritable`) via a single `AGY_MP_BOOT_FD`, whose payload is the
+  result-socketpair fd followed by `(prep, process_obj)` pickled under `set_spawning_popen`.
+  There is no pump thread — `AgyProcess.collect()`/`ask()` drain the PTY via `_service()` in the
+  same `_conn.wait` they use to read the Connection. `start/join/exitcode/terminate` are inherited
+  from `popen_fork.Popen` and track **agy's** pid; the *task result* flows over the Connection
+  (agy owns lifetime, so completion is signalled on the channel, not by process death), and the
+  ANSI-stripped PTY transcript is kept on `transcript` as a diagnostic byproduct.
 - Inside agy (the shim's worker imports `agy_process`, which starts a daemon thread when
-  `AGY_MP_MODE=1`), the child runs the **real** `proc._bootstrap()` with three surgical
-  neutralizations so it can't tear agy down: `sys.stdin=None` (defeats `util._close_stdin`,
-  which would close the PTY's fd 0), `threading._shutdown`→no-op, and a trimmed `prepare()`
-  (authkey/name only — no `sys.path=`/`chdir`/`_fixup_main`). `_bootstrap` is called directly,
-  which skips `spawn_main`'s `sys.exit` and the `is_forking(argv)` assert.
-- The PTY stays **parent-owned** (a pump thread answers agy's terminal-capability queries);
-  persistent mode types prompts in and uses PTY-idle as the turn/ready boundary.
+  `AGY_MP_BOOT_FD` is set), the child reads the result fd from the boot payload, then runs the
+  **real** `proc._bootstrap()` with three surgical neutralizations so it can't tear agy down:
+  `sys.stdin=None` (defeats `util._close_stdin`, which would close the PTY's fd 0),
+  `threading._shutdown`→no-op, and a trimmed `prepare()` (authkey/name only — no
+  `sys.path=`/`chdir`/`_fixup_main`). `_bootstrap` is called directly, which skips `spawn_main`'s
+  `sys.exit` and the `is_forking(argv)` assert.
+- The PTY stays **parent-owned** (`_service` answers agy's terminal-capability queries as it
+  drains); persistent mode types prompts in and uses PTY-idle as the turn/ready boundary.
 - **Python 3.13 both ends** (shim embeds pixi's `libpython3.13`), so parent↔child pickle is
   same-version and `pyagy` classes round-trip via the shared `PYTHONPATH`.
 

@@ -179,11 +179,11 @@ def dispatch(kind, stream_id, data):
         return None
 
 
-# AgyProcess: when agy is launched as a multiprocessing-spawn-shaped child (AGY_MP_MODE=1),
-# run the pickled target on a daemon thread — separate from this dispatch worker so a
-# blocking recv() there can't starve hook dispatch. The capture pipeline above stays live,
-# so the target can consume decoded events in-process AND stream results over the Connection.
-if os.environ.get("AGY_MP_MODE") == "1" and getattr(sys, "is_agy_shim", False):
+# AgyProcess: when agy is launched with the embedded-worker channel wired (the boot pipe fd is
+# exported), run the pickled target on a daemon thread — separate from this dispatch worker so a
+# blocking recv() there can't starve hook dispatch. The capture pipeline above stays live, so the
+# target can consume decoded events in-process AND stream results over the Connection.
+if os.environ.get("AGY_MP_BOOT_FD") and getattr(sys, "is_agy_shim", False):
     try:
         from . import mp_child
         mp_child.start()

@@ -2,8 +2,9 @@
 REAL `multiprocessing.spawn` child, WITHOUT the process-ownership teardown that stock
 `spawn_main`/`_bootstrap` would inflict on agy (which owns the process, not us).
 
-Started on a daemon thread by `agy_process.__init__` when `AGY_MP_MODE=1`, so a blocking
-`recv()` here can't starve the hook-dispatch worker (blocking releases the GIL).
+Started on a daemon thread by `agy_process.__init__` when the worker channel is wired
+(`AGY_MP_BOOT_FD` is set), so a blocking `recv()` here can't starve the hook-dispatch worker
+(blocking releases the GIL).
 
 The three neutralizations (see plan why-make-agy-a-splendid-rainbow.md):
   * `sys.stdin = None`            → `util._close_stdin()` early-returns (won't close the PTY's fd 0)
@@ -50,11 +51,11 @@ def _run():
     global _result_conn
     from multiprocessing import connection, reduction
     boot = int(os.environ["AGY_MP_BOOT_FD"])
-    chan = int(os.environ["AGY_MP_CHAN_FD"])
     _set_cloexec(boot)
-    _set_cloexec(chan)                              # don't leak into agy's Go child processes
-    _result_conn = connection.Connection(chan)      # duplex socketpair end inherited from the parent
     with os.fdopen(boot, "rb", closefd=True) as fp:
+        chan = reduction.pickle.load(fp)            # result-socketpair fd, shipped ahead of the payload
+        _set_cloexec(chan)                          # don't leak into agy's Go child processes
+        _result_conn = connection.Connection(chan)  # duplex socketpair end inherited from the parent
         prep = reduction.pickle.load(fp)
         _trimmed_prepare(prep)
         proc = reduction.pickle.load(fp)            # the AgyProcess instance (target + args)
@@ -86,15 +87,14 @@ def main():
 
 
 def start():
-    """Run the child on a daemon thread (called from agy_process import under AGY_MP_MODE)."""
+    """Run the child on a daemon thread (called from agy_process import when the embedded-worker
+    channel is wired). No-op if the boot fd is absent or stale."""
     try:
         boot = int(os.environ.get("AGY_MP_BOOT_FD", "-1"))
-        chan = int(os.environ.get("AGY_MP_CHAN_FD", "-1"))
-        if boot < 0 or chan < 0:
+        if boot < 0:
             return
         os.fstat(boot)
-        os.fstat(chan)
-    except (KeyError, ValueError, OSError):
+    except (ValueError, OSError):
         return
     threading.Thread(target=main, name="agy-mp-child", daemon=True).start()
 

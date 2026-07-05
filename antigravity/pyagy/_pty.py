@@ -139,10 +139,10 @@ class PtyPopen(_ForkPopen):
         boot_r, boot_w = os.pipe()
         os.set_inheritable(child_conn.fileno(), True)
         os.set_inheritable(boot_r, True)
-        # caller overlays (shim knobs / rewrite) + scoped-HOME override + the MP channel fds.
+        # caller overlays (shim knobs / rewrite) + scoped-HOME override + the boot pipe fd — the
+        # sole worker-channel signal. Its payload carries the result-socketpair fd + the pickled
+        # target (below), so no other AGY_MP_* env is needed.
         extra = {**(getattr(process_obj, "_extra_env", None) or {}), **env_ovr,
-                 "AGY_MP_MODE": "1",
-                 "AGY_MP_CHAN_FD": str(child_conn.fileno()),
                  "AGY_MP_BOOT_FD": str(boot_r)}
 
         env = instrumented_env(capture=capture, extra_env=extra)
@@ -167,13 +167,15 @@ class PtyPopen(_ForkPopen):
         # One-shot, so it's the sole closer of each. (No pump thread holds `self`, so GC works.)
         self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn))
 
-        # Ship the pickled target over the boot pipe. Pickle UNDER set_spawning_popen — the process's
-        # AuthenticationString refuses to pickle outside the spawning context (stock spawn does the
-        # same). The payload is a small function+args pickle, << the 64 KB pipe buffer, so this single
-        # write lands in the kernel buffer without blocking even though agy reads it late.
+        # Ship the result fd + pickled target over the boot pipe. Pickle the target UNDER
+        # set_spawning_popen — the process's AuthenticationString refuses to pickle outside the
+        # spawning context (stock spawn does the same). The payload is small (an fd + a function+args
+        # pickle), << the 64 KB pipe buffer, so this single write lands in the kernel buffer without
+        # blocking even though agy reads it late.
         import io
         prep = mp_spawn.get_preparation_data(process_obj._name)
         buf = io.BytesIO()
+        reduction.dump(child_conn.fileno(), buf)   # result-socketpair fd, shipped ahead of the payload
         set_spawning_popen(self)
         try:
             reduction.dump(prep, buf)
