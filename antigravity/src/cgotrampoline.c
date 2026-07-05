@@ -301,6 +301,12 @@ static void agy_cgo_hook(agy_block *b)
         cgt_bytes_emit("resp", b->regs.rax, b->regs.rbx, b->regs.rcx);
         return;
     }
+    if (b->kind && strcmp((const char *)b->kind, "tls_write") == 0) {
+        /* crypto/tls.(*Conn).Write(c=rax, b.ptr=rbx, b.len=rcx): the model REQUEST (egress).
+         * Entry-arg read on the trampoline — the reliable replacement for the gum on_enter path. */
+        cgt_bytes_emit("tls_write", b->regs.rax, b->regs.rbx, b->regs.rcx);
+        return;
+    }
     if (b->kind && strcmp((const char *)b->kind, "http_rt") == 0) {
         /* net/http.(*Transport).RoundTrip(t=rax, req=rbx): marker keyed by the request ptr */
         agy_event_t rt = { .kind = "http_rt", .stream_id = b->regs.rbx, .mode = AGY_ASYNC };

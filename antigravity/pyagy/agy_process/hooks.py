@@ -6,28 +6,34 @@ rewrite surface without parsing C. Keep the two in sync when you add/remove a ho
 
 Fields per entry: ``id`` (C enum tag), ``symbol`` (Go symbol hooked), ``mode``
 (``async`` log-only / ``sync`` blocks for a modify verdict), ``kind`` (the string
-passed to ``dispatch``), ``mech`` (how it's installed: ``"gum"`` = frida-gum inline attach;
-``"fullcgo"`` / ``"asmcgo"`` = cgocall trampoline via full ``runtime.cgocall`` vs the lighter
-``runtime.asmcgocall``; ``"off"`` = NOT installed — kept as documentation of a hook that
-stalls agy or collides with another), ``leave`` (intercepts the return value), ``note``.
+passed to ``dispatch``), ``mech`` (how it's installed: ``"gum"`` = frida-gum inline attach —
+RETIRED, no hook uses it; ``"fullcgo"`` / ``"asmcgo"`` = cgocall trampoline via full
+``runtime.cgocall`` (parking funcs) vs the lighter ``runtime.asmcgocall`` (hot non-parking funcs);
+``"off"`` = NOT installed — documentation of a hook that stalls agy or collides), ``leave``
+(intercepts the return value), ``note``.
 
 The shim installs the union of every non-``"off"`` hook on each run (no stage selector).
-``"off"`` hooks include every gum ``leave=1`` hook (return-value interception): a 2026-07
-bisect showed they intermittently corrupt agy's GC stack-unwind, killing ~40% of model turns
-(see procdef.h LEAVE), so they are retired — read such values via an entry-arg trampoline hook
-instead. Also off: the os.Getenv trampoline duplicate and the parking Conn.Read.
+GUM IS FULLY RETIRED: a 2026-07 bisect showed frida-gum's self-modifying-code patching
+intermittently corrupts agy's Go runtime — ``leave=1`` gum trips the GC unwinder (~40% turn
+failure) and even entry gum on hot funcs fails the full worker path (~15%), while both trampoline
+variants are 100%. So every hook is now a cgocall trampoline (asmcgo for hot non-parking:
+os.Getenv/os.OpenFile/tls_write; fullcgo for parking) and capture is done via entry-arg trampoline
+reads. ``"off"`` hooks: the retired gum ``leave=1`` set (their return values now read entry-arg
+where possible), the os.Getenv trampoline duplicate, and the parking Conn.Read.
 """
 
 HOOKS = [
     {"id": "SMOKE_GETENV", "symbol": "os.Getenv", "mode": "async", "kind": "smoke",
-     "mech": "gum", "leave": False, "note": "liveness smoke; fires often, no network"},
+     "mech": "asmcgo", "leave": False, "note": "liveness smoke; fires often, no network"},
     {"id": "FILE_OPEN", "symbol": "os.OpenFile", "mode": "async", "kind": "file_open",
-     "mech": "gum", "leave": False,
-     "note": "OVERLAY (AGY_PROC_CONV_ID): enter-only probe reading OpenFile's path arg; "
-             "C-filtered to conversations/·/brain/ paths → conversation_id event (the uuid "
-             "is in the path). Only attaches when AGY_PROC_CONV_ID is set."},
+     "mech": "fullcgo", "leave": False,
+     "note": "OVERLAY (AGY_PROC_CONV_ID): reads OpenFile's path arg, C-filtered to "
+             "conversations/·/brain/ paths → conversation_id event. fullcgo (rare + openat "
+             "syscall → not an asmcgo candidate). Only attaches when AGY_PROC_CONV_ID is set. "
+             "NOTE: the path filter still lives in the gum on_enter case; a trampoline arg-read "
+             "in agy_cgo_hook is the follow-on to re-enable conv-id capture."},
     {"id": "TLS_WRITE", "symbol": "crypto/tls.(*Conn).Write", "mode": "async",
-     "kind": "tls_write", "mech": "gum", "leave": False,
+     "kind": "tls_write", "mech": "asmcgo", "leave": False,
      "note": "egress c2s; the ONLY rewrite surface (AGY_PROC_TLS_WRITE_SYNC); "
              "carries the full HTTP/1.1 model request"},
     {"id": "H2_PIPE_WRITE", "symbol": "net/http/internal/http2.(*pipe).Write",
@@ -43,7 +49,7 @@ HOOKS = [
              "Kept off anyway: no data (plaintext is the return value; response is on TLS_DECRYPT) "
              "and ~135 cgocalls/turn. Parks under gum."},
     {"id": "HTTP_RT", "symbol": "net/http.(*Transport).RoundTrip", "mode": "async",
-     "kind": "http_rt", "mech": "asmcgo", "leave": False,
+     "kind": "http_rt", "mech": "fullcgo", "leave": False,
      "note": "RoundTrip marker (req ptr = rbx); parks → trampoline. Hot + about to syscall → asmcgo"},
     {"id": "SER_ROOT",
      "symbol": "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",
@@ -62,7 +68,7 @@ HOOKS = [
      "note": "cgocall-trampoline app-boundary hook (observe)"},
     {"id": "CGT_STREAM_SEND",
      "symbol": "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",
-     "mode": "async", "kind": "stream_send", "mech": "asmcgo", "leave": False,
+     "mode": "async", "kind": "stream_send", "mech": "fullcgo", "leave": False,
      "note": "app-boundary hook (observe); hot + syscall-at-entry-sensitive → asmcgo"},
     {"id": "CGT_GETENV", "symbol": "os.Getenv", "mode": "async", "kind": "cgt_getenv",
      "mech": "off", "leave": False,

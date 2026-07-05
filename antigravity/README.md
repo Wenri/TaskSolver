@@ -136,16 +136,20 @@ goroutine (blocking I/O, mutex/cond). A gum attach rewrites the return address a
 never matches → agy silently stalls (which is why a gum attach on a parking func is disabled
 — `AGY_OFF` — and these targets are trampolined instead).
 
-**Reliability: gum `leave=1` hooks are retired (2026-07).** Beyond parking, a bisect found gum's
-return-value interception (`on_leave`) is itself GC-unsafe *even on non-parking CPU funcs*: the
-return-address rewrite intermittently corrupts Go's stack unwinder during a GC scan, killing
-**~40% of model turns** (raw agy: 0% failure; entry-only gum + trampolines: 0%). So every gum
-`leave=1` hook is now `AGY_OFF` (`TLS_DECRYPT`, the leaf getters, the R&D marshalers). Entry-arg
-capture is safe on both gum and the trampoline; to read a value a leave hook used to intercept,
-hook an **entry-arg** func via the trampoline instead. (This is why the wire `genai_turn`
-**response** is temporarily unavailable — `TLS_DECRYPT` was its only source; the decoded answer
-still arrives via the `FH_UPDATE` trampoline as `app_response`. Restoring a trampoline-based
-response capture is the follow-on.)
+**Reliability: gum is fully retired (2026-07).** A bisect traced intermittent model-turn failures
+(long misread as backend rate-limiting) to frida-gum's inline self-modifying-code patching. Two
+ways it corrupts agy's Go runtime: (1) `on_leave` return-value interception rewrites the return
+address, which the GC stack-unwinder trips on — **~40% turn failure**; (2) even *entry* gum hooks
+on hot funcs (`tls_write` ~55×/turn, `os.Getenv` ~116×/turn) fail the full AgyProcess path under
+worker load (~15%). Both cgocall-trampoline variants are **100% across 55+ turns** where gum is
+~60–85%. So **every hook is now a cgocall trampoline** — `AGY_ASMCGO` for hot non-parking funcs
+(the lighter g0-switch: `os.Getenv`/`os.OpenFile`/`tls_write`) and `AGY_FULLCGO` for parking funcs
+— and capture is done via **entry-arg trampoline reads** (`agy_cgo_hook` reads args off the g0
+stack: the `tls_write` request, the h2 `resp` chunk, the app boundary). The gum `leave=1` hooks
+that read *return* values are `AGY_OFF` (`TLS_DECRYPT`, the leaf getters, the R&D marshalers); the
+decoded answer still arrives via the `FH_UPDATE` trampoline as `app_response`. The one capture that
+was return-only — the wire `genai_turn` **response** (`TLS_DECRYPT`) — is being restored via an
+entry-arg trampoline hook on `codeassistclient.toStreamResponseChunk` (the SSE-chunk parser).
 
 **Approach A (`src/cgotrampoline.c` + `src/gomod.c`)** avoids gum's return-tracking
 entirely. It redirects the target — **past its stack-check prologue** — into a generated

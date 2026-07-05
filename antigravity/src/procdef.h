@@ -7,13 +7,18 @@
  * MODE   AGY_ASYNC (log, non-blocking) or AGY_SYNC (block for a modify verdict).
  * kind   string tag passed to Python dispatch(kind, stream_id, data).
  * MECH   how the hook is installed (see install_hooks in antigravity.c):
- *          AGY_GUM     = frida-gum inline attach. ENTRY-only (leave=0) in practice — the leave=1
- *                        gum hooks are retired as GC-unwind-unsafe (see LEAVE below).
- *          AGY_FULLCGO = cgocall trampoline (cgotrampoline.c) via full runtime.cgocall — the robust
- *                        default for parking funcs (entersyscall + P handoff, GC-safe).
- *          AGY_ASMCGO  = cgocall trampoline via runtime.asmcgocall — the lighter g0-switch
- *                        variant (no syscall transition), for hot / syscall-at-entry-sensitive
- *                        funcs. Falls back to full cgocall if runtime.asmcgocall is unresolved.
+ *          AGY_GUM     = frida-gum inline attach. RETIRED — no hook uses it. Its self-modifying-code
+ *                        patching intermittently destabilizes agy's Go runtime: leave=1 gum trips the
+ *                        GC unwinder (~40% turn failure), and even ENTRY gum on hot funcs fails the
+ *                        full AgyProcess path under worker load (~15%). A 2026-07 bisect showed both
+ *                        cgocall-trampoline variants below are 100% where gum is ~60-85%. Kept as an
+ *                        enum only for the on_enter/on_leave register-read machinery.
+ *          AGY_FULLCGO = cgocall trampoline (cgotrampoline.c) via full runtime.cgocall — for PARKING
+ *                        funcs (entersyscall + P handoff, GC-safe). The default.
+ *          AGY_ASMCGO  = cgocall trampoline via runtime.asmcgocall — the lighter g0-switch variant
+ *                        (no syscall transition), for HOT NON-parking funcs (os.Getenv, tls_write):
+ *                        same 100% reliability, less per-fire overhead. Falls back to full cgocall if
+ *                        runtime.asmcgocall is unresolved. NOT for parking funcs (no P handoff → stall).
  *          AGY_OFF     = NOT installed. Kept here (line + on_enter/on_leave case) as
  *                        documentation of a hook that stalls agy or collides with another.
  *        The shim installs the union of every non-OFF hook on each run (no stage selector).
@@ -30,21 +35,22 @@
  */
 
 /* Safe ordinary startup function; fires many times, no auth/network needed. Liveness smoke.
- * (os.Getenv is ALSO a trampoline target below (CGT_GETENV) — that one is AGY_OFF to avoid
- * double-patching the same entry; we keep the lighter gum probe here.) */
-HOOK(SMOKE_GETENV, "os.Getenv",                      AGY_ASYNC, "smoke",     AGY_GUM,   0)
+ * Hot (~116 fires/turn) + non-parking → AGY_ASMCGO (the lighter trampoline; was gum, retired).
+ * CGT_GETENV below (same os.Getenv entry) stays AGY_OFF to avoid double-patching. */
+HOOK(SMOKE_GETENV, "os.Getenv",                      AGY_ASYNC, "smoke",     AGY_ASMCGO,   0)
 
 /* conversation-id capture (overlay, gated by AGY_PROC_CONV_ID — skipped unless that is set).
- * os.OpenFile(name string, ...) reads name.ptr=RAX/len=RBX (same shape as
- * os.Getenv); agy opens .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
- * so the uuid is in the path. Enter-only probe → park-safe across the openat syscall; the
- * on_enter case filters to conversation paths in C so Python only sees the match. */
-HOOK(FILE_OPEN,    "os.OpenFile",                     AGY_ASYNC, "file_open", AGY_GUM,   0)
+ * os.OpenFile: agy opens .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
+ * so the uuid is in the path arg. AGY_FULLCGO — rare (gated) + does an openat syscall (wants the
+ * P handoff), so NOT an asmcgo candidate (asmcgo is reserved for HOT non-parking funcs). NOTE:
+ * the path filter still lived in the retired gum on_enter case; re-enabling conv-id capture needs
+ * a "file_open" arg-read in agy_cgo_hook (a follow-on, like the tls_write read). */
+HOOK(FILE_OPEN,    "os.OpenFile",                     AGY_ASYNC, "file_open", AGY_FULLCGO,   0)
 
-/* egress capture. tls_write is safe once we attach PAST the prologue
- * (per-hook skip from symbols.json) — it doesn't park, so no morestack re-entry
- * and no park-while-hooked hazard. Captures the full model REQUEST. */
-HOOK(TLS_WRITE,    "crypto/tls.(*Conn).Write",        AGY_ASYNC, "tls_write", AGY_GUM,   0)
+/* egress capture — the full model REQUEST. Non-parking + hot (~55 fires/turn) → AGY_ASMCGO
+ * (lighter trampoline; was gum, retired). agy_cgo_hook reads the request bytes as an entry arg
+ * (c=rax, b.ptr=rbx, b.len=rcx) — the reliable replacement for the retired gum on_enter read. */
+HOOK(TLS_WRITE,    "crypto/tls.(*Conn).Write",        AGY_ASYNC, "tls_write", AGY_ASMCGO,   0)
 /* http2 pipe.Write gets each de-framed response body chunk as []byte (receiver=RAX,
  * p.ptr=RBX, p.len=RCX). It PARKS under reader/writer mutex/cond contention, so a gum
  * attach stalls agy — hooked via the park-safe cgocall trampoline instead (the chunk is
@@ -65,12 +71,11 @@ HOOK(TLS_DECRYPT,  "crypto/tls.(*halfConn).decrypt",   AGY_ASYNC, "tls_read",  A
  * full-cgo costs ~135 cgocalls/turn + as many _Gsyscall GC-scan windows on the read path —
  * all for a bare fire marker. */
 HOOK(TLS_READ,     "crypto/tls.(*Conn).Read",         AGY_ASYNC, "tls_read",  AGY_OFF,    1)
-/* RoundTrip(t=RAX, req=RBX) PARKS on the round-trip → cgocall trampoline. Hot (fires per
- * HTTP request) and about to do its own syscalls, so it uses the lighter AGY_ASMCGO variant
- * (no entersyscall-at-entry). Emits an http_rt marker keyed by the request ptr; the response
- * is a RETURN the trampoline can't read and the request is already captured via TLS_WRITE,
- * so this is a fire/timing marker more than new data. */
-HOOK(HTTP_RT,      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   AGY_ASMCGO,  0)
+/* RoundTrip(t=RAX, req=RBX) PARKS on the round-trip → cgocall trampoline, AGY_FULLCGO (parking →
+ * needs the P handoff; asmcgo would risk a stall). Emits an http_rt marker keyed by the request
+ * ptr; the response is a RETURN the trampoline can't read and the request is already captured via
+ * TLS_WRITE, so this is a fire/timing marker more than new data. */
+HOOK(HTTP_RT,      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   AGY_FULLCGO,  0)
 
 /* AGY_OFF — app-layer capture R&D (CPU-only funcs returning []byte). Retired: gum leave=1 is
  * GC-unwind-unsafe (see header LEAVE), and these never fired for the model request anyway. */
@@ -83,10 +88,9 @@ HOOK(PROTO_MARSHAL,"google3/third_party/golang/gogo/protobuf/proto/proto.Marshal
  * attach (whose return-tracking breaks on park/reschedule) we redirect them through
  * a generated trampoline (cgotrampoline.c) + a synthetic moduledata so GC stack-unwind is safe.
  * MODE/leave are advisory here — the trampoline reads args on the g0 stack and never
- * intercepts the return. SendUserMessage fires once/turn → full cgocall; Send is hot and
- * syscall-at-entry-sensitive → the lighter AGY_ASMCGO. */
+ * intercepts the return. Both PARK → AGY_FULLCGO (the P handoff; asmcgo would risk a stall). */
 HOOK(CGT_SEND_USER_MSG, "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage", AGY_ASYNC, "send_user_msg", AGY_FULLCGO, 0)
-HOOK(CGT_STREAM_SEND,   "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",          AGY_ASYNC, "stream_send",   AGY_ASMCGO,  0)
+HOOK(CGT_STREAM_SEND,   "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",          AGY_ASYNC, "stream_send",   AGY_FULLCGO,  0)
 
 /* AGY_OFF — cgocall-trampoline validation probe on the BENIGN os.Getenv. Disabled because
  * os.Getenv is ALSO hooked by SMOKE_GETENV (gum) above; installing both would patch one
