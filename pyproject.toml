@@ -101,6 +101,7 @@ gdb = ">=17.2,<18"
 binutils = ">=2.45.1,<3"
 gh = ">=2.96.0,<3"
 glab = ">=1.106.0,<2"
+paramiko = ">=5.0.0,<6"
 
 # The antigravity shim build lives in antigravity/Makefile (setup.py's build_py hook
 # runs `make -C antigravity` during the package build, so `pixi install` builds it).
