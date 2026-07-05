@@ -36,6 +36,20 @@ from .conversations import ensure_git_workspace
 _VENDOR_AGY = os.path.join(ROOT, "vendor", "agy")   # the pinned agy whose build-id matches the shim
 
 
+def _close_agy(fd, conn):
+    """PtyPopen's finalizer callback. Module-level, closing over only ``fd``/``conn`` (never the
+    Popen) so weakref-based GC finalization still fires: closes the PTY master fd — which SIGHUPs
+    agy, doubling as teardown — and, in worker mode, the result Connection (``conn`` is None in
+    plain-CLI). Uses Connection.close() (not a raw os.close on its fileno) so the Connection object
+    stays in sync; both are idempotent, and the finalizer is one-shot."""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    if conn is not None:
+        conn.close()
+
+
 class PtyPopen(_ForkPopen):
     """The `multiprocessing` Popen for an agy run: execs agy (not python) under a PTY and owns
     both the PTY (fork/pump/read/answer) and the fork-Popen lifecycle. Constructed by
@@ -183,11 +197,10 @@ class PtyPopen(_ForkPopen):
         self._snap = _conv.snapshot(home=self._home)   # pre-launch store snapshot → conversation_id
         self._spawn_pty(argv, workdir, env)            # pty.fork + execve(agy); child inherits the fds
         self.sentinel = self.fd                        # PTY master EOFs on agy death (wait(timeout))
-        # Safety net (mirrors popen_fork's finalizer): close the PTY master on GC / at exit / in
-        # close() if the caller forgets — closing the master SIGHUPs agy, so it doubles as teardown.
-        # One-shot, so it's the sole closer of self.fd (no double-close). The result Connection
-        # closes itself via its own __del__, so the fd is the only resource that needs this.
-        self.finalizer = util.Finalize(self, util.close_fds, (self.fd,))
+        # Safety net (mirrors popen_fork's finalizer): on GC / at exit / in close() — if the caller
+        # forgets — close the PTY master (which SIGHUPs agy, doubling as teardown) and, in worker
+        # mode, the result Connection. One-shot, so it's the sole closer of both (no double-close).
+        self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn))
 
         if not worker:
             return          # plain-CLI: the caller drives the PTY (read_until_exit/idle); no channel/pump
@@ -231,15 +244,11 @@ class PtyPopen(_ForkPopen):
             pass
 
     def close(self, interrupt=False):
-        """Stop the pump + Connection (worker), then tear down the PTY: optional Ctrl-C (to break
-        agy's TUI), SIGTERM, reap, close the master fd. Safe if agy was already reaped."""
+        """Stop the pump (worker), then tear down: optional Ctrl-C (to break agy's TUI), SIGTERM,
+        reap, and run the finalizer (closes the PTY master fd + the result Connection). Safe if agy
+        was already reaped."""
         if getattr(self, "_stop", None) is not None:
             self._stop.set()                             # stop the pump thread (worker mode)
-        try:
-            if getattr(self, "_parent_conn", None):
-                self._parent_conn.close()
-        except Exception:
-            pass
         if getattr(self, "pid", None):
             if interrupt:
                 for _ in range(2):                       # Ctrl-C twice to break out of the TUI
