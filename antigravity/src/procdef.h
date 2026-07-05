@@ -15,10 +15,10 @@
  * MECH   how the hook is installed (see install_hooks in antigravity.cpp):
  *          AGY_GUM     = frida-gum inline attach. RETIRED — no hook uses it. Its self-modifying-code
  *                        patching intermittently destabilizes agy's Go runtime: gum RETURN hooks trip
- *                        the GC unwinder (~40% turn failure), and even ENTRY gum on hot funcs fails the
- *                        full AgyProcess path under worker load (~15%). A 2026-07 bisect showed both
- *                        cgocall-trampoline variants below are 100% where gum is ~60-85%. Kept as an
- *                        enum only for the on_enter/on_leave register-read machinery.
+ *                        the GC unwinder (see RETCAP), and even ENTRY gum on hot funcs fails the full
+ *                        AgyProcess path under worker load (~15%). All-trampoline is 100% (80/80) where
+ *                        gum is worse. Kept as an enum only for the on_enter/on_leave register-read
+ *                        machinery.
  *          AGY_FULLCGO = cgocall trampoline (cgotrampoline.cpp) via full runtime.cgocall — for PARKING
  *                        funcs (entersyscall + P handoff, GC-safe). The default.
  *          AGY_ASMCGO  = cgocall trampoline via runtime.asmcgocall — the lighter g0-switch variant
@@ -31,12 +31,20 @@
  *        FULLCGO and ASMCGO hooks share one trampoline region + synthetic moduledata; the
  *        pcsp matches the full-cgo geometry (only those slots are ever GC-unwound).
  * RETCAP how on_leave captures this hook's RETURN value. Also selects the gum listener: any nonzero
- *        RETCAP means the return is intercepted, which costs a return-address rewrite that Go's stack
- *        unwinder trips on — a 2026-07 bisect proved gum return hooks corrupt agy's GC unwind (~40%
- *        of model turns; raw agy / entry-only: 0%), which is why every RETCAP≠0 hook here is now
- *        AGY_OFF and new captures read an ENTRY arg via the trampoline instead (see H2_PIPE_WRITE /
- *        the cgt_* app hooks). NEVER hook runtime-special funcs (runtime.main, goroutine entries) —
- *        Go validates their return PC. Values:
+ *        RETCAP means the return is intercepted, which costs a return-address rewrite Go's stack
+ *        unwinder trips on — while the return points at gum's trampoline, a GC unwind of that
+ *        goroutine hits an unknown PC → throw("unknown pc")/crash (empty turn, exit 2). A 2026-07-05
+ *        per-hook bisect (each RETCAP≠0 hook flipped to AGY_GUM alone, N turns via the full worker
+ *        path) pinned the rule: crash probability scales with FIRES/TURN × P(GC-unwind in the window)
+ *        — silent hooks that fire 0× on this agy build (SER_ROOT, MAR_PROMPT, PROTO_MARSHAL,
+ *        GET_DELTA_*, RESP_TEXT/THINKING/VIEW — dead 1.0.16 paths; answer flows via gemini_coder →
+ *        FH_UPDATE)
+ *        = 0 crashes but 0 data; hot non-parking TLS_DECRYPT (per TLS record) = 74/80 ≈ 92%; parking
+ *        TLS_READ (netpoll, resumes on another M) = 0/15 catastrophic (all-trampoline baseline: 80/80
+ *        = 100%). So NO RETCAP≠0 hook is both safe AND useful — every one is AGY_OFF, and new captures
+ *        read an ENTRY arg via the trampoline instead (see H2_PIPE_WRITE / the cgt_* app hooks, e.g.
+ *        RESP_CHUNK replaced the TLS_DECRYPT response). NEVER hook runtime-special funcs (runtime.main,
+ *        goroutine entries) — Go validates their return PC. Values:
  *           0   no on_leave — don't intercept the return.
  *          <0  intercept, but handled specially by ID in on_leave (TLS_READ/TLS_DECRYPT, which also
  *              need on_enter-saved state — a buffer ptr / conn). -1 is the marker; the value is unused.
@@ -108,21 +116,23 @@ inline constexpr agy_hook HOOKS[] = {
  * an ENTRY arg, safe-read off the g0 stack in agy_cgo_hook). A more-direct HTTP/2 body
  * capture; overlaps the TLS_DECRYPT → h2reassemble path. */
 { "H2_PIPE_WRITE","net/http/internal/http2.(*pipe).Write", AGY_ASYNC, "resp",   AGY_FULLCGO, 0 },
-/* AGY_OFF — the ingress RESPONSE (decrypted inbound record) is an on_leave []byte, but a gum return
- * hook on this hot func trips the GC unwinder (~40% turn failure — see header RETCAP). Retired; the
- * model response is to be re-captured via an entry-arg trampoline hook. Until then genai_turn
- * carries the request (TLS_WRITE) but not the wire response; the answer comes from FH_UPDATE.
+/* AGY_OFF — the ingress RESPONSE (decrypted inbound record) is an on_leave []byte. It FIRES and
+ * carries real data, but per TLS record (hot) → a gum return hook accumulates GC-unwind windows:
+ * measured 74/80 ≈ 92% (~8-12% hard crash) in the 2026-07-05 bisect — intermittently unsafe (see
+ * header RETCAP). The wire RESPONSE is instead captured via the RESP_CHUNK entry-arg trampoline hook
+ * (toStreamResponseChunk); genai_turn's response comes from there, the request from TLS_WRITE.
  * retcap<0: on_leave reads RAX=ptr/RBX=len but keys the event on the conn saved on_enter. */
 { "TLS_DECRYPT",  "crypto/tls.(*halfConn).decrypt",   AGY_ASYNC, "tls_read",  AGY_OFF,    -1 },
-/* AGY_OFF — Conn.Read is trampoline-hookable ONLY via full cgocall, not asmcgo (tested):
+/* AGY_OFF — Conn.Read PARKS on netpoll and resumes on another M, so a gum return hook here is
+ * CATASTROPHIC: the return-rewrite window spans the park → 0/15 turns (every one exit-2/empty) in
+ * the 2026-07-05 bisect. It's also trampoline-hookable ONLY via full cgocall, not asmcgo (tested):
  * asmcgo (no P handoff) stalled the model turn 0/3 while the baseline was 2/2; full cgocall
  * (entersyscall + P handoff) completed 4/6. The hot netpoll read path needs the P handed off
  * on each fire, so the usual "asmcgo for hot funcs" heuristic is INVERTED here. Left OFF
  * anyway: it yields NO data (the plaintext is the RETURN value the entry-only trampoline
- * can't read; the response is already captured at the non-parking TLS_DECRYPT above), while
- * full-cgo costs ~135 cgocalls/turn + as many _Gsyscall GC-scan windows on the read path —
- * all for a bare fire marker. retcap<0: on_leave uses the return count (RAX) + the buffer ptr
- * saved on_enter. */
+ * can't read; the response is already captured via RESP_CHUNK), while full-cgo costs ~135
+ * cgocalls/turn + as many _Gsyscall GC-scan windows on the read path — all for a bare fire marker.
+ * retcap<0: on_leave uses the return count (RAX) + the buffer ptr saved on_enter. */
 { "TLS_READ",     "crypto/tls.(*Conn).Read",         AGY_ASYNC, "tls_read",  AGY_OFF,    -1 },
 /* RoundTrip(t=RAX, req=RBX) PARKS on the round-trip → cgocall trampoline, AGY_FULLCGO (parking →
  * needs the P handoff; asmcgo would risk a stall). Emits an http_rt marker keyed by the request
@@ -131,8 +141,10 @@ inline constexpr agy_hook HOOKS[] = {
 { "HTTP_RT",      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   AGY_FULLCGO, 0 },
 
 /* AGY_OFF — app-layer capture R&D (CPU-only funcs returning []byte). Retired: a gum return hook is
- * GC-unwind-unsafe (see header RETCAP), and these never fired for the model request anyway. retcap>0
- * → the generic on_leave getter branch (emit the RAX/RBX return; 256 skips tiny protos). */
+ * GC-unwind-unsafe (see header RETCAP). Moot regardless — the 2026-07-05 bisect confirmed all three
+ * fire 0× on agy 1.0.16 (dead jetski model-package paths; the request goes out via the CloudCode
+ * client → TLS_WRITE), so a gum return hook here was 100% safe ONLY because it never executes.
+ * retcap>0 → the generic on_leave getter branch (emit the RAX/RBX return; 256 skips tiny protos). */
 { "SER_ROOT",     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",    AGY_ASYNC, "serialize", AGY_OFF,   1 },
 { "MAR_PROMPT",   "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON", AGY_ASYNC, "marshal",   AGY_OFF,   1 },
 { "PROTO_MARSHAL","google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            AGY_ASYNC, "proto_marshal", AGY_OFF, 256 },
@@ -155,11 +167,15 @@ inline constexpr agy_hook HOOKS[] = {
 /* AGY_OFF — model-TEXT leaf getters (gemini_coder pipeline): frameless nosplit getters that
  * RETURN the streamed assistant text (on_leave RAX=ptr,RBX=len). Retired: a gum return hook is
  * GC-unwind-unsafe (see header RETCAP), and being frameless they aren't trampoline-hookable
- * either (no prologue to relocate). The answer is captured at FH_UPDATE (app_response) instead. */
+ * either (no prologue to relocate). Moot — the 2026-07-05 bisect confirmed both fire 0× on 1.0.16
+ * (old api_server_pb/codeium_common surfaces); the answer is captured at FH_UPDATE (app_response). */
 { "GET_DELTA_CCPA", "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText", AGY_ASYNC, "delta_ccpa", AGY_OFF,   1 },
 { "GET_DELTA_CMPL", "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText", AGY_ASYNC, "delta_completion", AGY_OFF,   1 },
-/* AGY_OFF — RESPONSE getters (assembled assistant text as a Go string, on_leave RAX=ptr,RBX=len).
- * Retired for the same reason (a gum return hook is GC-unwind-unsafe; see header RETCAP). */
+/* AGY_OFF — RESPONSE getters (assembled assistant text + thinking as Go strings, on_leave
+ * RAX=ptr,RBX=len). Retired: a gum return hook is GC-unwind-unsafe (see header RETCAP). The
+ * 2026-07-05 bisect found them 30/30 safe but firing 0× on 1.0.16 (this cortex_go_proto surface is
+ * dead on the gemini_coder path) — so they'd add nothing even if kept. Thinking, if wanted, is a
+ * thought part in the RESP_CHUNK SSE stream, not here. */
 { "RESP_TEXT",     "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse", AGY_ASYNC, "resp_text",     AGY_OFF,   1 },
 { "RESP_THINKING", "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking", AGY_ASYNC, "resp_thinking", AGY_OFF,   1 },
 { "RESP_VIEW",     "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response",   AGY_ASYNC, "resp_view",     AGY_OFF,   1 },
