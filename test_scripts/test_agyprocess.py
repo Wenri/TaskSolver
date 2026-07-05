@@ -47,9 +47,12 @@ def case_roundtrip():
     got = _drain(p); _teardown(p)
     obj = next((x for x in got if isinstance(x, dict)), None)
     done = any(x == ("_agy_done", 0) for x in got)
+    # parent_alive/ppid exercise the parent-death sentinel: parent_process() sees the controlling
+    # process (our pid) and reports it alive (the boot pipe only EOFs when we die).
     ok = obj is not None and obj.get("agy_mp") == "ok" and list(obj.get("args", ())) == ["hi", 7] \
-        and obj.get("py", "").startswith("3.13") and done
-    print(f"  {'ok  ' if ok else 'FAIL'} round-trip: native object + clean exitcode  got={got}")
+        and obj.get("py", "").startswith("3.13") and done \
+        and obj.get("parent_alive") is True and obj.get("ppid") == os.getpid()
+    print(f"  {'ok  ' if ok else 'FAIL'} round-trip: native object + clean exitcode + parent sentinel  got={got}")
     if not ok:
         _fail.append("roundtrip")
 

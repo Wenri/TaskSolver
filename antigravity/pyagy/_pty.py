@@ -34,18 +34,23 @@ from .conversations import ensure_git_workspace
 _VENDOR_AGY = os.path.join(ROOT, "vendor", "agy")   # the pinned agy whose build-id matches the shim
 
 
-def _close_agy(fd, conn):
-    """PtyPopen's finalizer callback. Module-level, closing over only ``fd``/``conn`` (never the
-    Popen) so weakref-based GC finalization still fires: closes the PTY master fd — which SIGHUPs
-    agy, doubling as teardown — and the result Connection (``conn`` is None in plain-CLI). Uses
-    Connection.close() (not a raw os.close on its fileno) so the object stays in sync; both are
-    idempotent and the finalizer is one-shot."""
+def _close_agy(fd, conn, boot_w):
+    """PtyPopen's finalizer callback. Module-level, closing over only fds + ``conn`` (never the
+    Popen) so weakref-based GC finalization still fires. Closes: the PTY master fd — which SIGHUPs
+    agy, doubling as teardown; the result Connection; and the boot pipe's write end — whose EOF is
+    the worker's parent-death sentinel, so closing it here (or the OS closing it on our crash) tells
+    the in-agy worker we are gone. Uses Connection.close() (not a raw os.close on its fileno) so the
+    object stays in sync; all are idempotent and the finalizer is one-shot."""
     try:
         os.close(fd)
     except OSError:
         pass
     if conn is not None:
         conn.close()
+    try:
+        os.close(boot_w)
+    except OSError:
+        pass
 
 
 class PtyPopen(_ForkPopen):
@@ -133,12 +138,14 @@ class PtyPopen(_ForkPopen):
             workdir, getattr(process_obj, "_data_dir", None),
             trust=getattr(process_obj, "_trust", True))     # repo-scoped store + workspace trust
 
-        # Always wire the embedded-worker channel: a result Pipe + a boot pipe carrying the pickled
-        # target, both inherited across agy's execve (CLOEXEC off). See agy_process/mp_child.py.
+        # Always wire the embedded-worker channel: a result Pipe (child_conn → agy) + a boot pipe.
+        # child_conn and boot_r are inherited across agy's execve (CLOEXEC off); boot_w stays
+        # parent-only (CLOEXEC on — never made inheritable), so it lives exactly as long as we do
+        # and its EOF is the worker's parent-death sentinel. See agy_process/mp_child.py.
         parent_conn, child_conn = _conn.Pipe(duplex=True)   # bare socketpair (no semaphore → WSL1-ok)
         boot_r, boot_w = os.pipe()
         os.set_inheritable(child_conn.fileno(), True)
-        os.set_inheritable(boot_r, True)
+        os.set_inheritable(boot_r, True)                    # boot_w left CLOEXEC → not inherited by agy
         # caller overlays (shim knobs / rewrite) + scoped-HOME override + the boot pipe fd — the
         # sole worker-channel signal. Its payload carries the result-socketpair fd + the pickled
         # target (below), so no other AGY_MP_* env is needed.
@@ -161,17 +168,19 @@ class PtyPopen(_ForkPopen):
         self._spawn_pty(argv, workdir, env)            # pty.fork + execve(agy); child inherits the fds
         self.sentinel = self.fd                        # PTY master EOFs on agy death (wait(timeout))
         # Safety net (mirrors popen_fork's finalizer): runs via close() or, once nothing references
-        # the handle, GC of `self` — closes the PTY master (which SIGHUPs agy, doubling as teardown)
-        # + the result Connection. exitpriority is None (like popen_fork), so it does NOT run at the
-        # atexit sweep (there the OS reclaims fds and _exit_function terminates agy via _children).
-        # One-shot, so it's the sole closer of each. (No pump thread holds `self`, so GC works.)
-        self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn))
+        # the handle, GC of `self` — closes the PTY master (which SIGHUPs agy, doubling as teardown),
+        # the result Connection, and boot_w (whose EOF is the worker's parent-death sentinel).
+        # exitpriority is None (like popen_fork), so it does NOT run at the atexit sweep (there the OS
+        # reclaims fds — including boot_w, still signalling the worker — and _exit_function terminates
+        # agy via _children). One-shot, so it's the sole closer of each. (Nothing else holds `self`.)
+        self.finalizer = util.Finalize(self, _close_agy, (self.fd, parent_conn, boot_w))
 
         # Ship the result fd + pickled target over the boot pipe. Pickle the target UNDER
         # set_spawning_popen — the process's AuthenticationString refuses to pickle outside the
         # spawning context (stock spawn does the same). The payload is small (an fd + a function+args
         # pickle), << the 64 KB pipe buffer, so this single write lands in the kernel buffer without
-        # blocking even though agy reads it late.
+        # blocking even though agy reads it late. It's the ONLY thing ever written to boot_w — after
+        # this, boot_w just stays open as the sentinel (closefd=False; the finalizer closes it).
         import io
         prep = mp_spawn.get_preparation_data(process_obj._name)
         buf = io.BytesIO()
@@ -182,7 +191,7 @@ class PtyPopen(_ForkPopen):
             reduction.dump(process_obj, buf)
         finally:
             set_spawning_popen(None)
-        with os.fdopen(boot_w, "wb", closefd=True) as f:
+        with os.fdopen(boot_w, "wb", closefd=False) as f:   # keep boot_w open past the write (sentinel)
             f.write(buf.getvalue())
 
         child_conn.close()                                   # parent keeps only parent_conn

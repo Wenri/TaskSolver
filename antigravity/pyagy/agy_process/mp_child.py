@@ -51,11 +51,13 @@ def _run():
     global _result_conn
     from multiprocessing import connection, reduction
     boot = int(os.environ["AGY_MP_BOOT_FD"])
+    # keep boot open in-process (it's the parent-death sentinel), but CLOEXEC so agy's own Go
+    # child processes don't inherit it
     _set_cloexec(boot)
-    with os.fdopen(boot, "rb", closefd=True) as fp:
-        chan = reduction.pickle.load(fp)            # result-socketpair fd, shipped ahead of the payload
+    with os.fdopen(boot, "rb", closefd=False) as fp:  # closefd=False: boot outlives the read — the parent
+        chan = reduction.pickle.load(fp)            #   holds its write end open, so boot's EOF = our death
         _set_cloexec(chan)                          # don't leak into agy's Go child processes
-        _result_conn = connection.Connection(chan)  # duplex socketpair end inherited from the parent
+        _result_conn = connection.Connection(chan)  # result socketpair end inherited from the parent
         prep = reduction.pickle.load(fp)
         _trimmed_prepare(prep)
         proc = reduction.pickle.load(fp)            # the AgyProcess instance (target + args)
@@ -64,7 +66,11 @@ def _run():
     _orig_shutdown = threading._shutdown             # neutralization 2
     threading._shutdown = lambda: None
     try:
-        exitcode = proc._bootstrap(parent_sentinel=None)   # REAL mp child path (runs target, returns exitcode)
+        # boot doubles as the parent-death sentinel (so parent_process().is_alive()/.join() work): the
+        # parent writes the payload once, then holds boot's write end open for its whole life, so boot
+        # goes readable only when that end closes (EOF = our death). A dedicated write-once pipe like
+        # stock multiprocessing's child_r/parent_w — no data ever rides it, so nothing spuriously trips it.
+        exitcode = proc._bootstrap(parent_sentinel=boot)   # REAL mp child path (runs target, returns exitcode)
     except BaseException as e:                       # firewall: an escaped error must never reach Py_Exit
         exitcode = 1
         try:
@@ -124,8 +130,13 @@ def stream_turns(kinds=None, max_wait=300):
 
 # --- targets used by test_scripts/test_agyprocess.py (importable by reference in the child) ---
 def _demo_target(*args, **kwargs):
+    # also probes the parent-death sentinel: parent_process() reflects the controlling process,
+    # and is_alive() is True here because the parent is alive and only ever recvs on the socketpair.
+    import multiprocessing as _mp
+    parent = _mp.parent_process()
     get_result_conn().send({"agy_mp": "ok", "args": args, "kwargs": kwargs,
-                            "pid": os.getpid(), "py": sys.version.split()[0]})
+                            "pid": os.getpid(), "py": sys.version.split()[0],
+                            "parent_alive": parent.is_alive(), "ppid": parent.pid})
 
 
 def _raise_target(*args, **kwargs):
