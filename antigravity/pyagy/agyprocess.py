@@ -28,7 +28,6 @@ from `popen_fork.Popen` and tracks agy's own pid; the result flows over the Conn
 import os
 import threading
 import time
-import traceback
 
 import multiprocessing.connection as _conn
 from multiprocessing import reduction, spawn as mp_spawn
@@ -100,8 +99,6 @@ class AgyPopen(_ForkPopen):
         argv = [agy, *(getattr(process_obj, "_agy_args", None) or ["--print", "agy-mp"])]
 
         self._parent_conn = parent_conn
-        self._stop = threading.Event()
-        self._last_output = time.time()   # last time agy wrote to the PTY (turn-boundary idle)
         self._snap = _conv.snapshot(home=self._home)   # pre-launch store snapshot → conversation_id
         self._pty = PtyProcess(echo=getattr(process_obj, "_echo", False))
         self._pty.spawn(argv, workdir, env)                  # pty.fork + execve(agy); child inherits the fds
@@ -112,11 +109,12 @@ class AgyPopen(_ForkPopen):
         if not worker:
             return          # plain-CLI: the caller drives the PTY (read_until_exit/idle); no channel/pump
 
-        # Pickle (prep_data, process_obj) UNDER set_spawning_popen — BaseProcess.__reduce__ and
-        # the AuthenticationString refuse to pickle outside the spawning context (stock _launch
-        # wraps it the same way). Dump synchronously here (no thread-race on the module-global),
-        # then stream the bytes into the boot pipe from a thread so a large payload can't
-        # deadlock the launch before the child reads.
+        # --- embedded worker: ship the pickled target in, stream results out over the Connection ---
+        self._stop = threading.Event()                 # stops the PTY pump thread on close
+        self._last_output = time.time()                # last PTY write (turn-boundary idle for .ask())
+
+        # Pickle (prep_data, process_obj) UNDER set_spawning_popen — BaseProcess.__reduce__ and the
+        # AuthenticationString refuse to pickle outside the spawning context (stock _launch does the same).
         import io
         prep = mp_spawn.get_preparation_data(process_obj._name)
         buf = io.BytesIO()
@@ -126,22 +124,17 @@ class AgyPopen(_ForkPopen):
             reduction.dump(process_obj, buf)
         finally:
             set_spawning_popen(None)
-        payload = buf.getvalue()
-
-        def _feed():
-            try:
-                with os.fdopen(boot_w, "wb", closefd=True) as f:
-                    f.write(payload)
-            except Exception:
-                traceback.print_exc()
-        threading.Thread(target=_feed, name="agy-mp-boot", daemon=True).start()
+        # Write the whole payload into the boot pipe now (closing our end = EOF for the in-agy
+        # reader). It's a small function+args pickle, << the 64 KB pipe buffer, so this single
+        # write lands in the kernel buffer without blocking even though agy reads it late.
+        with os.fdopen(boot_w, "wb", closefd=True) as f:
+            f.write(buf.getvalue())
 
         child_conn.close()                                   # parent keeps only parent_conn
         try:
             os.close(boot_r)                                 # child has its own inherited copy
         except OSError:
             pass
-
         threading.Thread(target=self._pump, name="agy-mp-pty", daemon=True).start()
 
     def _pump(self):
