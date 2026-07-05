@@ -1,0 +1,9 @@
+{
+  "name": "tasksolver",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Node.js dependencies for TaskSolver",
+  "dependencies": {
+    "pymport": "^1.5.1"
+  }
+}

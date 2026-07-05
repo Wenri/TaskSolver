@@ -88,7 +88,9 @@ nodejs = ">=25,<26"
 bun = ">=1.3.11,<2"
 # GNU make drives the antigravity shim build (antigravity/Makefile); this host has
 # no system make, so pull it from conda-forge for manual rebuilds (`pixi run make …`).
+# make is also required by node-gyp for the pymport source build.
 make = ">=4"
+pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pymport)
 # Linux UAPI headers (linux/, asm/): glibc's <limits.h> (pulled in via frida-gum.h)
 # needs <linux/limits.h>, but this WSLackware host has none in /usr/include. The shim
 # build points -idirafter at this package's sysroot in place — no copy — at
@@ -132,6 +134,19 @@ pip = "*"
 setuptools = ">=61"
 make = ">=4"
 kernel-headers_linux-64 = ">=4"
+
+# --- pymport (Node.js ↔ Python bridge, compiled from source) ----------------
+# pymport embeds libpython as a shared library inside Node.js.  It must be
+# compiled from source (--build-from-source) so node-gyp links against pixi's
+# libpython3.13.  At runtime PYTHONHOME tells the embedded interpreter where
+# to find the conda env's stdlib + site-packages (numpy, torch, …).
+[tool.pixi.activation.env]
+PYTHONHOME = "$CONDA_PREFIX"
+PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig"
+
+[tool.pixi.tasks]
+npm-install = "npm_config_build_from_source=true CXXFLAGS='-std=c++17' npm install"
+pymport-test = { cmd = "node -e \"const {pymport,proxify}=require('pymport'); const sys=proxify(pymport('sys')); console.log('Python',sys.version.toString()); const np=proxify(pymport('numpy')); console.log('numpy',np.__version__.toString());\"", depends-on = ["npm-install"] }
 
 # --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---
 # The `local` and `app` features auto-map to the same-named
