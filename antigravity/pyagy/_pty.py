@@ -24,7 +24,7 @@ import threading
 import time
 
 import multiprocessing.connection as _conn
-from multiprocessing import reduction, spawn as mp_spawn
+from multiprocessing import reduction, spawn as mp_spawn, util
 from multiprocessing.context import set_spawning_popen
 from multiprocessing.popen_fork import Popen as _ForkPopen
 
@@ -183,7 +183,11 @@ class PtyPopen(_ForkPopen):
         self._snap = _conv.snapshot(home=self._home)   # pre-launch store snapshot → conversation_id
         self._spawn_pty(argv, workdir, env)            # pty.fork + execve(agy); child inherits the fds
         self.sentinel = self.fd                        # PTY master EOFs on agy death (wait(timeout))
-        self.finalizer = None
+        # Safety net (mirrors popen_fork's finalizer): close the PTY master on GC / at exit / in
+        # close() if the caller forgets — closing the master SIGHUPs agy, so it doubles as teardown.
+        # One-shot, so it's the sole closer of self.fd (no double-close). The result Connection
+        # closes itself via its own __del__, so the fd is the only resource that needs this.
+        self.finalizer = util.Finalize(self, util.close_fds, (self.fd,))
 
         if not worker:
             return          # plain-CLI: the caller drives the PTY (read_until_exit/idle); no channel/pump
@@ -236,24 +240,21 @@ class PtyPopen(_ForkPopen):
                 self._parent_conn.close()
         except Exception:
             pass
-        if not getattr(self, "pid", None):
-            return
-        if interrupt:
-            for _ in range(2):                           # Ctrl-C twice to break out of the TUI
-                try:
-                    self.write(b"\x03")
-                    time.sleep(0.2)
-                except OSError:
-                    break
-        try:
-            os.kill(self.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            os.waitpid(self.pid, 0)
-        except ChildProcessError:
-            pass
-        try:
-            os.close(self.fd)
-        except OSError:
-            pass
+        if getattr(self, "pid", None):
+            if interrupt:
+                for _ in range(2):                       # Ctrl-C twice to break out of the TUI
+                    try:
+                        self.write(b"\x03")
+                        time.sleep(0.2)
+                    except OSError:
+                        break
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(self.pid, 0)
+            except ChildProcessError:
+                pass
+        if getattr(self, "finalizer", None) is not None:
+            self.finalizer()                             # close the PTY master fd (one-shot)
