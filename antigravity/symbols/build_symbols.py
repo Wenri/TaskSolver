@@ -101,6 +101,13 @@ PROC_TARGETS = [
     # arg — the assembled assistant text is 3 proto-stable derefs away (Step+0x70 →
     # deref → +0x8 ptr / +0x10 len), not behind AgentState internals + a mutex.
     "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep",
+
+    # --- response-stream decode (restore the wire genai_turn RESPONSE, retired with TLS_DECRYPT) ---
+    # The raw SSE response was a gum-leave/Scanner-pull value (no entry-arg source); these
+    # codeassistclient funcs receive the DECODED response as entry args. Discovery targets:
+    # toStreamResponseChunk parses each SSE chunk; sendUsageDelta carries the token usage.
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.toStreamResponseChunk",
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*streamResponseHandler).sendUsageDelta",
 ]
 
 # Nosplit/frameless leaf getters that RETURN the streamed model text as a Go string

@@ -345,6 +345,13 @@ static void agy_cgo_hook(agy_block *b)
         agy_py_shutdown();       /* now cooperatively stop + join the worker (deterministic teardown) */
         return;
     }
+    if (kind == "resp_chunk") {
+        /* codeassistclient.toStreamResponseChunk(line string): line.ptr=rax, line.len=rbx — one
+         * raw SSE response line ("data: {\"response\": {...}}"), the wire RESPONSE. Entry-arg read
+         * on the trampoline — the reliable replacement for the retired TLS_DECRYPT leave hook. */
+        cgt_bytes_emit("resp_chunk", b->regs.rax, b->regs.rax, b->regs.rbx);
+        return;
+    }
     agy_event_t ev = { .kind = (const char *)b->kind,
                        .stream_id = b->regs.rax, .mode = AGY_ASYNC };
     agy_py_emit(&ev);

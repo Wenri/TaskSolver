@@ -150,8 +150,11 @@ worker load (~15%). Both cgocall-trampoline variants are **100% across 55+ turns
 stack: the `tls_write` request, the h2 `resp` chunk, the app boundary). The gum `leave=1` hooks
 that read *return* values are `AGY_OFF` (`TLS_DECRYPT`, the leaf getters, the R&D marshalers); the
 decoded answer still arrives via the `FH_UPDATE` trampoline as `app_response`. The one capture that
-was return-only — the wire `genai_turn` **response** (`TLS_DECRYPT`) — is being restored via an
-entry-arg trampoline hook on `codeassistclient.toStreamResponseChunk` (the SSE-chunk parser).
+was return-only — the wire `genai_turn` **response** (`TLS_DECRYPT`) — is recaptured entry-arg on
+the trampoline: `codeassistclient.toStreamResponseChunk(line string)` gets each raw SSE line
+(`data: {"response": {...}}`) in `rax`/`rbx`, emitted as `resp_chunk` (and `sendUsageDelta` carries
+model/usage). Reassembling those chunks into `genai_turn` in the capture correlator is the remaining
+Python step; the shim-side capture is in place (validated 10/10, no reliability cost).
 
 **Approach A (`src/cgotrampoline.c` + `src/gomod.c`)** avoids gum's return-tracking
 entirely. It redirects the target — **past its stack-check prologue** — into a generated

@@ -206,6 +206,16 @@ inline constexpr agy_hook HOOKS[] = {
 { "RPC_REC_TRAJ",     CAC "RecordTrajectorySegmentAnalytics", AGY_ASYNC, "rpc_record_trajectory", AGY_FULLCGO, 0 },
 { "RPC_WRITE_ACLS",   CAC "WriteTrajectoryACLs",              AGY_ASYNC, "rpc_write_acls",        AGY_FULLCGO, 0 },
 #undef CAC
+/* response-stream decode probes: the wire genai_turn RESPONSE (restores what TLS_DECRYPT
+ * carried before retirement). HTTP/1.1 SSE is pull-based, so the decrypted read is a return
+ * value with no entry-arg source; toStreamResponseChunk instead receives each DECODED SSE
+ * `data:` line as an entry arg (line.ptr=rax, line.len=rbx) — read on the trampoline in
+ * agy_cgo_hook. Parking response path → AGY_FULLCGO. sendUsageDelta carries model id + usage;
+ * run with AGY_PROC_CGT_ARGS to walk its args. */
+#define CAC2 "google3/third_party/jetski/language_server/code_assist_client/codeassistclient."
+{ "RESP_CHUNK",  CAC2 "toStreamResponseChunk",                   AGY_ASYNC, "resp_chunk",  AGY_FULLCGO, 0 },
+{ "USAGE_DELTA", CAC2 "(*streamResponseHandler).sendUsageDelta", AGY_ASYNC, "usage_delta", AGY_FULLCGO, 0 },
+#undef CAC2
 };
 
 inline constexpr int HK_COUNT = (int)(sizeof(HOOKS) / sizeof(HOOKS[0]));
