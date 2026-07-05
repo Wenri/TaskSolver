@@ -1,9 +1,9 @@
 """AgyProcess — the single front-door for launching the agy CLI. Always instrumented (LD_PRELOAD
 shim + capture JSONL, on the pinned vendor/agy), and always runs an in-agy worker target that
-streams agy's DECODED answer home over a Connection.
+streams agy's DECODED answer home over a SimpleQueue.
 
 A ``target`` (default: ``agy_process.mp_child.stream_turns``) runs inside agy's embedded interpreter
-and sends decoded objects home; the parent collects them with ``collect()`` (one-shot) / ``ask()``
+and puts decoded objects home; the parent collects them with ``collect()`` (one-shot) / ``ask()``
 (persistent multi-turn), or reads raw objects with ``recv``/``poll``. The PTY transcript is drained
 as a byproduct and kept on ``transcript`` for diagnostics (crashes, and a fallback answer when no
 turn decodes).
@@ -14,15 +14,15 @@ turn decodes).
 
     # custom worker: run a Python callable inside agy and stream your own objects home
     from pyagy.agy_process.mp_child import get_result_conn
-    def work(x): get_result_conn().send({"x": x})
+    def work(x): get_result_conn().put({"x": x})
     p = AgyProcess(target=work, args=(41,)); p.start()
     print(p.recv()); p.terminate(); p.join()
 
 Design: `AgyProcess` is a `SpawnProcess` whose `_Popen` is `_pty.PtyPopen` — a custom
 `popen_fork.Popen` that execs agy under a PTY (not python), owns the PTY + the lifecycle, hands the
-child a result Pipe + a boot pipe with the pickled target, and runs `agy_process/mp_child._bootstrap`.
+child a result SimpleQueue + a boot pipe with the pickled target, and runs `mp_child._bootstrap`.
 `start/join/exitcode/terminate` are inherited and track agy's pid; the answer flows over the
-Connection, the transcript over the PTY (a byproduct on ``transcript``).
+SimpleQueue, the transcript over the PTY (a byproduct on ``transcript``).
 """
 import time
 
@@ -91,18 +91,20 @@ class AgyProcess(SpawnProcess):
         self._extra_env = extra_env    # caller overlays layered onto instrumented_env (shim knobs)
         self._echo = echo              # mirror agy's PTY output to our stdout (debug)
 
-    # --- parent-side result channel (native Python objects sent by the target) ---
+    # --- parent-side result channel (native Python objects the target puts on the queue) ---
     def recv(self):
-        return self._popen._parent_conn.recv()
+        return self._popen._result_q.get()
 
     def poll(self, timeout=0.0):
-        """True if a result is waiting on the Connection. Drains agy's PTY (+ auto-answers) while it
+        """True if a result is waiting on the queue. Drains agy's PTY (+ auto-answers) while it
         waits, so a poll()/recv() loop keeps agy unblocked (no background pump thread)."""
         return self._popen._service(timeout)
 
     @property
     def connection(self):
-        return self._popen._parent_conn
+        """The result `SimpleQueue` (native mp channel). Custom targets ``.put`` on it inside agy;
+        the parent ``.get()``s it (or uses ``recv``/``poll``/``collect``)."""
+        return self._popen._result_q
 
     @property
     def conversation_id(self):
@@ -126,13 +128,12 @@ class AgyProcess(SpawnProcess):
         signals done / ``timeout``. Returns the collected dicts in arrival order (possibly empty
         if the run produced no decodable turn; use ``transcript`` as the fallback)."""
         pop = self._popen
-        conn = pop._parent_conn
         got, start = [], time.time()
         while time.time() - start < timeout:
-            if pop._service(1.0):            # drains the PTY; True when the Connection is readable
+            if pop._service(1.0):            # drains the PTY; True when the queue is readable
                 try:
-                    while conn.poll(0):
-                        o = conn.recv()
+                    while pop._result_reader.poll(0):
+                        o = pop._result_q.get()
                         if isinstance(o, tuple) and o and o[0] in ("_agy_done", "_agy_exc"):
                             pop.exited()      # reap agy so exit_status is set
                             return got
@@ -158,13 +159,12 @@ class AgyProcess(SpawnProcess):
         else:
             pop.send_line(prompt)            # type + submit a follow-up
         pop._last_output = time.time()
-        conn = pop._parent_conn
         got, last, start = [], None, time.time()
         while time.time() - start < timeout:
             if pop._service(0.2):            # drains the PTY; True once a result is ready
-                while conn.poll(0):
+                while pop._result_reader.poll(0):
                     try:
-                        o = conn.recv()
+                        o = pop._result_q.get()
                     except EOFError:
                         return got
                     if isinstance(o, dict) and o.get("kind") in kinds:
@@ -214,6 +214,12 @@ class AgyProcess(SpawnProcess):
     def close(self, interrupt=False):
         """Stop agy (``interrupt=True`` presses Ctrl-C first, for the TUI) and close the PTY."""
         self._popen.close(interrupt=interrupt)
+        # We reap agy ourselves (agy owns its lifetime), so multiprocessing's active-children set
+        # never sees it exit — drop it, else this Process (and its result SimpleQueue's two named
+        # semaphores) is pinned in `_children` and leaks until interpreter exit instead of being
+        # GC'd + sem_unlinked once the caller releases the handle.
+        from multiprocessing.process import _children
+        _children.discard(self)
 
 
 def collect_many(procs, timeout=300.0, kinds=_ANSWER_KINDS):
@@ -237,7 +243,7 @@ def collect_many(procs, timeout=300.0, kinds=_ANSWER_KINDS):
         for i, pop in enumerate(pops):
             if done[i]:
                 continue
-            watch[pop._parent_conn] = (i, True)
+            watch[pop._result_reader] = (i, True)
             if not pop._pty_dead:
                 watch[pop.fd] = (i, False)      # raw PTY master; drop it once it EOFs
         if not watch:
@@ -249,9 +255,9 @@ def collect_many(procs, timeout=300.0, kinds=_ANSWER_KINDS):
                 if not pop._read_available():
                     pop._pty_dead = True
                 continue
-            try:                                # Connection readable: gather this proc's results
-                while pop._parent_conn.poll(0):
-                    o = pop._parent_conn.recv()
+            try:                                # queue readable: gather this proc's results
+                while pop._result_reader.poll(0):
+                    o = pop._result_q.get()
                     if isinstance(o, tuple) and o and o[0] in ("_agy_done", "_agy_exc"):
                         pop.exited()             # reap agy so exit_status is set
                         done[i] = True
