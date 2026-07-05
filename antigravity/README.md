@@ -136,6 +136,17 @@ goroutine (blocking I/O, mutex/cond). A gum attach rewrites the return address a
 never matches → agy silently stalls (which is why a gum attach on a parking func is disabled
 — `AGY_OFF` — and these targets are trampolined instead).
 
+**Reliability: gum `leave=1` hooks are retired (2026-07).** Beyond parking, a bisect found gum's
+return-value interception (`on_leave`) is itself GC-unsafe *even on non-parking CPU funcs*: the
+return-address rewrite intermittently corrupts Go's stack unwinder during a GC scan, killing
+**~40% of model turns** (raw agy: 0% failure; entry-only gum + trampolines: 0%). So every gum
+`leave=1` hook is now `AGY_OFF` (`TLS_DECRYPT`, the leaf getters, the R&D marshalers). Entry-arg
+capture is safe on both gum and the trampoline; to read a value a leave hook used to intercept,
+hook an **entry-arg** func via the trampoline instead. (This is why the wire `genai_turn`
+**response** is temporarily unavailable — `TLS_DECRYPT` was its only source; the decoded answer
+still arrives via the `FH_UPDATE` trampoline as `app_response`. Restoring a trampoline-based
+response capture is the follow-on.)
+
 **Approach A (`src/cgotrampoline.c` + `src/gomod.c`)** avoids gum's return-tracking
 entirely. It redirects the target — **past its stack-check prologue** — into a generated
 trampoline that:

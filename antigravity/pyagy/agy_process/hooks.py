@@ -12,7 +12,10 @@ passed to ``dispatch``), ``mech`` (how it's installed: ``"gum"`` = frida-gum inl
 stalls agy or collides with another), ``leave`` (intercepts the return value), ``note``.
 
 The shim installs the union of every non-``"off"`` hook on each run (no stage selector).
-``"off"`` hooks are the parking/return-value funcs and the os.Getenv duplicate.
+``"off"`` hooks include every gum ``leave=1`` hook (return-value interception): a 2026-07
+bisect showed they intermittently corrupt agy's GC stack-unwind, killing ~40% of model turns
+(see procdef.h LEAVE), so they are retired — read such values via an entry-arg trampoline hook
+instead. Also off: the os.Getenv trampoline duplicate and the parking Conn.Read.
 """
 
 HOOKS = [
@@ -31,7 +34,7 @@ HOOKS = [
      "mode": "async", "kind": "resp", "mech": "fullcgo", "leave": False,
      "note": "de-framed HTTP/2 response chunk ([]byte entry arg); parks → cgocall trampoline"},
     {"id": "TLS_DECRYPT", "symbol": "crypto/tls.(*halfConn).decrypt", "mode": "async",
-     "kind": "tls_read", "mech": "gum", "leave": True,
+     "kind": "tls_read", "mech": "off", "leave": True,
      "note": "ingress s2c (decrypted inbound records); carries the SSE response"},
     {"id": "TLS_READ", "symbol": "crypto/tls.(*Conn).Read", "mode": "async",
      "kind": "tls_read", "mech": "off", "leave": True,
@@ -44,14 +47,14 @@ HOOKS = [
      "note": "RoundTrip marker (req ptr = rbx); parks → trampoline. Hot + about to syscall → asmcgo"},
     {"id": "SER_ROOT",
      "symbol": "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",
-     "mode": "async", "kind": "serialize", "mech": "gum", "leave": True,
+     "mode": "async", "kind": "serialize", "mech": "off", "leave": True,
      "note": "app-layer R&D; empirically does not fire for the model request"},
     {"id": "MAR_PROMPT",
      "symbol": "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON",
-     "mode": "async", "kind": "marshal", "mech": "gum", "leave": True, "note": "app-layer R&D"},
+     "mode": "async", "kind": "marshal", "mech": "off", "leave": True, "note": "app-layer R&D"},
     {"id": "PROTO_MARSHAL",
      "symbol": "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",
-     "mode": "async", "kind": "proto_marshal", "mech": "gum", "leave": True,
+     "mode": "async", "kind": "proto_marshal", "mech": "off", "leave": True,
      "note": "app-layer R&D; hot path (fires on every proto marshal ≥256B)"},
     {"id": "CGT_SEND_USER_MSG",
      "symbol": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage",
@@ -70,20 +73,20 @@ HOOKS = [
     # empirically inert on 1.0.16.
     {"id": "GET_DELTA_CCPA",
      "symbol": "…api_server_go_proto.(*GetChatMessageResponse).GetDeltaText",
-     "mode": "async", "kind": "delta_ccpa", "mech": "gum", "leave": True,
+     "mode": "async", "kind": "delta_ccpa", "mech": "off", "leave": True,
      "note": "leaf getter, returns delta text (on_leave); inactive ccpa provider — doesn't fire on 1.0.16"},
     {"id": "GET_DELTA_CMPL",
      "symbol": "…codeium_common_go_proto.(*CompletionDelta).GetDeltaText",
-     "mode": "async", "kind": "delta_completion", "mech": "gum", "leave": True,
+     "mode": "async", "kind": "delta_completion", "mech": "off", "leave": True,
      "note": "leaf getter, returns delta text (on_leave); inactive provider — doesn't fire"},
     # RESPONSE getters (return the assembled text as a plain string on_leave). Tried for
     # the return-value problem; DON'T fire on 1.0.16 (framework reads the field directly).
     {"id": "RESP_TEXT", "symbol": "…cortex_go_proto.(*CortexStepPlannerResponse).GetResponse",
-     "mode": "async", "kind": "resp_text", "mech": "gum", "leave": True, "note": "response getter — doesn't fire (direct field access)"},
+     "mode": "async", "kind": "resp_text", "mech": "off", "leave": True, "note": "response getter — doesn't fire (direct field access)"},
     {"id": "RESP_THINKING", "symbol": "…cortex_go_proto.(*CortexStepPlannerResponse).GetThinking",
-     "mode": "async", "kind": "resp_thinking", "mech": "gum", "leave": True, "note": "thinking getter — doesn't fire"},
+     "mode": "async", "kind": "resp_thinking", "mech": "off", "leave": True, "note": "thinking getter — doesn't fire"},
     {"id": "RESP_VIEW", "symbol": "…trajectory.(*PlannerResponseStepView).Response",
-     "mode": "async", "kind": "resp_view", "mech": "gum", "leave": True, "note": "response view — doesn't fire"},
+     "mode": "async", "kind": "resp_view", "mech": "off", "leave": True, "note": "response view — doesn't fire"},
     {"id": "FH_FINALIZE",
      "symbol": "…generator.(*streamResponseHandler).finalizePlannerResponse",
      "mode": "async", "kind": "fh_finalize", "mech": "fullcgo", "leave": False,

@@ -7,7 +7,8 @@
  * MODE   AGY_ASYNC (log, non-blocking) or AGY_SYNC (block for a modify verdict).
  * kind   string tag passed to Python dispatch(kind, stream_id, data).
  * MECH   how the hook is installed (see install_hooks in antigravity.c):
- *          AGY_GUM     = frida-gum inline attach (non-parking CPU funcs; supports leave=1).
+ *          AGY_GUM     = frida-gum inline attach. ENTRY-only (leave=0) in practice — the leave=1
+ *                        gum hooks are retired as GC-unwind-unsafe (see LEAVE below).
  *          AGY_FULLCGO = cgocall trampoline (cgotrampoline.c) via full runtime.cgocall — the robust
  *                        default for parking funcs (entersyscall + P handoff, GC-safe).
  *          AGY_ASMCGO  = cgocall trampoline via runtime.asmcgocall — the lighter g0-switch
@@ -18,10 +19,14 @@
  *        The shim installs the union of every non-OFF hook on each run (no stage selector).
  *        FULLCGO and ASMCGO hooks share one trampoline region + synthetic moduledata; the
  *        pcsp matches the full-cgo geometry (only those slots are ever GC-unwound).
- * LEAVE  1 => needs on_leave (return-value interception). Costs a return-address
- *        rewrite that Go's stack unwinder can trip on, so keep it to hooks that
- *        truly need the return value. NEVER hook runtime-special funcs
- *        (runtime.main, goroutine entries) — Go validates their return PC.
+ * LEAVE  1 => needs on_leave (return-value interception). Costs a return-address rewrite that
+ *        Go's stack unwinder trips on — and a 2026-07 bisect proved it: the gum leave=1 hooks
+ *        intermittently corrupt agy's GC stack-unwind, killing ~40% of model turns (raw agy: 0%;
+ *        entry-only gum + trampolines: 0%). So every gum leave=1 hook is now AGY_OFF. To read a
+ *        value a leave hook used to intercept, hook an ENTRY-arg func via the trampoline instead
+ *        (it reads args on the g0 stack and never rewrites a return) — see H2_PIPE_WRITE / the
+ *        cgt_* app hooks. NEVER hook runtime-special funcs (runtime.main, goroutine entries) —
+ *        Go validates their return PC.
  */
 
 /* Safe ordinary startup function; fires many times, no auth/network needed. Liveness smoke.
@@ -46,9 +51,11 @@ HOOK(TLS_WRITE,    "crypto/tls.(*Conn).Write",        AGY_ASYNC, "tls_write", AG
  * an ENTRY arg, safe-read off the g0 stack in agy_cgo_hook). A more-direct HTTP/2 body
  * capture; overlaps the TLS_DECRYPT → h2reassemble path. */
 HOOK(H2_PIPE_WRITE,"net/http/internal/http2.(*pipe).Write", AGY_ASYNC, "resp",   AGY_FULLCGO, 0)
-/* ingress RESPONSE via TLS decrypt (CPU-only, post-read → doesn't park). on_leave
- * []byte = decrypted inbound record (HTTP/2 frames of the response). */
-HOOK(TLS_DECRYPT,  "crypto/tls.(*halfConn).decrypt",   AGY_ASYNC, "tls_read",  AGY_GUM,   1)
+/* AGY_OFF — the ingress RESPONSE (decrypted inbound record) is an on_leave []byte, but gum
+ * leave=1 on this hot func trips the GC unwinder (~40% turn failure — see header LEAVE). Retired;
+ * the model response is to be re-captured via an entry-arg trampoline hook. Until then genai_turn
+ * carries the request (TLS_WRITE) but not the wire response; the answer comes from FH_UPDATE. */
+HOOK(TLS_DECRYPT,  "crypto/tls.(*halfConn).decrypt",   AGY_ASYNC, "tls_read",  AGY_OFF,   1)
 /* AGY_OFF — Conn.Read is trampoline-hookable ONLY via full cgocall, not asmcgo (tested):
  * asmcgo (no P handoff) stalled the model turn 0/3 while the baseline was 2/2; full cgocall
  * (entersyscall + P handoff) completed 4/6. The hot netpoll read path needs the P handed off
@@ -65,11 +72,11 @@ HOOK(TLS_READ,     "crypto/tls.(*Conn).Read",         AGY_ASYNC, "tls_read",  AG
  * so this is a fire/timing marker more than new data. */
 HOOK(HTTP_RT,      "net/http.(*Transport).RoundTrip", AGY_ASYNC, "http_rt",   AGY_ASMCGO,  0)
 
-/* app-layer capture R&D — CPU-only funcs returning []byte (readable). Do not fire for
- * the model request in practice, but park-safe leaves, so installed as part of the union. */
-HOOK(SER_ROOT,     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",    AGY_ASYNC, "serialize", AGY_GUM,   1)
-HOOK(MAR_PROMPT,   "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON", AGY_ASYNC, "marshal",   AGY_GUM,   1)
-HOOK(PROTO_MARSHAL,"google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            AGY_ASYNC, "proto_marshal", AGY_GUM,   1)
+/* AGY_OFF — app-layer capture R&D (CPU-only funcs returning []byte). Retired: gum leave=1 is
+ * GC-unwind-unsafe (see header LEAVE), and these never fired for the model request anyway. */
+HOOK(SER_ROOT,     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",    AGY_ASYNC, "serialize", AGY_OFF,   1)
+HOOK(MAR_PROMPT,   "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON", AGY_ASYNC, "marshal",   AGY_OFF,   1)
+HOOK(PROTO_MARSHAL,"google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            AGY_ASYNC, "proto_marshal", AGY_OFF,   1)
 
 /* cgocall-TRAMPOLINE app-boundary hooks (Approach A — the robust general mechanism).
  * The parking targets (SendUserMessage/callbackStreamer.Send): instead of a gum
@@ -87,19 +94,17 @@ HOOK(CGT_STREAM_SEND,   "google3/third_party/jetski/cli/backend/backend.(*callba
  * The trampoline mechanism is exercised by the real trampoline hooks; this validator is redundant. */
 HOOK(CGT_GETENV, "os.Getenv", AGY_ASYNC, "cgt_getenv", AGY_OFF, 0)
 
-/* model-TEXT leaf getters (gemini_coder pipeline). These frameless nosplit
- * getters RETURN the streamed assistant text as a Go string (on_leave RAX=ptr,RBX=len)
- * — the cleanest signal, zero struct-offset fragility. CPU-only leaves → gum-attach
- * on_leave is re-entry-safe. Two provider variants; whichever fires at runtime wins.
- * (build_symbols NOSPLIT_TARGETS resolves them skip=0, exempt from the prologue assert.) */
-HOOK(GET_DELTA_CCPA, "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText", AGY_ASYNC, "delta_ccpa", AGY_GUM,   1)
-HOOK(GET_DELTA_CMPL, "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText", AGY_ASYNC, "delta_completion", AGY_GUM,   1)
-/* RESPONSE getters: return the assembled assistant text as a plain Go string (on_leave
- * RAX=ptr,RBX=len) — the clean, zero-struct-offset answer to the return-value problem
- * IF they fire (proto getters can be bypassed by direct field access; probe first). */
-HOOK(RESP_TEXT,     "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse", AGY_ASYNC, "resp_text",     AGY_GUM,   1)
-HOOK(RESP_THINKING, "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking", AGY_ASYNC, "resp_thinking", AGY_GUM,   1)
-HOOK(RESP_VIEW,     "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response",   AGY_ASYNC, "resp_view",     AGY_GUM,   1)
+/* AGY_OFF — model-TEXT leaf getters (gemini_coder pipeline): frameless nosplit getters that
+ * RETURN the streamed assistant text (on_leave RAX=ptr,RBX=len). Retired: gum leave=1 is
+ * GC-unwind-unsafe (see header LEAVE), and being frameless they aren't trampoline-hookable
+ * either (no prologue to relocate). The answer is captured at FH_UPDATE (app_response) instead. */
+HOOK(GET_DELTA_CCPA, "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText", AGY_ASYNC, "delta_ccpa", AGY_OFF,   1)
+HOOK(GET_DELTA_CMPL, "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText", AGY_ASYNC, "delta_completion", AGY_OFF,   1)
+/* AGY_OFF — RESPONSE getters (assembled assistant text as a Go string, on_leave RAX=ptr,RBX=len).
+ * Retired for the same reason (gum leave=1 is GC-unwind-unsafe; see header LEAVE). */
+HOOK(RESP_TEXT,     "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse", AGY_ASYNC, "resp_text",     AGY_OFF,   1)
+HOOK(RESP_THINKING, "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking", AGY_ASYNC, "resp_thinking", AGY_OFF,   1)
+HOOK(RESP_VIEW,     "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response",   AGY_ASYNC, "resp_view",     AGY_OFF,   1)
 
 /* model-TEXT framework choke points (provider-agnostic). On the parking
  * stream-consumer path → cgocall trampoline; AGY_PROC_CGT_ARGS walks their args to
