@@ -22,6 +22,12 @@
 #include "symbols_gen.h"
 #include "cgotrampoline.h"
 #include "procdef.h"   /* agy_mech_t, the constexpr HOOKS[] table, HK_COUNT, and hk("id") lookup */
+#include "gomod.h"     /* AGY_GOMOD_MAX_SLOTS — the static synthetic-moduledata's slot capacity */
+
+/* The synthetic moduledata (gomod.cpp) holds its per-slot tables in a fixed static buffer sized for
+ * AGY_GOMOD_MAX_SLOTS. Trampoline slots ≤ installed hooks ≤ HK_COUNT, so guarantee it fits at build. */
+static_assert(HK_COUNT <= AGY_GOMOD_MAX_SLOTS,
+              "more hooks than the static synthetic-moduledata holds — bump AGY_GOMOD_MAX_SLOTS in gomod.h");
 
 /* ---- logging -------------------------------------------------------------- */
 static FILE *g_logf;

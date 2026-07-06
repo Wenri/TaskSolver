@@ -62,6 +62,23 @@ static go_moduledata *g_md;
 static uint64_t g_firstmd_addr, g_cgocall_rt;
 static std::atomic<int> g_claimed{0}, g_done{0};
 
+/* The synthetic moduledata + all its tables in ONE static (BSS) block — the process singleton:
+ * zero-initialized, fixed address, alive for the whole run (Go owns it forever), and NO heap
+ * (nothing to leak, no OOM path, and a second build is structurally impossible). Sized for
+ * AGY_GOMOD_MAX_SLOTS; prepare() fills only the first `nslots`. The raw byte buffers that back Go
+ * structs are aligned for them (go_func / go_stackmap are uint32-aligned; the typed arrays and md/ph
+ * self-align). */
+static struct {
+    go_moduledata     md;
+    go_pcHeader       ph;
+    go_functab        ftab[AGY_GOMOD_MAX_SLOTS + 1];   /* nfunc entries + 1 sentinel */
+    go_findfuncbucket fft[AGY_GOMOD_MAX_SLOTS + 1];    /* nbuckets ≤ nfunc/16+1, always ≤ this */
+    alignas(uint32_t) uint8_t pcln[AGY_GOMOD_MAX_SLOTS * AGY_FUNC_STRIDE];   /* the _func records */
+    uint8_t           names[32];   /* "\0agy_cgo_tramp\0" */
+    uint8_t           pctab[32];   /* dummy[0] + 3-region pcsp */
+    alignas(uint32_t) uint8_t smap[sizeof(go_stackmap) + AGY_GOMOD_MAX_MAPBYTES];  /* stackmap hdr+bits */
+} g_mod;
+
 int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
                       uintptr_t region_base, uintptr_t region_end,
                       uint32_t slot_size, int nslots,
@@ -70,22 +87,28 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     int nfunc = nslots;
     uint32_t region_size = (uint32_t)(region_end - region_base);
     int nbuckets = (int)(region_size / GO_FUNCTAB_BUCKET) + 1;
-
-    /* metadata buffers, off the Go heap (moduledata is NotInHeap; C allocs qualify) */
-    go_moduledata     *md   = (go_moduledata *)calloc(1, sizeof *md);
-    go_pcHeader       *ph   = (go_pcHeader *)calloc(1, sizeof *ph);
-    go_functab        *ftab = (go_functab *)calloc(nfunc + 1, sizeof *ftab);   /* +1 sentinel */
-    go_findfuncbucket *fft  = (go_findfuncbucket *)calloc(nbuckets, sizeof *fft); /* all-zero => scan from ftab[0] */
-    uint8_t           *pcln = (uint8_t *)calloc(nfunc, AGY_FUNC_STRIDE);       /* the _func records */
-    uint8_t           *names = (uint8_t *)calloc(1, 32);                       /* "\0agy_cgo_tramp\0" */
-    uint8_t           *pctab = (uint8_t *)calloc(1, 32);                       /* dummy[0] + 3-region pcsp */
     int nbit = (int)((frame - 8) / 8);
     int mapbytes = (nbit + 7) / 8;
-    go_stackmap       *smap = (go_stackmap *)calloc(1, sizeof *smap + mapbytes);
-    if (!md || !ph || !ftab || !fft || !pcln || !names || !pctab || !smap) {
-        GLOG("out of memory building moduledata");
+
+    /* All buffers come from the static g_mod singleton (no heap → nothing to leak, no OOM). Guard
+     * its fixed caps: the static_assert in antigravity.cpp (HK_COUNT <= AGY_GOMOD_MAX_SLOTS) makes
+     * the nfunc case unreachable, but keep the runtime check so an oversized frame/region degrades
+     * gracefully (rc<0 → "live but NOT GC-safe") rather than overflowing. moduledata is NotInHeap;
+     * static (BSS) storage qualifies just as a C alloc did. */
+    if (nfunc > AGY_GOMOD_MAX_SLOTS || nbuckets > AGY_GOMOD_MAX_SLOTS + 1 ||
+        mapbytes > AGY_GOMOD_MAX_MAPBYTES) {
+        GLOG("moduledata exceeds static caps (nfunc=%d nbuckets=%d mapbytes=%d) — bump AGY_GOMOD_MAX_SLOTS",
+             nfunc, nbuckets, mapbytes);
         return -3;
     }
+    go_moduledata     *md    = &g_mod.md;
+    go_pcHeader       *ph    = &g_mod.ph;
+    go_functab        *ftab  = g_mod.ftab;
+    go_findfuncbucket *fft   = g_mod.fft;
+    uint8_t           *pcln  = g_mod.pcln;
+    uint8_t           *names = g_mod.names;
+    uint8_t           *pctab = g_mod.pctab;
+    go_stackmap       *smap  = (go_stackmap *)g_mod.smap;
 
     /* pcHeader: hardcode the go1.26/amd64 constants (NOT read from firstmoduledata,
      * which isn't relocated yet at constructor time). Only moduledataverify1 (a

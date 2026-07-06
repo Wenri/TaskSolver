@@ -173,6 +173,14 @@ typedef struct { uint64_t kind; agy_go_regs regs; } agy_block;
 /* _func total stride in pclntable: 44-byte header + funcdata[2] (no pcdata). */
 #define AGY_FUNC_STRIDE 52
 
+/* The synthetic moduledata is a process singleton kept in STATIC (BSS) storage — no heap, nothing
+ * to leak, no OOM path. These bound its fixed-size tables; agy_gomod_prepare rejects (rc<0) anything
+ * larger, and antigravity.cpp static_asserts HK_COUNT <= AGY_GOMOD_MAX_SLOTS so the hook table can
+ * never outgrow it (bump the cap if you add that many hooks). MAX_MAPBYTES bounds the locals bitmap:
+ * mapbytes = ((frame-8)/8 + 7)/8, which is 2 for the real frame (GH_FRAME = 120). */
+#define AGY_GOMOD_MAX_SLOTS    64
+#define AGY_GOMOD_MAX_MAPBYTES 8
+
 /* Two-phase registration (our LD_PRELOAD ctor runs before Go rt0, when
  * firstmoduledata's pointer fields are still unrelocated):
  *
