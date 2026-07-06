@@ -70,15 +70,17 @@ UAPI_INC := $(if $(wildcard /usr/include/linux/limits.h),,$(patsubst %/linux/lim
 PYCFG   := $(shell command -v "$(CONDA_PREFIX)/bin/python3-config" 2>/dev/null || command -v python3-config || command -v /usr/bin/python3-config)
 CFLAGS  := -O2 -g -fPIC -Wall -Wextra -std=gnu11 -fvisibility=hidden \
            -ffunction-sections -fdata-sections -I$(GUM) $(shell $(PYCFG) --includes) $(if $(UAPI_INC),-idirafter $(UAPI_INC))
-# pybridge.cpp is C++23 (Boost.Thread); Boost headers live in $(CONDA_PREFIX)/include (conda).
-CXXFLAGS := -O2 -g -fPIC -Wall -Wextra -std=c++23 -fvisibility=hidden \
+# pybridge.cpp is C++23 (Boost.Thread + Boost.Python); Boost headers live in $(CONDA_PREFIX)/include.
+# -Wno-deprecated-declarations silences the one std::auto_ptr warning Boost.Python emits under c++23.
+CXXFLAGS := -O2 -g -fPIC -Wall -Wextra -Wno-deprecated-declarations -std=c++23 -fvisibility=hidden \
             -ffunction-sections -fdata-sections -I$(GUM) $(shell $(PYCFG) --includes) \
             $(if $(CONDA_PREFIX),-I$(CONDA_PREFIX)/include,) $(if $(UAPI_INC),-idirafter $(UAPI_INC))
 LDFLAGS := -shared -Wl,--exclude-libs,ALL -Wl,--gc-sections $(if $(CONDA_PREFIX),-Wl$(comma)-rpath$(comma)$(CONDA_PREFIX)/lib,)
-# Linked with $(CXX) (pulls libstdc++). libboost_thread is the conda .so in $(CONDA_PREFIX)/lib,
-# found at runtime via the rpath above — dynamic link, no /nix rpath (conda toolchain).
+# Linked with $(CXX) (pulls libstdc++). libboost_thread + libboost_python313 are the conda .so's in
+# $(CONDA_PREFIX)/lib, found at runtime via the rpath above — dynamic link, no /nix rpath.
+# libboost_python313's UND Py* symbols bind against the shim's own -lpython3.13 under LD_PRELOAD.
 LIBS    := $(GUM)/libfrida-gum.a $(shell $(PYCFG) --ldflags --embed) \
-           $(if $(CONDA_PREFIX),-L$(CONDA_PREFIX)/lib,) -lboost_thread -lrt -lresolv -ldl -lm -pthread
+           $(if $(CONDA_PREFIX),-L$(CONDA_PREFIX)/lib,) -lboost_thread -lboost_python313 -lrt -lresolv -ldl -lm -pthread
 
 .PHONY: all setup symbols agy-update clean
 all: $(SHIM)

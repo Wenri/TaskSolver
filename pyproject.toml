@@ -109,6 +109,9 @@ gxx_linux-64 = ">=11,<13.3"
 # 16 MB stack — no std API can). libboost-devel = headers + link libs; it pulls libboost (the
 # runtime libboost_thread.so, found at runtime via the shim's -rpath $CONDA_PREFIX/lib).
 libboost-devel = ">=1.88"
+# Boost.Python for the pybridge CPython embedding (bp::object/import/extract over the raw
+# C-API). Python-version-specific: the py313 build matches the embedded libpython3.13.
+libboost-python-devel = ">=1.88"
 # antigravity HTTP/2 response decoding (h2reassemble.py) — from conda-forge, not pip.
 hpack = ">=4"
 brotli-python = ">=1.1"
@@ -150,6 +153,7 @@ kernel-headers_linux-64 = ">=4"
 gcc_linux-64 = ">=11,<13.3"   # compile the shim's C TUs with conda's gcc, not the Nix gcc on PATH
 gxx_linux-64 = ">=11,<13.3"   # pybridge.cpp is C++23 (Boost.Thread) → conda g++
 libboost-devel = ">=1.88"     # Boost.Thread (headers + libboost_thread) for the pybridge worker
+libboost-python-devel = ">=1.88"   # Boost.Python (embedding) — py313 build matches libpython3.13
 
 # --- pymport (Node.js ↔ Python bridge, compiled from source) ----------------
 # pymport embeds libpython as a shared library inside Node.js.  It must be

@@ -3,11 +3,17 @@
  * C++23 TU (the rest of the shim is C). Boost.Thread is used over std::thread because only
  * boost::thread::attributes can set the worker's 16 MB stack — libpython's C stack is deep and
  * std::thread/jthread expose no stack-size API. The exported API has C linkage (see pybridge.h)
- * so the C TUs (antigravity.c, gomod.c, cgotrampoline.c) link against it. */
+ * so the C TUs (antigravity.c, gomod.c, cgotrampoline.c) link against it.
+ *
+ * Boost.Python (bp::) handles the Python object/call/refcount layer (import, attrs, calling
+ * dispatch, extracting the result) — RAII refcounting + error_already_set instead of manual
+ * PyObject* / Py_DECREF / NULL checks. It does NOT wrap interpreter bootstrap or the GIL (no
+ * gil.hpp in Boost 1.91), so Py_InitializeEx, PyEval_SaveThread, and PyGILState_Ensure/Release
+ * stay raw C-API. g_dispatch stays a raw PyObject* on purpose (a static bp::object would run an
+ * exit-time Py_DECREF without the GIL in this never-Py_Finalize'd interp). */
 #define PY_SSIZE_T_CLEAN   /* required for "#" formats (y#) on Python 3.10+ */
+#include <boost/python.hpp>   /* pulls in Python.h first, with the right guards */
 #include "pybridge.h"
-
-#include <Python.h>
 
 #include <boost/thread.hpp>
 #include <boost/thread/condition_variable.hpp>
@@ -16,6 +22,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+
+namespace bp = boost::python;
 
 #define PYLOG(...) do { fprintf(stderr, "[antigravity/py] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 
@@ -60,32 +68,49 @@ static void enqueue(job *j)
     g_qcv.notify_one();
 }
 
-/* Called on the worker thread, holding the GIL. */
+/* Called on the worker thread, holding the GIL. Every bp::object below is created AND destroyed
+ * inside this GIL window — none escapes to a GIL-less context. */
 static void run_dispatch(job *j)
 {
     if (!g_dispatch) return;
-    /* Keep the (ptr,len) pair consistent: if there's no buffer, length is 0 so the
-     * "y#" format never reads past the empty literal. */
-    const char *buf = j->data ? (const char *)j->data : "";
-    Py_ssize_t dlen = j->data ? (Py_ssize_t)j->len : 0;
-    PyObject *r = PyObject_CallFunction(g_dispatch, "sKy#",
-                                        j->kind, (unsigned long long)j->stream_id,
-                                        buf, dlen);
-    if (!r) {
-        PyErr_Print();
-        return;
-    }
-    if (j->mode == AGY_SYNC && PyBytes_Check(r)) {
-        Py_ssize_t n = PyBytes_GET_SIZE(r);
-        uint8_t *out = (uint8_t *)malloc(n ? (size_t)n : 1);
-        if (out) {
-            memcpy(out, PyBytes_AS_STRING(r), (size_t)n);
-            j->out_data = out;
-            j->out_len = (size_t)n;
-            j->verdict = 1;
+    try {
+        /* The "y#" payload must be real Python bytes — bp::str/std::string would build PyUnicode
+         * (str) and corrupt binary data. Build bytes via the C-API and adopt into a handle (throws
+         * error_already_set on NULL). Empty buffer → 0-length bytes, consistent (ptr,len). */
+        const char *buf = j->data ? (const char *)j->data : "";
+        Py_ssize_t  dlen = j->data ? (Py_ssize_t)j->len : 0;
+        bp::object arg(bp::handle<>(PyBytes_FromStringAndSize(buf, dlen)));
+
+        /* dispatch(kind: str, stream_id: int, data: bytes) — the old "sKy#" call. bp::call takes
+         * the raw PyObject* callable directly; the result is a new-ref bp::object (RAII decref). */
+        bp::object r = bp::call<bp::object>(g_dispatch,
+                                            bp::str(j->kind),
+                                            (unsigned long long)j->stream_id,
+                                            arg);
+
+        if (j->mode == AGY_SYNC && !r.is_none() && PyBytes_Check(r.ptr())) {
+            Py_ssize_t n = PyBytes_GET_SIZE(r.ptr());
+            uint8_t *out = (uint8_t *)malloc(n ? (size_t)n : 1);
+            if (out) {
+                memcpy(out, PyBytes_AS_STRING(r.ptr()), (size_t)n);
+                j->out_data = out;
+                j->out_len = (size_t)n;
+                j->verdict = 1;
+            }
         }
+        /* arg and r destruct here (GIL held) → automatic Py_DECREF. */
     }
-    Py_DECREF(r);
+    catch (const bp::error_already_set &) {
+        /* error_already_set carries no message — the detail is in CPython's error indicator;
+         * inspect it here before clearing (PyErr_Print also clears). */
+        if (PyErr_Occurred()) PyErr_Print();
+        PyErr_Clear();
+    }
+    catch (...) {
+        /* Backstop: run_dispatch runs in the boost::thread loop with the GIL held; an escaping
+         * C++ exception would std::terminate the process (and leak the GIL). Never unwind out. */
+        PyErr_Clear();
+    }
 }
 
 static void worker_main()
@@ -96,30 +121,28 @@ static void worker_main()
     const char *mc = getenv("AGY_PROC_MAXCOPY");
     if (mc && *mc) { long v = strtol(mc, NULL, 0); if (v > 0) g_maxcopy = (size_t)v; }
 
-    Py_InitializeEx(0);  /* no signal handlers — leave those to Go */
+    Py_InitializeEx(0);  /* raw C-API bootstrap — Boost.Python has no embedding entry point */
 
-    PyObject *sys = PyImport_ImportModule("sys");
-    if (sys) {
-        PyObject_SetAttrString(sys, "is_agy_shim", Py_True);
-        if (pypath && *pypath) {
-            PyObject *path = PyObject_GetAttrString(sys, "path");
-            if (path) {
-                PyObject *p = PyUnicode_FromString(pypath);
-                PyList_Insert(path, 0, p);
-                Py_XDECREF(p);
-                Py_DECREF(path);
-            }
-        }
-        Py_DECREF(sys);
+    /* GIL is held from Py_InitializeEx until PyEval_SaveThread() below, so these bp::objects are
+     * fine; all of them (sys/mod/disp/arg) destruct before the GIL drops. */
+    try {
+        bp::object sys = bp::import(bp::str("sys"));
+        sys.attr("is_agy_shim") = true;                 /* → Py_True */
+        if (pypath && *pypath)
+            sys.attr("path").attr("insert")(0, bp::str(pypath));   /* sys.path.insert(0, pypath) */
+
+        bp::object mod = bp::import(bp::str(modname));
+        bp::object disp = mod.attr("dispatch");         /* transient new-ref, destructs under the GIL */
+        /* Pin ONE strong raw ref forever. g_dispatch MUST stay a raw PyObject* (not a static
+         * bp::object) — a static bp::object's dtor would Py_DECREF at process exit, GIL-less, in a
+         * never-Py_Finalize'd interp (UB). This mirrors Boost's own scope.hpp forever-ref idiom. */
+        g_dispatch = bp::incref(disp.ptr());
     }
-
-    PyObject *mod = PyImport_ImportModule(modname);
-    if (!mod) {
-        PYLOG("failed to import '%s':", modname);
-        PyErr_Print();
-    } else {
-        g_dispatch = PyObject_GetAttrString(mod, "dispatch");
-        if (!g_dispatch) { PYLOG("module '%s' has no dispatch()", modname); PyErr_Clear(); }
+    catch (const bp::error_already_set &) {
+        PYLOG("failed to init module '%s':", modname);
+        if (PyErr_Occurred()) PyErr_Print();
+        PyErr_Clear();
+        g_dispatch = nullptr;                            /* → ok=false, graceful degrade */
     }
 
     int ok = (g_dispatch != NULL);

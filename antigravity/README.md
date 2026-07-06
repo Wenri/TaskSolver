@@ -372,7 +372,8 @@ antigravity/
   src/
     antigravity.c               ← LD_PRELOAD constructor + gum install + Go-ABI hook
                               callbacks + getaddrinfo interposer
-    pybridge.cpp/.h         ← embed libpython, pyworker boost::thread (C++23), queue, dispatch
+    pybridge.cpp/.h         ← embed libpython (C++23); pyworker boost::thread, Boost.Python
+                              object/call layer, queue, dispatch
     procdef.h                ← declarative hook table (id, symbol, mode, kind, mech, leave)
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
     __init__.py             ← lazy exports (PEP 562): ask/Session/AgyResponse/specs,
