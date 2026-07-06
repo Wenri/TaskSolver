@@ -31,16 +31,21 @@ Every call is instrumented (shim + capture on the pinned vendor/agy) via
 """
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from functools import cached_property
+from multiprocessing import get_context as _get_context
 
 from . import config as _config
 from . import conversations as _conv
 from ._term import answer_text as _answer_text
-from .agyprocess import AgyProcess, collect_many
+from ._pty import service_many as _service_many
+from .agyprocess import AgyProcess
 from .conversations import ensure_git_workspace
 
 _UNIQ = [0]
+_ANSWER_KINDS = ("genai_turn", "app_response")   # decoded objects the default target streams home
+_SPAWN = _get_context("spawn")                    # context for the caller-owned result SimpleQueue
 
 
 # --- declarative inputs ------------------------------------------------------
@@ -345,6 +350,117 @@ def _inject_config(tools, context):
     return lambda: _config.remove_mcp_config(name)
 
 
+# --- caller-owned result channel (the queue + drain helpers) -----------------
+# Stock-mp layering: we create the SimpleQueue, hand it to AgyProcess via ``args=(q,)`` (so it rides
+# the process pickle), and drain it here — AgyProcess is just the Process. ``proc.service_pty`` keeps
+# agy's PTY drained in the same wait we use to read the queue, so no background thread is needed.
+def _new_channel():
+    """A spawn-context result SimpleQueue for one agy run. The caller keeps the reader; the child
+    (agy) inherits both ends across execve and drops the reader. Close the parent's writer right
+    after ``proc.start()`` so the reader EOFs when agy dies (crash detection)."""
+    return _SPAWN.SimpleQueue()
+
+
+def _close_channel(q):
+    """Tear down the queue's pipe ends (idempotent). Its named SemLocks unlink via their own
+    resource_tracker Finalize when ``q`` is GC'd; this just makes the fd close prompt."""
+    for c in (q._reader, q._writer):
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+def _collect(proc, q, timeout=300.0, kinds=_ANSWER_KINDS):
+    """One-shot: drain the PTY and collect the decoded objects (of ``kinds``) the target streams home
+    over ``q`` until agy exits / the target signals done (``_agy_done``/``_agy_exc``) / ``timeout``.
+    Returns the dicts in arrival order (possibly empty; use ``proc.transcript`` as the fallback)."""
+    reader = q._reader
+    got, start = [], time.time()
+    while time.time() - start < timeout:
+        if proc.service_pty(1.0, [reader]):        # drains the PTY; True when the queue is readable
+            try:
+                while reader.poll(0):
+                    o = q.get()
+                    if isinstance(o, tuple) and o and o[0] in ("_agy_done", "_agy_exc"):
+                        proc.reap()                 # reap agy so exit_status is set
+                        return got
+                    if isinstance(o, dict) and o.get("kind") in kinds:
+                        got.append(o)
+            except EOFError:
+                proc.reap()                         # agy exited — the normal one-shot completion
+                return got
+    return got
+
+
+def _ask_turn(proc, q, prompt=None, idle=6.0, pty_idle=15.0, timeout=180.0, ready=2.5,
+              kinds=_ANSWER_KINDS):
+    """Persistent multi-turn: submit ``prompt`` (or the ``--prompt-interactive`` prefill if None),
+    then collect the decoded objects (of ``kinds``) for that turn from ``q`` until it settles (no new
+    object for ``idle`` s, or agy stays quiet ``pty_idle`` s with none), or ``timeout``. Drains the
+    PTY meanwhile."""
+    reader = q._reader
+    rstart = time.time()                 # wait until agy is ready (TUI drawn / prior turn done)
+    while time.time() - rstart < 30 and time.time() - proc.last_output < ready:
+        proc.service_pty(0.2, [reader])  # drain the PTY while waiting for agy to settle
+    if prompt is None:
+        proc.write(b"\r")                # submit the prefilled initial prompt
+    else:
+        proc.send_line(prompt)           # type + submit a follow-up
+    proc.last_output = time.time()       # measure idle from the submit, not the prior turn
+    got, last, start = [], None, time.time()
+    while time.time() - start < timeout:
+        if proc.service_pty(0.2, [reader]):        # drains the PTY; True once a result is ready
+            while reader.poll(0):
+                try:
+                    o = q.get()
+                except EOFError:
+                    return got
+                if isinstance(o, dict) and o.get("kind") in kinds:
+                    got.append(o)
+                    last = time.time()
+        now = time.time()
+        if last is not None and now - last >= idle:
+            break                        # turn(s) settled
+        if last is None and now - proc.last_output >= pty_idle:
+            break                        # agy went idle without producing a turn
+    return got
+
+
+def _collect_many(procs, queues, timeout=300.0, kinds=_ANSWER_KINDS):
+    """One-shot collect from several already-``start()``ed AgyProcesses concurrently, in one event
+    loop. ``procs`` and ``queues`` are parallel. A single ``_pty.service_many`` watches every live
+    proc's PTY + queue reader together, so all PTYs are drained while each proc's ``kinds`` objects
+    are gathered until it signals done or its queue EOFs. Returns a list parallel to ``procs`` — each
+    entry that proc's dicts in arrival order."""
+    got = [[] for _ in procs]
+    done = [False] * len(procs)
+    readers = [q._reader for q in queues]
+    reader_idx = {readers[i]: i for i in range(len(procs))}
+    end = time.time() + timeout
+    while not all(done) and time.time() < end:
+        live = [i for i in range(len(procs)) if not done[i]]
+        if not live:
+            break
+        pops = [procs[i]._popen for i in live]         # PTY-multiplex is a _pty-layer primitive
+        rds = [readers[i] for i in live]
+        for r in _service_many(pops, rds, max(0.0, end - time.time())):
+            i = reader_idx[r]
+            try:
+                while r.poll(0):
+                    o = queues[i].get()
+                    if isinstance(o, tuple) and o and o[0] in ("_agy_done", "_agy_exc"):
+                        procs[i].reap()               # reap agy so exit_status is set
+                        done[i] = True
+                        break
+                    if isinstance(o, dict) and o.get("kind") in kinds:
+                        got[i].append(o)
+            except EOFError:
+                procs[i].reap()                       # agy exited — the normal completion signal
+                done[i] = True
+    return got
+
+
 # --- one-shot ----------------------------------------------------------------
 def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
         capture=True, timeout=300, skip_permissions=False, agy_bin=None, extra_env=None,
@@ -379,17 +495,20 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
     overlays["AGY_PROC_LOG"] = os.path.join(workspace, "pyagy-shim.log")  # shim logs off the PTY
 
     cleanup = _inject_config(tools, context)
+    q = _new_channel()                              # caller owns the result queue (stock-mp style)
     try:
         p = AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
-                       agy_bin=agy_bin, workdir=workspace, capture=cap_path,
+                       agy_bin=agy_bin, workdir=workspace, capture=cap_path, args=(q,),
                        conversation_id=conversation_id, continue_latest=continue_latest,
                        data_dir=data_dir, trust=trust, extra_env=overlays)
         p.start()
-        objs = p.collect(timeout=timeout)           # decoded answer streamed home over the Connection
+        q._writer.close()                           # parent reads only; reader now EOFs on agy death
+        objs = _collect(p, q, timeout=timeout)      # decoded answer streamed home over the queue
         transcript = p.transcript                   # raw PTY (fallback / diagnostics)
         cid, exit_status = p.conversation_id, p.exit_status
         p.close()
     finally:
+        _close_channel(q)
         cleanup()
 
     return AgyResponse.from_objs(
@@ -405,8 +524,8 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
     return a list of ``n`` decoded :class:`AgyResponse` (parallel sampling — e.g. ``AgyModel``
     with ``n_choices>1``). Same kwargs as :func:`ask`; all share one workspace + tools/context,
     each gets its own capture file. No threads: every process is ``start()``ed (a fast, serial,
-    non-blocking fork), then :func:`pyagy.agyprocess.collect_many` services them all in one event
-    loop. ``n <= 1`` delegates to :func:`ask`."""
+    non-blocking fork), then the caller-side ``_collect_many`` services them all in one event loop
+    (draining every PTY + result queue together). ``n <= 1`` delegates to :func:`ask`."""
     if n <= 1:
         return [ask(prompt, model=model, workspace=workspace, tools=tools, context=context,
                     rewrite=rewrite, capture=capture, timeout=timeout,
@@ -423,15 +542,17 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
         if c:
             open(c, "w").close()                 # truncate so each reads only its own run
     cleanup = _inject_config(tools, context)     # one shared MCP config for all n
+    queues = [_new_channel() for _ in range(n)]   # one caller-owned result queue per proc
     try:
         procs = [AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
-                            agy_bin=agy_bin, workdir=workspace, capture=cap_paths[i],
+                            agy_bin=agy_bin, workdir=workspace, capture=cap_paths[i], args=(queues[i],),
                             conversation_id=conversation_id, continue_latest=continue_latest,
                             data_dir=data_dir, trust=trust, extra_env=overlays)
                  for i in range(n)]
-        for p in procs:
+        for p, q in zip(procs, queues):
             p.start()                            # non-blocking fork; serial → no fork-in-thread
-        objs_list = collect_many(procs, timeout=timeout)   # one event loop services all n
+            q._writer.close()                    # parent reads only; reader EOFs on that agy's death
+        objs_list = _collect_many(procs, queues, timeout=timeout)   # one event loop services all n
         responses = [AgyResponse.from_objs(
                          objs, p.transcript, exit_status=p.exit_status, capture_path=cap,
                          workspace=workspace, funcmap=funcmap, conversation_id=p.conversation_id)
@@ -440,6 +561,8 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
             p.close()
         return responses
     finally:
+        for q in queues:
+            _close_channel(q)
         cleanup()
 
 
@@ -486,6 +609,7 @@ class Session:
         self.rules_path = None
         self._cleanup = lambda: None
         self._agy = None                             # the AgyProcess (persistent), set on first ask
+        self._q = None                               # caller-owned result queue, beside self._agy
 
     def __enter__(self):
         return self
@@ -501,24 +625,26 @@ class Session:
                                                    self.stack, self.arg_probe, self.extra_env)
         overlays["AGY_PROC_LOG"] = os.path.join(self.workspace, "pyagy-session.log")
         self._cleanup = _inject_config(self._tools, self._context)
+        self._q = _new_channel()                     # caller-owned result queue for this session
         self._agy = AgyProcess(persistent=True, prompt=prompt, model=self.model,
                                skip_permissions=self.skip_permissions, agy_bin=self.agy_bin,
-                               workdir=self.workspace, capture=self.cap_path,
+                               workdir=self.workspace, capture=self.cap_path, args=(self._q,),
                                conversation_id=self._conversation_id,
                                continue_latest=self.continue_latest,
                                data_dir=self._data_dir, trust=self._trust, extra_env=overlays)
         self._agy.start()
+        self._q._writer.close()                      # parent reads only; reader EOFs on agy death
         self._home = self._agy.home                  # scoped store home (for .history())
 
     def ask(self, prompt):
         """Send ``prompt`` (starting the session on first call) and return the
         :class:`AgyResponse` for the turn it produced (decoded objects streamed home over the
-        Connection; the PTY transcript is the fallback)."""
+        caller-owned result queue; the PTY transcript is the fallback)."""
         if self._agy is None:
             self._start(prompt)
-            objs = self._agy.ask(None, idle=self.idle, timeout=self.timeout)   # submit the prefill
+            objs = _ask_turn(self._agy, self._q, None, idle=self.idle, timeout=self.timeout)  # prefill
         else:
-            objs = self._agy.ask(prompt, idle=self.idle, timeout=self.timeout)
+            objs = _ask_turn(self._agy, self._q, prompt, idle=self.idle, timeout=self.timeout)
         transcript = self._agy.transcript
         if self._conversation_id is None:            # first turn of a fresh session
             self._conversation_id = self._agy.conversation_id
@@ -558,6 +684,8 @@ class Session:
             if self._agy is not None:
                 self._agy.close(interrupt=True)
         finally:
+            if self._q is not None:
+                _close_channel(self._q)
             self._cleanup()
 
 

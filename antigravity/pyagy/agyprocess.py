@@ -1,38 +1,35 @@
-"""AgyProcess — the single front-door for launching the agy CLI. Always instrumented (LD_PRELOAD
-shim + capture JSONL, on the pinned vendor/agy), and always runs an in-agy worker target that
-streams agy's DECODED answer home over a SimpleQueue.
+"""AgyProcess — the ``multiprocessing.Process`` for launching the agy CLI. Always instrumented
+(LD_PRELOAD shim + capture JSONL, on the pinned vendor/agy) and always runs an in-agy worker target.
 
-A ``target`` (default: ``agy_process.mp_child.stream_turns``) runs inside agy's embedded interpreter
-and puts decoded objects home; the parent collects them with ``collect()`` (one-shot) / ``ask()``
-(persistent multi-turn), or reads raw objects with ``recv``/``poll``. The PTY transcript is drained
-as a byproduct and kept on ``transcript`` for diagnostics (crashes, and a fallback answer when no
-turn decodes).
+Modeled on stock ``Process``: it does NOT own the result channel. The **caller** creates the result
+``SimpleQueue`` and passes it as a target arg — ``AgyProcess(target=stream_turns, args=(q,))`` — so
+it rides ``process_obj``'s pickle, exactly like ``Process(target=f, args=(q,))``. The target (default
+``agy_process.mp_child.stream_turns``) runs inside agy's embedded interpreter and ``.put``s decoded
+objects on that queue; the caller (client.py) drains it via ``service_pty(timeout, [q._reader])`` +
+``q.get()``. The PTY transcript is drained as a byproduct and kept on ``transcript`` for diagnostics
+(crashes, and a fallback answer when no turn decodes).
 
-    # one-shot: collect agy's decoded answer turns
-    p = AgyProcess(prompt="What is 2+2?"); p.start()
-    turns = p.collect(); p.close()
-
-    # custom worker: run a Python callable inside agy and stream your own objects home
-    from pyagy.agy_process.mp_child import get_result_conn
-    def work(x): get_result_conn().put({"x": x})
-    p = AgyProcess(target=work, args=(41,)); p.start()
-    print(p.recv()); p.terminate(); p.join()
+    # the caller owns the queue and drains it (see client.py for collect/ask/collect_many):
+    from multiprocessing import get_context
+    q = get_context("spawn").SimpleQueue()
+    p = AgyProcess(prompt="What is 2+2?", args=(q,)); p.start(); q._writer.close()
+    while p.service_pty(1.0, [q._reader]):
+        obj = q.get()                       # decoded turns; ("_agy_done", code) on completion
+        ...
+    p.close()
 
 Design: `AgyProcess` is a `SpawnProcess` whose `_Popen` is `_pty.PtyPopen` — a custom
-`popen_fork.Popen` that execs agy under a PTY (not python), owns the PTY + the lifecycle, hands the
-child a result SimpleQueue + a boot pipe with the pickled target, and runs `mp_child._bootstrap`.
-`start/join/exitcode/terminate` are inherited and track agy's pid; the answer flows over the
-SimpleQueue, the transcript over the PTY (a byproduct on ``transcript``).
+`popen_fork.Popen` (shaped like `popen_spawn_posix`) that execs agy under a PTY (not python), owns
+the PTY + the lifecycle + fd inheritance, and runs `mp_child._bootstrap`. `start/join/exitcode/
+terminate` are inherited and track agy's pid; the answer flows over the caller's SimpleQueue, the
+transcript over the PTY (a byproduct on ``transcript``).
 """
 import time
 
-import multiprocessing.connection as _conn
 from multiprocessing.context import SpawnProcess
 
 from . import conversations as _conv
 from ._pty import PtyPopen
-
-_ANSWER_KINDS = ("genai_turn", "app_response")   # decoded objects the default target streams home
 
 
 def _agy_argv(prompt, persistent, model, skip_permissions, extra_flags,
@@ -57,9 +54,10 @@ def _agy_argv(prompt, persistent, model, skip_permissions, extra_flags,
 
 class AgyProcess(SpawnProcess):
     """`multiprocessing.Process`-shaped handle for an agy run (always instrumented, always a
-    worker). Collect the decoded answer with ``collect()`` (one-shot) / ``ask()`` (persistent), or
-    read raw objects a custom ``target`` sends with ``recv``/``poll``. The PTY transcript is a
-    byproduct on ``transcript`` (used for crash/fallback diagnostics)."""
+    worker). Like stock ``Process`` it does not own the result channel: the caller passes a
+    ``SimpleQueue`` via ``args=(q,)`` and drains it (see client.py's collect/ask/collect_many, which
+    use ``service_pty`` + ``q.get()``). The PTY transcript is a byproduct on ``transcript`` (used for
+    crash/fallback diagnostics)."""
 
     @staticmethod
     def _Popen(process_obj):
@@ -91,20 +89,29 @@ class AgyProcess(SpawnProcess):
         self._extra_env = extra_env    # caller overlays layered onto instrumented_env (shim knobs)
         self._echo = echo              # mirror agy's PTY output to our stdout (debug)
 
-    # --- parent-side result channel (native Python objects the target puts on the queue) ---
-    def recv(self):
-        return self._popen._result_q.get()
-
-    def poll(self, timeout=0.0):
-        """True if a result is waiting on the queue. Drains agy's PTY (+ auto-answers) while it
-        waits, so a poll()/recv() loop keeps agy unblocked (no background pump thread)."""
-        return self._popen._service(timeout)
+    # --- PTY service passthroughs (the caller owns the result queue and drains it via these) ---
+    def service_pty(self, timeout, readers):
+        """Drain agy's PTY (+ auto-answer) while waiting up to ``timeout`` s for data on any of
+        ``readers`` (the caller's result-queue read end(s)); True once one is ready. The caller
+        (client.py) owns the queue and passes its reader here — this keeps agy's PTY drained in the
+        same wait the caller uses to read results, so no background pump thread is needed."""
+        return self._popen._service(timeout, readers)
 
     @property
-    def connection(self):
-        """The result `SimpleQueue` (native mp channel). Custom targets ``.put`` on it inside agy;
-        the parent ``.get()``s it (or uses ``recv``/``poll``/``collect``)."""
-        return self._popen._result_q
+    def last_output(self):
+        """Wall-clock of the last PTY write — the turn-boundary idle signal the caller's ask-loop
+        uses to detect a settled turn. Settable so the caller can reset it right after submitting a
+        prompt (so the idle detector measures from the submit, not the prior turn)."""
+        return self._popen._last_output
+
+    @last_output.setter
+    def last_output(self, ts):
+        self._popen._last_output = ts
+
+    def reap(self):
+        """Non-blocking reap of agy so ``exit_status`` is set; True once it has exited. The caller's
+        collect loop calls this when the target signals done / the queue EOFs."""
+        return self._popen.exited()
 
     @property
     def conversation_id(self):
@@ -119,63 +126,9 @@ class AgyProcess(SpawnProcess):
                 home=getattr(self._popen, "_home", None))
         return self._conversation_id
 
-    # --- collect the decoded answer the worker target streams home ---
-    # NB: named `collect`, not `run` — `run` is BaseProcess's target-runner (called by _bootstrap
-    # inside agy), which we must NOT override.
-    def collect(self, timeout=300.0, kinds=_ANSWER_KINDS):
-        """One-shot: run agy to completion — drain the PTY into ``transcript`` and collect the
-        decoded objects (of ``kinds``) the target streams home — until agy exits / the target
-        signals done / ``timeout``. Returns the collected dicts in arrival order (possibly empty
-        if the run produced no decodable turn; use ``transcript`` as the fallback)."""
-        pop = self._popen
-        got, start = [], time.time()
-        while time.time() - start < timeout:
-            if pop._service(1.0):            # drains the PTY; True when the queue is readable
-                try:
-                    while pop._result_reader.poll(0):
-                        o = pop._result_q.get()
-                        if isinstance(o, tuple) and o and o[0] in ("_agy_done", "_agy_exc"):
-                            pop.exited()      # reap agy so exit_status is set
-                            return got
-                        if isinstance(o, dict) and o.get("kind") in kinds:
-                            got.append(o)
-                except EOFError:
-                    pop.exited()             # agy exited — the normal one-shot completion signal
-                    return got
-        return got
-
-    def ask(self, prompt=None, idle=6.0, pty_idle=15.0, timeout=180.0, ready=2.5,
-            kinds=_ANSWER_KINDS):
-        """Persistent multi-turn: submit ``prompt`` (or the ``--prompt-interactive`` prefill if
-        None), then collect the decoded objects (of ``kinds``) for that turn until it settles (no
-        new object for ``idle`` s, or agy stays quiet ``pty_idle`` s with none), or ``timeout``.
-        Drains the PTY meanwhile. Returns the collected dicts."""
-        pop = self._popen
-        rstart = time.time()                 # wait until agy is ready (TUI drawn / prior turn done)
-        while time.time() - rstart < 30 and time.time() - pop._last_output < ready:
-            pop._service(0.2)                # drain the PTY while waiting for agy to settle
-        if prompt is None:
-            pop.write(b"\r")                 # submit the prefilled initial prompt
-        else:
-            pop.send_line(prompt)            # type + submit a follow-up
-        pop._last_output = time.time()
-        got, last, start = [], None, time.time()
-        while time.time() - start < timeout:
-            if pop._service(0.2):            # drains the PTY; True once a result is ready
-                while pop._result_reader.poll(0):
-                    try:
-                        o = pop._result_q.get()
-                    except EOFError:
-                        return got
-                    if isinstance(o, dict) and o.get("kind") in kinds:
-                        got.append(o)
-                        last = time.time()
-            now = time.time()
-            if last is not None and now - last >= idle:
-                break                        # turn(s) settled
-            if last is None and now - pop._last_output >= pty_idle:
-                break                        # agy went idle without producing a turn
-        return got
+    # The decoded-answer collection helpers (collect / ask-turn / collect_many) live in the caller
+    # (client.py), which owns the result queue — this class is a Process, not its consumer. They
+    # drain via ``service_pty(timeout, [q._reader])`` + ``q.get()``.
 
     # --- PTY: raw input + the transcript byproduct ---
     @property
@@ -215,56 +168,8 @@ class AgyProcess(SpawnProcess):
         """Stop agy (``interrupt=True`` presses Ctrl-C first, for the TUI) and close the PTY."""
         self._popen.close(interrupt=interrupt)
         # We reap agy ourselves (agy owns its lifetime), so multiprocessing's active-children set
-        # never sees it exit — drop it, else this Process (and its result SimpleQueue's two named
-        # semaphores) is pinned in `_children` and leaks until interpreter exit instead of being
-        # GC'd + sem_unlinked once the caller releases the handle.
+        # never sees it exit — drop it, else this Process (and the result SimpleQueue it carries in
+        # ``args``, with its two named semaphores) is pinned in `_children` and leaks until
+        # interpreter exit instead of being GC'd + sem_unlinked once the caller releases the handle.
         from multiprocessing.process import _children
         _children.discard(self)
-
-
-def collect_many(procs, timeout=300.0, kinds=_ANSWER_KINDS):
-    """One-shot collect from several already-``start()``ed AgyProcesses concurrently, in one
-    event loop — the native way to exploit that ``start()`` is non-blocking (it forks agy and
-    returns) and the result Connection + PTY are selectable fds. No threads: the forks happened
-    serially in the caller, so there is no fork-in-a-multithreaded-process hazard.
-
-    A single ``_conn.wait`` watches every live process's Connection + PTY master together, so all
-    PTYs are drained (none stalls on a full buffer) while each process's ``kinds`` objects are
-    gathered until it signals done (``_agy_done``/``_agy_exc``) or its Connection EOFs. Returns a
-    list parallel to ``procs`` — each entry is that process's collected dicts in arrival order
-    (possibly empty; use its ``.transcript`` as the fallback). Stops early once all are done, or
-    at ``timeout``."""
-    pops = [p._popen for p in procs]
-    got = [[] for _ in procs]
-    done = [False] * len(procs)
-    end = time.time() + timeout
-    while not all(done) and time.time() < end:
-        watch = {}                              # Connection/fd -> (index, is_conn)
-        for i, pop in enumerate(pops):
-            if done[i]:
-                continue
-            watch[pop._result_reader] = (i, True)
-            if not pop._pty_dead:
-                watch[pop.fd] = (i, False)      # raw PTY master; drop it once it EOFs
-        if not watch:
-            break
-        for r in _conn.wait(list(watch), max(0.0, end - time.time())):
-            i, is_conn = watch[r]
-            pop = pops[i]
-            if not is_conn:                     # PTY readable: drain it (+ auto-answer prompts)
-                if not pop._read_available():
-                    pop._pty_dead = True
-                continue
-            try:                                # queue readable: gather this proc's results
-                while pop._result_reader.poll(0):
-                    o = pop._result_q.get()
-                    if isinstance(o, tuple) and o and o[0] in ("_agy_done", "_agy_exc"):
-                        pop.exited()             # reap agy so exit_status is set
-                        done[i] = True
-                        break
-                    if isinstance(o, dict) and o.get("kind") in kinds:
-                        got[i].append(o)
-            except EOFError:
-                pop.exited()                     # agy exited — the normal completion signal
-                done[i] = True
-    return got

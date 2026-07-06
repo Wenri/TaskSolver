@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """AgyProcess — agy driven as a multiprocessing.spawn-shaped child, streaming native
-Python objects home over a Connection. See plan why-make-agy-a-splendid-rainbow.md.
+Python objects home over a caller-owned result SimpleQueue. See plan why-make-agy-a-splendid-rainbow.md.
 
 Needs the shim built for the RUNNING agy's build-id — uses the pinned vendor/agy
-(matches symbols.json). WSL1-ok: the channel is multiprocessing.connection (no semaphores).
+(matches symbols.json). Stock-mp layering: the caller creates the SimpleQueue (a Pipe +
+SemLocks, re-attached to the shared resource_tracker) and hands it to AgyProcess via
+``args=(q,)``; AgyProcess is just the Process, the caller drains ``q``.
 
     python3 test_scripts/test_agyprocess.py
 """
@@ -17,22 +19,26 @@ sys.path.insert(0, _ANTI)
 
 from pyagy.agyprocess import AgyProcess                       # noqa: E402
 from pyagy.agy_process.mp_child import _demo_target, _raise_target, stream_turns  # noqa: E402
+from pyagy.client import _new_channel, _close_channel, _ask_turn  # noqa: E402  (caller-side helpers)
 
 _fail = []
 
 
-def _drain(p, n=2, timeout=45):
-    got, end = [], time.time() + timeout
+def _drain(p, q, n=2, timeout=45):
+    """Collect up to ``n`` RAW objects off the caller's queue (incl. the ("_agy_done", code)
+    sentinel), draining the PTY in the same wait via ``service_pty`` (no background thread)."""
+    got, end, reader = [], time.time() + timeout, q._reader
     while time.time() < end and len(got) < n:
         try:
-            if p.poll(1.0):
-                got.append(p.recv())
+            if p.service_pty(1.0, [reader]):
+                while reader.poll(0) and len(got) < n:
+                    got.append(q.get())
         except EOFError:
             break
     return got
 
 
-def _teardown(p):
+def _teardown(p, q=None):
     try:
         p.terminate(); p.join(timeout=10)
     finally:
@@ -40,11 +46,14 @@ def _teardown(p):
             p._popen.close()
         except Exception:
             pass
+        if q is not None:
+            _close_channel(q)
 
 
 def case_roundtrip():
-    p = AgyProcess(target=_demo_target, args=("hi", 7)); p.start()
-    got = _drain(p); _teardown(p)
+    q = _new_channel()
+    p = AgyProcess(target=_demo_target, args=(q, "hi", 7)); p.start(); q._writer.close()
+    got = _drain(p, q); _teardown(p, q)
     obj = next((x for x in got if isinstance(x, dict)), None)
     done = any(x == ("_agy_done", 0) for x in got)
     # parent_alive/ppid exercise the parent-death sentinel: parent_process() sees the controlling
@@ -60,8 +69,9 @@ def case_roundtrip():
 def case_exception():
     # target raises → mp's _bootstrap catches it and returns exitcode 1 (traceback to agy's
     # stderr); the parent sees ("_agy_done", 1). (agy's own process exitcode is separate.)
-    p = AgyProcess(target=_raise_target); p.start()
-    got = _drain(p); _teardown(p)
+    q = _new_channel()
+    p = AgyProcess(target=_raise_target, args=(q,)); p.start(); q._writer.close()
+    got = _drain(p, q); _teardown(p, q)
     ok = any(x == ("_agy_done", 1) for x in got)
     print(f"  {'ok  ' if ok else 'FAIL'} exception: firewalled, target exitcode 1  got={got}")
     if not ok:
@@ -74,19 +84,21 @@ def case_stream():
     # completing a turn, so retry once. A turn with EMPTY text = a real decode bug (FAIL); no
     # turns after retries = a live-model flake (NOTE, not a failure).
     for _ in range(2):
-        p = AgyProcess(target=stream_turns,
+        q = _new_channel()
+        p = AgyProcess(target=stream_turns, args=(q,),
                        agy_args=["--print", "What is 2+2? Reply with only the digits."])
-        p.start()
-        turns, end = [], time.time() + 75
+        p.start(); q._writer.close()
+        turns, end, reader = [], time.time() + 75, q._reader
         while time.time() < end:
             try:
-                if p.poll(1.0):
-                    o = p.recv()
-                    if isinstance(o, dict) and o.get("kind") == "genai_turn":
-                        turns.append(o)
+                if p.service_pty(1.0, [reader]):
+                    while reader.poll(0):
+                        o = q.get()
+                        if isinstance(o, dict) and o.get("kind") == "genai_turn":
+                            turns.append(o)
             except EOFError:
                 break
-        _teardown(p)
+        _teardown(p, q)
         if turns:
             has_text = any((t.get("text") or "").strip() for t in turns)
             print(f"  {'ok  ' if has_text else 'FAIL'} stream: {len(turns)} decoded genai_turn(s), "
@@ -98,15 +110,16 @@ def case_stream():
 
 
 def case_persistent():
-    # Persistent multi-turn: agy stays alive interactive; drive follow-ups with .ask() and
+    # Persistent multi-turn: agy stays alive interactive; drive follow-ups with _ask_turn() and
     # collect the decoded turns per prompt. Flaky (two live turns), so PASS on both-turns-with-
     # text (context retained), else NOTE — decode itself is already asserted by case_stream.
-    p = AgyProcess(target=stream_turns, persistent=True,
+    q = _new_channel()
+    p = AgyProcess(target=stream_turns, persistent=True, args=(q,),
                    prompt="What is 2+2? Reply with only the digits.")
-    p.start()
-    t1 = p.ask()                                                    # submit the prefilled initial
-    t2 = p.ask("Now multiply that by 10. Reply with only the digits.")   # follow-up (needs context)
-    _teardown(p)
+    p.start(); q._writer.close()
+    t1 = _ask_turn(p, q, None)                                      # submit the prefilled initial
+    t2 = _ask_turn(p, q, "Now multiply that by 10. Reply with only the digits.")  # follow-up (context)
+    _teardown(p, q)
 
     def first_text(ts):
         return next(((t.get("text") or "").strip() for t in ts if (t.get("text") or "").strip()), "")

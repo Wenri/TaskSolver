@@ -2,7 +2,7 @@
 """Drive an `agy` session under a controlled PTY + the antigravity network hooks, for capture
 experiments. agy is a TUI that wants a real terminal, so we run it under a pty we own; the
 LD_PRELOAD shim captures the model traffic to the AGY_PROC_CAPTURE JSONL, and an in-agy worker
-streams the decoded answer home over a Connection (collected by run()/ask()).
+streams the decoded answer home over a caller-owned SimpleQueue (collected by collect()/ask()).
 
 Two "outputs":
   * decoded answer  — the genai_turn/app_response objects the worker streams home (run()/ask()).
@@ -35,6 +35,7 @@ if _ANTIGRAVITY not in sys.path:
 
 from pyagy.agyprocess import AgyProcess   # noqa: E402
 from pyagy._term import strip_ansi        # noqa: E402  (re-exported for callers)
+from pyagy import client as _client       # noqa: E402  (caller-side queue + drain helpers)
 
 
 class AgySession:
@@ -54,6 +55,7 @@ class AgySession:
         self.extra_env = dict(extra_env or {})
         self.echo = echo
         self.proc = None                    # the AgyProcess, set on start()
+        self.q = None                       # caller-owned result queue (stock-mp style)
 
     # --- back-compat shims over the underlying PtyPopen ------------------------
     @property
@@ -77,19 +79,21 @@ class AgySession:
         extra = dict(self.extra_env)
         if self.log:
             extra["AGY_PROC_LOG"] = self.log
+        self.q = _client._new_channel()     # this façade is a caller: it owns the result queue
         self.proc = AgyProcess(agy_bin=self.agy, agy_args=list(args), workdir=self.workdir,
-                               capture=self.capture, extra_env=extra, echo=self.echo)
+                               capture=self.capture, args=(self.q,), extra_env=extra, echo=self.echo)
         self.proc.start()
+        self.q._writer.close()              # parent reads only; reader EOFs on agy death
         return self
 
     def collect(self, timeout=200.0):
         """One-shot: drive agy to completion, draining the PTY; return the decoded answer objects
         (the transcript is on ``.transcript`` / ``.raw``, the capture JSONL on ``capture``)."""
-        return self.proc.collect(timeout=timeout)
+        return _client._collect(self.proc, self.q, timeout=timeout)
 
     def ask(self, prompt=None, idle=4.0, timeout=120.0):
         """One persistent turn: submit ``prompt`` (or the prefill) and return its decoded objects."""
-        return self.proc.ask(prompt, idle=idle, timeout=timeout)
+        return _client._ask_turn(self.proc, self.q, prompt, idle=idle, timeout=timeout)
 
     def send(self, data: bytes):
         self.proc.write(data)
@@ -100,6 +104,8 @@ class AgySession:
     def close(self):
         if self.proc is not None:
             self.proc.close(interrupt=True)
+        if self.q is not None:
+            _client._close_channel(self.q)
 
 
 def _summarize_capture(path):

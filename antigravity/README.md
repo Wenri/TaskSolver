@@ -379,9 +379,10 @@ antigravity/
                               AgyResponse + ToolSpec/ContextResource/RewriteRule/Usage
     config.py               ← MCP config-injection (write_mcp_config/validate_server)
     model.py                ← AgyModel (prepare_payload/ask/rough_guess/run_once/…) over client.ask
-    agyprocess.py           ← AgyProcess: the user-facing SpawnProcess handle (start/collect/ask/
-                              recv/…) + argv assembly — THE single agy front-door; always runs an
-                              in-agy worker that streams the decoded answer home over a Connection
+    agyprocess.py           ← AgyProcess: the SpawnProcess handle (lifecycle + PTY passthroughs +
+                              argv assembly) — THE single agy front-door; a Process, not the queue's
+                              owner. Runs an in-agy worker that streams the decoded answer home over
+                              the caller-owned SimpleQueue (client.py owns collect/ask/collect_many)
     _pty.py                 ← PtyPopen(popen_fork.Popen): AgyProcess's `_Popen` — execs agy under
                               a PTY as the mp child, owns the PTY (fork/read/answer) + the
                               launch/lifecycle; always instrumented on the pinned vendor/agy
@@ -692,56 +693,58 @@ Add the scoped `.gemini/` to `.gitignore`. `data_dir=None` (default) uses the gl
 ## `AgyProcess`: the single agy launcher
 
 `AgyProcess` is the one front-door every agy launch goes through (always instrumented, on the
-pinned `vendor/agy`). It always runs an in-agy worker `target`:
+pinned `vendor/agy`). Modeled on stock `multiprocessing.Process`, it does **not** own the result
+channel: the **caller** creates the result `SimpleQueue` and passes it as a target arg —
+`AgyProcess(target=stream_turns, args=(q,))`, exactly like `Process(target=f, args=(q,))` — so it
+rides the process pickle. It always runs an in-agy worker `target`:
 
-- **default target** (`stream_turns`) — streams agy's decoded answer (`genai_turn` +
-  `app_response`) home over a `multiprocessing.connection`; the parent collects it with
-  `collect()` (one-shot) / `ask()` (interactive). Backs `pyagy.ask` / `pyagy.Session`, `AgyModel`,
+- **default target** (`stream_turns`) — receives the queue as arg0 and streams agy's decoded answer
+  (`genai_turn` + `app_response`) home over it; the caller (`pyagy/client.py`) drains it with the
+  module helpers `_collect` (one-shot) / `_ask_turn` (interactive) / `_collect_many` (parallel),
+  which use `AgyProcess.service_pty` + `q.get()`. Backs `pyagy.ask` / `pyagy.Session`, `AgyModel`,
   and the `AgySession` capture harness. The PTY transcript is drained as a diagnostic byproduct
   (`.transcript`).
 - **custom target** (`target=callable`) — your callable executes *inside* agy's embedded
-  interpreter and streams **native Python objects** home over the same Connection (no JSONL
-  round-trip).
+  interpreter, receiving the queue as arg0 (or via `get_result_conn()`), and `.put`s **native
+  Python objects** home over it (no JSONL round-trip).
 
 ```python
+from multiprocessing import get_context
 from pyagy.agyprocess import AgyProcess
 from pyagy.agy_process.mp_child import stream_turns, get_result_conn
 
-# plain-CLI: run one --print turn, read the transcript (this is what pyagy.ask wraps)
-p = AgyProcess(prompt="What is 2+2?"); p.start()
-print(p.read_until_exit()); p.close()
+# the caller owns the queue and drains it (client.py's _collect/_ask_turn wrap this)
+q = get_context("spawn").SimpleQueue()
+p = AgyProcess(target=stream_turns, args=(q,), prompt="What is 2+2?")
+p.start(); q._writer.close()          # writer close → reader EOFs on agy death (crash detection)
+while p.service_pty(1.0, [q._reader]): # drains the PTY in the same wait it reads the queue
+    o = q.get()                        # {"kind":"genai_turn",…} or ("_agy_done", code) on completion
+    if isinstance(o, tuple): break
 
-# one-shot: stream agy's decoded model turns home as native dicts (the shim always
-# installs the capture union, so genai_turn events flow)
-p = AgyProcess(target=stream_turns, prompt="What is 2+2?"); p.start()
-while p.poll(1.0) or p.is_alive():
-    try: turn = p.recv()             # {"kind":"genai_turn","text":…,"usage":…,"request":…}
-    except EOFError: break           # agy exited
-
-# persistent, multi-turn (context retained)
-p = AgyProcess(target=stream_turns, persistent=True, prompt="What is 2+2?"); p.start()
-t1 = p.ask()                         # submit the prefilled prompt          -> "4"
-t2 = p.ask("multiply that by 10")    # follow-up (agy remembers)            -> "40"
-
-# arbitrary target: fn runs inside agy; send whatever you like home
-def work(x): get_result_conn().send({"x": x})
-p = AgyProcess(target=work, args=(41,)); p.start(); print(p.recv())
+# arbitrary target: fn runs inside agy (conn = args[0]); .put whatever you like home
+def work(conn, x): conn.put({"x": x})
+q = get_context("spawn").SimpleQueue()
+p = AgyProcess(target=work, args=(q, 41)); p.start(); q._writer.close(); print(q.get())
 ```
 
-**How it works** (`pyagy/agyprocess.py` + `pyagy/agy_process/mp_child.py`):
-- `AgyProcess(SpawnProcess)` + a custom `_pty.PtyPopen(popen_fork.Popen)` whose `_launch` execs
-  agy under a PTY with the instrumented env — PtyPopen owns both the PTY (fork/read/answer)
-  and the process lifecycle. Every launch is a worker: it hands the child a result `Pipe` + a
-  boot pipe (both `os.set_inheritable`) via a single `AGY_MP_BOOT_FD`, whose payload is the
-  result-socketpair fd followed by `(prep, process_obj)` pickled under `set_spawning_popen`.
-  There is no pump thread — `AgyProcess.collect()`/`ask()` drain the PTY via `_service()` in the
-  same `_conn.wait` they use to read the Connection. `start/join/exitcode/terminate` are inherited
-  from `popen_fork.Popen` and track **agy's** pid; the *task result* flows over the Connection
-  (agy owns lifetime, so completion is signalled on the channel, not by process death), and the
+**How it works** (`pyagy/agyprocess.py` + `pyagy/_pty.py` + `pyagy/agy_process/mp_child.py`):
+- `AgyProcess(SpawnProcess)` + a custom `_pty.PtyPopen` shaped like `popen_spawn_posix.Popen`:
+  `_launch` execs agy under a PTY with the instrumented env — PtyPopen owns the PTY
+  (fork/read/answer), the process lifecycle, and child fd inheritance (`resource_tracker` fd +
+  `duplicate_for_child`), but **not** the result queue. The boot payload (one `AGY_MP_BOOT_FD`
+  pipe) is `tracker_fd` then `(prep, process_obj)` pickled under `set_spawning_popen`; the caller's
+  `SimpleQueue` rides `process_obj`'s args, so `duplicate_for_child` makes its pipe fds inheritable
+  and its SemLocks pickle by name. There is no pump thread — the caller drains the PTY via
+  `AgyProcess.service_pty(timeout, [q._reader])` (a passthrough to `PtyPopen._service`) in the same
+  `_conn.wait` it uses to read the queue. `start/join/exitcode/terminate` are inherited and track
+  **agy's** pid; the *task result* flows over the caller's queue (agy owns lifetime, so completion
+  is signalled on the channel via `("_agy_done", code)`, not by process death), and the
   ANSI-stripped PTY transcript is kept on `transcript` as a diagnostic byproduct.
 - Inside agy (the shim's worker imports `agy_process`, which starts a daemon thread when
-  `AGY_MP_BOOT_FD` is set), the child reads the result fd from the boot payload, then runs the
-  **real** `proc._bootstrap()` with three surgical neutralizations so it can't tear agy down:
+  `AGY_MP_BOOT_FD` is set), the child reads `tracker_fd` and re-attaches to the parent's
+  `resource_tracker` (so the queue's SemLocks share it) **before** unpickling `process_obj`, pulls
+  the queue out of `proc._args[0]` (dropping the inherited reader), then runs the **real**
+  `proc._bootstrap()` with three surgical neutralizations so it can't tear agy down:
   `sys.stdin=None` (defeats `util._close_stdin`, which would close the PTY's fd 0),
   `threading._shutdown`→no-op, and a trimmed `prepare()` (authkey/name only — no
   `sys.path=`/`chdir`/`_fixup_main`). `_bootstrap` is called directly, which skips `spawn_main`'s
@@ -751,10 +754,12 @@ p = AgyProcess(target=work, args=(41,)); p.start(); print(p.recv())
 - **Python 3.13 both ends** (shim embeds pixi's `libpython3.13`), so parent↔child pickle is
   same-version and `pyagy` classes round-trip via the shared `PYTHONPATH`.
 
-**WSL1:** the channel is `multiprocessing.connection` (`Pipe` — fd + pickle, **no semaphores**),
-which works on WSL1; `Queue`/`Lock`/`SharedMemory` (POSIX `sem_open` → `EPERM` on the 4.4
-kernel) are **cloud-only**. Runs the pinned `vendor/agy` (its build-id must match the shim).
-Tests: `test_scripts/test_agyprocess.py`.
+**Channel:** a spawn `SimpleQueue` — a `Pipe` (fd + pickle) plus two named `SemLock`s (POSIX
+`sem_open`) re-attached to the shared `resource_tracker` — created by the caller and handed to the
+worker via `args`. The put side is a single serialized writer (the daemon thread's one sender loop),
+so there is no feeder thread racing agy's neutralized shutdown. Because it uses POSIX semaphores it
+needs a kernel where `sem_open` works (cloud). Runs the pinned `vendor/agy` (its build-id must match
+the shim). Tests: `test_scripts/test_agyprocess.py`.
 
 ## Using agy as a TaskSolver backend (`pyagy`)
 

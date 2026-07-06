@@ -7,13 +7,13 @@ This class owns that fork, the winsize, and the terminal-query auto-reply — an
 are inherited and act on agy's pid + the PTY-master sentinel; only `_launch`/`close` are ours).
 
 Every launch is instrumented (LD_PRELOAD shim + capture on the pinned vendor/agy) and always wires
-the embedded-worker channel — a result SimpleQueue (native mp sync: a Pipe + SemLocks) + a boot pipe
-carrying the pickled target + the resource_tracker fd, inherited across agy's execve. The target
-streams agy's decoded answer home; the parent collects it with `AgyProcess.collect()` / `ask()`,
-which service the PTY (drain + answer queries) in the same `_service` wait they use to read the
-queue, so no background thread is needed. The PTY transcript is kept on `self.raw` (via
-`transcript`) as a diagnostic byproduct. See
-`agy_process/mp_child.py`.
+the embedded-worker channel — a boot pipe carrying the pickled target (with the caller's result
+queue in its args) + the resource_tracker fd, inherited across agy's execve. Like
+`popen_spawn_posix`, this Popen owns the fork + fd inheritance but NOT the result queue: the caller
+(client.py) creates the SimpleQueue, passes it as a target arg, and drains it via `_service` —
+which services the PTY (drain + answer queries) while waiting on the caller-supplied reader, so no
+background thread is needed. The PTY transcript is kept on `self.raw` (via `transcript`) as a
+diagnostic byproduct. See `agy_process/mp_child.py`.
 
 `AgyProcess` (pyagy/agyprocess.py) is the user-facing `SpawnProcess` handle; this is its `_Popen`.
 """
@@ -23,8 +23,8 @@ import signal
 import time
 
 import multiprocessing.connection as _conn
-from multiprocessing import (get_context as _get_context, reduction,
-                             resource_tracker as _rtracker, spawn as mp_spawn, util)
+from multiprocessing import (reduction, resource_tracker as _rtracker,
+                             spawn as mp_spawn, util)
 from multiprocessing.context import set_spawning_popen
 from multiprocessing.popen_fork import Popen as _ForkPopen
 from multiprocessing.popen_spawn_posix import _DupFd
@@ -37,23 +37,17 @@ from .conversations import ensure_git_workspace
 _VENDOR_AGY = os.path.join(ROOT, "vendor", "agy")   # the pinned agy whose build-id matches the shim
 
 
-def _close_agy(fd, result_q, boot_w):
-    """PtyPopen's finalizer callback. Module-level, closing over only fds + the queue (never the
-    Popen) so weakref-based GC finalization still fires. Closes: the PTY master fd — which SIGHUPs
-    agy, doubling as teardown; the result SimpleQueue's pipe ends (its SemLocks unlink via their own
-    resource_tracker Finalize when the queue is GC'd); and the boot pipe's write end — whose EOF is
-    the worker's parent-death sentinel, so closing it here (or the OS closing it on our crash) tells
-    the in-agy worker we are gone. All idempotent; the finalizer is one-shot."""
+def _close_agy(fd, boot_w):
+    """PtyPopen's finalizer callback. Module-level, closing over only fds (never the Popen) so
+    weakref-based GC finalization still fires. Closes: the PTY master fd — which SIGHUPs agy,
+    doubling as teardown; and the boot pipe's write end — whose EOF is the worker's parent-death
+    sentinel, so closing it here (or the OS closing it on our crash) tells the in-agy worker we are
+    gone. The result queue is the caller's (client.py), not the Popen's, so it is torn down there.
+    All idempotent; the finalizer is one-shot."""
     try:
         os.close(fd)
     except OSError:
         pass
-    if result_q is not None:
-        for c in (result_q._reader, result_q._writer):
-            try:
-                c.close()
-            except Exception:
-                pass
     try:
         os.close(boot_w)
     except OSError:
@@ -70,9 +64,10 @@ class PtyPopen(_ForkPopen):
     DupFd = _DupFd   # a pickled fd detaches to the same number (execve preserves inheritable fds)
 
     def duplicate_for_child(self, fd):
-        """Called via reduction.DupFd while pickling the result SimpleQueue's Connections under
-        set_spawning_popen: make each fd survive agy's execve. popen_spawn_posix appends to a passfds
-        list handed to spawnv_passfds; we exec directly, so inheritance is by the inheritable flag."""
+        """Called via reduction.DupFd while pickling any fd-bearing object under set_spawning_popen
+        (the caller's result SimpleQueue rides process_obj's args): make each fd survive agy's execve.
+        popen_spawn_posix appends to a passfds list handed to spawnv_passfds; we exec directly, so
+        inheritance is by the inheritable flag."""
         os.set_inheritable(fd, True)
         return fd
 
@@ -153,38 +148,36 @@ class PtyPopen(_ForkPopen):
             workdir, getattr(process_obj, "_data_dir", None),
             trust=getattr(process_obj, "_trust", True))     # repo-scoped store + workspace trust
 
-        # Result channel: a spawn-context SimpleQueue (a Pipe + two SemLocks — the native mp sync
-        # tools) rather than a bare socketpair. put()/get() are synchronous — SimpleQueue has NO
-        # feeder thread, so nothing races the neutralized threading._shutdown inside agy. Its SemLocks
-        # are named POSIX semaphores registered with the resource_tracker; we hand the child the
-        # tracker fd so it re-attaches (like popen_spawn_posix/spawn_main) instead of booting its own.
-        ctx = _get_context("spawn")
-        self._result_q = ctx.SimpleQueue()
-        self._result_reader = self._result_q._reader        # the selectable read end (for _conn.wait)
+        # Worker channel: the caller (client.py) created the result SimpleQueue and put it in
+        # process_obj's args, so it rides the process_obj pickle below — this Popen never owns it
+        # (like popen_spawn_posix, which pickles the process but not the user's queue). We still hand
+        # the child the resource_tracker fd so it re-attaches (like popen_spawn_posix/spawn_main)
+        # instead of booting its own — needed for the queue's SemLocks (and any custom-target sems).
         tracker_fd = _rtracker.getfd()                       # boots/reuses the parent's tracker
         os.set_inheritable(tracker_fd, True)                 # agy inherits it; the child re-attaches
         boot_r, boot_w = os.pipe()
         os.set_inheritable(boot_r, True)                     # boot_w left CLOEXEC → parent-only sentinel
         # caller overlays (shim knobs / rewrite) + scoped-HOME override + the boot pipe fd (the sole
-        # worker-channel signal; its payload carries the tracker fd + the pickled queue + target).
+        # worker-channel signal; its payload carries the tracker fd + the pickled target, whose args
+        # carry the caller's queue).
         extra = {**(getattr(process_obj, "_extra_env", None) or {}), **env_ovr,
                  "AGY_MP_BOOT_FD": str(boot_r)}
         env = instrumented_env(capture=capture, extra_env=extra)
         argv = [agy, *(getattr(process_obj, "_agy_args", None) or ["--print", "agy-mp"])]
 
-        # Build the boot payload BEFORE the fork: pickling the queue under set_spawning_popen runs our
-        # duplicate_for_child on its pipe fds (set_inheritable) so they survive agy's execve, while its
-        # SemLocks pickle by name (the child sem_opens them). The AuthenticationString also refuses to
-        # pickle outside the spawning context. Order: tracker fd, queue, prep, process_obj — the child
-        # re-attaches the tracker before rebuilding the queue. Payload << 64 KB → the later single
-        # write to boot_w is non-blocking even though agy reads it late.
+        # Build the boot payload BEFORE the fork: pickling process_obj under set_spawning_popen runs
+        # our duplicate_for_child on the queue's pipe fds (carried in process_obj's args) so they
+        # survive agy's execve, while its SemLocks pickle by name (the child sem_opens them). The
+        # AuthenticationString also refuses to pickle outside the spawning context. Order: tracker fd,
+        # prep, process_obj — the child re-attaches the tracker before rebuilding the queue (in proc's
+        # args). Payload << 64 KB → the later single write to boot_w is non-blocking even though agy
+        # reads it late.
         import io
         prep = mp_spawn.get_preparation_data(process_obj._name)
         buf = io.BytesIO()
         reduction.dump(tracker_fd, buf)            # int; installed onto the child's tracker first
         set_spawning_popen(self)
         try:
-            reduction.dump(self._result_q, buf)
             reduction.dump(prep, buf)
             reduction.dump(process_obj, buf)
         finally:
@@ -203,40 +196,39 @@ class PtyPopen(_ForkPopen):
         self._spawn_pty(argv, workdir, env)            # pty.fork + execve(agy)
         self.sentinel = self.fd                        # PTY master EOFs on agy death (wait(timeout))
         # Safety net (mirrors popen_fork's finalizer): via close() or GC of `self` — closes the PTY
-        # master (SIGHUPs agy, doubling as teardown), the result queue's pipe ends, and boot_w (the
-        # parent-death sentinel). exitpriority None (like popen_fork), so NOT at the atexit sweep.
-        self.finalizer = util.Finalize(self, _close_agy, (self.fd, self._result_q, boot_w))
+        # master (SIGHUPs agy, doubling as teardown) and boot_w (the parent-death sentinel). The
+        # result queue is the caller's, torn down there. exitpriority None (like popen_fork), so NOT
+        # at the atexit sweep.
+        self.finalizer = util.Finalize(self, _close_agy, (self.fd, boot_w))
 
         # Ship the payload to agy over the boot pipe, then keep boot_w open as the sentinel.
         with os.fdopen(boot_w, "wb", closefd=False) as f:
             f.write(buf.getvalue())
-        self._result_q._writer.close()     # parent only reads; the child is the sole writer, so the
-        #                                    reader now EOFs when agy dies (crash-detection).
         try:
             os.close(boot_r)               # agy has its own inherited copy
         except OSError:
             pass
-        # No pump thread: AgyProcess.collect()/poll()/ask() drain the PTY via _service() (waiting on
-        # the queue's reader and the PTY together), so agy stays unblocked while we consume results.
+        # No pump thread: the caller drains the PTY via _service() (waiting on its queue reader and
+        # the PTY together), so agy stays unblocked while results are consumed. The caller closes the
+        # queue's writer after start() so the reader EOFs when agy dies (crash-detection).
 
-    def _service(self, timeout):
-        """Worker mode: drain agy's PTY (+ auto-answer, tracking `_last_output`) while waiting up to
-        `timeout` s for a result on the queue; return True once the queue's reader has data.
-        Replaces the old background pump thread — `AgyProcess.poll()`/`ask()` call this in the same
-        wait they use to read results, so agy's PTY stays drained without a separate thread.
-        `_conn.wait` watches the queue's read end (a `Connection`) and the raw PTY fd together; once
-        the master EOFs it is dropped from the wait set (no busy-spin)."""
-        reader = self._result_reader
+    def _service(self, timeout, readers):
+        """Drain agy's PTY (+ auto-answer, tracking `_last_output`) while waiting up to `timeout` s
+        for data on any of `readers` (the caller's result-queue read end(s)); return True once one is
+        ready. Replaces the old background pump thread — the caller drains in the same wait it uses to
+        read results, so agy's PTY stays drained without a separate thread. The Popen owns no queue,
+        so the reader(s) are passed in. `_conn.wait` watches the reader(s) and the raw PTY fd
+        together; once the master EOFs it is dropped from the wait set (no busy-spin)."""
         end = time.time() + timeout
         while True:
-            watch = [reader] if self._pty_dead else [reader, self.fd]
+            watch = list(readers) if self._pty_dead else [*readers, self.fd]
             ready = _conn.wait(watch, max(0.0, end - time.time()))
             if not self._pty_dead and self.fd in ready:
                 if self._read_available():
                     self._last_output = time.time()
                 else:
                     self._pty_dead = True          # master EOF/closed — stop watching it
-            if reader in ready:
+            if any(r in ready for r in readers):
                 return True
             if time.time() >= end:
                 return False
@@ -263,3 +255,28 @@ class PtyPopen(_ForkPopen):
                 pass
         if getattr(self, "finalizer", None) is not None:
             self.finalizer()                             # close the PTY master fd (one-shot)
+
+
+def service_many(popens, readers, timeout):
+    """PTY-multiplex primitive for draining several agy PTYs while waiting on their result readers
+    in one `_conn.wait`. `popens` and `readers` are parallel lists — one live `(PtyPopen, reader)`
+    pair each. Does ONE wait: drains every PTY that is readable (+ auto-answers, marking `_pty_dead`
+    on EOF) and returns the sublist of `readers` that are ready. No busy-spin; the caller loops and
+    owns the queues + collection policy (mirrors single-proc `_service`, but across N PTYs). The
+    Popens own no queues — the reader(s) come from the caller."""
+    watch = {}
+    for pop, reader in zip(popens, readers):
+        watch[reader] = None                   # a result reader (Connection)
+        if not pop._pty_dead:
+            watch[pop.fd] = pop                # PTY master (int fd) → its Popen; drop once it EOFs
+    if not watch:
+        return []
+    ready = _conn.wait(list(watch), timeout)
+    ready_readers = []
+    for r in ready:
+        pop = watch[r]
+        if pop is None:                        # result reader is ready
+            ready_readers.append(r)
+        elif not pop._read_available():        # PTY readable: drain (+ auto-answer); EOF → dead
+            pop._pty_dead = True
+    return ready_readers

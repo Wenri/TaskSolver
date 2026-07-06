@@ -19,12 +19,14 @@ import threading
 import time
 import traceback
 
-_result_conn = None   # the AgyProcess result SimpleQueue (child side); the target puts objects here
+_result_conn = None   # the result SimpleQueue (child side), sourced from proc._args[0] in _run;
+#                       the target puts objects here (also handed to the target as its arg0)
 
 
 def get_result_conn():
-    """The result `SimpleQueue` back to the parent `AgyProcess`. A target running under
-    AgyProcess calls ``.put(obj)`` on it to stream native Python objects home."""
+    """The result `SimpleQueue` back to the parent (child side) — the same object handed to the
+    target as arg0 (``args=(q,)``), also exposed here so a target can fetch it without threading it
+    through. A target calls ``.put(obj)`` on it to stream native Python objects home."""
     return _result_conn
 
 
@@ -58,14 +60,19 @@ def _run():
         tracker_fd = reduction.pickle.load(fp)      #   holds its write end open, so boot's EOF = our death
         # Re-attach to the parent's resource_tracker (as spawn_main does) so the queue's SemLocks share
         # it instead of this interpreter booting a second tracker. CLOEXEC: keep it in-process; don't
-        # leak it into agy's Go child processes.
+        # leak it into agy's Go child processes. Installed BEFORE proc unpickles, so the queue's
+        # SemLocks (rebuilt with proc's args) re-attach to this tracker rather than a fresh one.
         resource_tracker._resource_tracker._fd = tracker_fd
         _set_cloexec(tracker_fd)
-        _result_conn = reduction.pickle.load(fp)    # the result SimpleQueue (pipe fds inherited; sems by name)
-        _result_conn._reader.close()                # child only puts; drop the inherited reader end
         prep = reduction.pickle.load(fp)
         _trimmed_prepare(prep)
         proc = reduction.pickle.load(fp)            # the AgyProcess instance (target + args)
+
+    # The result SimpleQueue rides proc's args (arg0 = result conn, stock-mp style: the caller passes
+    # it via AgyProcess(target=..., args=(q,))). Pull it out for get_result_conn() + the firewall
+    # puts below; the pipe fds were inherited across execve, the SemLocks sem_opened by name.
+    _result_conn = proc._args[0]
+    _result_conn._reader.close()                    # child only puts; drop the inherited reader end
 
     sys.stdin = None                                 # neutralization 1
     _orig_shutdown = threading._shutdown             # neutralization 2
@@ -110,14 +117,14 @@ def start():
     threading.Thread(target=main, name="agy-mp-child", daemon=True).start()
 
 
-def stream_turns(kinds=None, max_wait=300):
+def stream_turns(conn, kinds=None, max_wait=300):
     """Built-in AgyProcess target: stream agy's DECODED model turns home over the result queue
-    as they're produced, until agy exits (the parent then sees EOF on get()) or max_wait.
+    `conn` — arg0, passed by the caller via ``AgyProcess(target=stream_turns, args=(q,))`` (stock-mp
+    style) — as they're produced, until agy exits (the parent then sees EOF on get()) or max_wait.
     The shim always installs the capture hooks, so genai_turn events flow. Uses a subscribe
     → in-process queue → single-sender loop, so the put side has no cross-thread race."""
     import queue as _q
     from . import subscribe as _subscribe
-    conn = get_result_conn()
     kinds = set(kinds or ("genai_turn", "app_response", "resp_text", "resp_thinking"))
     q = _q.Queue()
     _subscribe(lambda obj: q.put(obj) if isinstance(obj, dict) and obj.get("kind") in kinds else None)
@@ -134,15 +141,16 @@ def stream_turns(kinds=None, max_wait=300):
 
 
 # --- targets used by test_scripts/test_agyprocess.py (importable by reference in the child) ---
-def _demo_target(*args, **kwargs):
+# All targets receive the result conn as arg0 (the caller passes args=(q, ...)), stock-mp style.
+def _demo_target(conn, *args, **kwargs):
     # also probes the parent-death sentinel: parent_process() reflects the controlling process,
     # and is_alive() is True here because the parent is alive (its boot-pipe write end is open).
     import multiprocessing as _mp
     parent = _mp.parent_process()
-    get_result_conn().put({"agy_mp": "ok", "args": args, "kwargs": kwargs,
-                           "pid": os.getpid(), "py": sys.version.split()[0],
-                           "parent_alive": parent.is_alive(), "ppid": parent.pid})
+    conn.put({"agy_mp": "ok", "args": args, "kwargs": kwargs,
+              "pid": os.getpid(), "py": sys.version.split()[0],
+              "parent_alive": parent.is_alive(), "ppid": parent.pid})
 
 
-def _raise_target(*args, **kwargs):
+def _raise_target(conn, *args, **kwargs):
     raise ValueError("agy-mp boom")   # -> _bootstrap catches it, exitcode 1 over ("_agy_done", 1)

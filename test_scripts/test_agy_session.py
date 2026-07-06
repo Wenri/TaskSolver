@@ -133,15 +133,19 @@ def case_agymodel_resume():
 
 
 def case_agyprocess_resume():
-    # AgyProcess in plain-CLI mode (no target) exposes a resumable conversation_id. Needs the shim.
+    # AgyProcess with the default target exposes a resumable conversation_id. Needs the shim.
+    # The caller owns the result queue (stock-mp style) and drains it via client._collect.
     if not os.path.exists(_env.SHIM):
         print("  NOTE agyprocess: shim not built (run `make -C antigravity`); skipped")
         return
     from pyagy.agyprocess import AgyProcess
-    p = AgyProcess(prompt=f"Remember the code word {WORD}. Reply with only: OK")
+    from pyagy.client import _new_channel, _close_channel, _collect
+    q = _new_channel()
+    p = AgyProcess(prompt=f"Remember the code word {WORD}. Reply with only: OK", args=(q,))
     try:
         p.start()
-        p.collect(timeout=60)                  # one-shot --print: drive to completion, collect the turn
+        q._writer.close()
+        _collect(p, q, timeout=60)             # one-shot --print: drive to completion, collect the turn
         cid = p.conversation_id
         ok = bool(cid)
         print(f"  {'ok  ' if ok else 'NOTE'} agyprocess: conversation_id={cid}")
@@ -151,6 +155,7 @@ def case_agyprocess_resume():
         print(f"  NOTE agyprocess: {type(e).__name__}: {e}")
     finally:
         p.close()
+        _close_channel(q)
 
 
 def case_scoped():
