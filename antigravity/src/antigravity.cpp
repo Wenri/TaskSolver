@@ -31,16 +31,18 @@
  * sensitive funcs). Both are collected into one agy_gohook_install call. */
 typedef enum { AGY_OFF = 0, AGY_GUM, AGY_FULLCGO, AGY_ASMCGO } agy_mech_t;
 enum {
-#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE) HK_##ID,
+#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE, RETMIN) HK_##ID,
 #include "procdef.h"
 #undef HOOK
     HK_COUNT
 };
 /* Positional init (NOT [HK_##ID]= array designators — C++ has no array designators):
  * the enum above and this table are both expanded from procdef.h in the SAME order,
- * so HOOKS[HK_X] is X's row by position. */
-static const struct { const char *name; agy_mode_t mode; const char *kind; agy_mech_t mech; int leave; } HOOKS[] = {
-#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE) { NAME, MODE, KIND, MECH, LEAVE },
+ * so HOOKS[HK_X] is X's row by position. retmin>0 marks a return-[]byte/string leaf getter
+ * (its minlen) — data-drives on_leave's generic return-value branch. */
+static const struct { const char *name; agy_mode_t mode; const char *kind; agy_mech_t mech;
+                      int leave; uint32_t retmin; } HOOKS[] = {
+#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE, RETMIN) { NAME, MODE, KIND, MECH, LEAVE, RETMIN },
 #include "procdef.h"
 #undef HOOK
 };
@@ -208,15 +210,12 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
                                .mode = AGY_ASYNC };
             agy_py_emit(&ev);
         }
-    } else if (id == HK_SER_ROOT || id == HK_MAR_PROMPT || id == HK_PROTO_MARSHAL ||
-               id == HK_GET_DELTA_CCPA || id == HK_GET_DELTA_CMPL ||
-               id == HK_RESP_TEXT || id == HK_RESP_THINKING || id == HK_RESP_VIEW) {
-        /* Go []byte/string return: RAX=ptr, RBX=len (CPU-only funcs). proto.Marshal is
-         * hot; skip tiny protos to cut noise. The GET_DELTA_* getters return the
-         * streamed assistant text as a Go string — the cleanest response signal. */
+    } else if (HOOKS[id].retmin) {
+        /* Return-[]byte/string leaf getters (RETMIN>0 in procdef.h): RAX=ptr, RBX=len (CPU-only
+         * funcs). Gate on len >= retmin — e.g. 256 skips tiny protos on the hot proto.Marshal;
+         * the delta/response getters return the assistant text as a Go string. */
         uint64_t ptr = cpu->rax, len = cpu->rbx;
-        uint64_t minlen = (id == HK_PROTO_MARSHAL) ? 256 : 1;
-        if (ptr && len >= minlen && len < (16u << 20)) {
+        if (ptr && len >= HOOKS[id].retmin && len < (16u << 20)) {
             agy_event_t ev = { .kind = HOOKS[id].kind, .stream_id = 0,
                                .data = (const uint8_t *)ptr, .len = (size_t)len,
                                .mode = AGY_ASYNC };
