@@ -12,8 +12,16 @@ SHELL := /bin/bash
 .ONESHELL:
 
 FRIDA_VER ?= 17.15.3
-CC        ?= gcc
 comma     := ,
+# Prefer the conda C compiler over a bare PATH `gcc`. On a host with Nix on PATH, `gcc`
+# resolves to Nix's gcc, which bakes /nix/store glibc rpaths into the shim — and that Nix
+# glibc demands GLIBC_ABI_DT_X86_64_PLT, a symbol version the system libc lacks, so
+# LD_PRELOADing the shim then fails before main (agy, even /bin/true). The conda compiler
+# links against its old sysroot glibc and uses the SYSTEM libc at runtime (like agy) — no
+# rpath leak, no version clash. Search the conda prefixes (build/host/runtime) for the
+# wrapper; fall back to a PATH gcc only if none is present.
+CONDA_CC  := $(firstword $(foreach p,$(BUILD_PREFIX) $(PREFIX) $(CONDA_PREFIX),$(wildcard $(p)/bin/x86_64-conda-linux-gnu-gcc)))
+CC        ?= $(if $(CONDA_CC),$(CONDA_CC),gcc)
 
 # Pinned agy release — the binary whose build-id matches the committed symbols.json.
 # agy self-updates in the background, so a local install's build-id DRIFTS; we vendor a
