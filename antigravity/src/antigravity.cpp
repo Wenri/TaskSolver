@@ -1,4 +1,4 @@
-/* antigravity.c — LD_PRELOAD shim: embed frida-gum, install inline hooks on the
+/* antigravity.cpp — LD_PRELOAD shim: embed frida-gum, install inline hooks on the
  * recovered Go function addresses, and forward events to the Python worker.
  *
  * Loaded into `agy` via LD_PRELOAD. The constructor (agy_init) verifies the
@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string_view>
 
 #include "frida-gum.h"
 #include "pybridge.h"
@@ -89,14 +90,11 @@ static int bid_cb(struct dl_phdr_info *info, size_t size, void *data)
 /* ---- gum listener --------------------------------------------------------- */
 struct rd_state { uint64_t conn, ptr; };  /* passed enter→leave for TLS_READ */
 
-/* substring scan over a NON-nul-terminated Go string (name.ptr/name.len) */
-static int mem_has(const char *h, size_t n, const char *needle)
+/* substring scan over a NON-nul-terminated Go string (name.ptr/name.len). The (ptr,len)
+ * string_view never reads past n, and find() allocates nothing — safe on a goroutine stack. */
+static bool mem_has(const char *h, size_t n, std::string_view needle)
 {
-    size_t m = strlen(needle);
-    if (m == 0 || n < m) return 0;
-    for (size_t i = 0; i + m <= n; i++)
-        if (memcmp(h + i, needle, m) == 0) return 1;
-    return 0;
+    return !needle.empty() && std::string_view(h, n).find(needle) != std::string_view::npos;
 }
 
 static void on_enter(GumInvocationContext *ic, gpointer user_data)
@@ -239,18 +237,18 @@ static void install_hooks(void)
      *    A probe listener leaves the return untouched, so the goroutine can park and
      *    resume on another OS thread without corrupting gum's bookkeeping.
      *  - CALL (enter+leave, leave=1 hooks): used only where we need the []byte return. */
-    GumInvocationListener *l_enter = gum_make_probe_listener(on_enter, NULL, NULL);
-    GumInvocationListener *l_full  = gum_make_call_listener(on_enter, on_leave, NULL, NULL);
+    GumInvocationListener *l_enter = gum_make_probe_listener(on_enter, nullptr, nullptr);
+    GumInvocationListener *l_full  = gum_make_call_listener(on_enter, on_leave, nullptr, nullptr);
     GumModule *mainmod = gum_process_get_main_module();
     GumAddress base = gum_module_get_range(mainmod)->base_address;
     g_base = (uint64_t)base;       /* for agy_emit_stack PC→link-vaddr reduction */
     LOG("main module base = 0x%llx", (unsigned long long)base);
 
     /* Trampoline hooks (AGY_FULLCGO/AGY_ASMCGO): the cgocall-trampoline path
-     * (cgotrampoline.c) — NOT a gum attach. These are the parking scheduling-path funcs
+     * (cgotrampoline.cpp) — NOT a gum attach. These are the parking scheduling-path funcs
      * (SendUserMessage/Send, the gemini_coder framework consumers, the CodeAssistClient
      * RPCs). Resolve + filter the union HERE and stream each into the builder — no
-     * intermediate array. It's a SINGLE region + synthetic moduledata (the gomod.c
+     * intermediate array. It's a SINGLE region + synthetic moduledata (the gomod.cpp
      * singletons make a second install unsafe), so all go through one begin/add/finalize. */
     {
         agy_gohook *gh = agy_gohook_begin((uint64_t)base, agy_sym("runtime.cgocall"),
@@ -278,7 +276,7 @@ static void install_hooks(void)
         if (i == HK_FILE_OPEN && !g_conv_id) continue;
         uint64_t va = agy_sym(HOOKS[i].name);
         if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
-        GumAttachOptions opt = { 0 };
+        GumAttachOptions opt = {};
         opt.listener_function_data = GSIZE_TO_POINTER((gsize)(i + 1));
         /* Attach PAST the stack-check prologue (agy_skip): Go's morestack re-runs
          * the real entry, not our trampoline. Args are still in registers at the
@@ -329,9 +327,9 @@ static void agy_init(void)
 
     const char *logpath = getenv("AGY_PROC_LOG");
     if (logpath && *logpath) g_logf = fopen(logpath, "ae");
-    g_tls_write_sync = getenv("AGY_PROC_TLS_WRITE_SYNC") != NULL;
-    g_stack = getenv("AGY_PROC_STACK") != NULL;
-    g_conv_id = getenv("AGY_PROC_CONV_ID") != NULL;
+    g_tls_write_sync = getenv("AGY_PROC_TLS_WRITE_SYNC") != nullptr;
+    g_stack = getenv("AGY_PROC_STACK") != nullptr;
+    g_conv_id = getenv("AGY_PROC_CONV_ID") != nullptr;
 
     /* build-id guard: refuse to apply offsets to a different agy build */
     struct bid b = { .hex = "" };

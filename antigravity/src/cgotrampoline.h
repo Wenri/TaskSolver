@@ -1,5 +1,5 @@
 /* cgotrampoline.h — public API of the cgocall-trampoline installer + the frame-pointer
- * stack unwinder (cgotrampoline.c). The GC-safety machinery it depends on — the synthetic
+ * stack unwinder (cgotrampoline.cpp). The GC-safety machinery it depends on — the synthetic
  * runtime.moduledata and the Go runtime struct mirrors — lives in gomod.h. */
 #ifndef AGY_CGOTRAMPOLINE_H
 #define AGY_CGOTRAMPOLINE_H

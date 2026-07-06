@@ -1,7 +1,7 @@
-/* gomod.c — build + register a synthetic go1.26 runtime.moduledata that covers
+/* gomod.cpp — build + register a synthetic go1.26 runtime.moduledata that covers
  * the cgocall-trampoline page, so the Go GC's stack scanner (findfunc ->
  * findmoduledatap, walking the firstmoduledata linked list) resolves our
- * trampoline PCs instead of throw("unknown pc"). See gomod.h. Pure C.
+ * trampoline PCs instead of throw("unknown pc"). See gomod.h.
  *
  * Split in two phases because our LD_PRELOAD constructor runs BEFORE Go's rt0:
  *   - agy_gomod_prepare(): build the module + all its buffers at constructor time
@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <atomic>
 
 #define GLOG(...) do { fprintf(stderr, "[antigravity/gomod] " __VA_ARGS__); \
                        fputc('\n', stderr); fflush(stderr); } while (0)
@@ -59,7 +60,7 @@ static size_t put_step(uint8_t *p, int32_t dval, uint32_t dpc)
  * consumes it (once) at the first trampoline hit. */
 static go_moduledata *g_md;
 static uint64_t g_firstmd_addr, g_cgocall_rt;
-static int g_claimed, g_done;
+static std::atomic<int> g_claimed{0}, g_done{0};
 
 int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
                       uintptr_t region_base, uintptr_t region_end,
@@ -154,7 +155,7 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     md->text         = region_base;
     md->etext        = region_end;
     md->gofunc       = (uintptr_t)smap;   /* @344: funcdata[Locals] offset 0 => &stackmap */
-    md->next         = NULL;              /* @560: our module is the chain tail */
+    md->next         = nullptr;           /* @560: our module is the chain tail */
 
     g_md = md;
     g_firstmd_addr = firstmd_addr;
@@ -168,22 +169,22 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
 
 void agy_gomod_ensure(void)
 {
-    if (__atomic_load_n(&g_done, __ATOMIC_ACQUIRE)) return;          /* fast path */
+    if (g_done.load(std::memory_order_acquire)) return;             /* fast path */
     int expected = 0;
-    while (!__atomic_compare_exchange_n(&g_claimed, &expected, 1, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+    while (!g_claimed.compare_exchange_strong(expected, 1,
+                                              std::memory_order_acq_rel, std::memory_order_relaxed)) {
         /* Lost the claim to another thread. If it finished the splice, we're done.
          * Otherwise it may have hit the pre-init retry path and dropped g_claimed back
          * to 0 WITHOUT setting g_done — so loop and try to become the splicer ourselves
          * rather than wait forever on a g_done the claimer is not obligated to set. */
-        if (__atomic_load_n(&g_done, __ATOMIC_ACQUIRE)) return;
+        if (g_done.load(std::memory_order_acquire)) return;
         __builtin_ia32_pause();
         expected = 0;
     }
 
     go_moduledata *md  = g_md;
     go_moduledata *fmd = (go_moduledata *)(uintptr_t)g_firstmd_addr;
-    go_pcHeader   *fph = fmd ? fmd->pcHeader : NULL;
+    go_pcHeader   *fph = fmd ? fmd->pcHeader : nullptr;
     int magic_ok = fph && !((uintptr_t)fph & 7) && fph->magic == GO_PCLNTAB_MAGIC_GO120;
     int ok = md && fmd && magic_ok
              && fmd->minpc < fmd->maxpc && fmd->text
@@ -191,11 +192,14 @@ void agy_gomod_ensure(void)
     if (ok) {
         go_moduledata *tail = fmd;
         while (tail->next) tail = tail->next;                       /* @560, correct go1.27 offset */
-        __atomic_store_n(&tail->next, md, __ATOMIC_RELEASE);
-        __atomic_store_n(&g_done, 1, __ATOMIC_RELEASE);
+        /* Publish our module on Go's own `next` field. Its type must stay go_moduledata* (the
+         * moduledata layout is pinned by static_asserts), so use atomic_ref for the release store
+         * rather than making the field itself std::atomic. */
+        std::atomic_ref<go_moduledata *>(tail->next).store(md, std::memory_order_release);
+        g_done.store(1, std::memory_order_release);
     } else {
         /* self-check failed (e.g. first hit was pre-runtime-init: firstmoduledata
          * pointers not relocated yet) — release the claim so a later hit retries. */
-        __atomic_store_n(&g_claimed, 0, __ATOMIC_RELEASE);
+        g_claimed.store(0, std::memory_order_release);
     }
 }

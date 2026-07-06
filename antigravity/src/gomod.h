@@ -111,7 +111,7 @@ typedef struct { int32_t n, nbit; uint8_t bytedata[]; } go_stackmap;
  * to +344 and `next` to +560 (go1.26.4 had 320/584). Verified against
  * release-branch.go1.27 src/runtime/symtab.go AND the live agy binary (hasmain@512,
  * typedesclen@304, itaboffset@320, gofunc@344, next@560 all match). The _Static_
- * asserts in gomod.c pin the critical offsets. Leading sys.NotInHeap is zero-size.
+ * asserts in gomod.cpp pin the critical offsets. Leading sys.NotInHeap is zero-size.
  * We build this fresh (calloc) and set only the fields findfunc/GC-unwind read. */
 typedef struct go_moduledata {
     go_pcHeader *pcHeader;
@@ -201,7 +201,7 @@ void agy_gomod_ensure(void);
 #endif
 
 /* The frame-pointer unwinder (agy_safe_read/agy_backtrace/agy_emit_stack) and the
- * cgocall-trampoline installer (agy_gohook_*) are cgotrampoline.c's API — see
- * cgotrampoline.h. cgotrampoline.c includes this header for agy_gomod_prepare/ensure. */
+ * cgocall-trampoline installer (agy_gohook_*) are cgotrampoline.cpp's API — see
+ * cgotrampoline.h. cgotrampoline.cpp includes this header for agy_gomod_prepare/ensure. */
 
 #endif /* AGY_GOMOD_H */

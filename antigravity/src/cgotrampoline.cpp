@@ -1,4 +1,4 @@
-/* cgotrampoline.c — cgocall-trampoline hooks for parking Go functions.
+/* cgotrampoline.cpp — cgocall-trampoline hooks for parking Go functions.
  *
  * A gum Interceptor rewrites the return address and tracks it per-OS-thread, so
  * hooking a function that PARKS the goroutine (it resumes on another M) corrupts
@@ -27,6 +27,8 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/uio.h>
+#include <array>
+#include <string_view>
 
 #define GHLOG(...) do { fprintf(stderr, "[antigravity/gohook] " __VA_ARGS__); \
                         fputc('\n', stderr); fflush(stderr); } while (0)
@@ -56,6 +58,17 @@ enum { OFF_KIND = GH_SPILL,      OFF_RAX = GH_SPILL + 8,  OFF_RBX = GH_SPILL + 1
        OFF_RCX  = GH_SPILL + 24, OFF_RDI = GH_SPILL + 32, OFF_RSI = GH_SPILL + 40,
        OFF_R8   = GH_SPILL + 48, OFF_R9  = GH_SPILL + 56, OFF_R10 = GH_SPILL + 64,
        OFF_R11  = GH_SPILL + 72, OFF_RDX = GH_SPILL + 80, OFF_RBP = GH_SPILL + 88 };
+
+/* The arg registers snapshotted into / restored from the block, in the agy_go_regs order.
+ * One table drives both the spill and restore emitters below, so they can't drift out of
+ * lockstep. RAX must stay first (it's saved before the trampoline reuses it for `kind`);
+ * restore order is irrelevant (all reads are rsp-relative and rsp is unchanged). */
+static constexpr struct { gssize off; GumX86Reg reg; } GH_REGS[] = {
+    { OFF_RAX, GUM_X86_RAX }, { OFF_RBX, GUM_X86_RBX }, { OFF_RCX, GUM_X86_RCX },
+    { OFF_RDI, GUM_X86_RDI }, { OFF_RSI, GUM_X86_RSI }, { OFF_R8,  GUM_X86_R8  },
+    { OFF_R9,  GUM_X86_R9  }, { OFF_R10, GUM_X86_R10 }, { OFF_R11, GUM_X86_R11 },
+    { OFF_RDX, GUM_X86_RDX }, { OFF_RBP, GUM_X86_RBP },
+};
 
 /* xorps xmm15,xmm15 — Go's ABI requires X15 zeroed across a (asm)cgocall
  * boundary; emitted verbatim into both call paths below. */
@@ -103,16 +116,16 @@ int agy_backtrace(uint64_t rbp, uint64_t base, uint64_t *out, int max)
  * fault-safe), but skip the expensive copy+enqueue for repeats. */
 void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base)
 {
-    uint64_t frames[48];
-    int n = agy_backtrace(rbp, base, frames, 48);
+    std::array<uint64_t, 48> frames;
+    int n = agy_backtrace(rbp, base, frames.data(), (int)frames.size());
     if (n <= 0) return;
 
     uint64_t h = 1469598103934665603ULL ^ (uint64_t)(uintptr_t)src_kind;
     for (int i = 0; i < n; i++) { h ^= frames[i]; h *= 1099511628211ULL; }
-    static uint64_t seen[1024];
+    static std::array<uint64_t, 1024> seen;
     static int nseen;
     for (int i = 0; i < nseen; i++) if (seen[i] == h) return;   /* already emitted */
-    if (nseen < 1024) seen[nseen++] = h; else return;           /* set full → stop */
+    if (nseen < (int)seen.size()) seen[nseen++] = h; else return;  /* set full → stop */
 
     unsigned char buf[64 + 48 * 8];
     size_t kl = strlen(src_kind);
@@ -120,11 +133,21 @@ void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base)
     memcpy(buf, src_kind, kl);
     buf[kl] = 0;
     size_t off = kl + 1;
-    memcpy(buf + off, frames, (size_t)n * 8);
+    memcpy(buf + off, frames.data(), (size_t)n * 8);
     off += (size_t)n * 8;
     agy_event_t ev = { .kind = "callstack", .stream_id = rbp,
                        .data = buf, .len = off, .mode = AGY_ASYNC };
     agy_py_emit(&ev);
+}
+
+/* True iff >=80% of the n bytes look like text (tab/newline count as printable) — the gate
+ * used to reject non-text buffers before treating them as strings. Pure; no allocation. */
+static bool mostly_printable(const unsigned char *p, size_t n)
+{
+    size_t ok = 0;
+    for (size_t i = 0; i < n; i++)
+        if (p[i] == '\t' || p[i] == '\n' || (p[i] >= 0x20 && p[i] < 0x7f)) ok++;
+    return ok * 10 >= n * 8;
 }
 
 /* Diagnostic (AGY_PROC_CGT_ARGS=1): build a human-readable report of the arg
@@ -138,11 +161,7 @@ static void cgt_diag_append_string(char *rep, size_t cap, size_t *o,
     unsigned char tmp[256];
     size_t n = len < sizeof(tmp) ? (size_t)len : sizeof(tmp);
     if (agy_safe_read(ptr, tmp, n) != (ssize_t)n) return;
-    /* only report if it looks like text (mostly printable) */
-    size_t printable = 0;
-    for (size_t i = 0; i < n; i++)
-        if (tmp[i] == '\t' || tmp[i] == '\n' || (tmp[i] >= 0x20 && tmp[i] < 0x7f)) printable++;
-    if (printable * 10 < n * 8) return;                     /* <80% printable → skip */
+    if (!mostly_printable(tmp, n)) return;                  /* only report if it looks like text */
     *o += snprintf(rep + *o, cap - *o, "  %s(len=%llu)=\"", label,
                    (unsigned long long)len);
     for (size_t i = 0; i < n && *o < cap - 2; i++)
@@ -156,12 +175,12 @@ static void cgt_diag_append_string(char *rep, size_t cap, size_t *o,
 /* Recursively walk the Go object graph from an arg register, reporting any
  * printable (ptr,len) Go-string header found, with its access path. Bounded by a
  * read budget + a visited set (cycle guard); depth-limited. */
-struct walkctx { char *rep; size_t cap; size_t *o; int budget; uint64_t seen[1024]; int nseen; };
+struct walkctx { char *rep; size_t cap; size_t *o; int budget; std::array<uint64_t, 1024> seen; int nseen; };
 
 static int cgt_seen(struct walkctx *c, uint64_t a)
 {
     for (int i = 0; i < c->nseen; i++) if (c->seen[i] == a) return 1;
-    if (c->nseen < 1024) c->seen[c->nseen++] = a;
+    if (c->nseen < (int)c->seen.size()) c->seen[c->nseen++] = a;
     return 0;
 }
 
@@ -254,11 +273,7 @@ static void cgt_response_emit(agy_block *b)
     char buf[CGT_RESP_CAP];
     size_t n = len < CGT_RESP_CAP ? (size_t)len : CGT_RESP_CAP;
     if (agy_safe_read(ptr, buf, n) != (ssize_t)n) return;
-    size_t printable = 0;                              /* reject non-text (wrong field) */
-    for (size_t i = 0; i < n; i++)
-        if (buf[i] == '\t' || buf[i] == '\n' || ((unsigned char)buf[i] >= 0x20 &&
-            (unsigned char)buf[i] < 0x7f)) printable++;
-    if (printable * 10 < n * 8) return;                /* <80% printable → not the text */
+    if (!mostly_printable((const unsigned char *)buf, n)) return;  /* reject non-text (wrong field) */
     agy_event_t ev = { .kind = "app_response", .stream_id = b->regs.rax,
                        .data = (const uint8_t *)buf, .len = n, .mode = AGY_ASYNC };
     agy_py_emit(&ev);
@@ -292,30 +307,33 @@ static void agy_cgo_hook(agy_block *b)
                                         prologue runs on the way out) → chain starts
                                         one frame above the target (= the kind). */
         agy_emit_stack((const char *)b->kind, b->regs.rbp, g_gh_base);
+    /* One non-owning view of the kind tag for the dispatch below (strlen only, no allocation;
+     * guarded because std::string_view from a null pointer is UB). */
+    std::string_view kind = b->kind ? std::string_view((const char *)b->kind) : std::string_view{};
     /* updateWithStep is the shallow response consumer → emit the clean answer text
      * (in addition to the fire-count event below, which other kinds also emit). */
-    if (b->kind && strcmp((const char *)b->kind, "fh_update") == 0)
+    if (kind == "fh_update")
         cgt_response_emit(b);
     /* Entry-arg hooks migrated off gum because they PARK (the trampoline is park-safe).
      * These emit their own full event and return — no generic fire event below. */
-    if (b->kind && strcmp((const char *)b->kind, "resp") == 0) {
+    if (kind == "resp") {
         /* http2 (*pipe).Write(p []byte): receiver=rax, p.ptr=rbx, p.len=rcx */
         cgt_bytes_emit("resp", b->regs.rax, b->regs.rbx, b->regs.rcx);
         return;
     }
-    if (b->kind && strcmp((const char *)b->kind, "tls_write") == 0) {
+    if (kind == "tls_write") {
         /* crypto/tls.(*Conn).Write(c=rax, b.ptr=rbx, b.len=rcx): the model REQUEST (egress).
          * Entry-arg read on the trampoline — the reliable replacement for the gum on_enter path. */
         cgt_bytes_emit("tls_write", b->regs.rax, b->regs.rbx, b->regs.rcx);
         return;
     }
-    if (b->kind && strcmp((const char *)b->kind, "http_rt") == 0) {
+    if (kind == "http_rt") {
         /* net/http.(*Transport).RoundTrip(t=rax, req=rbx): marker keyed by the request ptr */
         agy_event_t rt = { .kind = "http_rt", .stream_id = b->regs.rbx, .mode = AGY_ASYNC };
         agy_py_emit(&rt);
         return;
     }
-    if (b->kind && strcmp((const char *)b->kind, "exit") == 0) {
+    if (kind == "exit") {
         /* os.Exit(code int): code=rax. The clean end-of-capture marker. SYNC so the worker
          * writes it BEFORE agy's exit_group syscall (an ASYNC event would race process death);
          * FULLCGO hands off the P so other goroutines run while we briefly block. The code rides
@@ -362,12 +380,12 @@ struct agy_gohook {
 agy_gohook *agy_gohook_begin(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_va,
                              int max_targets)
 {
-    if (!cgocall_va)      { GHLOG("runtime.cgocall unresolved; cannot build trampolines"); return NULL; }
-    if (!asmcgocall_va)   { GHLOG("runtime.asmcgocall unresolved; cannot build trampolines"); return NULL; }
-    if (max_targets <= 0) { GHLOG("bad max_targets=%d", max_targets); return NULL; }
+    if (!cgocall_va)      { GHLOG("runtime.cgocall unresolved; cannot build trampolines"); return nullptr; }
+    if (!asmcgocall_va)   { GHLOG("runtime.asmcgocall unresolved; cannot build trampolines"); return nullptr; }
+    if (max_targets <= 0) { GHLOG("bad max_targets=%d", max_targets); return nullptr; }
 
     agy_gohook *h = (agy_gohook *)calloc(1, sizeof *h);
-    if (!h) { GHLOG("calloc failed"); return NULL; }
+    if (!h) { GHLOG("calloc failed"); return nullptr; }
     h->base = base;
     h->cgocall_abs = base + cgocall_va;
     h->asmcgocall_abs = base + asmcgocall_va;   /* required, assumed resolved (checked above) */
@@ -380,7 +398,7 @@ agy_gohook *agy_gohook_begin(uint64_t base, uint64_t cgocall_va, uint64_t asmcgo
     guint npages = (guint)((need + page - 1) / page);
     GumAddressSpec spec = { (gpointer)(uintptr_t)base, 0x7f000000 };  /* within +-~2GB of text */
     h->region = (guint8 *)gum_alloc_n_pages_near(npages, GUM_PAGE_RWX, &spec);
-    if (!h->region) { GHLOG("gum_alloc_n_pages_near failed"); free(h); return NULL; }
+    if (!h->region) { GHLOG("gum_alloc_n_pages_near failed"); free(h); return nullptr; }
     h->w = gum_x86_writer_new(h->region);
     return h;
 }
@@ -400,20 +418,11 @@ void agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip, const char *ki
     gum_x86_writer_reset(w, slot);
     uint32_t lo = 0, hi = 0;
 
-    /* prologue: reserve frame, snapshot the arg registers into the block */
+    /* prologue: reserve frame, snapshot the arg registers into the block (GH_REGS order) */
     gum_x86_writer_put_sub_reg_imm(w, GUM_X86_RSP, GH_FRAME);
     lo = gum_x86_writer_offset(w);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_RAX, GUM_X86_RAX);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_RBX, GUM_X86_RBX);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_RCX, GUM_X86_RCX);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_RDI, GUM_X86_RDI);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_RSI, GUM_X86_RSI);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_R8,  GUM_X86_R8);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_R9,  GUM_X86_R9);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_R10, GUM_X86_R10);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_R11, GUM_X86_R11);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_RDX, GUM_X86_RDX);
-    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_RBP, GUM_X86_RBP);
+    for (auto &r : GH_REGS)
+        gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, r.off, r.reg);
     /* block.kind = borrowed const char* (imm64) via RAX (already saved) */
     gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)kind);
     gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_KIND, GUM_X86_RAX);
@@ -456,17 +465,8 @@ void agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip, const char *ki
     }
 
     /* restore the target's registers, then close the frame */
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_RAX, GUM_X86_RSP, OFF_RAX);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_RBX, GUM_X86_RSP, OFF_RBX);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_RCX, GUM_X86_RSP, OFF_RCX);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_RDI, GUM_X86_RSP, OFF_RDI);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_RSI, GUM_X86_RSP, OFF_RSI);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_R8,  GUM_X86_RSP, OFF_R8);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_R9,  GUM_X86_RSP, OFF_R9);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_R10, GUM_X86_RSP, OFF_R10);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_R11, GUM_X86_RSP, OFF_R11);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_RDX, GUM_X86_RSP, OFF_RDX);
-    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_RBP, GUM_X86_RSP, OFF_RBP);
+    for (auto &r : GH_REGS)
+        gum_x86_writer_put_mov_reg_reg_offset_ptr(w, r.reg, GUM_X86_RSP, r.off);
     hi = gum_x86_writer_offset(w);
     gum_x86_writer_put_add_reg_imm(w, GUM_X86_RSP, GH_FRAME);
 

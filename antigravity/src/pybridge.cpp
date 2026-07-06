@@ -1,9 +1,9 @@
 /* pybridge.cpp — embedded CPython on a dedicated 16 MB-stack worker thread (Boost.Thread).
  *
- * C++23 TU (the rest of the shim is C). Boost.Thread is used over std::thread because only
+ * C++23 TU, like the rest of the shim. Boost.Thread is used over std::thread because only
  * boost::thread::attributes can set the worker's 16 MB stack — libpython's C stack is deep and
  * std::thread/jthread expose no stack-size API. The exported API has C linkage (see pybridge.h)
- * so the C TUs (antigravity.c, gomod.c, cgotrampoline.c) link against it.
+ * so the sibling TUs (antigravity.cpp, gomod.cpp, cgotrampoline.cpp) link against it.
  *
  * Boost.Python (bp::) handles the Python object/call/refcount layer (import, attrs, calling
  * dispatch, extracting the result) — RAII refcounting + error_already_set instead of manual
@@ -91,7 +91,7 @@ private:
 
 /* The one instance — a Meyers singleton (thread-safe first-call init, no raw `new` to leak).
  * Cleanup is DETERMINISTIC via shutdown(), invoked from the os.Exit hook (the "exit" branch in
- * cgotrampoline.c) — the one teardown callback that fires under agy's Go os.Exit, which bypasses
+ * cgotrampoline.cpp) — the one teardown callback that fires under agy's Go os.Exit, which bypasses
  * libc exit / __cxa_atexit (verified), so ~PyBridge does NOT run on the normal path. ~PyBridge is
  * only a fallback for a libc-exit() path, where it join-then-destructs safely. Note the residual
  * corner: if that fallback dtor ever ran while another goroutine was still calling bridge(), it
@@ -166,7 +166,7 @@ void PyBridge::worker_main()
     if (!modname || !*modname) modname = "pyagy.agy_process";
     const char *pypath = getenv("AGY_PROC_PYTHONPATH");
     const char *mc = getenv("AGY_PROC_MAXCOPY");
-    if (mc && *mc) { long v = strtol(mc, NULL, 0); if (v > 0) maxcopy_ = (size_t)v; }
+    if (mc && *mc) { long v = strtol(mc, nullptr, 0); if (v > 0) maxcopy_ = (size_t)v; }
 
     Py_InitializeEx(0);  /* raw C-API bootstrap — Boost.Python has no embedding entry point */
 
@@ -192,7 +192,7 @@ void PyBridge::worker_main()
         dispatch_ = nullptr;                            /* → ok=false, graceful degrade */
     }
 
-    int ok = (dispatch_ != NULL);
+    int ok = (dispatch_ != nullptr);
     PyThreadState *saved = PyEval_SaveThread();  /* release GIL while idle */
 
     {
