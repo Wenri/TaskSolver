@@ -188,11 +188,17 @@ typedef struct { uint64_t kind; agy_go_regs regs; } agy_block;
  * Once-guarded: self-check the now-relocated firstmoduledata layout, then splice
  * our module onto the chain tail so findfunc/GC-unwind resolve the trampoline PCs.
  * Minimal stack + bare write() — safe to run on a goroutine stack. */
+#ifdef __cplusplus
+extern "C" {
+#endif
 int  agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
                        uintptr_t region_base, uintptr_t region_end,
                        uint32_t slot_size, int nslots,
                        uint32_t frame, uint32_t frame_lo, uint32_t frame_hi);
 void agy_gomod_ensure(void);
+#ifdef __cplusplus
+}
+#endif
 
 /* The frame-pointer unwinder (agy_safe_read/agy_backtrace/agy_emit_stack) and the
  * cgocall-trampoline installer (agy_gohook_*) are cgotrampoline.c's API — see

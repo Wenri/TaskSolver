@@ -13,17 +13,14 @@ SHELL := /bin/bash
 
 FRIDA_VER ?= 17.15.3
 comma     := ,
-# Prefer the conda C compiler over a bare PATH `gcc`. On a host with Nix on PATH, `gcc`
-# resolves to Nix's gcc, which bakes /nix/store glibc rpaths into the shim — and that Nix
-# glibc demands GLIBC_ABI_DT_X86_64_PLT, a symbol version the system libc lacks, so
-# LD_PRELOADing the shim then fails before main (agy, even /bin/true). The conda compiler
-# links against its old sysroot glibc and uses the SYSTEM libc at runtime (like agy) — no
-# rpath leak, no version clash. Search the conda prefixes (build/host/runtime) for the
-# wrapper; fall back to a PATH gcc only if none is present.
-CONDA_CC  := $(firstword $(foreach p,$(BUILD_PREFIX) $(PREFIX) $(CONDA_PREFIX),$(wildcard $(p)/bin/x86_64-conda-linux-gnu-gcc)))
-CC        ?= $(if $(CONDA_CC),$(CONDA_CC),gcc)
-# Same for the C++ compiler (pybridge.cpp is C++23 / Boost.Thread), and it drives the final link
-# so libstdc++ is pulled in.
+# The whole shim is C++23 (Boost.Thread/Boost.Python), so $(CXX) compiles every TU and drives
+# the final link (pulls libstdc++). Prefer the conda g++ over a bare PATH `g++`. On a host with
+# Nix on PATH, `g++` resolves to Nix's, which bakes /nix/store glibc rpaths into the shim — and
+# that Nix glibc demands GLIBC_ABI_DT_X86_64_PLT, a symbol version the system libc lacks, so
+# LD_PRELOADing the shim then fails before main (agy, even /bin/true). The conda compiler links
+# against its old sysroot glibc and uses the SYSTEM libc at runtime (like agy) — no rpath leak,
+# no version clash. Search the conda prefixes (build/host/runtime) for the wrapper; fall back to
+# a PATH g++ only if none is present.
 CONDA_CXX := $(firstword $(foreach p,$(BUILD_PREFIX) $(PREFIX) $(CONDA_PREFIX),$(wildcard $(p)/bin/x86_64-conda-linux-gnu-g++)))
 CXX       ?= $(if $(CONDA_CXX),$(CONDA_CXX),g++)
 
@@ -68,11 +65,15 @@ UAPI_INC := $(if $(wildcard /usr/include/linux/limits.h),,$(patsubst %/linux/lim
 # below points the shim at $(CONDA_PREFIX)/lib so agy finds libpython3.13 at runtime
 # (agy is always launched via pyagy/_env.py under the pixi env).
 PYCFG   := $(shell command -v "$(CONDA_PREFIX)/bin/python3-config" 2>/dev/null || command -v python3-config || command -v /usr/bin/python3-config)
-CFLAGS  := -O2 -g -fPIC -Wall -Wextra -std=gnu11 -fvisibility=hidden \
-           -ffunction-sections -fdata-sections -I$(GUM) $(shell $(PYCFG) --includes) $(if $(UAPI_INC),-idirafter $(UAPI_INC))
-# pybridge.cpp is C++23 (Boost.Thread + Boost.Python); Boost headers live in $(CONDA_PREFIX)/include.
-# -Wno-deprecated-declarations silences the one std::auto_ptr warning Boost.Python emits under c++23.
-CXXFLAGS := -O2 -g -fPIC -Wall -Wextra -Wno-deprecated-declarations -std=c++23 -fvisibility=hidden \
+# Every TU is C++23 (Boost.Thread + Boost.Python in pybridge.cpp); Boost headers live in
+# $(CONDA_PREFIX)/include. -Wno-deprecated-declarations silences the one std::auto_ptr warning
+# Boost.Python emits under c++23. -Wno-missing-field-initializers: the shim uses partial designated
+# initializers pervasively (e.g. agy_event_t leaves verdict/out_data/out_len to zero) — C's -Wextra
+# exempts those, C++'s doesn't, so we re-exempt them here. The C-style TUs (antigravity/gomod/
+# cgotrampoline) otherwise build clean — GNU extensions (flexible array members, __atomic builtins)
+# stay enabled since we don't pass -pedantic.
+CXXFLAGS := -O2 -g -fPIC -Wall -Wextra -Wno-deprecated-declarations -Wno-missing-field-initializers \
+            -std=c++23 -fvisibility=hidden \
             -ffunction-sections -fdata-sections -I$(GUM) $(shell $(PYCFG) --includes) \
             $(if $(CONDA_PREFIX),-I$(CONDA_PREFIX)/include,) $(if $(UAPI_INC),-idirafter $(UAPI_INC))
 LDFLAGS := -shared -Wl,--exclude-libs,ALL -Wl,--gc-sections $(if $(CONDA_PREFIX),-Wl$(comma)-rpath$(comma)$(CONDA_PREFIX)/lib,)
@@ -87,15 +88,15 @@ all: $(SHIM)
 
 # Recompile only when sources/symbols change; `| setup` (order-only) ensures the
 # vendored deps exist first without forcing a rebuild.
-$(SHIM): src/antigravity.c src/pybridge.cpp src/pybridge.h src/gomod.c src/cgotrampoline.c src/gomod.h src/cgotrampoline.h src/procdef.h symbols/gen_symbols_header.py symbols/symbols.json | setup
+$(SHIM): src/antigravity.cpp src/pybridge.cpp src/pybridge.h src/gomod.cpp src/cgotrampoline.cpp src/gomod.h src/cgotrampoline.h src/procdef.h symbols/gen_symbols_header.py symbols/symbols.json | setup
 	test -n "$(UAPI_INC)" || test -f /usr/include/linux/limits.h || { echo "ERROR: no linux/limits.h — install kernel-headers_linux-64 (a pixi dep) so \$$CONDA_PREFIX has a sysroot (CONDA_PREFIX=$(CONDA_PREFIX) PREFIX=$(PREFIX))" >&2; exit 1; }
 	echo "[build] UAPI headers: $(if $(UAPI_INC),$(UAPI_INC),/usr/include (system))"
 	python3 symbols/gen_symbols_header.py symbols/symbols.json src/symbols_gen.h
 	mkdir -p vendor
-	$(CC)  $(CFLAGS)   -c src/antigravity.c   -o vendor/antigravity.o
-	$(CC)  $(CFLAGS)   -c src/gomod.c         -o vendor/gomod.o
-	$(CC)  $(CFLAGS)   -c src/cgotrampoline.c -o vendor/cgotrampoline.o
-	$(CXX) $(CXXFLAGS) -c src/pybridge.cpp    -o vendor/pybridge.o
+	$(CXX) $(CXXFLAGS) -c src/antigravity.cpp   -o vendor/antigravity.o
+	$(CXX) $(CXXFLAGS) -c src/gomod.cpp         -o vendor/gomod.o
+	$(CXX) $(CXXFLAGS) -c src/cgotrampoline.cpp -o vendor/cgotrampoline.o
+	$(CXX) $(CXXFLAGS) -c src/pybridge.cpp      -o vendor/pybridge.o
 	$(CXX) $(LDFLAGS) -o $(SHIM) vendor/antigravity.o vendor/gomod.o vendor/cgotrampoline.o vendor/pybridge.o $(LIBS)
 	echo "built $(SHIM) ($$(stat -c%s $(SHIM)) bytes)"
 

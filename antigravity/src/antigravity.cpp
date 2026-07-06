@@ -6,7 +6,9 @@
  * heavy work happens in Python; the hook bodies here are deliberately tiny
  * because they run on goroutine stacks (see README).
  */
+#ifndef _GNU_SOURCE          /* g++ already defines it; guard avoids a redefinition warning */
 #define _GNU_SOURCE
+#endif
 #include <dlfcn.h>
 #include <link.h>
 #include <elf.h>
@@ -33,8 +35,11 @@ enum {
 #undef HOOK
     HK_COUNT
 };
+/* Positional init (NOT [HK_##ID]= array designators — C++ has no array designators):
+ * the enum above and this table are both expanded from procdef.h in the SAME order,
+ * so HOOKS[HK_X] is X's row by position. */
 static const struct { const char *name; agy_mode_t mode; const char *kind; agy_mech_t mech; int leave; } HOOKS[] = {
-#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE) [HK_##ID] = { NAME, MODE, KIND, MECH, LEAVE },
+#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE) { NAME, MODE, KIND, MECH, LEAVE },
 #include "procdef.h"
 #undef HOOK
 };
@@ -54,7 +59,7 @@ struct bid { char hex[80]; int done; };
 static int bid_cb(struct dl_phdr_info *info, size_t size, void *data)
 {
     (void)size;
-    struct bid *b = data;
+    struct bid *b = (struct bid *)data;
     if (b->done) return 0;                 /* first object == main program */
     for (int i = 0; i < info->dlpi_phnum; i++) {
         const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
@@ -144,14 +149,14 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
     }
     case HK_TLS_READ: {
         /* capture buffer ptr now; data is filled by the time we return */
-        struct rd_state *s = gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
+        struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
         s->conn = cpu->rax;
         s->ptr  = cpu->rbx;
         break;
     }
     case HK_TLS_DECRYPT: {
         /* stash *halfConn receiver for stream correlation; plaintext is the return */
-        struct rd_state *s = gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
+        struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
         s->conn = cpu->rax;
         s->ptr = 0;
         break;
@@ -186,7 +191,7 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
     GumCpuContext *cpu = ic->cpu_context;
     if (id == HK_TLS_READ) {
         int64_t n = (int64_t)cpu->rax;   /* return value: bytes read */
-        struct rd_state *s = gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
+        struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
         if (n > 0 && s->ptr) {
             agy_event_t ev = { .kind = "tls_read", .stream_id = s->conn,
                                .data = (const uint8_t *)s->ptr, .len = (size_t)n,
@@ -197,7 +202,7 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
         /* (*halfConn).decrypt returns ([]byte plaintext, recordType, error):
          * RAX=ptr, RBX=len. This is a decrypted inbound TLS record = HTTP/2 frames
          * of the response. Safe on_leave: decrypt is CPU-only and doesn't park. */
-        struct rd_state *s = gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
+        struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
         uint64_t ptr = cpu->rax, len = cpu->rbx;
         if (ptr && (int64_t)len > 0 && len < (16u << 20)) {
             agy_event_t ev = { .kind = HOOKS[id].kind, .stream_id = s->conn,
@@ -297,12 +302,15 @@ static void install_hooks(void)
  * addrinfo is opaque here — we only read `node` and pass the rest through, so we
  * avoid pulling <netdb.h> (and the kernel UAPI headers it needs). */
 struct addrinfo;
-__attribute__((visibility("default")))
+/* extern "C": this is a libc interposer resolved by the dynamic linker BY NAME, so it
+ * must export the unmangled symbol `getaddrinfo` (C++ mangling would hide it). */
+extern "C" __attribute__((visibility("default")))
 int getaddrinfo(const char *node, const char *service,
                 const struct addrinfo *hints, struct addrinfo **res)
 {
     static int (*real)(const char *, const char *, const struct addrinfo *, struct addrinfo **);
-    if (!real) real = dlsym(RTLD_NEXT, "getaddrinfo");
+    if (!real) real = (int (*)(const char *, const char *, const struct addrinfo *,
+                               struct addrinfo **))dlsym(RTLD_NEXT, "getaddrinfo");
     int rc = real(node, service, hints, res);
     if (agy_py_ready() && node) {
         agy_event_t ev = { .kind = "dns", .data = (const uint8_t *)node,

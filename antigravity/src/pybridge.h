@@ -11,8 +11,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* pybridge.cpp is C++ (Boost.Thread); the other shim TUs (antigravity.c, gomod.c,
- * cgotrampoline.c) are C. Give the exported API C linkage so they link across the boundary. */
+/* All shim TUs are C++ now, but the whole hook API keeps C linkage: pybridge.cpp defines
+ * these and the antigravity/gomod/cgotrampoline TUs call them, so unmangled names keep the
+ * cross-TU wiring (and the exported symbols) byte-identical regardless of compiler. */
 #ifdef __cplusplus
 extern "C" {
 #endif

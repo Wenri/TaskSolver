@@ -27,15 +27,15 @@
 /* go1.26: FuncTabBucketSize = 256*MINFUNC, MINFUNC = 16. */
 #define GO_FUNCTAB_BUCKET 4096
 
-_Static_assert(sizeof(go_func) == 44, "go_func header must be 44 bytes");
-_Static_assert(sizeof(go_functab) == 8, "functab must be 8 bytes");
-_Static_assert(sizeof(go_findfuncbucket) == 20, "findfuncbucket must be 20 bytes");
+static_assert(sizeof(go_func) == 44, "go_func header must be 44 bytes");
+static_assert(sizeof(go_functab) == 8, "functab must be 8 bytes");
+static_assert(sizeof(go_findfuncbucket) == 20, "findfuncbucket must be 20 bytes");
 /* Pin the go1.27 moduledata layout (agy). If agy's Go changes these, the build
  * fails loudly instead of corrupting memory (as an off-by-N splice would). */
-_Static_assert(sizeof(go_moduledata) == 568, "moduledata must be 568 bytes (go1.27 amd64)");
-_Static_assert(offsetof(go_moduledata, text) == 176, "text@176");
-_Static_assert(offsetof(go_moduledata, gofunc) == 344, "gofunc@344 (go1.27)");
-_Static_assert(offsetof(go_moduledata, next) == 560, "next@560 (go1.27)");
+static_assert(sizeof(go_moduledata) == 568, "moduledata must be 568 bytes (go1.27 amd64)");
+static_assert(offsetof(go_moduledata, text) == 176, "text@176");
+static_assert(offsetof(go_moduledata, gofunc) == 344, "gofunc@344 (go1.27)");
+static_assert(offsetof(go_moduledata, next) == 560, "next@560 (go1.27)");
 
 /* LEB128 varint append (used by the pctab SP-delta encoding). */
 static size_t put_uvarint(uint8_t *p, uint32_t v)
@@ -71,16 +71,16 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     int nbuckets = (int)(region_size / GO_FUNCTAB_BUCKET) + 1;
 
     /* metadata buffers, off the Go heap (moduledata is NotInHeap; C allocs qualify) */
-    go_moduledata     *md   = calloc(1, sizeof *md);
-    go_pcHeader       *ph   = calloc(1, sizeof *ph);
-    go_functab        *ftab = calloc(nfunc + 1, sizeof *ftab);       /* +1 sentinel */
-    go_findfuncbucket *fft  = calloc(nbuckets, sizeof *fft);         /* all-zero => scan from ftab[0] */
-    uint8_t           *pcln = calloc(nfunc, AGY_FUNC_STRIDE);        /* the _func records */
-    uint8_t           *names = calloc(1, 32);                        /* "\0agy_cgo_tramp\0" */
-    uint8_t           *pctab = calloc(1, 32);                        /* dummy[0] + 3-region pcsp */
+    go_moduledata     *md   = (go_moduledata *)calloc(1, sizeof *md);
+    go_pcHeader       *ph   = (go_pcHeader *)calloc(1, sizeof *ph);
+    go_functab        *ftab = (go_functab *)calloc(nfunc + 1, sizeof *ftab);   /* +1 sentinel */
+    go_findfuncbucket *fft  = (go_findfuncbucket *)calloc(nbuckets, sizeof *fft); /* all-zero => scan from ftab[0] */
+    uint8_t           *pcln = (uint8_t *)calloc(nfunc, AGY_FUNC_STRIDE);       /* the _func records */
+    uint8_t           *names = (uint8_t *)calloc(1, 32);                       /* "\0agy_cgo_tramp\0" */
+    uint8_t           *pctab = (uint8_t *)calloc(1, 32);                       /* dummy[0] + 3-region pcsp */
     int nbit = (int)((frame - 8) / 8);
     int mapbytes = (nbit + 7) / 8;
-    go_stackmap       *smap = calloc(1, sizeof *smap + mapbytes);
+    go_stackmap       *smap = (go_stackmap *)calloc(1, sizeof *smap + mapbytes);
     if (!md || !ph || !ftab || !fft || !pcln || !names || !pctab || !smap) {
         GLOG("out of memory building moduledata");
         return -3;
@@ -144,10 +144,10 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
      * so no phantom data/type ranges are ever scanned (we only join the
      * findmoduledatap linked list, never modulesSlice). */
     md->pcHeader     = ph;
-    md->funcnametab  = (go_slice){ names, 32, 32 };
-    md->pctab        = (go_slice){ pctab, (intptr_t)po, (intptr_t)po };
-    md->pclntable    = (go_slice){ pcln, (intptr_t)nfunc * AGY_FUNC_STRIDE, (intptr_t)nfunc * AGY_FUNC_STRIDE };
-    md->ftab         = (go_slice){ ftab, nfunc + 1, nfunc + 1 };
+    md->funcnametab  = go_slice{ names, 32, 32 };
+    md->pctab        = go_slice{ pctab, (intptr_t)po, (intptr_t)po };
+    md->pclntable    = go_slice{ pcln, (intptr_t)nfunc * AGY_FUNC_STRIDE, (intptr_t)nfunc * AGY_FUNC_STRIDE };
+    md->ftab         = go_slice{ ftab, nfunc + 1, nfunc + 1 };
     md->findfunctab  = (uintptr_t)fft;
     md->minpc        = region_base;
     md->maxpc        = region_end;

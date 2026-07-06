@@ -14,7 +14,9 @@
  * trampoline frame; agy_gomod_register() covers it with a synthetic moduledata
  * so findfunc resolves the trampoline PCs (else throw("unknown pc")). See gomod.h.
  */
+#ifndef _GNU_SOURCE          /* g++ already defines it; guard avoids a redefinition warning */
 #define _GNU_SOURCE
+#endif
 #include "frida-gum.h"
 #include "gomod.h"
 #include "cgotrampoline.h"
@@ -344,7 +346,7 @@ static uint32_t match_prologue(const uint8_t *p)
 struct patch_ctx { uint8_t bytes[16]; gsize n; };
 static void patch_apply(gpointer mem, gpointer ud)
 {
-    struct patch_ctx *c = ud;
+    struct patch_ctx *c = (struct patch_ctx *)ud;
     memcpy(mem, c->bytes, c->n);
 }
 
@@ -364,7 +366,7 @@ agy_gohook *agy_gohook_begin(uint64_t base, uint64_t cgocall_va, uint64_t asmcgo
     if (!asmcgocall_va)   { GHLOG("runtime.asmcgocall unresolved; cannot build trampolines"); return NULL; }
     if (max_targets <= 0) { GHLOG("bad max_targets=%d", max_targets); return NULL; }
 
-    agy_gohook *h = calloc(1, sizeof *h);
+    agy_gohook *h = (agy_gohook *)calloc(1, sizeof *h);
     if (!h) { GHLOG("calloc failed"); return NULL; }
     h->base = base;
     h->cgocall_abs = base + cgocall_va;
@@ -377,7 +379,7 @@ agy_gohook *agy_gohook_begin(uint64_t base, uint64_t cgocall_va, uint64_t asmcgo
     gsize need = (gsize)max_targets * GH_SLOT;
     guint npages = (guint)((need + page - 1) / page);
     GumAddressSpec spec = { (gpointer)(uintptr_t)base, 0x7f000000 };  /* within +-~2GB of text */
-    h->region = gum_alloc_n_pages_near(npages, GUM_PAGE_RWX, &spec);
+    h->region = (guint8 *)gum_alloc_n_pages_near(npages, GUM_PAGE_RWX, &spec);
     if (!h->region) { GHLOG("gum_alloc_n_pages_near failed"); free(h); return NULL; }
     h->w = gum_x86_writer_new(h->region);
     return h;

@@ -6,6 +6,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ---- frame-pointer stack unwinder --------------------------------------------
  * Fault-safe read of `n` bytes from a possibly-bogus address in our own process
  * (process_vm_readv → EFAULT instead of SIGSEGV). Returns bytes read or -1. */
@@ -44,5 +48,9 @@ agy_gohook *agy_gohook_begin(uint64_t base, uint64_t cgocall_va, uint64_t asmcgo
 void        agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip,
                            const char *kind, int asmcgo);
 int         agy_gohook_finalize(agy_gohook *h, uint64_t md_vaddr);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* AGY_CGOTRAMPOLINE_H */
