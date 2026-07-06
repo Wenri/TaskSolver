@@ -2,25 +2,13 @@
     "python-envs.defaultEnvManager": "renan-r-santos.pixi-code:pixi",
     "python-envs.defaultPackageManager": "renan-r-santos.pixi-code:pixi",
 
-    // The antigravity shim is its own CMake project (antigravity/CMakeLists.txt), built with
-    // Ninja into antigravity/build (matches the pixi build-shim task + .gitignore).
+    // The antigravity shim is its own CMake project (antigravity/CMakeLists.txt). Build it via the
+    // "pixi" CMake preset (antigravity/CMakePresets.json), which self-contains the conda toolchain +
+    // CONDA_PREFIX — so CMake Tools needs NO kit. useCMakePresets=always keeps it on presets, never
+    // the kit scanner (which misfires on this Linux host, e.g. a phantom clang-cl-21 kit).
     "cmake.sourceDirectory": "${workspaceFolder}/antigravity",
-    "cmake.buildDirectory": "${workspaceFolder}/antigravity/build",
-    "cmake.generator": "Ninja",
-
-    // The shim MUST build inside the pixi env: it needs conda's cmake + g++ (not the Nix ones on
-    // PATH) and $CONDA_PREFIX (CMakeLists.txt reads it for python3-config, Boost, and the rpath).
-    // CMake Tools runs cmake in VS Code's own env with no pixi activation, so point it at the pixi
-    // env's cmake and inject the four vars the CMakeLists needs. The CMakeLists is self-contained
-    // (uses $CONDA_PREFIX explicitly for every include/lib/rpath), so these are enough — no full
-    // conda activation required. Paths are ${workspaceFolder}-relative → portable.
     "cmake.cmakePath": "${workspaceFolder}/.pixi/envs/default/bin/cmake",
-    "cmake.environment": {
-        "CONDA_PREFIX": "${workspaceFolder}/.pixi/envs/default",
-        "CC": "${workspaceFolder}/.pixi/envs/default/bin/x86_64-conda-linux-gnu-cc",
-        "CXX": "${workspaceFolder}/.pixi/envs/default/bin/x86_64-conda-linux-gnu-c++",
-        "PATH": "${workspaceFolder}/.pixi/envs/default/bin:${env:PATH}"
-    },
+    "cmake.useCMakePresets": "always",
 
     // Point the C/C++ tooling at the generated compile DB (antigravity/compile_commands.json is a
     // symlink into the build dir) so it resolves frida-gum.h + the Gum* types in antigravity/src.

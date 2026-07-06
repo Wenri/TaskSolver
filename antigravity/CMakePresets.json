@@ -1,0 +1,23 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "pixi",
+            "displayName": "pixi (conda toolchain)",
+            "description": "Build the antigravity shim with the pixi env's conda toolchain. Self-contained: sets CONDA_PREFIX + the conda g++/gcc and prepends the env's bin to PATH, so it works without pixi activation — VS Code CMake Tools, or `cmake --preset pixi` from a plain shell. No kit needed.",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "environment": {
+                "CONDA_PREFIX": "${sourceDir}/../.pixi/envs/default",
+                "PATH": "${sourceDir}/../.pixi/envs/default/bin:$penv{PATH}"
+            },
+            "cacheVariables": {
+                "CMAKE_CXX_COMPILER": "${sourceDir}/../.pixi/envs/default/bin/x86_64-conda-linux-gnu-c++"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "pixi", "configurePreset": "pixi" }
+    ]
+}
