@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <sys/uio.h>
 #include <array>
+#include <memory>
 #include <string_view>
 
 #define GHLOG(...) do { fprintf(stderr, "[antigravity/gohook] " __VA_ARGS__); \
@@ -384,8 +385,8 @@ agy_gohook *agy_gohook_begin(uint64_t base, uint64_t cgocall_va, uint64_t asmcgo
     if (!asmcgocall_va)   { GHLOG("runtime.asmcgocall unresolved; cannot build trampolines"); return nullptr; }
     if (max_targets <= 0) { GHLOG("bad max_targets=%d", max_targets); return nullptr; }
 
-    agy_gohook *h = (agy_gohook *)calloc(1, sizeof *h);
-    if (!h) { GHLOG("calloc failed"); return nullptr; }
+    auto h = std::unique_ptr<agy_gohook>(new (std::nothrow) agy_gohook{});  /* {} zero-inits */
+    if (!h) { GHLOG("alloc failed"); return nullptr; }
     h->base = base;
     h->cgocall_abs = base + cgocall_va;
     h->asmcgocall_abs = base + asmcgocall_va;   /* required, assumed resolved (checked above) */
@@ -398,9 +399,9 @@ agy_gohook *agy_gohook_begin(uint64_t base, uint64_t cgocall_va, uint64_t asmcgo
     guint npages = (guint)((need + page - 1) / page);
     GumAddressSpec spec = { (gpointer)(uintptr_t)base, 0x7f000000 };  /* within +-~2GB of text */
     h->region = (guint8 *)gum_alloc_n_pages_near(npages, GUM_PAGE_RWX, &spec);
-    if (!h->region) { GHLOG("gum_alloc_n_pages_near failed"); free(h); return nullptr; }
+    if (!h->region) { GHLOG("gum_alloc_n_pages_near failed"); return nullptr; }  /* unique_ptr frees h */
     h->w = gum_x86_writer_new(h->region);
-    return h;
+    return h.release();   /* hand the raw ptr to the C caller; finalize() adopts + frees it */
 }
 
 void agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
@@ -500,9 +501,10 @@ void agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip, const char *ki
 int agy_gohook_finalize(agy_gohook *h, uint64_t md_vaddr)
 {
     if (!h) return 0;
+    std::unique_ptr<agy_gohook> guard(h);   /* adopt the raw handle → auto-freed on every return below */
     if (h->w) gum_x86_writer_unref(h->w);
     int made = h->made;
-    if (made == 0) { GHLOG("no trampolines installed"); free(h); return 0; }
+    if (made == 0) { GHLOG("no trampolines installed"); return 0; }
 
     /* GC-unwind safety: BUILD the covering synthetic moduledata now (constructor
      * time; no firstmoduledata read). The trampolines call agy_gomod_ensure() to
@@ -514,6 +516,5 @@ int agy_gohook_finalize(agy_gohook *h, uint64_t md_vaddr)
                                GH_SLOT, made, GH_FRAME, h->frame_lo, h->frame_hi);
     if (rc != 0) GHLOG("moduledata prepare failed (rc=%d); trampolines are live "
                        "but NOT GC-safe — expect throw(\"unknown pc\") under GC", rc);
-    free(h);
-    return made;
+    return made;   /* guard frees h */
 }
