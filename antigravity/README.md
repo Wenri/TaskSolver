@@ -56,7 +56,7 @@ silently applied to a different build. Re-run the extractor after any `agy` upda
         │           │ enqueue (+ block if SYNC)                              │
         │           ▼                                                        │
         │   ┌───────────────────────────────────────────┐                   │
-        │   │ pyworker pthread  (LARGE 16MB stack)        │  ← libpython3.13  │
+        │   │ pyworker boost::thread (LARGE 16MB stack)   │  ← libpython3.13  │
         │   │  Py_InitializeEx(0); import pyagy.agy_process │    lives only     │
         │   │  loop: pop req → PyGILState_Ensure →        │    here (one      │
         │   │        call on_tls_write/read/http/tool →   │    PyThreadState) │
@@ -77,9 +77,11 @@ goroutine's guard page (a hard crash — Go's `morestack` growth only triggers a
 Go prologues, never inside our C code).
 
 So the **goroutine-side hook body stays tiny** (copy the `[]byte`, push a
-request) and all Python runs on a dedicated pthread with a normal large stack.
+request) and all Python runs on a dedicated `boost::thread` with a 16 MB stack.
 That thread is *not* a goroutine and is unknown to Go's scheduler, so Python's
-deep stacks and the GIL never touch Go's runtime.
+deep stacks and the GIL never touch Go's runtime. (`pybridge.cpp` is C++23 and uses
+Boost.Thread specifically because its `thread::attributes::set_stack_size` is the
+only standard-ish way to set that 16 MB stack — `std::thread` has no stack-size API.)
 
 ### Async vs sync (logging vs modify)
 
@@ -370,7 +372,7 @@ antigravity/
   src/
     antigravity.c               ← LD_PRELOAD constructor + gum install + Go-ABI hook
                               callbacks + getaddrinfo interposer
-    pybridge.c/.h           ← embed libpython, pyworker thread, queue, dispatch
+    pybridge.cpp/.h         ← embed libpython, pyworker boost::thread (C++23), queue, dispatch
     procdef.h                ← declarative hook table (id, symbol, mode, kind, mech, leave)
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
     __init__.py             ← lazy exports (PEP 562): ask/Session/AgyResponse/specs,

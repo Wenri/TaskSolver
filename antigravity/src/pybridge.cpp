@@ -1,60 +1,67 @@
-/* pybridge.c — embedded CPython on a dedicated 16 MB-stack worker thread. */
-#define _GNU_SOURCE
+/* pybridge.cpp — embedded CPython on a dedicated 16 MB-stack worker thread (Boost.Thread).
+ *
+ * C++23 TU (the rest of the shim is C). Boost.Thread is used over std::thread because only
+ * boost::thread::attributes can set the worker's 16 MB stack — libpython's C stack is deep and
+ * std::thread/jthread expose no stack-size API. The exported API has C linkage (see pybridge.h)
+ * so the C TUs (antigravity.c, gomod.c, cgotrampoline.c) link against it. */
 #define PY_SSIZE_T_CLEAN   /* required for "#" formats (y#) on Python 3.10+ */
 #include "pybridge.h"
 
 #include <Python.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+
+#include <boost/thread.hpp>
+#include <boost/thread/condition_variable.hpp>
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <new>
 
 #define PYLOG(...) do { fprintf(stderr, "[antigravity/py] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 
-typedef struct job {
-    struct job *next;
-    const char *kind;      /* static literal, not owned */
-    uint64_t    stream_id;
-    uint8_t    *data;      /* owned by worker; freed after dispatch */
-    size_t      len;
-    agy_mode_t  mode;
-    int         on_heap;   /* 1 => worker frees the job; 0 => stack job (SYNC) */
+struct job {
+    job        *next = nullptr;
+    const char *kind = nullptr;    /* static literal, not owned */
+    uint64_t    stream_id = 0;
+    uint8_t    *data = nullptr;    /* owned by worker; freed after dispatch */
+    size_t      len = 0;
+    agy_mode_t  mode = AGY_ASYNC;
+    bool        on_heap = false;   /* true => worker deletes the job; false => stack job (SYNC) */
 
     /* SYNC completion + result */
-    pthread_mutex_t done_mu;
-    pthread_cond_t  done_cv;
-    int         done;
-    int         verdict;
-    uint8_t    *out_data;
-    size_t      out_len;
-} job_t;
+    boost::mutex              done_mu;
+    boost::condition_variable done_cv;
+    bool        done = false;
+    int         verdict = 0;
+    uint8_t    *out_data = nullptr;
+    size_t      out_len = 0;
+};
 
-static pthread_t       g_worker;
-static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_qcv = PTHREAD_COND_INITIALIZER;
-static job_t          *g_head, *g_tail;
+static boost::thread             g_worker;
+static boost::mutex              g_qmu;
+static boost::condition_variable g_qcv;
+static job                      *g_head, *g_tail;
 
-static pthread_mutex_t g_startmu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_startcv = PTHREAD_COND_INITIALIZER;
-static int             g_ready = -1;   /* -1 starting, 0 failed, 1 ready */
+static boost::mutex              g_startmu;
+static boost::condition_variable g_startcv;
+static int                       g_ready = -1;   /* -1 starting, 0 failed, 1 ready */
 
 static size_t          g_maxcopy = 1u << 20;
 static PyObject       *g_dispatch;     /* pyagy.agy_process.dispatch (borrowed on worker thread) */
 
-int agy_py_ready(void) { return g_ready == 1; }
+extern "C" int agy_py_ready(void) { return g_ready == 1; }
 
-static void enqueue(job_t *j)
+static void enqueue(job *j)
 {
-    pthread_mutex_lock(&g_qmu);
-    j->next = NULL;
+    boost::unique_lock<boost::mutex> lk(g_qmu);
+    j->next = nullptr;
     if (g_tail) g_tail->next = j; else g_head = j;
     g_tail = j;
-    pthread_cond_signal(&g_qcv);
-    pthread_mutex_unlock(&g_qmu);
+    g_qcv.notify_one();
 }
 
 /* Called on the worker thread, holding the GIL. */
-static void run_dispatch(job_t *j)
+static void run_dispatch(job *j)
 {
     if (!g_dispatch) return;
     /* Keep the (ptr,len) pair consistent: if there's no buffer, length is 0 so the
@@ -70,7 +77,7 @@ static void run_dispatch(job_t *j)
     }
     if (j->mode == AGY_SYNC && PyBytes_Check(r)) {
         Py_ssize_t n = PyBytes_GET_SIZE(r);
-        uint8_t *out = malloc(n ? (size_t)n : 1);
+        uint8_t *out = (uint8_t *)malloc(n ? (size_t)n : 1);
         if (out) {
             memcpy(out, PyBytes_AS_STRING(r), (size_t)n);
             j->out_data = out;
@@ -81,9 +88,8 @@ static void run_dispatch(job_t *j)
     Py_DECREF(r);
 }
 
-static void *worker_main(void *arg)
+static void worker_main()
 {
-    (void)arg;
     const char *modname = getenv("AGY_PROC_MODULE");
     if (!modname || !*modname) modname = "pyagy.agy_process";
     const char *pypath = getenv("AGY_PROC_PYTHONPATH");
@@ -119,20 +125,23 @@ static void *worker_main(void *arg)
     int ok = (g_dispatch != NULL);
     PyThreadState *saved = PyEval_SaveThread();  /* release GIL while idle */
 
-    pthread_mutex_lock(&g_startmu);
-    g_ready = ok ? 1 : 0;
-    pthread_cond_broadcast(&g_startcv);
-    pthread_mutex_unlock(&g_startmu);
-    if (!ok) { PyEval_RestoreThread(saved); return NULL; }
+    {
+        boost::unique_lock<boost::mutex> lk(g_startmu);
+        g_ready = ok ? 1 : 0;
+        g_startcv.notify_all();
+    }
+    if (!ok) { PyEval_RestoreThread(saved); return; }
     PYLOG("worker ready (module=%s, maxcopy=%zu)", modname, g_maxcopy);
 
     for (;;) {
-        pthread_mutex_lock(&g_qmu);
-        while (!g_head) pthread_cond_wait(&g_qcv, &g_qmu);
-        job_t *j = g_head;
-        g_head = j->next;
-        if (!g_head) g_tail = NULL;
-        pthread_mutex_unlock(&g_qmu);
+        job *j;
+        {
+            boost::unique_lock<boost::mutex> lk(g_qmu);
+            g_qcv.wait(lk, [] { return g_head != nullptr; });
+            j = g_head;
+            g_head = j->next;
+            if (!g_head) g_tail = nullptr;
+        }
 
         PyGILState_STATE gil = PyGILState_Ensure();
         run_dispatch(j);
@@ -140,52 +149,53 @@ static void *worker_main(void *arg)
 
         free(j->data);
         if (j->mode == AGY_SYNC) {
-            pthread_mutex_lock(&j->done_mu);
-            j->done = 1;
-            pthread_cond_signal(&j->done_cv);
-            pthread_mutex_unlock(&j->done_mu);   /* emitter owns the stack job */
+            boost::unique_lock<boost::mutex> lk(j->done_mu);
+            j->done = true;
+            j->done_cv.notify_one();   /* emitter owns the stack job */
         } else if (j->on_heap) {
-            free(j);
+            delete j;
         }
     }
     (void)saved;
-    return NULL;
 }
 
-int agy_py_start(void)
+extern "C" int agy_py_start(void)
 {
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 16u * 1024 * 1024);  /* big stack for libpython */
-    int rc = pthread_create(&g_worker, &attr, worker_main, NULL);
-    pthread_attr_destroy(&attr);
-    if (rc != 0) { PYLOG("pthread_create failed: %d", rc); g_ready = 0; return -1; }
+    try {
+        boost::thread::attributes attrs;
+        attrs.set_stack_size(16u * 1024 * 1024);  /* big stack for libpython */
+        g_worker = boost::thread(attrs, &worker_main);
+        g_worker.detach();  /* fire-and-forget; runs until the process dies (matches pthread) */
+    } catch (const std::exception &e) {
+        PYLOG("boost::thread create failed: %s", e.what());
+        g_ready = 0;
+        return -1;
+    }
 
-    pthread_mutex_lock(&g_startmu);
-    while (g_ready == -1) pthread_cond_wait(&g_startcv, &g_startmu);
-    pthread_mutex_unlock(&g_startmu);
+    boost::unique_lock<boost::mutex> lk(g_startmu);
+    g_startcv.wait(lk, [] { return g_ready != -1; });
     return g_ready == 1 ? 0 : -1;
 }
 
 static uint8_t *copy_capped(const uint8_t *src, size_t len, size_t *out_len)
 {
     size_t n = len > g_maxcopy ? g_maxcopy : len;
-    if (n == 0) { *out_len = 0; return NULL; }
-    uint8_t *p = malloc(n);
-    if (!p) { *out_len = 0; return NULL; }   /* alloc failed → keep data/len consistent */
+    if (n == 0) { *out_len = 0; return nullptr; }
+    uint8_t *p = (uint8_t *)malloc(n);
+    if (!p) { *out_len = 0; return nullptr; }   /* alloc failed → keep data/len consistent */
     if (src) memcpy(p, src, n);
     *out_len = n;
     return p;
 }
 
-void agy_py_emit(agy_event_t *ev)
+extern "C" void agy_py_emit(agy_event_t *ev)
 {
     if (g_ready != 1) return;
 
     if (ev->mode == AGY_ASYNC) {
-        job_t *j = calloc(1, sizeof(*j));
+        job *j = new (std::nothrow) job();
         if (!j) return;
-        j->on_heap = 1;
+        j->on_heap = true;
         j->kind = ev->kind;
         j->stream_id = ev->stream_id;
         j->mode = AGY_ASYNC;
@@ -194,29 +204,26 @@ void agy_py_emit(agy_event_t *ev)
         return;
     }
 
-    /* SYNC: stack job, block until the worker fills the verdict. */
-    job_t j;
-    memset(&j, 0, sizeof(j));
-    pthread_mutex_init(&j.done_mu, NULL);
-    pthread_cond_init(&j.done_cv, NULL);
+    /* SYNC: stack job, block until the worker fills the verdict. boost::mutex/condition_variable
+     * members are constructed/destroyed with the job — no manual init/destroy. */
+    job j;
     j.kind = ev->kind;
     j.stream_id = ev->stream_id;
     j.mode = AGY_SYNC;
     j.data = copy_capped(ev->data, ev->len, &j.len);
 
     enqueue(&j);
-    pthread_mutex_lock(&j.done_mu);
-    while (!j.done) pthread_cond_wait(&j.done_cv, &j.done_mu);
-    pthread_mutex_unlock(&j.done_mu);
-    pthread_mutex_destroy(&j.done_mu);
-    pthread_cond_destroy(&j.done_cv);
+    {
+        boost::unique_lock<boost::mutex> lk(j.done_mu);
+        j.done_cv.wait(lk, [&] { return j.done; });
+    }
 
     ev->verdict = j.verdict;
     ev->out_data = j.out_data;   /* caller frees via agy_py_free */
     ev->out_len = j.out_len;
 }
 
-void agy_py_free(agy_event_t *ev)
+extern "C" void agy_py_free(agy_event_t *ev)
 {
-    if (ev->out_data) { free(ev->out_data); ev->out_data = NULL; ev->out_len = 0; ev->verdict = 0; }
+    if (ev->out_data) { free(ev->out_data); ev->out_data = nullptr; ev->out_len = 0; ev->verdict = 0; }
 }

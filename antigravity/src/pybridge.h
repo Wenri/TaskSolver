@@ -11,6 +11,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* pybridge.cpp is C++ (Boost.Thread); the other shim TUs (antigravity.c, gomod.c,
+ * cgotrampoline.c) are C. Give the exported API C linkage so they link across the boundary. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum { AGY_ASYNC = 0, AGY_SYNC = 1 } agy_mode_t;
 
 typedef struct {
@@ -42,5 +48,9 @@ void agy_py_emit(agy_event_t *ev);
 void agy_py_free(agy_event_t *ev);
 
 int  agy_py_ready(void);
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif
 
 #endif

@@ -22,6 +22,10 @@ comma     := ,
 # wrapper; fall back to a PATH gcc only if none is present.
 CONDA_CC  := $(firstword $(foreach p,$(BUILD_PREFIX) $(PREFIX) $(CONDA_PREFIX),$(wildcard $(p)/bin/x86_64-conda-linux-gnu-gcc)))
 CC        ?= $(if $(CONDA_CC),$(CONDA_CC),gcc)
+# Same for the C++ compiler (pybridge.cpp is C++23 / Boost.Thread), and it drives the final link
+# so libstdc++ is pulled in.
+CONDA_CXX := $(firstword $(foreach p,$(BUILD_PREFIX) $(PREFIX) $(CONDA_PREFIX),$(wildcard $(p)/bin/x86_64-conda-linux-gnu-g++)))
+CXX       ?= $(if $(CONDA_CXX),$(CONDA_CXX),g++)
 
 # Pinned agy release — the binary whose build-id matches the committed symbols.json.
 # agy self-updates in the background, so a local install's build-id DRIFTS; we vendor a
@@ -66,20 +70,31 @@ UAPI_INC := $(if $(wildcard /usr/include/linux/limits.h),,$(patsubst %/linux/lim
 PYCFG   := $(shell command -v "$(CONDA_PREFIX)/bin/python3-config" 2>/dev/null || command -v python3-config || command -v /usr/bin/python3-config)
 CFLAGS  := -O2 -g -fPIC -Wall -Wextra -std=gnu11 -fvisibility=hidden \
            -ffunction-sections -fdata-sections -I$(GUM) $(shell $(PYCFG) --includes) $(if $(UAPI_INC),-idirafter $(UAPI_INC))
+# pybridge.cpp is C++23 (Boost.Thread); Boost headers live in $(CONDA_PREFIX)/include (conda).
+CXXFLAGS := -O2 -g -fPIC -Wall -Wextra -std=c++23 -fvisibility=hidden \
+            -ffunction-sections -fdata-sections -I$(GUM) $(shell $(PYCFG) --includes) \
+            $(if $(CONDA_PREFIX),-I$(CONDA_PREFIX)/include,) $(if $(UAPI_INC),-idirafter $(UAPI_INC))
 LDFLAGS := -shared -Wl,--exclude-libs,ALL -Wl,--gc-sections $(if $(CONDA_PREFIX),-Wl$(comma)-rpath$(comma)$(CONDA_PREFIX)/lib,)
-LIBS    := $(GUM)/libfrida-gum.a $(shell $(PYCFG) --ldflags --embed) -lrt -lresolv -ldl -lm -pthread
+# Linked with $(CXX) (pulls libstdc++). libboost_thread is the conda .so in $(CONDA_PREFIX)/lib,
+# found at runtime via the rpath above — dynamic link, no /nix rpath (conda toolchain).
+LIBS    := $(GUM)/libfrida-gum.a $(shell $(PYCFG) --ldflags --embed) \
+           $(if $(CONDA_PREFIX),-L$(CONDA_PREFIX)/lib,) -lboost_thread -lrt -lresolv -ldl -lm -pthread
 
 .PHONY: all setup symbols agy-update clean
 all: $(SHIM)
 
 # Recompile only when sources/symbols change; `| setup` (order-only) ensures the
 # vendored deps exist first without forcing a rebuild.
-$(SHIM): src/antigravity.c src/pybridge.c src/pybridge.h src/gomod.c src/cgotrampoline.c src/gomod.h src/cgotrampoline.h src/procdef.h symbols/gen_symbols_header.py symbols/symbols.json | setup
+$(SHIM): src/antigravity.c src/pybridge.cpp src/pybridge.h src/gomod.c src/cgotrampoline.c src/gomod.h src/cgotrampoline.h src/procdef.h symbols/gen_symbols_header.py symbols/symbols.json | setup
 	test -n "$(UAPI_INC)" || test -f /usr/include/linux/limits.h || { echo "ERROR: no linux/limits.h — install kernel-headers_linux-64 (a pixi dep) so \$$CONDA_PREFIX has a sysroot (CONDA_PREFIX=$(CONDA_PREFIX) PREFIX=$(PREFIX))" >&2; exit 1; }
 	echo "[build] UAPI headers: $(if $(UAPI_INC),$(UAPI_INC),/usr/include (system))"
 	python3 symbols/gen_symbols_header.py symbols/symbols.json src/symbols_gen.h
 	mkdir -p vendor
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(SHIM) src/antigravity.c src/pybridge.c src/gomod.c src/cgotrampoline.c $(LIBS)
+	$(CC)  $(CFLAGS)   -c src/antigravity.c   -o vendor/antigravity.o
+	$(CC)  $(CFLAGS)   -c src/gomod.c         -o vendor/gomod.o
+	$(CC)  $(CFLAGS)   -c src/cgotrampoline.c -o vendor/cgotrampoline.o
+	$(CXX) $(CXXFLAGS) -c src/pybridge.cpp    -o vendor/pybridge.o
+	$(CXX) $(LDFLAGS) -o $(SHIM) vendor/antigravity.o vendor/gomod.o vendor/cgotrampoline.o vendor/pybridge.o $(LIBS)
 	echo "built $(SHIM) ($$(stat -c%s $(SHIM)) bytes)"
 
 # Vendor the deps that are NOT committed (see .gitignore); all steps idempotent.
@@ -117,7 +132,7 @@ symbols: | setup
 	python3 symbols/build_symbols.py vendor/agy symbols/symbols.json
 
 clean:
-	rm -f $(SHIM) src/symbols_gen.h
+	rm -f $(SHIM) src/symbols_gen.h vendor/*.o
 
 # Fetch the LATEST agy from the official updater manifest, vendor it (sha512-verified),
 # and print the new pin values to paste above. The build-id WILL change vs the current

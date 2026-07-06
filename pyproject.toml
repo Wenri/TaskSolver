@@ -85,7 +85,9 @@ preview = ["pixi-build"]
 python = "3.13.*"
 tasksolver = { path = "." }
 nodejs = ">=25,<26"
-bun = ">=1.3.11,<2"
+# NOTE: bun was removed — it pins icu 75, which conflicts with boost 1.91 (icu 78, pulled in
+# for Boost.Thread); nodejs (what pymport uses) is icu-78 and coexists fine. Re-add bun in a
+# separate environment if needed so its icu pin doesn't clash with the default env's boost.
 # GNU make drives the antigravity shim build (antigravity/Makefile); this host has
 # no system make, so pull it from conda-forge for manual rebuilds (`pixi run make …`).
 # make is also required by node-gyp for the pymport source build.
@@ -96,11 +98,17 @@ pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pym
 # build points -idirafter at this package's sysroot in place — no copy — at
 # $CONDA_PREFIX/x86_64-conda-linux-gnu/sysroot/usr/include.
 kernel-headers_linux-64 = ">=4"
-# Conda C compiler for the antigravity shim — the automatic build_py build AND manual
-# `pixi run make -C antigravity`. Use it instead of a bare PATH `gcc`: on a Nix host `gcc`
-# is Nix's, which bakes /nix/store glibc rpaths into the shim and breaks its LD_PRELOAD.
-# Pinned <13.3 to match gxx_linux-64 in the local feature (shared solve group).
+# Conda C/C++ compilers for the antigravity shim — the automatic build_py build AND manual
+# `pixi run make -C antigravity`. Use them instead of a bare PATH `gcc`/`g++`: on a Nix host
+# those are Nix's, which bake /nix/store glibc rpaths into the shim and break its LD_PRELOAD.
+# gxx pulls gcc; both pinned <13.3 to match the local feature (shared solve group). pybridge is
+# C++23 (Boost.Thread), the other shim TUs are C — hence both compilers.
 gcc_linux-64 = ">=11,<13.3"
+gxx_linux-64 = ">=11,<13.3"
+# Boost.Thread for the pybridge worker (its thread::attributes sets the libpython worker's
+# 16 MB stack — no std API can). libboost-devel = headers + link libs; it pulls libboost (the
+# runtime libboost_thread.so, found at runtime via the shim's -rpath $CONDA_PREFIX/lib).
+libboost-devel = ">=1.88"
 # antigravity HTTP/2 response decoding (h2reassemble.py) — from conda-forge, not pip.
 hpack = ">=4"
 brotli-python = ">=1.1"
@@ -139,7 +147,9 @@ pip = "*"
 setuptools = ">=61"
 make = ">=4"
 kernel-headers_linux-64 = ">=4"
-gcc_linux-64 = ">=11,<13.3"   # compile the shim with conda's gcc, not the Nix gcc on PATH
+gcc_linux-64 = ">=11,<13.3"   # compile the shim's C TUs with conda's gcc, not the Nix gcc on PATH
+gxx_linux-64 = ">=11,<13.3"   # pybridge.cpp is C++23 (Boost.Thread) → conda g++
+libboost-devel = ">=1.88"     # Boost.Thread (headers + libboost_thread) for the pybridge worker
 
 # --- pymport (Node.js ↔ Python bridge, compiled from source) ----------------
 # pymport embeds libpython as a shared library inside Node.js.  It must be
