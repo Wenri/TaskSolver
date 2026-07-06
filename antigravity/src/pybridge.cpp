@@ -12,10 +12,12 @@
  * stay raw C-API.
  *
  * The worker thread, its job queue, and the pinned dispatch callable are encapsulated in the
- * `PyBridge` class; a single leaked-forever instance (`bridge()`) backs the extern "C" entry
- * points. `dispatch_` stays a raw PyObject* on purpose (a bp::object member of a destroyed-at-exit
- * instance would Py_DECREF without the GIL in this never-Py_Finalize'd interp) — which is also why
- * the instance is intentionally never destroyed. */
+ * `PyBridge` class; a single Meyers-singleton instance (`bridge()`) backs the extern "C" entry
+ * points. Ownership is RAII: jobs are held BY VALUE in a std::queue (input/result bytes are
+ * std::vector); a SYNC job's completion rides std::promise/std::future (the emitter keeps the
+ * promise on its stack, the job carries a pointer to it — so ASYNC pays no promise cost).
+ * `dispatch_` stays a raw PyObject* on purpose (a bp::object member destroyed at exit would
+ * Py_DECREF without the GIL in this never-Py_Finalize'd interp). */
 #define PY_SSIZE_T_CLEAN   /* required for "#" formats (y#) on Python 3.10+ */
 #include <boost/python.hpp>   /* pulls in Python.h first, with the right guards */
 #include "pybridge.h"
@@ -26,7 +28,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <new>
+#include <future>
+#include <queue>
+#include <utility>
+#include <vector>
 
 namespace bp = boost::python;
 
@@ -34,27 +39,26 @@ namespace bp = boost::python;
 
 namespace {
 
-struct job {
-    job        *next = nullptr;
-    const char *kind = nullptr;    /* static literal, not owned */
-    uint64_t    stream_id = 0;
-    uint8_t    *data = nullptr;    /* owned by worker; freed after dispatch */
-    size_t      len = 0;
-    agy_mode_t  mode = AGY_ASYNC;
-    bool        on_heap = false;   /* true => worker deletes the job; false => stack job (SYNC) */
+/* The worker's output for a SYNC event: verdict=1 means `out` holds a replacement buffer. */
+struct Result {
+    int verdict = 0;
+    std::vector<uint8_t> out;
+};
 
-    /* SYNC completion + result */
-    boost::mutex              done_mu;
-    boost::condition_variable done_cv;
-    bool        done = false;
-    int         verdict = 0;
-    uint8_t    *out_data = nullptr;
-    size_t      out_len = 0;
+/* A queued event. Held by value in the queue (movable: vector + trivial members), so no new/delete
+ * and no ownership flag. `result` is non-owning: for SYNC it points at the emitter's stack promise
+ * (fulfilled by the worker); for ASYNC it stays null (no promise → no cost on the hot path). */
+struct job {
+    const char          *kind = nullptr;    /* static literal, not owned */
+    uint64_t             stream_id = 0;
+    std::vector<uint8_t> data;              /* input bytes (owned; auto-freed) */
+    agy_mode_t           mode = AGY_ASYNC;
+    std::promise<Result> *result = nullptr; /* SYNC: emitter's stack promise; ASYNC: null */
 };
 
 /* PyBridge — owns the embedded interpreter's worker thread, the job queue, and the pinned
- * dispatch callable. A single leaked instance (see bridge()) lives for the whole process; the
- * extern "C" entry points delegate to it. */
+ * dispatch callable. A single instance (see bridge()) lives for the whole process; the extern "C"
+ * entry points delegate to it. */
 class PyBridge {
 public:
     int  start();               /* create the worker thread; block until it signals ready */
@@ -67,18 +71,18 @@ public:
                                  * (that dtor never runs; the os.Exit hook already called shutdown). */
 
 private:
-    void     worker_main();     /* boost::thread body: init the interpreter, then drain the queue */
-    bool     enqueue(job *j);   /* false if shutting down (job not queued) */
-    void     run_dispatch(job *j);   /* on the worker thread, holding the GIL */
-    uint8_t *copy_capped(const uint8_t *src, size_t len, size_t *out_len) const;
+    void   worker_main();       /* boost::thread body: init the interpreter, then drain the queue */
+    bool   enqueue(job &&j);    /* false if shutting down (job dropped) */
+    Result run_dispatch(const job &j);   /* on the worker thread, holding the GIL */
+    std::vector<uint8_t> copy_capped(const uint8_t *src, size_t len) const;
 
     /* One mutex + condvar for everything: the start handshake, the job queue, and shutdown. qcv_
      * carries three signals (ready_ set / job enqueued / stop_ set), each disambiguated by the
-     * waiter's predicate — start() waits on `ready_ != -1`, the worker loop on `head_ || stop_`. */
+     * waiter's predicate — start() waits on `ready_ != -1`, the worker loop on `!queue_.empty() || stop_`. */
     boost::thread             worker_;
     boost::mutex              qmu_;
     boost::condition_variable qcv_;
-    job                      *head_ = nullptr, *tail_ = nullptr;
+    std::queue<job>           queue_;                  /* FIFO of pending jobs (by value; guarded by qmu_) */
     bool                      stop_ = false;           /* set by shutdown(); worker drains then exits */
     int                       ready_ = -1;             /* -1 starting, 0 failed, 1 ready (write: qmu_) */
     size_t                    maxcopy_ = 1u << 20;
@@ -94,46 +98,40 @@ private:
  * would be a use-after-destruction — but agy never takes that path (it always os.Exits). */
 PyBridge &bridge() { static PyBridge b; return b; }
 
-bool PyBridge::enqueue(job *j)
+bool PyBridge::enqueue(job &&j)
 {
     boost::unique_lock<boost::mutex> lk(qmu_);
     if (stop_) return false;      /* shutting down: refuse so no emitter blocks on a dead worker */
-    j->next = nullptr;
-    if (tail_) tail_->next = j; else head_ = j;
-    tail_ = j;
+    queue_.push(std::move(j));
     qcv_.notify_one();
     return true;
 }
 
 /* Called on the worker thread, holding the GIL. Every bp::object below is created AND destroyed
- * inside this GIL window — none escapes to a GIL-less context. */
-void PyBridge::run_dispatch(job *j)
+ * inside this GIL window — none escapes to a GIL-less context. Returns the SYNC verdict/bytes. */
+Result PyBridge::run_dispatch(const job &j)
 {
-    if (!dispatch_) return;
+    Result res;
+    if (!dispatch_) return res;
     try {
         /* The "y#" payload must be real Python bytes — bp::str/std::string would build PyUnicode
          * (str) and corrupt binary data. Build bytes via the C-API and adopt into a handle (throws
-         * error_already_set on NULL). Empty buffer → 0-length bytes, consistent (ptr,len). */
-        const char *buf = j->data ? (const char *)j->data : "";
-        Py_ssize_t  dlen = j->data ? (Py_ssize_t)j->len : 0;
+         * error_already_set on NULL). Empty buffer → 0-length bytes. */
+        const char *buf = j.data.empty() ? "" : (const char *)j.data.data();
+        Py_ssize_t  dlen = (Py_ssize_t)j.data.size();
         bp::object arg(bp::handle<>(PyBytes_FromStringAndSize(buf, dlen)));
 
         /* dispatch(kind: str, stream_id: int, data: bytes) — the old "sKy#" call. bp::call takes
          * the raw PyObject* callable directly; the result is a new-ref bp::object (RAII decref). */
         bp::object r = bp::call<bp::object>(dispatch_,
-                                            bp::str(j->kind),
-                                            (unsigned long long)j->stream_id,
+                                            bp::str(j.kind),
+                                            (unsigned long long)j.stream_id,
                                             arg);
 
-        if (j->mode == AGY_SYNC && !r.is_none() && PyBytes_Check(r.ptr())) {
-            Py_ssize_t n = PyBytes_GET_SIZE(r.ptr());
-            uint8_t *out = (uint8_t *)malloc(n ? (size_t)n : 1);
-            if (out) {
-                memcpy(out, PyBytes_AS_STRING(r.ptr()), (size_t)n);
-                j->out_data = out;
-                j->out_len = (size_t)n;
-                j->verdict = 1;
-            }
+        if (j.mode == AGY_SYNC && !r.is_none() && PyBytes_Check(r.ptr())) {
+            const char *p = PyBytes_AS_STRING(r.ptr());
+            res.out.assign(p, p + PyBytes_GET_SIZE(r.ptr()));
+            res.verdict = 1;
         }
         /* arg and r destruct here (GIL held) → automatic Py_DECREF. */
     }
@@ -148,17 +146,18 @@ void PyBridge::run_dispatch(job *j)
          * C++ exception would std::terminate the process (and leak the GIL). Never unwind out. */
         PyErr_Clear();
     }
+    return res;
 }
 
-uint8_t *PyBridge::copy_capped(const uint8_t *src, size_t len, size_t *out_len) const
+std::vector<uint8_t> PyBridge::copy_capped(const uint8_t *src, size_t len) const
 {
+    std::vector<uint8_t> v;
     size_t n = len > maxcopy_ ? maxcopy_ : len;
-    if (n == 0) { *out_len = 0; return nullptr; }
-    uint8_t *p = (uint8_t *)malloc(n);
-    if (!p) { *out_len = 0; return nullptr; }   /* alloc failed → keep data/len consistent */
-    if (src) memcpy(p, src, n);
-    *out_len = n;
-    return p;
+    if (n) {
+        v.resize(n);
+        if (src) memcpy(v.data(), src, n);
+    }
+    return v;
 }
 
 void PyBridge::worker_main()
@@ -205,28 +204,22 @@ void PyBridge::worker_main()
     PYLOG("worker ready (module=%s, maxcopy=%zu)", modname, maxcopy_);
 
     for (;;) {
-        job *j;
+        job j;
         {
             boost::unique_lock<boost::mutex> lk(qmu_);
-            qcv_.wait(lk, [this] { return head_ != nullptr || stop_; });
-            if (!head_) break;    /* woken by stop_ with the queue drained → exit */
-            j = head_;
-            head_ = j->next;
-            if (!head_) tail_ = nullptr;
+            qcv_.wait(lk, [this] { return !queue_.empty() || stop_; });
+            if (queue_.empty()) break;    /* woken by stop_ with the queue drained → exit */
+            j = std::move(queue_.front());
+            queue_.pop();
         }
 
         PyGILState_STATE gil = PyGILState_Ensure();
-        run_dispatch(j);
+        Result res = run_dispatch(j);
         PyGILState_Release(gil);
 
-        free(j->data);
-        if (j->mode == AGY_SYNC) {
-            boost::unique_lock<boost::mutex> lk(j->done_mu);
-            j->done = true;
-            j->done_cv.notify_one();   /* emitter owns the stack job */
-        } else if (j->on_heap) {
-            delete j;
-        }
+        if (j.result)                          /* SYNC: fulfill the emitter's future (last use of j) */
+            j.result->set_value(std::move(res));
+        /* j (and its data vector) destructs at the end of the iteration — RAII, no free/delete. */
     }
     (void)saved;
 }
@@ -237,8 +230,7 @@ int PyBridge::start()
         boost::thread::attributes attrs;
         attrs.set_stack_size(16u * 1024 * 1024);  /* big stack for libpython */
         worker_ = boost::thread(attrs, [this] { worker_main(); });
-        /* Kept joinable (not detached) so shutdown() can join it at os.Exit. The singleton is
-         * leaked, so worker_ is never destructed → no std::terminate even if shutdown never runs. */
+        /* Kept joinable (not detached) so shutdown() can join it at os.Exit. */
     } catch (const std::exception &e) {
         PYLOG("boost::thread create failed: %s", e.what());
         ready_ = 0;
@@ -255,34 +247,42 @@ void PyBridge::emit(agy_event_t *ev)
     if (ready_ != 1) return;
 
     if (ev->mode == AGY_ASYNC) {
-        job *j = new (std::nothrow) job();
-        if (!j) return;
-        j->on_heap = true;
-        j->kind = ev->kind;
-        j->stream_id = ev->stream_id;
-        j->mode = AGY_ASYNC;
-        j->data = copy_capped(ev->data, ev->len, &j->len);
-        if (!enqueue(j)) { free(j->data); delete j; }   /* shutting down: drop it */
+        job j;
+        j.kind = ev->kind;
+        j.stream_id = ev->stream_id;
+        j.mode = AGY_ASYNC;
+        j.data = copy_capped(ev->data, ev->len);
+        enqueue(std::move(j));   /* moved into the queue; on refuse it just destructs here */
         return;
     }
 
-    /* SYNC: stack job, block until the worker fills the verdict. boost::mutex/condition_variable
-     * members are constructed/destroyed with the job — no manual init/destroy. */
+    /* SYNC: keep the promise on THIS stack and hand the job a pointer to it, then block on the
+     * future. The job (with the pointer) is moved into the queue; the promise/future stay here and
+     * outlive the wait, so the worker's set_value reaches us. */
+    std::promise<Result> pr;
+    std::future<Result>  fut = pr.get_future();
+
     job j;
     j.kind = ev->kind;
     j.stream_id = ev->stream_id;
     j.mode = AGY_SYNC;
-    j.data = copy_capped(ev->data, ev->len, &j.len);
+    j.data = copy_capped(ev->data, ev->len);
+    j.result = &pr;
 
-    if (!enqueue(&j)) { free(j.data); return; }   /* shutting down: don't block on a dead worker */
-    {
-        boost::unique_lock<boost::mutex> lk(j.done_mu);
-        j.done_cv.wait(lk, [&] { return j.done; });
+    if (!enqueue(std::move(j))) return;   /* shutting down: don't block (fut is never got → no throw) */
+    Result res = fut.get();               /* blocks until the worker set_value's */
+
+    if (res.verdict) {
+        /* Hand the replacement to the caller over the C ABI: agy_event_t.out_data is a malloc'd
+         * buffer freed by agy_py_free — the one place we bridge std::vector → raw for C. */
+        uint8_t *out = (uint8_t *)malloc(res.out.size() ? res.out.size() : 1);
+        if (out) {
+            memcpy(out, res.out.data(), res.out.size());
+            ev->out_data = out;
+            ev->out_len = res.out.size();
+            ev->verdict = 1;
+        }
     }
-
-    ev->verdict = j.verdict;
-    ev->out_data = j.out_data;   /* caller frees via agy_py_free */
-    ev->out_len = j.out_len;
 }
 
 /* Cooperative teardown, invoked from the os.Exit hook (the one callback that fires under agy's Go
