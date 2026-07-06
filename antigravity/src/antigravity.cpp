@@ -186,12 +186,13 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
                                .mode = AGY_ASYNC };
             agy_py_emit(&ev);
         }
-    } else if (HOOKS[id].retmin) {
-        /* Return-[]byte/string leaf getters (RETMIN>0 in procdef.h): RAX=ptr, RBX=len (CPU-only
-         * funcs). Gate on len >= retmin — e.g. 256 skips tiny protos on the hot proto.Marshal;
-         * the delta/response getters return the assistant text as a Go string. */
+    } else if (HOOKS[id].retcap > 0) {
+        /* Return-[]byte/string leaf getters (retcap>0 in procdef.h): RAX=ptr, RBX=len (CPU-only
+         * funcs). Gate on len >= retcap — e.g. 256 skips tiny protos on the hot proto.Marshal;
+         * the delta/response getters return the assistant text as a Go string. (TLS_READ/DECRYPT
+         * are retcap<0 — handled by the ID branches above, not here.) */
         uint64_t ptr = cpu->rax, len = cpu->rbx;
-        if (ptr && len >= HOOKS[id].retmin && len < (16u << 20)) {
+        if (ptr && len >= (uint32_t)HOOKS[id].retcap && len < (16u << 20)) {
             agy_event_t ev = { .kind = HOOKS[id].kind, .stream_id = 0,
                                .data = (const uint8_t *)ptr, .len = (size_t)len,
                                .mode = AGY_ASYNC };
@@ -262,11 +263,13 @@ static void install_hooks(void)
          * Only hook functions that don't park (tls_write, halfConn.decrypt, CPU funcs). */
         uint64_t skip = HOOKS[i].skip;
         gpointer addr = GSIZE_TO_POINTER((gsize)base + va + skip);
-        GumInvocationListener *lis = HOOKS[i].leave ? l_full : l_enter;
+        /* retcap != 0 → the return is intercepted, so use the enter+leave listener (a return-address
+         * rewrite); retcap == 0 → the enter-only probe listener (no return trampoline). */
+        GumInvocationListener *lis = HOOKS[i].retcap ? l_full : l_enter;
         GumAttachReturn r = gum_interceptor_attach(interceptor, addr, lis, &opt);
         LOG("attach %-34s @ %p  (%s%s)  ret=%d", HOOKS[i].name, addr,
             HOOKS[i].mode == AGY_SYNC ? "sync" : "async",
-            HOOKS[i].leave ? ",leave" : "", (int)r);
+            HOOKS[i].retcap ? ",leave" : "", (int)r);
     }
     gum_interceptor_end_transaction(interceptor);
 }
