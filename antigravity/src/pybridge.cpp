@@ -72,14 +72,15 @@ private:
     void     run_dispatch(job *j);   /* on the worker thread, holding the GIL */
     uint8_t *copy_capped(const uint8_t *src, size_t len, size_t *out_len) const;
 
+    /* One mutex + condvar for everything: the start handshake, the job queue, and shutdown. qcv_
+     * carries three signals (ready_ set / job enqueued / stop_ set), each disambiguated by the
+     * waiter's predicate — start() waits on `ready_ != -1`, the worker loop on `head_ || stop_`. */
     boost::thread             worker_;
     boost::mutex              qmu_;
     boost::condition_variable qcv_;
     job                      *head_ = nullptr, *tail_ = nullptr;
     bool                      stop_ = false;           /* set by shutdown(); worker drains then exits */
-    boost::mutex              startmu_;
-    boost::condition_variable startcv_;
-    int                       ready_ = -1;             /* -1 starting, 0 failed, 1 ready */
+    int                       ready_ = -1;             /* -1 starting, 0 failed, 1 ready (write: qmu_) */
     size_t                    maxcopy_ = 1u << 20;
     PyObject                 *dispatch_ = nullptr;     /* pyagy.agy_process.dispatch; strong raw ref */
 };
@@ -196,9 +197,9 @@ void PyBridge::worker_main()
     PyThreadState *saved = PyEval_SaveThread();  /* release GIL while idle */
 
     {
-        boost::unique_lock<boost::mutex> lk(startmu_);
+        boost::unique_lock<boost::mutex> lk(qmu_);
         ready_ = ok ? 1 : 0;
-        startcv_.notify_all();
+        qcv_.notify_all();       /* wake start() (predicate: ready_ != -1) */
     }
     if (!ok) { PyEval_RestoreThread(saved); return; }
     PYLOG("worker ready (module=%s, maxcopy=%zu)", modname, maxcopy_);
@@ -244,8 +245,8 @@ int PyBridge::start()
         return -1;
     }
 
-    boost::unique_lock<boost::mutex> lk(startmu_);
-    startcv_.wait(lk, [this] { return ready_ != -1; });
+    boost::unique_lock<boost::mutex> lk(qmu_);
+    qcv_.wait(lk, [this] { return ready_ != -1; });
     return ready_ == 1 ? 0 : -1;
 }
 
