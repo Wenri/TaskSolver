@@ -21,31 +21,7 @@
 #include "pybridge.h"
 #include "symbols_gen.h"
 #include "cgotrampoline.h"
-
-/* ---- hook table generated from procdef.h ---------------------------------- */
-/* How each hook is installed (see the MECH column in procdef.h + install_hooks).
- * AGY_OFF must be 0 so a hook is only ever installed when explicitly set.
- * AGY_FULLCGO / AGY_ASMCGO are both cgocall-trampoline hooks; they pick the Go→C
- * gateway per hook: full runtime.cgocall (robust, entersyscall + P handoff) vs
- * runtime.asmcgocall (lighter g0-switch, no syscall transition — for hot/syscall-
- * sensitive funcs). Both are collected into one agy_gohook_install call. */
-typedef enum { AGY_OFF = 0, AGY_GUM, AGY_FULLCGO, AGY_ASMCGO } agy_mech_t;
-enum {
-#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE, RETMIN) HK_##ID,
-#include "procdef.h"
-#undef HOOK
-    HK_COUNT
-};
-/* Positional init (NOT [HK_##ID]= array designators — C++ has no array designators):
- * the enum above and this table are both expanded from procdef.h in the SAME order,
- * so HOOKS[HK_X] is X's row by position. retmin>0 marks a return-[]byte/string leaf getter
- * (its minlen) — data-drives on_leave's generic return-value branch. */
-static const struct { const char *name; agy_mode_t mode; const char *kind; agy_mech_t mech;
-                      int leave; uint32_t retmin; } HOOKS[] = {
-#define HOOK(ID, NAME, MODE, KIND, MECH, LEAVE, RETMIN) { NAME, MODE, KIND, MECH, LEAVE, RETMIN },
-#include "procdef.h"
-#undef HOOK
-};
+#include "procdef.h"   /* agy_mech_t, the constexpr HOOKS[] table, HK_COUNT, and hk("id") lookup */
 
 /* ---- logging -------------------------------------------------------------- */
 static FILE *g_logf;
@@ -109,7 +85,7 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
      * (this is the exact function context around tls_write / decrypt). */
     if (g_stack) agy_emit_stack(HOOKS[id].kind, cpu->rbp, g_base);
     switch (id) {
-    case HK_SMOKE_GETENV: {
+    case hk("SMOKE_GETENV"): {
         /* os.Getenv(key string): key.ptr=RAX, key.len=RBX — send the key so we
          * can confirm real string data flows through to Python. */
         agy_event_t ev = { .kind = "smoke", .stream_id = 0,
@@ -118,7 +94,7 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         agy_py_emit(&ev);
         break;
     }
-    case HK_FILE_OPEN: {
+    case hk("FILE_OPEN"): {
         /* os.OpenFile(name string, ...): name.ptr=RAX, name.len=RBX. agy's conversation
          * store lives at .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
          * so the uuid is IN the path. Filter to those paths HERE (C, cheap) so Python only
@@ -133,7 +109,7 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         }
         break;
     }
-    case HK_TLS_WRITE: {
+    case hk("TLS_WRITE"): {
         /* crypto/tls.(*Conn).Write(c=RAX, b.ptr=RBX, b.len=RCX, b.cap=RDI) */
         uint64_t conn = cpu->rax, ptr = cpu->rbx, len = cpu->rcx;
         agy_event_t ev = { .kind = "tls_write", .stream_id = conn,
@@ -147,27 +123,27 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         agy_py_free(&ev);
         break;
     }
-    case HK_TLS_READ: {
+    case hk("TLS_READ"): {
         /* capture buffer ptr now; data is filled by the time we return */
         struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
         s->conn = cpu->rax;
         s->ptr  = cpu->rbx;
         break;
     }
-    case HK_TLS_DECRYPT: {
+    case hk("TLS_DECRYPT"): {
         /* stash *halfConn receiver for stream correlation; plaintext is the return */
         struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
         s->conn = cpu->rax;
         s->ptr = 0;
         break;
     }
-    case HK_HTTP_RT: {
+    case hk("HTTP_RT"): {
         /* net/http.(*Transport).RoundTrip(t=RAX, req=RBX): use req ptr as id */
         agy_event_t ev = { .kind = "http_rt", .stream_id = cpu->rbx, .mode = AGY_ASYNC };
         agy_py_emit(&ev);
         break;
     }
-    case HK_H2_PIPE_WRITE: {
+    case hk("H2_PIPE_WRITE"): {
         /* http2 (*pipe).Write(p []byte): receiver=RAX, p.ptr=RBX, p.len=RCX.
          * The de-framed response body chunk (ingress) — data is the input arg,
          * valid at entry. CPU-only func, so hooking is safe (no park). */
@@ -189,7 +165,7 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
     (void)user_data;
     int id = (int)(gsize)gum_invocation_context_get_listener_function_data(ic) - 1;
     GumCpuContext *cpu = ic->cpu_context;
-    if (id == HK_TLS_READ) {
+    if (id == hk("TLS_READ")) {
         int64_t n = (int64_t)cpu->rax;   /* return value: bytes read */
         struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
         if (n > 0 && s->ptr) {
@@ -198,7 +174,7 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
                                .mode = AGY_ASYNC };
             agy_py_emit(&ev);
         }
-    } else if (id == HK_TLS_DECRYPT) {
+    } else if (id == hk("TLS_DECRYPT")) {
         /* (*halfConn).decrypt returns ([]byte plaintext, recordType, error):
          * RAX=ptr, RBX=len. This is a decrypted inbound TLS record = HTTP/2 frames
          * of the response. Safe on_leave: decrypt is CPU-only and doesn't park. */
@@ -255,10 +231,10 @@ static void install_hooks(void)
         int n_tramp = 0, n_asm = 0;
         for (int i = 0; i < HK_COUNT; i++) {
             if (HOOKS[i].mech != AGY_FULLCGO && HOOKS[i].mech != AGY_ASMCGO) continue;
-            uint64_t va = agy_sym(HOOKS[i].name);
+            uint64_t va = HOOKS[i].vaddr;
             if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
             int asmcgo = (HOOKS[i].mech == AGY_ASMCGO);
-            agy_gohook_add(gh, va, agy_skip(HOOKS[i].name), HOOKS[i].kind, asmcgo);
+            agy_gohook_add(gh, va, HOOKS[i].skip, HOOKS[i].kind, asmcgo);
             n_tramp++; n_asm += asmcgo;
         }
         int made = agy_gohook_finalize(gh, AGY_MODULEDATA_VADDR);
@@ -272,8 +248,8 @@ static void install_hooks(void)
         if (HOOKS[i].mech != AGY_GUM) continue;
         /* FILE_OPEN is an OVERLAY: only install it when the caller asked for conversation-id
          * capture, so an ordinary run isn't burdened by os.OpenFile. */
-        if (i == HK_FILE_OPEN && !g_conv_id) continue;
-        uint64_t va = agy_sym(HOOKS[i].name);
+        if (i == hk("FILE_OPEN") && !g_conv_id) continue;
+        uint64_t va = HOOKS[i].vaddr;
         if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
         GumAttachOptions opt = {};
         opt.listener_function_data = GSIZE_TO_POINTER((gsize)(i + 1));
@@ -284,7 +260,7 @@ static void install_hooks(void)
          * RoundTrip, pipe.Write) still stalls agy even past-prologue, because gum's
          * per-thread return tracking breaks when Go resumes it on another OS thread.
          * Only hook functions that don't park (tls_write, halfConn.decrypt, CPU funcs). */
-        uint64_t skip = agy_skip(HOOKS[i].name);
+        uint64_t skip = HOOKS[i].skip;
         gpointer addr = GSIZE_TO_POINTER((gsize)base + va + skip);
         GumInvocationListener *lis = HOOKS[i].leave ? l_full : l_enter;
         GumAttachReturn r = gum_interceptor_attach(interceptor, addr, lis, &opt);
