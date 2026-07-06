@@ -39,6 +39,13 @@
  * CGT_GETENV below (same os.Getenv entry) stays AGY_OFF to avoid double-patching. */
 HOOK(SMOKE_GETENV, "os.Getenv",                      AGY_ASYNC, "smoke",     AGY_ASMCGO,   0)
 
+/* Clean end-of-capture marker. os.Exit(code) is the explicit clean-exit path — a crash/panic
+ * won't fire it, which is correct (the capture then has no clean marker). Fires once; a normal Go
+ * func (register ABI, spliceable prologue, live scheduler) → FULLCGO, unlike runtime.exit (tiny
+ * teardown assembly). The "exit" branch in agy_cgo_hook reads code=rax and SYNC-emits it so the
+ * worker writes {"kind":"exit","code":N} BEFORE agy's exit_group syscall. */
+HOOK(EXIT,         "os.Exit",                        AGY_SYNC,  "exit",      AGY_FULLCGO,  0)
+
 /* conversation-id capture (overlay, gated by AGY_PROC_CONV_ID — skipped unless that is set).
  * os.OpenFile: agy opens .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
  * so the uuid is in the path arg. AGY_FULLCGO — rare (gated) + does an openat syscall (wants the

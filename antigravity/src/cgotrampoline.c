@@ -313,6 +313,17 @@ static void agy_cgo_hook(agy_block *b)
         agy_py_emit(&rt);
         return;
     }
+    if (b->kind && strcmp((const char *)b->kind, "exit") == 0) {
+        /* os.Exit(code int): code=rax. The clean end-of-capture marker. SYNC so the worker
+         * writes it BEFORE agy's exit_group syscall (an ASYNC event would race process death);
+         * FULLCGO hands off the P so other goroutines run while we briefly block. The code rides
+         * stream_id; Python on_exit records {"kind":"exit","code":N}. */
+        agy_event_t ev = { .kind = "exit", .stream_id = b->regs.rax, .mode = AGY_SYNC };
+        agy_py_emit(&ev);        /* SYNC: marker recorded before we stop the worker (below) */
+        agy_py_free(&ev);
+        agy_py_shutdown();       /* now cooperatively stop + join the worker (deterministic teardown) */
+        return;
+    }
     agy_event_t ev = { .kind = (const char *)b->kind,
                        .stream_id = b->regs.rax, .mode = AGY_ASYNC };
     agy_py_emit(&ev);

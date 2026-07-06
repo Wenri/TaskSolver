@@ -90,6 +90,14 @@ def on_smoke(stream_id, data):
     return None
 
 
+def on_exit(stream_id, data):
+    # os.Exit(code) fired — the clean end-of-capture marker. The exit code rode stream_id from the
+    # C hook, which SYNC-emits so this record is written (line-buffered → flushed) BEFORE agy's
+    # exit_group syscall. A capture that ends without this marker was truncated (crash/kill).
+    _rec.event({"kind": "exit", "code": int(stream_id)})
+    return None
+
+
 # conversation-id capture (AGY_PROC_CONV_ID): the FILE_OPEN hook (os.OpenFile) is C-filtered to
 # conversation-store paths, so `data` is a path like `.../conversations/<uuid>.db` or
 # `.../brain/<uuid>/.../transcript.jsonl`. Extract the uuid and emit a `conversation_id` event
@@ -150,6 +158,7 @@ _ROUTER = {
     "http_rt": on_http_rt,
     "dns": on_dns,
     "smoke": on_smoke,
+    "exit": on_exit,
     "file_open": on_file_open,
     "cgt_args": on_cgt_args,
     "callstack": on_callstack,

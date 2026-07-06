@@ -37,6 +37,7 @@ PROC_TARGETS = [
     "crypto/tls.(*halfConn).decrypt",
     "runtime.main",                      # smoke-test anchor (fires every launch)
     "os.Getenv",                         # smoke-test anchor (no auth/network)
+    "os.Exit",                           # clean end-of-capture marker (SYNC "exit" event at exit)
     # conversation-id capture (AGY_PROC_CONV_ID overlay): agy opens its conversation
     # store at .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl —
     # the uuid is IN the path, so an enter-only probe reading OpenFile's name arg
