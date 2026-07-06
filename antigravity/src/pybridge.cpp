@@ -9,8 +9,13 @@
  * dispatch, extracting the result) — RAII refcounting + error_already_set instead of manual
  * PyObject* / Py_DECREF / NULL checks. It does NOT wrap interpreter bootstrap or the GIL (no
  * gil.hpp in Boost 1.91), so Py_InitializeEx, PyEval_SaveThread, and PyGILState_Ensure/Release
- * stay raw C-API. g_dispatch stays a raw PyObject* on purpose (a static bp::object would run an
- * exit-time Py_DECREF without the GIL in this never-Py_Finalize'd interp). */
+ * stay raw C-API.
+ *
+ * The worker thread, its job queue, and the pinned dispatch callable are encapsulated in the
+ * `PyBridge` class; a single leaked-forever instance (`bridge()`) backs the extern "C" entry
+ * points. `dispatch_` stays a raw PyObject* on purpose (a bp::object member of a destroyed-at-exit
+ * instance would Py_DECREF without the GIL in this never-Py_Finalize'd interp) — which is also why
+ * the instance is intentionally never destroyed. */
 #define PY_SSIZE_T_CLEAN   /* required for "#" formats (y#) on Python 3.10+ */
 #include <boost/python.hpp>   /* pulls in Python.h first, with the right guards */
 #include "pybridge.h"
@@ -26,6 +31,8 @@
 namespace bp = boost::python;
 
 #define PYLOG(...) do { fprintf(stderr, "[antigravity/py] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+
+namespace {
 
 struct job {
     job        *next = nullptr;
@@ -45,34 +52,63 @@ struct job {
     size_t      out_len = 0;
 };
 
-static boost::thread             g_worker;
-static boost::mutex              g_qmu;
-static boost::condition_variable g_qcv;
-static job                      *g_head, *g_tail;
+/* PyBridge — owns the embedded interpreter's worker thread, the job queue, and the pinned
+ * dispatch callable. A single leaked instance (see bridge()) lives for the whole process; the
+ * extern "C" entry points delegate to it. */
+class PyBridge {
+public:
+    int  start();               /* create the worker thread; block until it signals ready */
+    void emit(agy_event_t *ev); /* enqueue an event (ASYNC) or block for a verdict (SYNC) */
+    bool ready() const { return ready_ == 1; }
+    void shutdown();            /* cooperatively stop + join the worker; idempotent */
+    ~PyBridge() { shutdown(); } /* fallback: join the worker BEFORE members destruct, so a dtor on
+                                 * the rare libc-exit path can't terminate on a joinable thread or
+                                 * tear down an in-use mutex. Dormant on the normal Go-os.Exit path
+                                 * (that dtor never runs; the os.Exit hook already called shutdown). */
 
-static boost::mutex              g_startmu;
-static boost::condition_variable g_startcv;
-static int                       g_ready = -1;   /* -1 starting, 0 failed, 1 ready */
+private:
+    void     worker_main();     /* boost::thread body: init the interpreter, then drain the queue */
+    bool     enqueue(job *j);   /* false if shutting down (job not queued) */
+    void     run_dispatch(job *j);   /* on the worker thread, holding the GIL */
+    uint8_t *copy_capped(const uint8_t *src, size_t len, size_t *out_len) const;
 
-static size_t          g_maxcopy = 1u << 20;
-static PyObject       *g_dispatch;     /* pyagy.agy_process.dispatch (borrowed on worker thread) */
+    boost::thread             worker_;
+    boost::mutex              qmu_;
+    boost::condition_variable qcv_;
+    job                      *head_ = nullptr, *tail_ = nullptr;
+    bool                      stop_ = false;           /* set by shutdown(); worker drains then exits */
+    boost::mutex              startmu_;
+    boost::condition_variable startcv_;
+    int                       ready_ = -1;             /* -1 starting, 0 failed, 1 ready */
+    size_t                    maxcopy_ = 1u << 20;
+    PyObject                 *dispatch_ = nullptr;     /* pyagy.agy_process.dispatch; strong raw ref */
+};
 
-extern "C" int agy_py_ready(void) { return g_ready == 1; }
+/* The one instance — a Meyers singleton (thread-safe first-call init, no raw `new` to leak).
+ * Cleanup is DETERMINISTIC via shutdown(), invoked from the os.Exit hook (the "exit" branch in
+ * cgotrampoline.c) — the one teardown callback that fires under agy's Go os.Exit, which bypasses
+ * libc exit / __cxa_atexit (verified), so ~PyBridge does NOT run on the normal path. ~PyBridge is
+ * only a fallback for a libc-exit() path, where it join-then-destructs safely. Note the residual
+ * corner: if that fallback dtor ever ran while another goroutine was still calling bridge(), it
+ * would be a use-after-destruction — but agy never takes that path (it always os.Exits). */
+PyBridge &bridge() { static PyBridge b; return b; }
 
-static void enqueue(job *j)
+bool PyBridge::enqueue(job *j)
 {
-    boost::unique_lock<boost::mutex> lk(g_qmu);
+    boost::unique_lock<boost::mutex> lk(qmu_);
+    if (stop_) return false;      /* shutting down: refuse so no emitter blocks on a dead worker */
     j->next = nullptr;
-    if (g_tail) g_tail->next = j; else g_head = j;
-    g_tail = j;
-    g_qcv.notify_one();
+    if (tail_) tail_->next = j; else head_ = j;
+    tail_ = j;
+    qcv_.notify_one();
+    return true;
 }
 
 /* Called on the worker thread, holding the GIL. Every bp::object below is created AND destroyed
  * inside this GIL window — none escapes to a GIL-less context. */
-static void run_dispatch(job *j)
+void PyBridge::run_dispatch(job *j)
 {
-    if (!g_dispatch) return;
+    if (!dispatch_) return;
     try {
         /* The "y#" payload must be real Python bytes — bp::str/std::string would build PyUnicode
          * (str) and corrupt binary data. Build bytes via the C-API and adopt into a handle (throws
@@ -83,7 +119,7 @@ static void run_dispatch(job *j)
 
         /* dispatch(kind: str, stream_id: int, data: bytes) — the old "sKy#" call. bp::call takes
          * the raw PyObject* callable directly; the result is a new-ref bp::object (RAII decref). */
-        bp::object r = bp::call<bp::object>(g_dispatch,
+        bp::object r = bp::call<bp::object>(dispatch_,
                                             bp::str(j->kind),
                                             (unsigned long long)j->stream_id,
                                             arg);
@@ -113,18 +149,29 @@ static void run_dispatch(job *j)
     }
 }
 
-static void worker_main()
+uint8_t *PyBridge::copy_capped(const uint8_t *src, size_t len, size_t *out_len) const
+{
+    size_t n = len > maxcopy_ ? maxcopy_ : len;
+    if (n == 0) { *out_len = 0; return nullptr; }
+    uint8_t *p = (uint8_t *)malloc(n);
+    if (!p) { *out_len = 0; return nullptr; }   /* alloc failed → keep data/len consistent */
+    if (src) memcpy(p, src, n);
+    *out_len = n;
+    return p;
+}
+
+void PyBridge::worker_main()
 {
     const char *modname = getenv("AGY_PROC_MODULE");
     if (!modname || !*modname) modname = "pyagy.agy_process";
     const char *pypath = getenv("AGY_PROC_PYTHONPATH");
     const char *mc = getenv("AGY_PROC_MAXCOPY");
-    if (mc && *mc) { long v = strtol(mc, NULL, 0); if (v > 0) g_maxcopy = (size_t)v; }
+    if (mc && *mc) { long v = strtol(mc, NULL, 0); if (v > 0) maxcopy_ = (size_t)v; }
 
     Py_InitializeEx(0);  /* raw C-API bootstrap — Boost.Python has no embedding entry point */
 
     /* GIL is held from Py_InitializeEx until PyEval_SaveThread() below, so these bp::objects are
-     * fine; all of them (sys/mod/disp/arg) destruct before the GIL drops. */
+     * fine; all of them (sys/mod/disp) destruct before the GIL drops. */
     try {
         bp::object sys = bp::import(bp::str("sys"));
         sys.attr("is_agy_shim") = true;                 /* → Py_True */
@@ -133,37 +180,38 @@ static void worker_main()
 
         bp::object mod = bp::import(bp::str(modname));
         bp::object disp = mod.attr("dispatch");         /* transient new-ref, destructs under the GIL */
-        /* Pin ONE strong raw ref forever. g_dispatch MUST stay a raw PyObject* (not a static
-         * bp::object) — a static bp::object's dtor would Py_DECREF at process exit, GIL-less, in a
-         * never-Py_Finalize'd interp (UB). This mirrors Boost's own scope.hpp forever-ref idiom. */
-        g_dispatch = bp::incref(disp.ptr());
+        /* Pin ONE strong raw ref forever. dispatch_ MUST stay a raw PyObject* (not a bp::object) —
+         * a bp::object member destroyed at exit would Py_DECREF GIL-less in a never-Py_Finalize'd
+         * interp (UB); this mirrors Boost's own scope.hpp forever-ref idiom. */
+        dispatch_ = bp::incref(disp.ptr());
     }
     catch (const bp::error_already_set &) {
         PYLOG("failed to init module '%s':", modname);
         if (PyErr_Occurred()) PyErr_Print();
         PyErr_Clear();
-        g_dispatch = nullptr;                            /* → ok=false, graceful degrade */
+        dispatch_ = nullptr;                            /* → ok=false, graceful degrade */
     }
 
-    int ok = (g_dispatch != NULL);
+    int ok = (dispatch_ != NULL);
     PyThreadState *saved = PyEval_SaveThread();  /* release GIL while idle */
 
     {
-        boost::unique_lock<boost::mutex> lk(g_startmu);
-        g_ready = ok ? 1 : 0;
-        g_startcv.notify_all();
+        boost::unique_lock<boost::mutex> lk(startmu_);
+        ready_ = ok ? 1 : 0;
+        startcv_.notify_all();
     }
     if (!ok) { PyEval_RestoreThread(saved); return; }
-    PYLOG("worker ready (module=%s, maxcopy=%zu)", modname, g_maxcopy);
+    PYLOG("worker ready (module=%s, maxcopy=%zu)", modname, maxcopy_);
 
     for (;;) {
         job *j;
         {
-            boost::unique_lock<boost::mutex> lk(g_qmu);
-            g_qcv.wait(lk, [] { return g_head != nullptr; });
-            j = g_head;
-            g_head = j->next;
-            if (!g_head) g_tail = nullptr;
+            boost::unique_lock<boost::mutex> lk(qmu_);
+            qcv_.wait(lk, [this] { return head_ != nullptr || stop_; });
+            if (!head_) break;    /* woken by stop_ with the queue drained → exit */
+            j = head_;
+            head_ = j->next;
+            if (!head_) tail_ = nullptr;
         }
 
         PyGILState_STATE gil = PyGILState_Ensure();
@@ -182,38 +230,28 @@ static void worker_main()
     (void)saved;
 }
 
-extern "C" int agy_py_start(void)
+int PyBridge::start()
 {
     try {
         boost::thread::attributes attrs;
         attrs.set_stack_size(16u * 1024 * 1024);  /* big stack for libpython */
-        g_worker = boost::thread(attrs, &worker_main);
-        g_worker.detach();  /* fire-and-forget; runs until the process dies (matches pthread) */
+        worker_ = boost::thread(attrs, [this] { worker_main(); });
+        /* Kept joinable (not detached) so shutdown() can join it at os.Exit. The singleton is
+         * leaked, so worker_ is never destructed → no std::terminate even if shutdown never runs. */
     } catch (const std::exception &e) {
         PYLOG("boost::thread create failed: %s", e.what());
-        g_ready = 0;
+        ready_ = 0;
         return -1;
     }
 
-    boost::unique_lock<boost::mutex> lk(g_startmu);
-    g_startcv.wait(lk, [] { return g_ready != -1; });
-    return g_ready == 1 ? 0 : -1;
+    boost::unique_lock<boost::mutex> lk(startmu_);
+    startcv_.wait(lk, [this] { return ready_ != -1; });
+    return ready_ == 1 ? 0 : -1;
 }
 
-static uint8_t *copy_capped(const uint8_t *src, size_t len, size_t *out_len)
+void PyBridge::emit(agy_event_t *ev)
 {
-    size_t n = len > g_maxcopy ? g_maxcopy : len;
-    if (n == 0) { *out_len = 0; return nullptr; }
-    uint8_t *p = (uint8_t *)malloc(n);
-    if (!p) { *out_len = 0; return nullptr; }   /* alloc failed → keep data/len consistent */
-    if (src) memcpy(p, src, n);
-    *out_len = n;
-    return p;
-}
-
-extern "C" void agy_py_emit(agy_event_t *ev)
-{
-    if (g_ready != 1) return;
+    if (ready_ != 1) return;
 
     if (ev->mode == AGY_ASYNC) {
         job *j = new (std::nothrow) job();
@@ -223,7 +261,7 @@ extern "C" void agy_py_emit(agy_event_t *ev)
         j->stream_id = ev->stream_id;
         j->mode = AGY_ASYNC;
         j->data = copy_capped(ev->data, ev->len, &j->len);
-        enqueue(j);
+        if (!enqueue(j)) { free(j->data); delete j; }   /* shutting down: drop it */
         return;
     }
 
@@ -235,7 +273,7 @@ extern "C" void agy_py_emit(agy_event_t *ev)
     j.mode = AGY_SYNC;
     j.data = copy_capped(ev->data, ev->len, &j.len);
 
-    enqueue(&j);
+    if (!enqueue(&j)) { free(j.data); return; }   /* shutting down: don't block on a dead worker */
     {
         boost::unique_lock<boost::mutex> lk(j.done_mu);
         j.done_cv.wait(lk, [&] { return j.done; });
@@ -246,7 +284,31 @@ extern "C" void agy_py_emit(agy_event_t *ev)
     ev->out_len = j.out_len;
 }
 
-extern "C" void agy_py_free(agy_event_t *ev)
+/* Cooperative teardown, invoked from the os.Exit hook (the one callback that fires under agy's Go
+ * exit). Idempotent. Order at os.Exit: the "exit" marker is SYNC-emitted first (worker alive),
+ * THEN this runs — so the marker is recorded before the worker stops. New emits after stop_ are
+ * refused by enqueue(), so no goroutine blocks on a dead worker. */
+void PyBridge::shutdown()
+{
+    {
+        boost::unique_lock<boost::mutex> lk(qmu_);
+        if (stop_) return;   /* already shut down */
+        stop_ = true;
+        ready_ = 0;          /* ready() → false; emit() fast-path no-ops */
+    }
+    qcv_.notify_all();       /* wake the worker so it drains the queue and exits */
+    if (worker_.joinable()) worker_.join();
+}
+
+}  // anonymous namespace
+
+/* C ABI entry points (pybridge.h) — thin delegators to the singleton. */
+extern "C" int  agy_py_ready(void) { return bridge().ready() ? 1 : 0; }
+extern "C" int  agy_py_start(void) { return bridge().start(); }
+extern "C" void agy_py_emit(agy_event_t *ev) { bridge().emit(ev); }
+extern "C" void agy_py_shutdown(void) { bridge().shutdown(); }
+
+extern "C" void agy_py_free(agy_event_t *ev)   /* stateless: free a SYNC replacement buffer */
 {
     if (ev->out_data) { free(ev->out_data); ev->out_data = nullptr; ev->out_len = 0; ev->verdict = 0; }
 }

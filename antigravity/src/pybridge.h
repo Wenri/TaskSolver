@@ -49,6 +49,10 @@ void agy_py_free(agy_event_t *ev);
 
 int  agy_py_ready(void);
 
+/* Cooperatively stop + join the worker (idempotent). Called from the os.Exit hook — the one
+ * teardown callback that fires under agy's Go exit — after the end-of-capture marker is emitted. */
+void agy_py_shutdown(void);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
