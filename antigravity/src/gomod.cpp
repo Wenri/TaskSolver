@@ -58,8 +58,7 @@ static size_t put_step(uint8_t *p, int32_t dval, uint32_t dpc)
 
 /* Deferred-registration state: prepare() fills this at constructor time; ensure()
  * consumes it (once) at the first trampoline hit. */
-static go_moduledata *g_md;
-static uint64_t g_firstmd_addr, g_cgocall_rt;
+static uint64_t g_firstmd_addr, g_cgocall_rt;   /* g_firstmd_addr!=0 doubles as "prepare() done" */
 static std::atomic<int> g_claimed{0}, g_done{0};
 
 /* The synthetic moduledata + all its tables in ONE static (BSS) block — the process singleton:
@@ -180,8 +179,7 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     md->gofunc       = (uintptr_t)smap;   /* @344: funcdata[Locals] offset 0 => &stackmap */
     md->next         = nullptr;           /* @560: our module is the chain tail */
 
-    g_md = md;
-    g_firstmd_addr = firstmd_addr;
+    g_firstmd_addr = firstmd_addr;   /* set LAST (with the buffers filled) → the "prepared" signal */
     g_cgocall_rt = cgocall_rt;
     GLOG("prepared synthetic moduledata: text=[%#lx,%#lx) %d funcs, frame=%u "
          "(spdelta in [%u,%u)), nbit=%d — splice deferred to first trampoline hit",
@@ -205,11 +203,13 @@ void agy_gomod_ensure(void)
         expected = 0;
     }
 
-    go_moduledata *md  = g_md;
+    go_moduledata *md  = &g_mod.md;   /* our synthetic module — a fixed static object (no g_md needed) */
     go_moduledata *fmd = (go_moduledata *)(uintptr_t)g_firstmd_addr;
     go_pcHeader   *fph = fmd ? fmd->pcHeader : nullptr;
     int magic_ok = fph && !((uintptr_t)fph & 7) && fph->magic == GO_PCLNTAB_MAGIC_GO120;
-    int ok = md && fmd && magic_ok
+    /* `fmd` is null until prepare() completed (g_firstmd_addr is set last, with g_mod filled), so it
+     * gates "prepared" — md is always valid here, no separate flag needed. */
+    int ok = fmd && magic_ok
              && fmd->minpc < fmd->maxpc && fmd->text
              && fmd->minpc <= g_cgocall_rt && g_cgocall_rt < fmd->maxpc;
     if (ok) {
