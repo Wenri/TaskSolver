@@ -369,53 +369,49 @@ static void patch_apply(gpointer mem, gpointer ud)
     memcpy(mem, c->bytes, c->n);
 }
 
-struct agy_gohook {
-    uint64_t base, cgocall_abs, asmcgocall_abs;
-    guint8 *region;
-    GumX86Writer *w;
-    int made, max;
-    uint32_t frame_lo, frame_hi;
-    int frame_is_fullcgo;   /* the shared pcsp must match a full-cgo slot (only those get GC-unwound) */
-};
+/* The gum code writer is released here; region_ (live trampoline code) is deliberately kept. */
+AgyGoHook::~AgyGoHook()
+{
+    if (w_) gum_x86_writer_unref(w_);
+}
 
-agy_gohook *agy_gohook_begin(uint64_t base, uint64_t cgocall_va, uint64_t asmcgocall_va,
-                             int max_targets)
+std::unique_ptr<AgyGoHook> AgyGoHook::begin(uint64_t base, uint64_t cgocall_va,
+                                            uint64_t asmcgocall_va, int max_targets)
 {
     if (!cgocall_va)      { GHLOG("runtime.cgocall unresolved; cannot build trampolines"); return nullptr; }
     if (!asmcgocall_va)   { GHLOG("runtime.asmcgocall unresolved; cannot build trampolines"); return nullptr; }
     if (max_targets <= 0) { GHLOG("bad max_targets=%d", max_targets); return nullptr; }
 
-    auto h = std::unique_ptr<agy_gohook>(new (std::nothrow) agy_gohook{});  /* {} zero-inits */
+    auto h = std::unique_ptr<AgyGoHook>(new (std::nothrow) AgyGoHook());  /* members default-init */
     if (!h) { GHLOG("alloc failed"); return nullptr; }
-    h->base = base;
-    h->cgocall_abs = base + cgocall_va;
-    h->asmcgocall_abs = base + asmcgocall_va;   /* required, assumed resolved (checked above) */
-    h->max = max_targets;
-    g_gh_base = base;                           /* for agy_emit_stack PC→vaddr reduction */
+    h->base_ = base;
+    h->cgocall_abs_ = base + cgocall_va;
+    h->asmcgocall_abs_ = base + asmcgocall_va;   /* required, assumed resolved (checked above) */
+    h->max_ = max_targets;
+    g_gh_base = base;                            /* for agy_emit_stack PC→vaddr reduction */
 
     /* Slot region NEAR agy's text so each target->trampoline jmp is a 5-byte rel32. */
     long page = sysconf(_SC_PAGESIZE);
     gsize need = (gsize)max_targets * GH_SLOT;
     guint npages = (guint)((need + page - 1) / page);
     GumAddressSpec spec = { (gpointer)(uintptr_t)base, 0x7f000000 };  /* within +-~2GB of text */
-    h->region = (guint8 *)gum_alloc_n_pages_near(npages, GUM_PAGE_RWX, &spec);
-    if (!h->region) { GHLOG("gum_alloc_n_pages_near failed"); return nullptr; }  /* unique_ptr frees h */
-    h->w = gum_x86_writer_new(h->region);
-    return h.release();   /* hand the raw ptr to the C caller; finalize() adopts + frees it */
+    h->region_ = (uint8_t *)gum_alloc_n_pages_near(npages, GUM_PAGE_RWX, &spec);
+    if (!h->region_) { GHLOG("gum_alloc_n_pages_near failed"); return nullptr; }  /* unique_ptr frees h */
+    h->w_ = gum_x86_writer_new(h->region_);
+    return h;   /* caller owns the unique_ptr across add()/finalize() */
 }
 
-void agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
+void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
 {
-    if (!h) return;
-    if (h->made >= h->max) { GHLOG("region full (max=%d); dropping kind=%s", h->max, kind); return; }
+    if (made_ >= max_) { GHLOG("region full (max=%d); dropping kind=%s", max_, kind); return; }
 
-    uint64_t hook_addr = h->base + entry + skip;
+    uint64_t hook_addr = base_ + entry + skip;
     const uint8_t *orig = (const uint8_t *)(uintptr_t)hook_addr;
     uint32_t ov = match_prologue(orig);
     if (!ov) { GHLOG("unexpected prologue at +%u (kind=%s); skipping", skip, kind); return; }
 
-    GumX86Writer *w = h->w;
-    guint8 *slot = h->region + (size_t)h->made * GH_SLOT;
+    GumX86Writer *w = w_;
+    uint8_t *slot = region_ + (size_t)made_ * GH_SLOT;
     gum_x86_writer_reset(w, slot);
     uint32_t lo = 0, hi = 0;
 
@@ -451,7 +447,7 @@ void agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip, const char *ki
         gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, 0, GUM_X86_RAX);   /* [sp+0]=fn  */
         gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, 8, GUM_X86_RSI);   /* [sp+8]=arg */
         gum_x86_writer_put_bytes(w, XORPS_XMM15, sizeof XORPS_XMM15);
-        gum_x86_writer_put_mov_reg_address(w, GUM_X86_R12, (GumAddress)h->asmcgocall_abs);
+        gum_x86_writer_put_mov_reg_address(w, GUM_X86_R12, (GumAddress)asmcgocall_abs_);
         gum_x86_writer_put_call_reg(w, GUM_X86_R12);
         gum_x86_writer_put_add_reg_imm(w, GUM_X86_RSP, 32);
     } else {
@@ -461,7 +457,7 @@ void agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip, const char *ki
         gum_x86_writer_put_lea_reg_reg_offset(w, GUM_X86_RBX, GUM_X86_RSP, OFF_KIND);
         gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_cgo_hook);
         gum_x86_writer_put_bytes(w, XORPS_XMM15, sizeof XORPS_XMM15);
-        gum_x86_writer_put_mov_reg_address(w, GUM_X86_R12, (GumAddress)h->cgocall_abs);
+        gum_x86_writer_put_mov_reg_address(w, GUM_X86_R12, (GumAddress)cgocall_abs_);
         gum_x86_writer_put_call_reg(w, GUM_X86_R12);
     }
 
@@ -478,8 +474,8 @@ void agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip, const char *ki
     /* The shared pcsp must describe a FULL-CGO slot's frame window — those are the only
      * slots GC unwinds (asmcgo never enters _Gsyscall, so its frames are never scanned).
      * Prefer a full-cgo slot; fall back to an asmcgo one only if the region is all-asmcgo. */
-    if (!asmcgo) { h->frame_lo = lo; h->frame_hi = hi; h->frame_is_fullcgo = 1; }
-    else if (!h->frame_is_fullcgo) { h->frame_lo = lo; h->frame_hi = hi; }
+    if (!asmcgo) { frame_lo_ = lo; frame_hi_ = hi; frame_is_fullcgo_ = 1; }
+    else if (!frame_is_fullcgo_) { frame_lo_ = lo; frame_hi_ = hi; }
 
     /* patch target+skip: jmp rel32 to the slot, nop-pad to the whole prologue */
     struct patch_ctx pc = { .n = ov };
@@ -495,26 +491,23 @@ void agy_gohook_add(agy_gohook *h, uint64_t entry, uint32_t skip, const char *ki
     }
 
     GHLOG("cgo-trampoline kind=%s @ +%u -> %p (overwrite %u bytes)", kind, skip, (void *)slot, ov);
-    h->made++;
+    made_++;
 }
 
-int agy_gohook_finalize(agy_gohook *h, uint64_t md_vaddr)
+int AgyGoHook::finalize(uint64_t md_vaddr)
 {
-    if (!h) return 0;
-    std::unique_ptr<agy_gohook> guard(h);   /* adopt the raw handle → auto-freed on every return below */
-    if (h->w) gum_x86_writer_unref(h->w);
-    int made = h->made;
+    int made = made_;
     if (made == 0) { GHLOG("no trampolines installed"); return 0; }
 
     /* GC-unwind safety: BUILD the covering synthetic moduledata now (constructor
      * time; no firstmoduledata read). The trampolines call agy_gomod_ensure() to
      * SPLICE it lazily on first hit, when Go is up. Required — without it a GC that
      * unwinds a trampoline frame throws("unknown pc"). */
-    uintptr_t rbase = (uintptr_t)h->region;
-    int rc = agy_gomod_prepare(h->base + md_vaddr, h->cgocall_abs,
+    uintptr_t rbase = (uintptr_t)region_;
+    int rc = agy_gomod_prepare(base_ + md_vaddr, cgocall_abs_,
                                rbase, rbase + (uintptr_t)made * GH_SLOT,
-                               GH_SLOT, made, GH_FRAME, h->frame_lo, h->frame_hi);
+                               GH_SLOT, made, GH_FRAME, frame_lo_, frame_hi_);
     if (rc != 0) GHLOG("moduledata prepare failed (rc=%d); trampolines are live "
                        "but NOT GC-safe — expect throw(\"unknown pc\") under GC", rc);
-    return made;   /* guard frees h */
+    return made;
 }

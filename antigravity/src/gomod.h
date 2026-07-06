@@ -209,7 +209,7 @@ void agy_gomod_ensure(void);
 #endif
 
 /* The frame-pointer unwinder (agy_safe_read/agy_backtrace/agy_emit_stack) and the
- * cgocall-trampoline installer (agy_gohook_*) are cgotrampoline.cpp's API — see
+ * cgocall-trampoline installer (class AgyGoHook) are cgotrampoline.cpp's API — see
  * cgotrampoline.h. cgotrampoline.cpp includes this header for agy_gomod_prepare/ensure. */
 
 #endif /* AGY_GOMOD_H */

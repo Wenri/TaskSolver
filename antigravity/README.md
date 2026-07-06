@@ -190,8 +190,9 @@ is exact and future-proof. (Directly confirmed under gdb — see Status.)
 
 These trampoline targets (`SendUserMessage`/`Send`, the framework consumers, and the
 `CodeAssistClient` RPCs) are marked `AGY_FULLCGO`/`AGY_ASMCGO` in `procdef.h` and installed as
-one set — `install_hooks` collects them into a **single** `agy_gohook_install` call (the `gomod.c`
-singletons make a second call unsafe). The GC-safe synthetic moduledata is always installed.
+one set — `install_hooks` streams them through a **single** `AgyGoHook` builder (`begin`→`add`→
+`finalize`; the `gomod.cpp` singletons make a second builder unsafe). The GC-safe synthetic
+moduledata is always installed.
 `os.Getenv` was the benign CPU-only validator for this path during bring-up (a trampoline on
 it that answers cleanly proves the tool sound); it's now `AGY_OFF` because the gum `smoke`
 hook already covers `os.Getenv` and the real targets exercise the mechanism. (Two earlier

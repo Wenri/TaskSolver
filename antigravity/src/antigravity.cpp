@@ -231,21 +231,23 @@ static void install_hooks(void)
      * intermediate array. It's a SINGLE region + synthetic moduledata (the gomod.cpp
      * singletons make a second install unsafe), so all go through one begin/add/finalize. */
     {
-        agy_gohook *gh = agy_gohook_begin((uint64_t)base, agy_sym("runtime.cgocall"),
-                                          agy_sym("runtime.asmcgocall"), HK_COUNT);
-        int n_tramp = 0, n_asm = 0;
-        for (int i = 0; i < HK_COUNT; i++) {
-            if (HOOKS[i].mech != AGY_FULLCGO && HOOKS[i].mech != AGY_ASMCGO) continue;
-            uint64_t va = HOOKS[i].vaddr;
-            if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
-            int asmcgo = (HOOKS[i].mech == AGY_ASMCGO);
-            agy_gohook_add(gh, va, HOOKS[i].skip, HOOKS[i].kind, asmcgo);
-            n_tramp++; n_asm += asmcgo;
+        auto gh = AgyGoHook::begin((uint64_t)base, agy_sym("runtime.cgocall"),
+                                   agy_sym("runtime.asmcgocall"), HK_COUNT);
+        int n_tramp = 0, n_asm = 0, made = 0;
+        if (gh) {
+            for (int i = 0; i < HK_COUNT; i++) {
+                if (HOOKS[i].mech != AGY_FULLCGO && HOOKS[i].mech != AGY_ASMCGO) continue;
+                uint64_t va = HOOKS[i].vaddr;
+                if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
+                int asmcgo = (HOOKS[i].mech == AGY_ASMCGO);
+                gh->add(va, HOOKS[i].skip, HOOKS[i].kind, asmcgo);
+                n_tramp++; n_asm += asmcgo;
+            }
+            made = gh->finalize(AGY_MODULEDATA_VADDR);
         }
-        int made = agy_gohook_finalize(gh, AGY_MODULEDATA_VADDR);
         LOG("cgocall-trampoline: installed %d/%d target(s) (%d asmcgo, %d full-cgo)",
             made, n_tramp, n_asm, n_tramp - n_asm);
-    }
+    }   /* gh (unique_ptr) frees here — releases the gum writer; trampolines + moduledata persist */
 
     /* AGY_GUM hooks: frida-gum inline attach on the non-parking CPU funcs. */
     gum_interceptor_begin_transaction(interceptor);
