@@ -263,17 +263,14 @@ void PyBridge::emit(agy_event_t *ev)
     if (!enqueue(std::move(j))) return;   /* shutting down: fut is never got → no broken_promise */
 
     Result res = fut.get();
-    if (res.verdict) {
-        /* Hand the replacement across the C ABI with NO malloc: park it in a thread-local buffer
-         * that outlives this call. The C side's emit → memcpy → agy_py_free is synchronous on this
-         * one thread, and a SYNC emit never nests on it (the FULLCGO trampoline hands off the P
-         * while we block) — so a per-thread buffer is safe. out_data borrows it until the next SYNC
-         * emit on this thread replaces it (or the thread exits); agy_py_free just clears the fields. */
-        thread_local std::vector<uint8_t> out;
-        out = std::move(res.out);
-        ev->out_data = out.data();
-        ev->out_len  = out.size();
-        ev->verdict  = 1;
+    /* Apply an equal-or-shorter replacement IN PLACE, on this (the caller's) thread. The sole
+     * consumer rewrites ev->data (the egress buffer) with these bytes anyway, and we're running
+     * synchronously on the caller's thread with its buffer still live — so write them straight into
+     * ev->data and just report the new length. No out_data buffer, no malloc, no thread-local. */
+    if (res.verdict && res.out.size() <= ev->len) {
+        if (!res.out.empty()) memcpy((void *)ev->data, res.out.data(), res.out.size());
+        ev->out_len = res.out.size();
+        ev->verdict = 1;
     }
 }
 
@@ -301,10 +298,9 @@ extern "C" int  agy_py_start(void) { return bridge().start(); }
 extern "C" void agy_py_emit(agy_event_t *ev) { bridge().emit(ev); }
 extern "C" void agy_py_shutdown(void) { bridge().shutdown(); }
 
-extern "C" void agy_py_free(agy_event_t *ev)   /* the SYNC replacement lives in emit()'s thread-local
-                                                * buffer, so nothing to free here — just reset. */
+extern "C" void agy_py_free(agy_event_t *ev)   /* the SYNC replacement was applied in place in emit();
+                                                * nothing to free — just reset the output fields. */
 {
-    ev->out_data = nullptr;
     ev->out_len = 0;
     ev->verdict = 0;
 }

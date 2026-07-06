@@ -23,14 +23,14 @@ typedef enum { AGY_ASYNC = 0, AGY_SYNC = 1 } agy_mode_t;
 typedef struct {
     const char *kind;      /* "tls_write" | "tls_read" | "http_rt" | "dns" | "smoke" */
     uint64_t    stream_id; /* conn/transport pointer, for per-stream reassembly */
-    const uint8_t *data;   /* borrowed; valid only for the duration of the call */
+    const uint8_t *data;   /* borrowed; valid for the call. SYNC: the bridge may REWRITE it in place
+                            * (equal-or-shorter) with the worker's replacement — see verdict below. */
     size_t      len;
     agy_mode_t  mode;
 
-    /* outputs, SYNC only: verdict=1 means use out_data/out_len. The buffer lives in a
-     * thread-local in the bridge; borrowed, valid until the emitting hook returns. */
+    /* outputs, SYNC only: verdict=1 means the bridge rewrote `data` in place with an equal-or-shorter
+     * replacement; out_len is its new length (honor it, e.g. shrink the slice the callee sees). */
     int         verdict;
-    uint8_t    *out_data;
     size_t      out_len;
 } agy_event_t;
 
@@ -45,8 +45,8 @@ int  agy_py_start(void);
  * SYNC: enqueues and blocks until the worker returns a verdict. */
 void agy_py_emit(agy_event_t *ev);
 
-/* Reset the SYNC outputs after applying ev->out_data (the buffer is thread-local in
- * the bridge, not owned by the caller — nothing is freed). */
+/* Reset the SYNC output fields after honoring the verdict. The replacement (if any) was written
+ * into ev->data in place by emit — there's no separate buffer to free. */
 void agy_py_free(agy_event_t *ev);
 
 int  agy_py_ready(void);

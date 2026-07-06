@@ -115,11 +115,9 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         agy_event_t ev = { .kind = "tls_write", .stream_id = conn,
                            .data = (const uint8_t *)ptr, .len = (size_t)len,
                            .mode = g_tls_write_sync ? AGY_SYNC : AGY_ASYNC };
-        agy_py_emit(&ev);
-        if (ev.verdict && ev.out_data && ev.out_len <= len) {
-            memcpy((void *)ptr, ev.out_data, ev.out_len);
-            cpu->rcx = ev.out_len;   /* shrink the slice length the callee sees */
-        }
+        agy_py_emit(&ev);   /* SYNC: on a rewrite the bridge already replaced ev.data (== ptr) in
+                             * place; verdict says so, out_len is the new (equal-or-shorter) length. */
+        if (ev.verdict) cpu->rcx = ev.out_len;   /* shrink the slice length the callee sees */
         agy_py_free(&ev);
         break;
     }
