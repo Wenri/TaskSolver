@@ -1,4 +1,21 @@
 {
     "python-envs.defaultEnvManager": "renan-r-santos.pixi-code:pixi",
-    "python-envs.defaultPackageManager": "renan-r-santos.pixi-code:pixi"
+    "python-envs.defaultPackageManager": "renan-r-santos.pixi-code:pixi",
+
+    // The antigravity shim is its own CMake project (antigravity/CMakeLists.txt), built with
+    // Ninja into antigravity/build (matches the pixi build-shim task + .gitignore).
+    "cmake.sourceDirectory": "${workspaceFolder}/antigravity",
+    "cmake.buildDirectory": "${workspaceFolder}/antigravity/build",
+    "cmake.generator": "Ninja",
+
+    // Point the C/C++ tooling at the generated compile DB (antigravity/compile_commands.json is a
+    // symlink into the build dir) so it resolves frida-gum.h + the Gum* types in antigravity/src.
+    // clangd.arguments applies if the clangd extension is installed; C_Cpp.* if using Microsoft
+    // C/C++ — whichever is active picks it up, the other setting is ignored.
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/antigravity",
+        "--background-index",
+        "--header-insertion=never"
+    ],
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/antigravity/compile_commands.json"
 }
