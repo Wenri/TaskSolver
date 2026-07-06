@@ -172,7 +172,7 @@ def test_live_roundtrip():
     s0.close()
     logtxt = open(log0, errors="replace").read() if os.path.exists(log0) else ""
     if "build-id ok" not in logtxt:
-        return _skip("shim build-id != running agy (run `make -C antigravity symbols`)")
+        return _skip("shim build-id != running agy (run `pixi run shim-symbols`)")
     if "ZORPLE" not in out0:
         return _skip("agy not authenticated (baseline turn produced no answer)")
 

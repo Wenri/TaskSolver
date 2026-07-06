@@ -36,7 +36,7 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 `dee6de740c3883dd05450228aeec8a75`, agy **1.0.16**). The shim refuses to install hooks if
 the running binary's BuildID doesn't match `symbols.json`, so offsets can never be
 silently applied to a different build. Re-run the extractor after any `agy` update
-(`make symbols`).
+(`pixi run shim-symbols`).
 
 ---
 
@@ -310,7 +310,7 @@ From the client: `ask("…", stack=True).stacks` returns the symbolized, grouped
 stacks and `.call_graph` the caller→callee edge `Counter`. Low-level path:
 `AGY_PROC_STACK=1 test_scripts/run-agy.sh --print "…"`,
 then `python3 -m pyagy.agy_process.symbolize <capture.jsonl> [--graph]`. `.stacks` needs the
-funcmap (`make symbols`); when it's absent the accessor returns a short reason string.
+funcmap (`pixi run shim-symbols`); when it's absent the accessor returns a short reason string.
 
 ### RPC trace — the app-level backend timeline
 
@@ -361,8 +361,8 @@ result). See `config/` and `pyagy/config.py`.
 ```
 antigravity/
   README.md                 ← this file (the design)
-  Makefile                  ← one build entry: vendor deps (agy, frida-gum) + compile
-  vendor/                   ← agy copy (164 MB) + frida-gum devkit + built shim (gitignored; `make setup`)
+  CMakeLists.txt            ← the build: configure fetches deps (agy, frida-gum) + compile
+  vendor/                   ← agy copy (164 MB) + frida-gum devkit + built shim (gitignored; fetched at configure)
   symbols/
     build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
                               symbols.json; self-verifies every hook is a prologue
@@ -370,11 +370,12 @@ antigravity/
     patch_agy_wsl1.py       ← WSL1: clear tcmalloc MAP_FIXED_NOREPLACE in the fetched agy
     symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, catalog}
   src/
-    antigravity.c               ← LD_PRELOAD constructor + gum install + Go-ABI hook
+    antigravity.cpp         ← LD_PRELOAD constructor + gum install + Go-ABI hook
                               callbacks + getaddrinfo interposer
+    gomod.cpp / cgotrampoline.cpp ← synthetic Go moduledata + the cgocall trampolines
     pybridge.cpp/.h         ← embed libpython (C++23); pyworker boost::thread, Boost.Python
                               object/call layer, queue, dispatch
-    procdef.h                ← declarative hook table (id, symbol, mode, kind, mech, leave)
+    procdef.h                ← constexpr hook table + consteval hk() (id, symbol, mode, kind, mech, …)
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
     __init__.py             ← lazy exports (PEP 562): ask/Session/AgyResponse/specs,
                               AgyModel, write_mcp_config
@@ -411,31 +412,32 @@ The shim's in-process module is **`pyagy.agy_process`** (loaded by `antigravity.
 ## Build & run
 
 `pixi install` **builds the shim** — the tasksolver package build (`setup.py` →
-`build_py`) runs `make -C antigravity`, which vendors the deps and compiles
+`build_py`) runs `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …`,
+which (at configure time) vendors the deps and then compiles
 `antigravity/vendor/antigravity.so`. Since the shim is x86-64-specific and a main
 target, the package is **arch-specific (linux-64)** (`[tool.pixi.package.build.config]
 noarch=false`) and the build is **required** — it fails loudly if the toolchain
-(gcc / frida-gum / libpython) is missing. Set `ANTIGRAVITY_SKIP_BUILD=1` to build
-just the Python library without the shim. (`make`, `hpack`, and `brotli-python` are
-pixi/conda deps — no `pip install` needed; this host has no system `make`.)
+(g++ / frida-gum / libpython) is missing. Set `ANTIGRAVITY_SKIP_BUILD=1` to build
+just the Python library without the shim. (`cmake`, `ninja`, `hpack`, and `brotli-python`
+are pixi/conda deps — no `pip install` needed.)
 
-pixi caches the package build, so **after an agy update** rebuild the shim explicitly
-(GNU make comes from the pixi env, so run it via `pixi run`):
+pixi caches the package build, so **after an agy update** rebuild the shim explicitly via
+the pixi tasks:
 
 ```bash
-pixi run make -C antigravity symbols   # re-resolve symbols.json from the new agy binary
-pixi run make -C antigravity           # recompile the shim (also runs `make setup` first)
+pixi run shim-symbols   # after an agy update: re-resolve symbols.json + recompile
+pixi run build-shim     # a plain recompile (configure fetches the vendored deps on first run)
 ```
 
 **libpython / Python version.** The shim embeds the **pixi env's libpython 3.13**
 (`$(CONDA_PREFIX)/bin/python3-config`), unified with the pixi-3.13 driver so the
 multiprocessing/pickle wire between them is same-version (see *AgyProcess* below). It links
 `-Wl,-rpath,$(CONDA_PREFIX)/lib` so agy finds `libpython3.13.so.1.0` at runtime (agy is always
-launched via `pyagy/_env.py` under the pixi env). Build with `pixi run make -C antigravity`
-(needs `gcc` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). `make setup` fetches the
+launched via `pyagy/_env.py` under the pixi env). Build with `pixi run build-shim`
+(needs `g++` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). cmake configure fetches the
 **frida-gum devkit** from GitHub releases; where GitHub egress is blocked (e.g. a locked-down
 cloud container), vendor it manually into `vendor/frida-gum/` (`libfrida-gum.a`, `frida-gum.h`,
-`VERSION`) and `make` finds it. `pyagy.agy_process` needs `hpack`/`brotli` only for the
+`VERSION`) and cmake's existence guard skips the download. `pyagy.agy_process` needs `hpack`/`brotli` only for the
 HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
 Run agy under the hook via the launcher in `test_scripts/` — it installs the full working
@@ -606,7 +608,7 @@ capture that kind (e.g. no `rpc_*` events):
   `.stacks` / `.call_graph` / `.cgt_args` (each decodes its capture on demand — reading one
   never costs the others, and `.stacks` loads the funcmap only when touched). Also
   `.transcript`, `.exit_status`, `.instrumented` (+`.instrumented_reason`). `.stacks` needs
-  `symbols/funcmap.tsv.gz` (`make symbols`); pass `funcmap=` to override it.
+  `symbols/funcmap.tsv.gz` (`pixi run shim-symbols`); pass `funcmap=` to override it.
 - **Introspect the capture surface**: `from pyagy import HOOKS, by_mech, enabled_hooks,
   by_kind, sync_capable, DERIVED_KINDS` — the machine-readable mirror of `src/procdef.h`
   (which hooks are installed, by mechanism, and which kinds rewrite egress).
@@ -626,7 +628,7 @@ capture that kind (e.g. no `rpc_*` events):
   pinned `vendor/agy` (build-id-matched) — there is no clean/degrade path. `instrumented_env`
   puts `$CONDA_PREFIX/lib` on `LD_LIBRARY_PATH` so the `LD_PRELOAD` always resolves libpython;
   `AgyResponse.instrumented` is therefore always `True`. The shim + `vendor/agy` are a
-  prerequisite (`make -C antigravity`).
+  prerequisite (`pixi run build-shim`).
 - **Offline tests** (no agy/network/creds): `test_scripts/test_http1sse.py`,
   `test_config.py`, `test_client.py`, `test_appresponse.py`, `test_rpctrace.py`,
   `test_symbolize.py`, plus the `rewrite`/`config` offline suites. **Live** (skip cleanly
@@ -795,12 +797,12 @@ shell's `LD_PRELOAD`), otherwise it fails copying `_distutils_hack/__init__.py`.
   Validated on both WSL1 and a real cloud kernel (6.18.5) — see Status. The known WSL1
   0-byte-mmap bug is worked around on that host (see MEMORY); it does not apply to a real
   kernel.
-- **Cloud-container caveats**: `make setup` and `pixi`/`agy` installers fetch from GitHub
+- **Cloud-container caveats**: `cmake configure` and `pixi`/`agy` installers fetch from GitHub
   releases, which a locked-down egress policy may block (403) — vendor the frida-gum devkit
   (and, if needed, the pixi binary) from a mirror instead. agy sign-in works headlessly via
   its out-of-band OAuth code-paste flow (no in-container browser needed).
 - **agy updates** change offsets and may reorder text again → re-run
-  `build_symbols.py` (`make symbols`). Names are stable; the build-id guard blocks
+  `build_symbols.py` (`pixi run shim-symbols`). Names are stable; the build-id guard blocks
   mismatched hooks.
 - **SYNC + GC**: keep SYNC callbacks fast/CPU-bound (above).
 - This instruments a binary **you run on your own machine** for research/interop.

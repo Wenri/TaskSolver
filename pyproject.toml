@@ -88,9 +88,8 @@ nodejs = ">=25,<26"
 # NOTE: bun was removed — it pins icu 75, which conflicts with boost 1.91 (icu 78, pulled in
 # for Boost.Thread); nodejs (what pymport uses) is icu-78 and coexists fine. Re-add bun in a
 # separate environment if needed so its icu pin doesn't clash with the default env's boost.
-# GNU make drives the antigravity shim build (antigravity/Makefile); this host has
-# no system make, so pull it from conda-forge for manual rebuilds (`pixi run make …`).
-# make is also required by node-gyp for the pymport source build.
+# GNU make for node-gyp: pymport is compiled from source by node-gyp, which needs make (this host
+# has no system make). The antigravity shim now builds with cmake+ninja (below), not make.
 make = ">=4"
 pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pymport)
 # Linux UAPI headers (linux/, asm/): glibc's <limits.h> (pulled in via frida-gum.h)
@@ -99,10 +98,10 @@ pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pym
 # $CONDA_PREFIX/x86_64-conda-linux-gnu/sysroot/usr/include.
 kernel-headers_linux-64 = ">=4"
 # Conda C/C++ compilers for the antigravity shim — the automatic build_py build AND manual
-# `pixi run make -C antigravity`. Use them instead of a bare PATH `gcc`/`g++`: on a Nix host
-# those are Nix's, which bake /nix/store glibc rpaths into the shim and break its LD_PRELOAD.
-# gxx pulls gcc; both pinned <13.3 to match the local feature (shared solve group). pybridge is
-# C++23 (Boost.Thread), the other shim TUs are C — hence both compilers.
+# `pixi run build-shim`. Use them instead of a bare PATH `gcc`/`g++`: on a Nix host those are
+# Nix's, which bake /nix/store glibc rpaths into the shim and break its LD_PRELOAD. cmake picks
+# them up via $CXX/$CC exported by the env. gxx pulls gcc; both pinned <13.3 to match the local
+# feature (shared solve group). All shim TUs are C++23 (Boost.Thread/Boost.Python).
 gcc_linux-64 = ">=11,<13.3"
 gxx_linux-64 = ">=11,<13.3"
 # Boost.Thread for the pybridge worker (its thread::attributes sets the libpython worker's
@@ -120,12 +119,17 @@ binutils = ">=2.45.1,<3"
 gh = ">=2.96.0,<3"
 glab = ">=1.106.0,<2"
 paramiko = ">=5.0.0,<6"
+# cmake + ninja build the antigravity shim (antigravity/CMakeLists.txt) — both the automatic
+# build_py hook (during `pixi install`) and the manual `pixi run build-shim`.
+cmake = ">=4.3.4,<5"
+ninja = ">=1.11"
 
-# The antigravity shim build lives in antigravity/Makefile (setup.py's build_py hook
-# runs `make -C antigravity` during the package build, so `pixi install` builds it).
-# No pixi tasks needed: after an agy update, rebuild manually with
-#   pixi run make -C antigravity symbols   # re-resolve symbols.json from the new agy
-#   pixi run make -C antigravity           # recompile the shim
+# The antigravity shim build lives in antigravity/CMakeLists.txt (setup.py's build_py hook runs
+# `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …` during the package build,
+# so `pixi install` builds it). Manual rebuilds via the pixi tasks below:
+#   pixi run build-shim         # configure (fetch deps) + compile the shim
+#   pixi run shim-symbols       # after an agy update: re-resolve symbols.json + rebuild
+#   pixi run shim-agy-update    # fetch the latest agy + print new pin values
 [tool.pixi.package]
 name = "tasksolver"
 version = "0.0.1"
@@ -139,19 +143,20 @@ version = "*"
 [tool.pixi.package.build.config]
 noarch = false
 
-# The python backend builds without build isolation, so the [build-system]
-# requirements must be present in the package's host environment — plus `make` and
-# `kernel-headers_linux-64` (UAPI headers), which setup.py's build_py hook needs to
-# build the antigravity shim. build_py compiles against $CONDA_PREFIX's sysroot, so
-# the headers must live in *this* (host) env, not just the default one.
+# The python backend builds without build isolation, so the [build-system] requirements must be
+# present in the package's host environment — plus `cmake`/`ninja` and `kernel-headers_linux-64`
+# (UAPI headers), which setup.py's build_py hook needs to build the antigravity shim. build_py
+# compiles against $CONDA_PREFIX's sysroot, so the headers must live in *this* (host) env, not
+# just the default one.
 [tool.pixi.package.host-dependencies]
 python = "3.13.*"
 pip = "*"
 setuptools = ">=61"
-make = ">=4"
+cmake = ">=4.3.4,<5"          # drives the shim build (antigravity/CMakeLists.txt) in build_py
+ninja = ">=1.11"             # cmake generator for the shim build
 kernel-headers_linux-64 = ">=4"
-gcc_linux-64 = ">=11,<13.3"   # compile the shim's C TUs with conda's gcc, not the Nix gcc on PATH
-gxx_linux-64 = ">=11,<13.3"   # pybridge.cpp is C++23 (Boost.Thread) → conda g++
+gcc_linux-64 = ">=11,<13.3"   # pulled by gxx; conda toolchain, not the Nix gcc on PATH
+gxx_linux-64 = ">=11,<13.3"   # all shim TUs are C++23 (Boost.Thread/Boost.Python) → conda g++
 libboost-devel = ">=1.88"     # Boost.Thread (headers + libboost_thread) for the pybridge worker
 libboost-python-devel = ">=1.88"   # Boost.Python (embedding) — py313 build matches libpython3.13
 
@@ -167,6 +172,12 @@ PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig"
 [tool.pixi.tasks]
 npm-install = "npm_config_build_from_source=true CXXFLAGS='-std=c++17' npm install"
 pymport-test = { cmd = "node -e \"const {pymport,proxify}=require('pymport'); const sys=proxify(pymport('sys')); console.log('Python',sys.version.toString()); const np=proxify(pymport('numpy')); console.log('numpy',np.__version__.toString());\"", depends-on = ["npm-install"] }
+
+# antigravity shim (antigravity/CMakeLists.txt). Configure is idempotent (fetches vendored deps on
+# first run), so each task re-runs it before building the relevant target.
+build-shim = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build"
+shim-symbols = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target symbols && cmake --build antigravity/build"
+shim-agy-update = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target agy-update"
 
 # --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---
 # The `local` and `app` features auto-map to the same-named

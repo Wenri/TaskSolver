@@ -14,13 +14,13 @@ the turn:
       the one capture: SendUserMessage/Send (trampoline app-boundary), genai_turn (wire),
       app_response (app boundary), and the StreamGenerateContent RPC (rpc trace).
 
-This is the regression guard for an agy update: after `make -C antigravity symbols`
+This is the regression guard for an agy update: after `pixi run shim-symbols`
 re-resolves offsets for a new build, run this to confirm the union still works. It is
 also the primary check that the combined install doesn't destabilize a turn.
 
 It SKIPS (exit 0), rather than fails, when the environment can't run it — no agy
 binary, shim not built, or the running agy's build-id doesn't match symbols.json
-(the shim then refuses to hook; re-run `make -C antigravity symbols`). Model-turn
+(the shim then refuses to hook; re-run `pixi run shim-symbols`). Model-turn
 checks are skipped when agy isn't logged in.
 
     python3 test_scripts/test_trampoline.py            # validates the full union (mixed full-cgo + asmcgo)
@@ -97,7 +97,7 @@ def main():
     if not os.path.exists(AGY):
         skip(f"agy not found at {AGY} (set AGY_BIN)")
     if not os.path.exists(SHIM):
-        skip(f"shim not built: {SHIM} (run `make -C antigravity`)")
+        skip(f"shim not built: {SHIM} (run `pixi run build-shim`)")
 
     wd = tempfile.mkdtemp(prefix="agy_tramp_")
     subprocess.run("git init -q && printf x > f && git add -A && "
@@ -119,7 +119,7 @@ def main():
     r = run({}, wd)
     if "build-id ok" not in r["log"]:
         skip("shim build-id does not match the running agy — re-run "
-             "`make -C antigravity symbols` && `make -C antigravity` (agy may have auto-updated)")
+             "`pixi run shim-symbols` && `pixi run build-shim` (agy may have auto-updated)")
     check("cgocall-trampoline: installed" in r["log"], "union: trampoline installed")
     check(r["kinds"].get("smoke", 0) > 0, "union: gum os.Getenv hook fired end-to-end")
     check(r["home_bad"] == 0, "union: no $HOME corruption (register block intact)")

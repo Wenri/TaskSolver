@@ -349,7 +349,7 @@ def main():
 
     # Full sorted funcmap (addr → name for EVERY function) for offline stack
     # symbolization (pyagy.agy_process.symbolize). Gzipped, gitignored, regenerated
-    # by `make symbols`. Keyed by absolute link vaddr so it's ASLR-independent:
+    # by `pixi run shim-symbols`. Keyed by absolute link vaddr so it's ASLR-independent:
     # a captured runtime PC maps via link_vaddr = pc - module_base, then bisect.
     import gzip
     import os as _os

@@ -228,7 +228,7 @@ class AgyResponse:
     @cached_property
     def _symbolizer(self):
         """A funcmap-backed Symbolizer, or None if the funcmap file is absent
-        (``make -C antigravity symbols`` produces it; it's gitignored)."""
+        (``pixi run shim-symbols`` produces it; it's gitignored)."""
         from .agy_process import symbolize
         path = self.funcmap or symbolize.DEFAULT_FUNCMAP
         if not os.path.exists(path):
@@ -246,7 +246,7 @@ class AgyResponse:
         if sym is None:
             from .agy_process import symbolize
             return (f"(funcmap not found at {self.funcmap or symbolize.DEFAULT_FUNCMAP}; "
-                    "run `make -C antigravity symbols`)")
+                    "run `pixi run shim-symbols`)")
         from .agy_process import symbolize
         return symbolize.render_stacks(self.capture_path, sym)
 

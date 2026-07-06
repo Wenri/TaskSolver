@@ -136,7 +136,7 @@ def case_agyprocess_resume():
     # AgyProcess with the default target exposes a resumable conversation_id. Needs the shim.
     # The caller owns the result queue (stock-mp style) and drains it via client._collect.
     if not os.path.exists(_env.SHIM):
-        print("  NOTE agyprocess: shim not built (run `make -C antigravity`); skipped")
+        print("  NOTE agyprocess: shim not built (run `pixi run build-shim`); skipped")
         return
     from pyagy.agyprocess import AgyProcess
     from pyagy.client import _new_channel, _close_channel, _collect

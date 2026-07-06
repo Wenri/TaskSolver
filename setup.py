@@ -31,10 +31,13 @@ class BuildPyWithShim(build_py):
             return
         if not os.path.isdir(os.path.join(root, "antigravity")):
             return  # antigravity/ absent (e.g. partial checkout) — nothing to build
-        # `make` (a pixi host-dependency) runs the whole chain: vendor agy + fetch
-        # frida-gum devkit + UAPI headers, then gen symbols_gen.h from the committed
-        # symbols.json + compile. All idempotent; uses system gcc + python3-config.
-        subprocess.run(["make", "-C", "antigravity"], cwd=root, check=True)
+        # CMake + Ninja (both pixi host-dependencies) run the whole chain: configure fetches agy
+        # (sha512-verified) + the frida-gum devkit into vendor/, then the build generates
+        # symbols_gen.h from the committed symbols.json and compiles the shim. All idempotent;
+        # picks up conda's g++/python3-config from the env ($CXX / $CONDA_PREFIX).
+        build = os.path.join("antigravity", "build")
+        subprocess.run(["cmake", "-S", "antigravity", "-B", build, "-G", "Ninja"], cwd=root, check=True)
+        subprocess.run(["cmake", "--build", build], cwd=root, check=True)
         sys.stderr.write("[setup] antigravity.so built (arch-specific tasksolver build)\n")
 
 
