@@ -246,42 +246,34 @@ void PyBridge::emit(agy_event_t *ev)
 {
     if (ready_ != 1) return;
 
-    if (ev->mode == AGY_ASYNC) {
-        job j;
-        j.kind = ev->kind;
-        j.stream_id = ev->stream_id;
-        j.mode = AGY_ASYNC;
-        j.data = copy_capped(ev->data, ev->len);
-        enqueue(std::move(j));   /* moved into the queue; on refuse it just destructs here */
+    /* One job for both modes; they differ only in whether a result promise is attached. */
+    job j{ .kind = ev->kind, .stream_id = ev->stream_id,
+           .data = copy_capped(ev->data, ev->len), .mode = ev->mode };
+
+    if (ev->mode == AGY_ASYNC) {          /* fire-and-forget (on refuse the job just destructs here) */
+        enqueue(std::move(j));
         return;
     }
 
-    /* SYNC: keep the promise on THIS stack and hand the job a pointer to it, then block on the
-     * future. The job (with the pointer) is moved into the queue; the promise/future stay here and
-     * outlive the wait, so the worker's set_value reaches us. */
+    /* SYNC: block on the worker's verdict via a promise/future kept on THIS stack; the moved-in job
+     * carries a pointer to the promise, so the worker's set_value reaches us. */
     std::promise<Result> pr;
     std::future<Result>  fut = pr.get_future();
-
-    job j;
-    j.kind = ev->kind;
-    j.stream_id = ev->stream_id;
-    j.mode = AGY_SYNC;
-    j.data = copy_capped(ev->data, ev->len);
     j.result = &pr;
+    if (!enqueue(std::move(j))) return;   /* shutting down: fut is never got → no broken_promise */
 
-    if (!enqueue(std::move(j))) return;   /* shutting down: don't block (fut is never got → no throw) */
-    Result res = fut.get();               /* blocks until the worker set_value's */
-
+    Result res = fut.get();
     if (res.verdict) {
-        /* Hand the replacement to the caller over the C ABI: agy_event_t.out_data is a malloc'd
-         * buffer freed by agy_py_free — the one place we bridge std::vector → raw for C. */
-        uint8_t *out = (uint8_t *)malloc(res.out.size() ? res.out.size() : 1);
-        if (out) {
-            memcpy(out, res.out.data(), res.out.size());
-            ev->out_data = out;
-            ev->out_len = res.out.size();
-            ev->verdict = 1;
-        }
+        /* Hand the replacement across the C ABI with NO malloc: park it in a thread-local buffer
+         * that outlives this call. The C side's emit → memcpy → agy_py_free is synchronous on this
+         * one thread, and a SYNC emit never nests on it (the FULLCGO trampoline hands off the P
+         * while we block) — so a per-thread buffer is safe. out_data borrows it until the next SYNC
+         * emit on this thread replaces it (or the thread exits); agy_py_free just clears the fields. */
+        thread_local std::vector<uint8_t> out;
+        out = std::move(res.out);
+        ev->out_data = out.data();
+        ev->out_len  = out.size();
+        ev->verdict  = 1;
     }
 }
 
@@ -309,7 +301,10 @@ extern "C" int  agy_py_start(void) { return bridge().start(); }
 extern "C" void agy_py_emit(agy_event_t *ev) { bridge().emit(ev); }
 extern "C" void agy_py_shutdown(void) { bridge().shutdown(); }
 
-extern "C" void agy_py_free(agy_event_t *ev)   /* stateless: free a SYNC replacement buffer */
+extern "C" void agy_py_free(agy_event_t *ev)   /* the SYNC replacement lives in emit()'s thread-local
+                                                * buffer, so nothing to free here — just reset. */
 {
-    if (ev->out_data) { free(ev->out_data); ev->out_data = nullptr; ev->out_len = 0; ev->verdict = 0; }
+    ev->out_data = nullptr;
+    ev->out_len = 0;
+    ev->verdict = 0;
 }

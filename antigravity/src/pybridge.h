@@ -26,8 +26,8 @@ typedef struct {
     size_t      len;
     agy_mode_t  mode;
 
-    /* outputs, SYNC only: verdict=1 means use out_data/out_len (owned by bridge,
-     * valid until the emitting hook returns). */
+    /* outputs, SYNC only: verdict=1 means use out_data/out_len. The buffer lives in a
+     * thread-local in the bridge; borrowed, valid until the emitting hook returns. */
     int         verdict;
     uint8_t    *out_data;
     size_t      out_len;
@@ -44,7 +44,8 @@ int  agy_py_start(void);
  * SYNC: enqueues and blocks until the worker returns a verdict. */
 void agy_py_emit(agy_event_t *ev);
 
-/* Free a SYNC replacement buffer returned in ev->out_data (call after applying). */
+/* Reset the SYNC outputs after applying ev->out_data (the buffer is thread-local in
+ * the bridge, not owned by the caller — nothing is freed). */
 void agy_py_free(agy_event_t *ev);
 
 int  agy_py_ready(void);
