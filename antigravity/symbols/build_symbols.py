@@ -43,6 +43,12 @@ PROC_TARGETS = [
     # the uuid is IN the path, so an enter-only probe reading OpenFile's name arg
     # (RAX=ptr,RBX=len, same shape as os.Getenv) yields the exact id in-process.
     "os.OpenFile",
+    # /proc/self/exe correction (filter mode): under `ld.so --preload`, /proc/self/exe resolves
+    # to the loader, not agy. os.readlink (the inner, loop-bearing implementation — NOT the
+    # os.Readlink wrapper, which Go inlines so its symbol is never called) is what the os-package
+    # init + os.Executable readlink funnels through — hook it and RETURN the real agy path for
+    # that one input. Returns (string, error), so RETURN just sets the result registers.
+    "os.readlink",
 
     # --- app-layer capture R&D (CPU-only funcs returning []byte = readable) ---
     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",

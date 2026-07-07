@@ -106,6 +106,18 @@ inline constexpr agy_hook HOOKS[] = {
  * a "file_open" arg-read in agy_cgo_hook (a follow-on, like the tls_write read). */
 { "FILE_OPEN",    "os.OpenFile",                     AGY_ASYNC, "file_open", AGY_FULLCGO, 0 },
 
+/* /proc/self/exe correction via the trampoline FILTER mode. Under `ld.so --preload`, the kernel's
+ * /proc/self/exe points at the loader, not agy — so os.Executable()/os-init readlink (and agy's
+ * self-re-exec) misresolve. We hook os.readlink (the inner, loop-bearing impl — NOT os.Readlink,
+ * which Go inlines so its symbol never fires; verified empirically). Signature is the same,
+ * os.readlink(name string)(string,error): name.ptr=rax,name.len=rbx; returns string.ptr=rax,
+ * string.len=rbx,err.tab=rcx,err.data=rdi. The agy_cgo_hook branch filters name=="/proc/self/exe":
+ * for it, it writes the real agy path (from AGY_PROC_REAL_EXE) into the return regs + sets
+ * block.action → RETURN (skips the body); every other readlink PASSes. FULLCGO — the PASS branch runs
+ * a readlinkat syscall that can park (os.OpenFile precedent). Fires once/turn at os-init, so it's a
+ * deterministic, login-independent liveness signal. */
+{ "READLINK_FILTER", "os.readlink",                  AGY_ASYNC, "readlink_filter", AGY_FULLCGO, 0 },
+
 /* egress capture — the full model REQUEST. Non-parking + hot (~55 fires/turn) → AGY_ASMCGO
  * (lighter trampoline; was gum, retired). agy_cgo_hook reads the request bytes as an entry arg
  * (c=rax, b.ptr=rbx, b.len=rcx) — the reliable replacement for the retired gum on_enter read. */

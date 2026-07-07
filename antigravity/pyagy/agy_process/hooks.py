@@ -32,6 +32,12 @@ HOOKS = [
              "syscall → not an asmcgo candidate). Only attaches when AGY_PROC_CONV_ID is set. "
              "NOTE: the path filter still lives in the gum on_enter case; a trampoline arg-read "
              "in agy_cgo_hook is the follow-on to re-enable conv-id capture."},
+    {"id": "READLINK_FILTER", "symbol": "os.readlink", "mode": "async", "kind": "readlink_filter",
+     "mech": "fullcgo", "leave": False,
+     "note": "FILTER mode: for os.readlink(\"/proc/self/exe\") — misresolved to the loader under "
+             "`ld.so --preload` — RETURNs the real agy path (AGY_PROC_REAL_EXE) via block.action, "
+             "skipping the body; all other readlinks PASS. Hooks the inner os.readlink, not the "
+             "inlined os.Readlink wrapper. Fires ~once/turn at os-init (deterministic liveness)."},
     {"id": "TLS_WRITE", "symbol": "crypto/tls.(*Conn).Write", "mode": "async",
      "kind": "tls_write", "mech": "asmcgo", "leave": False,
      "note": "egress c2s; the ONLY rewrite surface (AGY_PROC_TLS_WRITE_SYNC); "

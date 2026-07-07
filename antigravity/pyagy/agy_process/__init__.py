@@ -131,6 +131,15 @@ def on_file_open(stream_id, data):
     return None
 
 
+def on_readlink_filter(stream_id, data):
+    # The READLINK_FILTER hook (os.readlink) RETURN-substituted "/proc/self/exe" — which resolves to
+    # the loader under `ld.so --preload` — with the real agy path (`data`, from AGY_PROC_REAL_EXE), so
+    # os.Executable()/self-re-exec see agy, not ld.so. `data` is the substitute path we handed back.
+    _rec.event({"kind": "readlink_filter", "requested": "/proc/self/exe",
+                "substitute": data.decode("utf-8", "replace")})
+    return None
+
+
 def on_cgt_args(stream_id, data):
     # Diagnostic (AGY_PROC_CGT_ARGS): the C hook already rendered a readable arg
     # report; print it in full (the raw recorder would truncate to the preview len)
@@ -174,6 +183,7 @@ _ROUTER = {
     "smoke": on_smoke,
     "exit": on_exit,
     "file_open": on_file_open,
+    "readlink_filter": on_readlink_filter,
     "cgt_args": on_cgt_args,
     "callstack": on_callstack,
     "delta_ccpa": _on_model_text("delta_ccpa"),

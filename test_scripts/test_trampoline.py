@@ -122,6 +122,11 @@ def main():
              "`pixi run shim-symbols` && `pixi run build-shim` (agy may have auto-updated)")
     check("cgocall-trampoline: installed" in r["log"], "union: trampoline installed")
     check(r["kinds"].get("smoke", 0) > 0, "union: gum os.Getenv hook fired end-to-end")
+    # readlink_filter fires at os-package init (os.readlink of /proc/self/exe) every turn — a
+    # deterministic, login-independent check of the trampoline FILTER (pass/return) mode: the hook
+    # RETURNed the real agy path, skipping the body. If this is 0 the filter mode is inert.
+    check(r["kinds"].get("readlink_filter", 0) >= 1,
+          "union: readlink_filter fired (os.readlink /proc/self/exe → RETURN, filter mode)")
     check(r["home_bad"] == 0, "union: no $HOME corruption (register block intact)")
     check(r["unicode_err"] == 0, "union: no worker UnicodeDecodeError (kind intact)")
     check(r["crashes"] == 0, "union: no throw/unknown-pc/panic (GC unwind safe)")

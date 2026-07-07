@@ -308,6 +308,23 @@ static void cgt_bytes_emit(const char *kind, uint64_t id, uint64_t ptr, uint64_t
  * AGY_PROC_CGT_ARGS set, also emits a diagnostic arg-register report. */
 static uint64_t g_gh_base;   /* main-module base, for reducing PCs to link vaddrs */
 
+/* The real agy path the READLINK_FILTER hook substitutes for /proc/self/exe. A static (BSS) buffer,
+ * filled once at agy_init from AGY_PROC_REAL_EXE (before Go starts → no concurrent-writer race), so
+ * the Go string we hand back points at stable, immutable, non-heap memory (GC-safe, like a rodata
+ * string literal). len==0 ⇒ unset ⇒ the filter stays inert (PASS). */
+static char g_real_exe[4096];
+static size_t g_real_exe_len;
+
+void agy_set_real_exe(const char *p)
+{
+    if (!p || !*p) return;
+    size_t n = strlen(p);
+    if (n >= sizeof g_real_exe) n = sizeof g_real_exe - 1;
+    memcpy(g_real_exe, p, n);
+    g_real_exe[n] = 0;
+    g_real_exe_len = n;
+}
+
 static void agy_cgo_hook(agy_block *b)
 {
     if (getenv("AGY_PROC_CGT_ARGS")) cgt_diag(b);
@@ -358,6 +375,39 @@ static void agy_cgo_hook(agy_block *b)
          * on the trampoline — the reliable replacement for the retired TLS_DECRYPT leave hook. */
         cgt_bytes_emit("resp_chunk", b->regs.rax, b->regs.rax, b->regs.rbx);
         return;
+    }
+    if (kind == "readlink_filter") {
+        /* os.readlink(name string) (string, error): name.ptr=rax, name.len=rbx. For /proc/self/exe
+         * (misresolved to the loader under `ld.so --preload`), RETURN the real agy path via the filter
+         * mode: os.readlink returns (string,error) → rax=str.ptr, rbx=str.len, rcx=err.tab=0,
+         * rdi=err.data=0; set action=1 to skip the body (the readlinkat syscall + grow loop). Every
+         * other readlink — and the case where AGY_PROC_REAL_EXE is unset (g_real_exe_len==0) — PASSes
+         * untouched (never return "", which would poison os.Executable's cached path). */
+        uint64_t nptr = b->regs.rax, nlen = b->regs.rbx;
+        char nm[16];
+        if (g_real_exe_len && nlen == 14 && agy_safe_read(nptr, nm, 14) == 14 &&
+            memcmp(nm, "/proc/self/exe", 14) == 0) {
+            b->regs.rax = (uint64_t)(uintptr_t)g_real_exe;   /* string.ptr → static BSS buffer */
+            b->regs.rbx = g_real_exe_len;                    /* string.len */
+            b->regs.rcx = 0;                                 /* error.tab  = nil */
+            b->regs.rdi = 0;                                 /* error.data = nil */
+            b->action = 1;                                   /* RETURN — skip the body */
+            /* one-shot: log the correction (kernel's real answer = the loader → our substitute) */
+            static int logged;
+            if (!logged) {
+                logged = 1;
+                char kr[512];
+                ssize_t n = readlink("/proc/self/exe", kr, sizeof kr - 1);
+                kr[n > 0 ? n : 0] = 0;
+                GHLOG("os.readlink(/proc/self/exe): kernel=%s -> RETURN %s", kr, g_real_exe);
+            }
+            /* emit the substitute (the path we handed back) so a test can assert it */
+            agy_event_t ev = { .kind = "readlink_filter", .stream_id = nptr,
+                               .data = (const uint8_t *)g_real_exe, .len = g_real_exe_len,
+                               .mode = AGY_ASYNC };
+            agy_py_emit(&ev);
+        }
+        return;   /* non-match / no real-exe → PASS (action stays 0) */
     }
     agy_event_t ev = { .kind = (const char *)b->kind,
                        .stream_id = b->regs.rax, .mode = AGY_ASYNC };

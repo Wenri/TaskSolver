@@ -314,6 +314,7 @@ static void agy_init(void)
     g_tls_write_sync = getenv("AGY_PROC_TLS_WRITE_SYNC") != nullptr;
     g_stack = getenv("AGY_PROC_STACK") != nullptr;
     g_conv_id = getenv("AGY_PROC_CONV_ID") != nullptr;
+    agy_set_real_exe(getenv("AGY_PROC_REAL_EXE"));   /* the path READLINK_FILTER returns for /proc/self/exe */
 
     /* build-id guard: refuse to apply offsets to a different agy build */
     struct bid b = { .hex = "" };

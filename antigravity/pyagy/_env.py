@@ -45,6 +45,9 @@ def preload_argv(agy_bin, agy_args, shim=None, env=None):
     without leaving ``LD_LIBRARY_PATH`` in the environment either."""
     shim = shim or SHIM
     env = os.environ if env is None else env
+    # The shim's READLINK_FILTER hook returns this for os.readlink("/proc/self/exe") — which the
+    # kernel resolves to the loader here (argv[0] is the interpreter, below), not agy.
+    env["AGY_PROC_REAL_EXE"] = os.path.abspath(agy_bin)
     argv = [_elf_interp(agy_bin), "--argv0", agy_bin]
     libpath = [p for p in (os.path.join(env["CONDA_PREFIX"], "lib") if env.get("CONDA_PREFIX") else None,
                            env.get("LD_LIBRARY_PATH")) if p]

@@ -1,5 +1,5 @@
 {
-  "agy_path": "antigravity/vendor/agy",
+  "agy_path": "vendor/agy",
   "build_id": "dee6de740c3883dd05450228aeec8a75",
   "ptr_size": 8,
   "moduledata_vaddr": 170996608,
@@ -16,6 +16,7 @@
     "os.Getenv": 84384128,
     "os.Exit": 84414016,
     "os.OpenFile": 84394304,
+    "os.readlink": 84405728,
     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize": 122323552,
     "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON": 122256384,
     "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 85375808,
@@ -59,6 +60,7 @@
     "os.Getenv": 6,
     "os.Exit": 6,
     "os.OpenFile": 6,
+    "os.readlink": 10,
     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize": 10,
     "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON": 18,
     "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 10,

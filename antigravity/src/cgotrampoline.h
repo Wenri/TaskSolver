@@ -28,6 +28,12 @@ int  agy_backtrace(uint64_t rbp, uint64_t base, uint64_t *out, int max);
  * frame vaddrs from agy_backtrace(rbp,base). No-op-safe if rbp is bogus. */
 void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base);
 
+/* Set the real agy binary path (from AGY_PROC_REAL_EXE) the READLINK_FILTER hook returns for
+ * os.readlink("/proc/self/exe") — needed because agy runs under `ld.so --preload`, so the kernel's
+ * /proc/self/exe points at the loader. Called once at agy_init (before Go starts). Empty/null = the
+ * filter stays inert (PASS). Copied into a static buffer whose lifetime spans the process. */
+void agy_set_real_exe(const char *path);
+
 #ifdef __cplusplus
 }
 #endif
