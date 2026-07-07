@@ -7,10 +7,32 @@ build, Phase 6), and ``codex exec`` is a non-TTY one-shot, so a plain subprocess
 capture file replaces agy's PTY + embedded-worker streaming.
 
 Public API:
-    pycodex.ask("What is 2+2?")           -> CodexResponse (.text / .model / .usage / .request / .turns)
-    pycodex.ask_many(prompt, n)           -> [CodexResponse, ...]
+    pycodex.ask("What is 2+2?")   -> CodexResponse (.text / .model / .usage / .request / .turns)
+    pycodex.ask_many(prompt, n)   -> [CodexResponse, ...]
+    pycodex.CodexModel(...)       -> a TaskSolver-contract backend (pulls tasksolver — lazy)
 
-The in-process decode side is ``pycodex.codex_process`` (the WIRE_MODULE the embedded interpreter
-imports); the OpenAI-Responses turn shaping is ``pycodex.codex_process.responses_decode``.
+Exports are LAZY (PEP 562): importing ``pycodex.codex_process`` (the WIRE_MODULE the embedded
+interpreter loads) runs this package __init__, which must stay import-pure — so ``client`` (and
+especially ``model``, which imports ``tasksolver``) are imported only on attribute access, never
+at package load. The in-process decode side is ``pycodex.codex_process``.
 """
-from .client import CodexResponse, Usage, ask, ask_many   # noqa: F401
+
+_LAZY = {
+    "ask": ".client",
+    "ask_many": ".client",
+    "CodexResponse": ".client",
+    "Usage": ".client",
+    "CodexModel": ".model",
+}
+
+
+def __getattr__(name):
+    mod = _LAZY.get(name)
+    if mod is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    return getattr(importlib.import_module(mod, __name__), name)
+
+
+def __dir__():
+    return sorted(_LAZY)

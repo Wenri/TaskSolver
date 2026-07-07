@@ -107,6 +107,8 @@ def ask(prompt, *, model=None, workspace=None, timeout=300, extra_flags=None,
     and codex auth (``OPENAI_API_KEY`` or ``codex login``)."""
     ws = ensure_git_workspace(workspace)
     capture = os.path.join(ws, "codex-capture.jsonl")
+    open(capture, "w").close()   # truncate: the bridge Recorder appends, and the scratch ws is
+    #                              reused across calls, so start fresh or ask() would re-read prior turns
     env = instrumented_env(capture, extra_env=extra_env)
     argv = codex_argv(prompt, ws, model=model, extra_flags=extra_flags, codex_bin=codex_bin)
     # stdin=DEVNULL: `codex exec` reads stdin for extra context and blocks until EOF otherwise.
