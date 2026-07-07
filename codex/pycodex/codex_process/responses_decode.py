@@ -100,24 +100,31 @@ def finish_reason(events):
     return None
 
 
+def _item_text(content):
+    """The concatenated text of a Responses input item's ``content`` (a string, or a list of
+    ``{type: input_text|text, text}`` parts)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") for p in content
+                       if isinstance(p, dict) and isinstance(p.get("text"), str))
+    return ""
+
+
 def summarize_request(req_json):
     """Compact summary of a ``ResponsesApiRequest`` body (already json.loads'd): model,
-    instructions length, tool names, and the first user text in ``input``."""
+    instructions length, tool names, and the user prompt. codex's ``input`` interleaves injected
+    developer/context messages with the user turn, so the user prompt is the LAST ``role:"user"``
+    message (after any injected context)."""
     instr = req_json.get("instructions") or ""
-    tools = [t.get("name") for t in req_json.get("tools", []) or [] if isinstance(t, dict)]
+    tools = [t.get("name") for t in req_json.get("tools", []) or []
+             if isinstance(t, dict) and t.get("name")]
     user_text = ""
     for item in req_json.get("input", []) or []:
-        content = item.get("content") if isinstance(item, dict) else None
-        if isinstance(content, str):
-            user_text = content
-            break
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    user_text = part["text"]
-                    break
-            if user_text:
-                break
+        if isinstance(item, dict) and item.get("role") == "user":
+            txt = _item_text(item.get("content"))
+            if txt:
+                user_text = txt          # keep the last user message = the actual prompt
     return {
         "model": req_json.get("model"),
         "instructions_len": len(instr),
