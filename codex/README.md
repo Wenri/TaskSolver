@@ -26,13 +26,14 @@ existing vendored files are tiny and anchored on stable names, so bumping the pi
 
     git subtree pull --prefix codex/vendor https://github.com/openai/codex.git <newtag> --squash
 
-then re-apply the emit edits if they drifted, and `pixi run build-codex`.
+then re-apply the emit edits if they drifted, and re-run `pixi install` (which rebuilds codex).
 
 ## Build + run
 Built from source as a **gnu-dynamic** ELF (NOT the static-musl release artifact — it must embed
-the pixi libpython): `pixi run build-codex` → `vendor/codex-rs/target/release/codex` (point `CODEX_BIN`
-elsewhere to override). Needs `rust`, `clang`/`libclang`, `openssl`, `libcap` (pixi deps). Auth:
-`OPENAI_API_KEY` or `codex login`. Then:
+the pixi libpython) by **`pixi install`** (setup.py's build_py, after the shim) →
+`vendor/codex-rs/target/release/codex` (point `CODEX_BIN` elsewhere to override; `CODEX_SKIP_BUILD=1`
+skips the ~23-min compile). Needs `rust`, `clang`/`libclang`, `openssl`, `libcap` (pixi host-deps).
+Auth: `OPENAI_API_KEY` or `codex login`. Then:
 
     from pycodex import ask
     r = ask("What is 2+2?")            # -> CodexResponse(.text, .model, .usage, .request, .turns)
