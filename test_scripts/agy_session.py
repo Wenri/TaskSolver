@@ -29,9 +29,11 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ANTIGRAVITY = os.path.join(os.path.dirname(_HERE), "antigravity")
-if _ANTIGRAVITY not in sys.path:
-    sys.path.insert(0, _ANTIGRAVITY)   # make `pyagy` importable without an install
+_REPO = os.path.dirname(_HERE)                       # repo root holds the shared `wirecap` package
+_ANTIGRAVITY = os.path.join(_REPO, "antigravity")
+for _p in (_ANTIGRAVITY, _REPO):                     # make `pyagy` + `wirecap` importable without an install
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from pyagy.agyprocess import AgyProcess   # noqa: E402
 from pyagy._term import strip_ansi        # noqa: E402  (re-exported for callers)

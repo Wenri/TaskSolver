@@ -16,8 +16,10 @@ import sys
 import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ANTIGRAVITY = os.path.join(os.path.dirname(_HERE), "antigravity")
+_REPO = os.path.dirname(_HERE)                       # repo root holds the shared `wirecap` package
+_ANTIGRAVITY = os.path.join(_REPO, "antigravity")
 sys.path.insert(0, _ANTIGRAVITY)
+sys.path.insert(0, _REPO)
 
 _failures = []
 
@@ -96,9 +98,9 @@ def test_response_preference():
 
 def test_import_purity():
     print("[offline] agy_process (incl. app_response route) stays stdlib-only")
-    code = ("import sys; sys.path.insert(0, %r); import pyagy.agy_process as ap; "
+    code = ("import sys; sys.path[:0] = [%r, %r]; import pyagy.agy_process as ap; "
             "assert 'app_response' in ap._ROUTER; "
-            "assert 'tasksolver' not in sys.modules; print('pure')" % _ANTIGRAVITY)
+            "assert 'tasksolver' not in sys.modules; print('pure')" % (_REPO, _ANTIGRAVITY))
     import subprocess
     r = subprocess.run([sys.executable, "-S", "-c", code], capture_output=True, text=True)
     check(r.returncode == 0 and "pure" in r.stdout, "purity: app_response routed, no tasksolver")

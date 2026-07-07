@@ -15,8 +15,10 @@ import sys
 import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ANTIGRAVITY = os.path.join(os.path.dirname(_HERE), "antigravity")
+_REPO = os.path.dirname(_HERE)                       # repo root holds the shared `wirecap` package
+_ANTIGRAVITY = os.path.join(_REPO, "antigravity")
 sys.path.insert(0, _ANTIGRAVITY)
+sys.path.insert(0, _REPO)
 # spawned MCP servers must import this module (for the module:func handler test)
 os.environ["PYTHONPATH"] = os.pathsep.join(
     p for p in (_ANTIGRAVITY, _HERE, os.environ.get("PYTHONPATH", "")) if p)

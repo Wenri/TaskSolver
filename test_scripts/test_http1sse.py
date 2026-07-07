@@ -15,8 +15,10 @@ import subprocess
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ANTIGRAVITY = os.path.join(os.path.dirname(_HERE), "antigravity")
+_REPO = os.path.dirname(_HERE)                       # repo root holds the shared `wirecap` package
+_ANTIGRAVITY = os.path.join(_REPO, "antigravity")
 sys.path.insert(0, _ANTIGRAVITY)
+sys.path.insert(0, _REPO)
 
 from pyagy.agy_process import http1sse as h  # noqa: E402
 from pyagy.agy_process import capture         # noqa: E402
@@ -203,8 +205,8 @@ def test_correlator_resp_chunk():
 
 def test_import_purity():
     print("[purity] agy_process imports under python3 -S with no tasksolver")
-    code = ("import sys; sys.path.insert(0, %r); import pyagy.agy_process; "
-            "assert 'tasksolver' not in sys.modules; print('pure')" % _ANTIGRAVITY)
+    code = ("import sys; sys.path[:0] = [%r, %r]; import pyagy.agy_process; "
+            "assert 'tasksolver' not in sys.modules; print('pure')" % (_REPO, _ANTIGRAVITY))
     r = subprocess.run([sys.executable, "-S", "-c", code],
                        capture_output=True, text=True)
     check(r.returncode == 0 and "pure" in r.stdout,

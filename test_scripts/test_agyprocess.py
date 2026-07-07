@@ -14,8 +14,10 @@ import sys
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ANTI = os.path.join(os.path.dirname(_HERE), "antigravity")
+_REPO = os.path.dirname(_HERE)                       # repo root holds the shared `wirecap` package
+_ANTI = os.path.join(_REPO, "antigravity")
 sys.path.insert(0, _ANTI)
+sys.path.insert(0, _REPO)
 
 from pyagy.agyprocess import AgyProcess                       # noqa: E402
 from pyagy.agy_process.mp_child import _demo_target, _raise_target, stream_turns  # noqa: E402

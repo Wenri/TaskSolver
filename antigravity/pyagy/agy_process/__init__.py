@@ -30,11 +30,12 @@ import sys
 import time
 import traceback
 
-from .record import Recorder
-from . import h2reassemble as h2
+from wirecap.decode.record import Recorder
+from wirecap.decode import h2reassemble as h2
 from . import capture
 
-_rec = Recorder()
+_rec = Recorder(path=os.environ.get("AGY_PROC_CAPTURE", "agy-capture.jsonl"),
+                preview=int(os.environ.get("AGY_PROC_PREVIEW", "64")))
 _reasm = h2.Reassembler(_rec) if os.environ.get("AGY_PROC_H2", "1") != "0" else None
 _corr = (capture.Correlator(_rec, _reasm)
          if os.environ.get("AGY_PROC_CORRELATE", "1") != "0" else None)
