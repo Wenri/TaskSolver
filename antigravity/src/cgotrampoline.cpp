@@ -21,18 +21,18 @@
 #include "gomod.h"
 #include "cgotrampoline.h"
 #include "pybridge.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cstdint>
 #include <unistd.h>
 #include <sys/uio.h>
 #include <array>
 #include <memory>
 #include <string_view>
 
-#define GHLOG(...) do { fprintf(stderr, "[antigravity/gohook] " __VA_ARGS__); \
-                        fputc('\n', stderr); fflush(stderr); } while (0)
+#define GHLOG(...) do { std::fprintf(stderr, "[antigravity/gohook] " __VA_ARGS__); \
+                        std::fputc('\n', stderr); std::fflush(stderr); } while (0)
 
 /* Go enters a function with rsp ≡ 8 (mod 16). The `call` inside the trampoline
  * needs rsp ≡ 0 (mod 16) (SysV for the C hook; Go/cgocall likewise), so the frame
@@ -136,12 +136,12 @@ void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base)
     if (nseen < (int)seen.size()) seen[nseen++] = h; else return;  /* set full → stop */
 
     unsigned char buf[64 + 48 * 8];
-    size_t kl = strlen(src_kind);
+    size_t kl = std::strlen(src_kind);
     if (kl > 48) kl = 48;
-    memcpy(buf, src_kind, kl);
+    std::memcpy(buf, src_kind, kl);
     buf[kl] = 0;
     size_t off = kl + 1;
-    memcpy(buf + off, frames.data(), (size_t)n * 8);
+    std::memcpy(buf + off, frames.data(), (size_t)n * 8);
     off += (size_t)n * 8;
     agy_event_t ev = { .kind = "callstack", .stream_id = rbp,
                        .data = buf, .len = off, .mode = AGY_ASYNC };
@@ -170,7 +170,7 @@ static void cgt_diag_append_string(char *rep, size_t cap, size_t *o,
     size_t n = len < sizeof(tmp) ? (size_t)len : sizeof(tmp);
     if (agy_safe_read(ptr, tmp, n) != (ssize_t)n) return;
     if (!mostly_printable(tmp, n)) return;                  /* only report if it looks like text */
-    *o += snprintf(rep + *o, cap - *o, "  %s(len=%llu)=\"", label,
+    *o += std::snprintf(rep + *o, cap - *o, "  %s(len=%llu)=\"", label,
                    (unsigned long long)len);
     for (size_t i = 0; i < n && *o < cap - 2; i++)
         rep[(*o)++] = (tmp[i] >= 0x20 && tmp[i] < 0x7f) ? (char)tmp[i] :
@@ -202,19 +202,19 @@ static void cgt_walk(struct walkctx *c, uint64_t addr, int depth, const char *pa
     /* adjacent (ptr,len) word pairs → candidate Go strings */
     for (int w = 0; w + 1 < 8; w++) {
         uint64_t p, l;
-        memcpy(&p, buf + w * 8, 8);
-        memcpy(&l, buf + (w + 1) * 8, 8);
+        std::memcpy(&p, buf + w * 8, 8);
+        std::memcpy(&l, buf + (w + 1) * 8, 8);
         char lbl[72];
-        snprintf(lbl, sizeof(lbl), "%s+%d", path, w * 8);
+        std::snprintf(lbl, sizeof(lbl), "%s+%d", path, w * 8);
         cgt_diag_append_string(c->rep, c->cap, c->o, lbl, p, l);
     }
     if (depth <= 0) return;
     for (int w = 0; w < 8; w++) {
         uint64_t p;
-        memcpy(&p, buf + w * 8, 8);
+        std::memcpy(&p, buf + w * 8, 8);
         if (p > 0x10000 && p != addr) {
             char np[72];
-            snprintf(np, sizeof(np), "%s+%d", path, w * 8);
+            std::snprintf(np, sizeof(np), "%s+%d", path, w * 8);
             cgt_walk(c, p, depth - 1, np);
         }
     }
@@ -224,15 +224,15 @@ static void cgt_diag(agy_block *b)
 {
     char rep[16384];
     size_t o = 0;
-    const char *ds = getenv("AGY_PROC_CGT_DEPTH");
-    const char *bs = getenv("AGY_PROC_CGT_BUDGET");
-    int depth = ds ? atoi(ds) : 3;
-    int budget = bs ? atoi(bs) : 220;
+    const char *ds = std::getenv("AGY_PROC_CGT_DEPTH");
+    const char *bs = std::getenv("AGY_PROC_CGT_BUDGET");
+    int depth = ds ? std::atoi(ds) : 3;
+    int budget = bs ? std::atoi(bs) : 220;
     uint64_t r[10] = { b->regs.rax, b->regs.rbx, b->regs.rcx, b->regs.rdi, b->regs.rsi,
                        b->regs.r8, b->regs.r9, b->regs.r10, b->regs.r11, b->regs.rdx };
     static const char *nm[10] = { "rax", "rbx", "rcx", "rdi", "rsi",
                                   "r8", "r9", "r10", "r11", "rdx" };
-    o += snprintf(rep + o, sizeof(rep) - o, "kind=%s recv=0x%llx\n",
+    o += std::snprintf(rep + o, sizeof(rep) - o, "kind=%s recv=0x%llx\n",
                   (const char *)b->kind, (unsigned long long)r[0]);
     /* per-register value + 24-byte pointee ascii preview */
     for (int i = 0; i < 10 && o < sizeof(rep) - 80; i++) {
@@ -244,7 +244,7 @@ static void cgt_diag(agy_block *b)
                 asc[k] = (s[k] >= 0x20 && s[k] < 0x7f) ? (char)s[k] : '.';
             asc[sizeof(s)] = 0;
         }
-        o += snprintf(rep + o, sizeof(rep) - o, " %s=0x%llx%s%s\n", nm[i],
+        o += std::snprintf(rep + o, sizeof(rep) - o, " %s=0x%llx%s%s\n", nm[i],
                       (unsigned long long)r[i], got ? " ~" : "", got ? asc : "");
     }
     /* immediate (ptr,len) arg-pair strings, then a bounded object-graph walk from
@@ -318,17 +318,17 @@ static size_t g_real_exe_len;
 void agy_set_real_exe(const char *p)
 {
     if (!p || !*p) return;
-    size_t n = strlen(p);
+    size_t n = std::strlen(p);
     if (n >= sizeof g_real_exe) n = sizeof g_real_exe - 1;
-    memcpy(g_real_exe, p, n);
+    std::memcpy(g_real_exe, p, n);
     g_real_exe[n] = 0;
     g_real_exe_len = n;
 }
 
 static void agy_cgo_hook(agy_block *b)
 {
-    if (getenv("AGY_PROC_CGT_ARGS")) cgt_diag(b);
-    if (getenv("AGY_PROC_STACK"))    /* captured rbp = the CALLER's frame (target
+    if (std::getenv("AGY_PROC_CGT_ARGS")) cgt_diag(b);
+    if (std::getenv("AGY_PROC_STACK"))    /* captured rbp = the CALLER's frame (target
                                         prologue runs on the way out) → chain starts
                                         one frame above the target (= the kind). */
         agy_emit_stack((const char *)b->kind, b->regs.rbp, g_gh_base);
@@ -386,7 +386,7 @@ static void agy_cgo_hook(agy_block *b)
         uint64_t nptr = b->regs.rax, nlen = b->regs.rbx;
         char nm[16];
         if (g_real_exe_len && nlen == 14 && agy_safe_read(nptr, nm, 14) == 14 &&
-            memcmp(nm, "/proc/self/exe", 14) == 0) {
+            std::memcmp(nm, "/proc/self/exe", 14) == 0) {
             b->regs.rax = (uint64_t)(uintptr_t)g_real_exe;   /* string.ptr → static BSS buffer */
             b->regs.rbx = g_real_exe_len;                    /* string.len */
             b->regs.rcx = 0;                                 /* error.tab  = nil */
@@ -430,7 +430,7 @@ struct patch_ctx { uint8_t bytes[16]; gsize n; };
 static void patch_apply(gpointer mem, gpointer ud)
 {
     struct patch_ctx *c = (struct patch_ctx *)ud;
-    memcpy(mem, c->bytes, c->n);
+    std::memcpy(mem, c->bytes, c->n);
 }
 
 /* The gum code writer is released here; region_ (live trampoline code) is deliberately kept. */
@@ -571,10 +571,10 @@ void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
 
     /* patch target+skip: jmp rel32 to the slot, nop-pad to the whole prologue */
     struct patch_ctx pc = { .n = ov };
-    memset(pc.bytes, 0x90, ov);
+    std::memset(pc.bytes, 0x90, ov);
     int32_t rel = (int32_t)((int64_t)(uintptr_t)slot - (int64_t)(hook_addr + 5));
     pc.bytes[0] = 0xe9;
-    memcpy(pc.bytes + 1, &rel, 4);
+    std::memcpy(pc.bytes + 1, &rel, 4);
     if (!gum_memory_patch_code((gpointer)(uintptr_t)hook_addr, ov, patch_apply, &pc)) {
         /* target prologue wasn't overwritten → the trampoline is unreachable. Don't count
          * it (the moduledata covers only `made` slots) and reuse this slot on the next add. */

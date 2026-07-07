@@ -16,14 +16,14 @@
  */
 #include "gomod.h"
 #include "pybridge.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 #include <atomic>
 
-#define GLOG(...) do { fprintf(stderr, "[antigravity/gomod] " __VA_ARGS__); \
-                       fputc('\n', stderr); fflush(stderr); } while (0)
+#define GLOG(...) do { std::fprintf(stderr, "[antigravity/gomod] " __VA_ARGS__); \
+                       std::fputc('\n', stderr); std::fflush(stderr); } while (0)
 
 /* go1.26: FuncTabBucketSize = 256*MINFUNC, MINFUNC = 16. */
 #define GO_FUNCTAB_BUCKET 4096
@@ -120,7 +120,7 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     ph->nfiles  = 0;
 
     /* funcnametab: byte 0 empty, name at offset 1. */
-    memcpy(names + 1, "agy_cgo_tramp", 13);
+    std::memcpy(names + 1, "agy_cgo_tramp", 13);
     uint32_t nameOff = 1;
 
     /* pctab: index 0 is reserved ("no table"); real table starts at 1. */
@@ -134,7 +134,7 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     /* stackmap: n=1 bitmap, nbit words, all pointer bits set (conservative). */
     smap->n = 1;
     smap->nbit = nbit;
-    memset(smap->bytedata, 0xff, mapbytes);
+    std::memset(smap->bytedata, 0xff, mapbytes);
     if (nbit % 8) smap->bytedata[mapbytes - 1] = (uint8_t)((1u << (nbit % 8)) - 1);
 
     /* _func records: identical but for entryOff. funcdata sits at fixed offset 44

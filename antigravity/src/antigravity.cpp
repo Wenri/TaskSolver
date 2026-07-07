@@ -12,9 +12,9 @@
 #include <dlfcn.h>
 #include <link.h>
 #include <elf.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string_view>
 
 #include "frida-gum.h"
@@ -32,7 +32,7 @@ static_assert(HK_COUNT <= AGY_GOMOD_MAX_SLOTS,
 /* ---- logging -------------------------------------------------------------- */
 static FILE *g_logf;
 #define LOG(...) do { FILE *f = g_logf ? g_logf : stderr; \
-    fprintf(f, "[antigravity] " __VA_ARGS__); fputc('\n', f); fflush(f); } while (0)
+    std::fprintf(f, "[antigravity] " __VA_ARGS__); std::fputc('\n', f); std::fflush(f); } while (0)
 
 static int g_tls_write_sync;   /* AGY_PROC_TLS_WRITE_SYNC=1 → allow modifying egress */
 static int g_stack;            /* AGY_PROC_STACK=1 → emit a "callstack" event per hook fire */
@@ -57,10 +57,10 @@ static int bid_cb(struct dl_phdr_info *info, size_t size, void *data)
             uint32_t type   = *(const uint32_t *)(p + 8);
             const unsigned char *name = p + 12;
             const unsigned char *desc = name + ((namesz + 3) & ~3u);
-            if (type == NT_GNU_BUILD_ID && namesz == 4 && memcmp(name, "GNU", 3) == 0) {
+            if (type == NT_GNU_BUILD_ID && namesz == 4 && std::memcmp(name, "GNU", 3) == 0) {
                 char *o = b->hex;
                 for (uint32_t k = 0; k < descsz && k < 32; k++)
-                    o += sprintf(o, "%02x", desc[k]);
+                    o += std::sprintf(o, "%02x", desc[k]);
                 b->done = 1;
                 return 1;
             }
@@ -296,7 +296,7 @@ int getaddrinfo(const char *node, const char *service,
     int rc = real(node, service, hints, res);
     if (agy_py_ready() && node) {
         agy_event_t ev = { .kind = "dns", .data = (const uint8_t *)node,
-                           .len = strlen(node), .mode = AGY_ASYNC };
+                           .len = std::strlen(node), .mode = AGY_ASYNC };
         agy_py_emit(&ev);
     }
     return rc;
@@ -306,25 +306,25 @@ int getaddrinfo(const char *node, const char *service,
 __attribute__((constructor))
 static void agy_init(void)
 {
-    if (!getenv("AGY_PROC_ENABLE")) return;          /* opt-in */
-    if (getenv("_AGY_SBOXSERVE")) return;            /* skip sandbox-server children */
+    if (!std::getenv("AGY_PROC_ENABLE")) return;          /* opt-in */
+    if (std::getenv("_AGY_SBOXSERVE")) return;            /* skip sandbox-server children */
 
-    const char *logpath = getenv("AGY_PROC_LOG");
-    if (logpath && *logpath) g_logf = fopen(logpath, "ae");
-    g_tls_write_sync = getenv("AGY_PROC_TLS_WRITE_SYNC") != nullptr;
-    g_stack = getenv("AGY_PROC_STACK") != nullptr;
-    g_conv_id = getenv("AGY_PROC_CONV_ID") != nullptr;
-    agy_set_real_exe(getenv("AGY_PROC_REAL_EXE"));   /* the path READLINK_FILTER returns for /proc/self/exe */
+    const char *logpath = std::getenv("AGY_PROC_LOG");
+    if (logpath && *logpath) g_logf = std::fopen(logpath, "ae");
+    g_tls_write_sync = std::getenv("AGY_PROC_TLS_WRITE_SYNC") != nullptr;
+    g_stack = std::getenv("AGY_PROC_STACK") != nullptr;
+    g_conv_id = std::getenv("AGY_PROC_CONV_ID") != nullptr;
+    agy_set_real_exe(std::getenv("AGY_PROC_REAL_EXE"));   /* the path READLINK_FILTER returns for /proc/self/exe */
 
     /* build-id guard: refuse to apply offsets to a different agy build */
     struct bid b = { .hex = "" };
     dl_iterate_phdr(bid_cb, &b);
     /* Require an EXACT build-id match. Missing/mismatched → skip (else we'd try to
      * hook agy offsets in the wrong binary — e.g. a preloaded child — and crash). */
-    if (strcmp(b.hex, AGY_BUILD_ID) != 0) {
+    if (std::strcmp(b.hex, AGY_BUILD_ID) != 0) {
         LOG("build-id not agy (running=%s symbols=%s); not hooking this process",
             b.hex[0] ? b.hex : "<none>", AGY_BUILD_ID);
-        if (!getenv("AGY_PROC_FORCE")) return;
+        if (!std::getenv("AGY_PROC_FORCE")) return;
     } else {
         LOG("build-id ok (%s)", b.hex);
     }

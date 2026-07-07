@@ -35,7 +35,7 @@
 
 namespace bp = boost::python;
 
-#define PYLOG(...) do { fprintf(stderr, "[antigravity/py] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#define PYLOG(...) do { std::fprintf(stderr, "[antigravity/py] " __VA_ARGS__); std::fputc('\n', stderr); } while (0)
 
 namespace {
 
@@ -155,18 +155,18 @@ std::vector<uint8_t> PyBridge::copy_capped(const uint8_t *src, size_t len) const
     size_t n = len > maxcopy_ ? maxcopy_ : len;
     if (n) {
         v.resize(n);
-        if (src) memcpy(v.data(), src, n);
+        if (src) std::memcpy(v.data(), src, n);
     }
     return v;
 }
 
 void PyBridge::worker_main()
 {
-    const char *modname = getenv("AGY_PROC_MODULE");
+    const char *modname = std::getenv("AGY_PROC_MODULE");
     if (!modname || !*modname) modname = "pyagy.agy_process";
-    const char *pypath = getenv("AGY_PROC_PYTHONPATH");
-    const char *mc = getenv("AGY_PROC_MAXCOPY");
-    if (mc && *mc) { long v = strtol(mc, nullptr, 0); if (v > 0) maxcopy_ = (size_t)v; }
+    const char *pypath = std::getenv("AGY_PROC_PYTHONPATH");
+    const char *mc = std::getenv("AGY_PROC_MAXCOPY");
+    if (mc && *mc) { long v = std::strtol(mc, nullptr, 0); if (v > 0) maxcopy_ = (size_t)v; }
 
     Py_InitializeEx(0);  /* raw C-API bootstrap — Boost.Python has no embedding entry point */
 
@@ -268,7 +268,7 @@ void PyBridge::emit(agy_event_t *ev)
      * synchronously on the caller's thread with its buffer still live — so write them straight into
      * ev->data and just report the new length. No out_data buffer, no malloc, no thread-local. */
     if (res.verdict && res.out.size() <= ev->len) {
-        if (!res.out.empty()) memcpy((void *)ev->data, res.out.data(), res.out.size());
+        if (!res.out.empty()) std::memcpy((void *)ev->data, res.out.data(), res.out.size());
         ev->out_len = res.out.size();
         ev->verdict = 1;
     }
