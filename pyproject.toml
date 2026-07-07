@@ -59,14 +59,15 @@ app = [
     "matplotlib",
 ]
 
-# tasksolver lives at the repo root; the antigravity `pyagy` package — the backend
-# plus the nested pyagy.agy_process shim-runtime and pyagy.agy_mcp_server — lives under
-# antigravity/. List both roots so both ship in the (editable) package instead of
-# relying on the PYTHONPATH activation. agy_process is a subpackage of pyagy (found
-# automatically); the test/experiment scripts live in test_scripts/, not the package.
+# Package roots: tasksolver + the shared `wirecap` (capture/decode/native bridge, reused by
+# both wrappers) at the repo root; the antigravity `pyagy` package under antigravity/; the
+# codex `pycodex` package under codex/. List all three roots so they ship in the (editable)
+# package instead of relying on the PYTHONPATH activation. The nested shim-runtime subpackages
+# (pyagy.agy_process, pycodex.codex_process, wirecap.decode/runtime) are found automatically;
+# the test/experiment scripts live in test_scripts/, not the package.
 [tool.setuptools.packages.find]
-where = [".", "antigravity"]
-include = ["tasksolver*", "pyagy*"]
+where = [".", "antigravity", "codex"]
+include = ["tasksolver*", "wirecap*", "pyagy*", "pycodex*"]
 
 # --- pixi workspace + buildable package -----------------------------------
 # Uses the `pixi-build` preview feature: rather than installing this project as
