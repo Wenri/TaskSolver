@@ -65,6 +65,8 @@ parsed, raw, meta, payload = model.rough_guess(q, max_tokens=2000)
 print(parsed)
 ```
 
+`rough_guess` retries parsing up to `max_tries` (default 1); if the reply still won't parse it raises `GPTMaxTriesExceededException`, which exposes the last attempt's `.raw_response`, `.response_metadata`, and `.request_payload` so you can inspect what the model actually returned.
+
 To dispatch by model-id instead of importing an adapter directly, use `tasksolver.agent.Agent(api_key, task, vision_model="claude-code-sonnet-4-6")` and call `agent.visual_interface.run_once(question)`. Runnable text-only and vision examples live in [`test_scripts/`](test_scripts/).
 
 ## Antigravity (`agy`) instrumentation
