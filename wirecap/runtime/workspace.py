@@ -5,8 +5,9 @@ Both agy and codex refuse to run outside a git repo (agy always; codex unless
 doesn't supply a workspace. One reusable scratch repo is created lazily and reused.
 """
 import os
-import subprocess
 import tempfile
+
+import pygit2
 
 _scratch_ws = None
 
@@ -20,12 +21,13 @@ def ensure_git_workspace(path=None, prefix="wire-ws-") -> str:
     if _scratch_ws and os.path.isdir(os.path.join(_scratch_ws, ".git")):
         return _scratch_ws
     d = tempfile.mkdtemp(prefix=prefix)
-    subprocess.run(["git", "init", "-q"], cwd=d, check=False)
-    subprocess.run(["git", "config", "user.email", "wirecap@local"], cwd=d, check=False)
-    subprocess.run(["git", "config", "user.name", "wirecap"], cwd=d, check=False)
+    repo = pygit2.init_repository(d)
     with open(os.path.join(d, "README.md"), "w") as f:
         f.write("# scratch workspace\n")
-    subprocess.run(["git", "add", "-A"], cwd=d, check=False)
-    subprocess.run(["git", "commit", "-qm", "init"], cwd=d, check=False)
+    repo.index.add_all()
+    repo.index.write()
+    tree = repo.index.write_tree()
+    sig = pygit2.Signature("wirecap", "wirecap@local")
+    repo.create_commit("HEAD", sig, sig, "init", tree, [])
     _scratch_ws = d
     return d
