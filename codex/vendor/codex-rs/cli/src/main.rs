@@ -954,6 +954,9 @@ fn stage_str(stage: Stage) -> &'static str {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Start the wirecap embedded-CPython bridge (no-op unless WIRE_ENABLE is set — i.e. only under
+    // pycodex) BEFORE the tokio runtime, so CPython initializes on the bridge's own worker thread.
+    codex_wirecap::start();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         cli_main(arg0_paths, remote_control_disabled).await?;

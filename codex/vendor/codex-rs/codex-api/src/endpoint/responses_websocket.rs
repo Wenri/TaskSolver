@@ -677,6 +677,10 @@ async fn run_websocket_response_stream(
                     return Err(error);
                 }
 
+                // wirecap capture: the raw ResponsesStreamEvent JSON (WebSocket transport — the
+                // DEFAULT for OpenAI + API key). Byte-identical to the SSE path → one decoder.
+                codex_wirecap::emit_event(text.as_bytes());
+
                 let event = match serde_json::from_str::<ResponsesStreamEvent>(&text) {
                     Ok(event) => event,
                     Err(err) => {

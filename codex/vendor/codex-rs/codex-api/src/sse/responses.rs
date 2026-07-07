@@ -528,6 +528,9 @@ async fn process_sse_with_treatment(
 
         trace!("SSE event: {}", &sse.data);
 
+        // wirecap capture: the raw ResponsesStreamEvent JSON (SSE transport). No-op unless enabled.
+        codex_wirecap::emit_event(sse.data.as_bytes());
+
         let event: ResponsesStreamEvent = match serde_json::from_str(&sse.data) {
             Ok(event) => event,
             Err(e) => {

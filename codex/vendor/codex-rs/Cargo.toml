@@ -124,6 +124,7 @@ members = [
     "codex-experimental-api-macros",
     "plugin",
     "model-provider",
+    "wirecap",
 ]
 resolver = "2"
 
@@ -157,6 +158,7 @@ codex-async-utils = { path = "async-utils" }
 codex-backend-client = { path = "backend-client" }
 codex-chatgpt = { path = "chatgpt" }
 codex-cli = { path = "cli" }
+codex-wirecap = { path = "wirecap" }
 codex-client = { path = "codex-client" }
 codex-collaboration-mode-templates = { path = "collaboration-mode-templates" }
 codex-cloud-config = { path = "cloud-config" }

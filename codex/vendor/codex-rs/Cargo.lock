@@ -1939,6 +1939,7 @@ dependencies = [
  "codex-http-client",
  "codex-protocol",
  "codex-utils-rustls-provider",
+ "codex-wirecap",
  "eventsource-stream",
  "futures",
  "http 1.4.0",
@@ -2362,6 +2363,7 @@ dependencies = [
  "codex-utils-cli",
  "codex-utils-path",
  "codex-windows-sandbox",
+ "codex-wirecap",
  "crossterm",
  "http 1.4.0",
  "insta",
@@ -2687,6 +2689,7 @@ dependencies = [
  "codex-utils-string",
  "codex-web-search-extension",
  "codex-windows-sandbox",
+ "codex-wirecap",
  "core_test_support",
  "csv",
  "ctor 0.6.3",
@@ -4490,6 +4493,10 @@ dependencies = [
  "windows 0.58.0",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "codex-wirecap"
+version = "0.143.0-alpha.38"
 
 [[package]]
 name = "color-eyre"
