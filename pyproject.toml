@@ -166,6 +166,14 @@ gcc_linux-64 = ">=11,<13.3"   # pulled by gxx; conda toolchain, not the Nix gcc 
 gxx_linux-64 = ">=11,<13.3"   # all shim TUs are C++23 (Boost.Thread/Boost.Python) → conda g++
 libboost-devel = ">=1.88"     # Boost.Thread (headers + libboost_thread) for the pybridge worker
 libboost-python-devel = ">=1.88"   # Boost.Python (embedding) — py313 build matches libpython3.13
+# codex build (build_py also compiles the vendored codex CLI, gnu-dynamic, linking the shared
+# wirecap bridge + libpython): the Rust toolchain + aws-lc-rs/rustls' bindgen (clang/libclang) +
+# openssl-sys + the linux-sandbox crate (libcap). Skippable via CODEX_SKIP_BUILD.
+rust = ">=1.96.1,<1.97"
+clang = ">=22.1.8,<23"
+libclang = ">=22.1.8,<23"
+openssl = "*"
+libcap = ">=2.78,<3"
 
 # --- pymport (Node.js ↔ Python bridge, compiled from source) ----------------
 # pymport embeds libpython as a shared library inside Node.js.  It must be
