@@ -3,7 +3,7 @@ REAL `multiprocessing.spawn` child, WITHOUT the process-ownership teardown that 
 `spawn_main`/`_bootstrap` would inflict on agy (which owns the process, not us).
 
 Started on a daemon thread by `agy_process.__init__` when the worker channel is wired
-(`AGY_MP_BOOT_FD` is set), so a blocking `get()` here can't starve the hook-dispatch worker
+(`WIRE_MP_BOOT_FD` is set), so a blocking `get()` here can't starve the hook-dispatch worker
 (blocking releases the GIL).
 
 The three neutralizations (see plan why-make-agy-a-splendid-rainbow.md):
@@ -52,7 +52,7 @@ def _trimmed_prepare(data):
 def _run():
     global _result_conn
     from multiprocessing import reduction, resource_tracker
-    boot = int(os.environ["AGY_MP_BOOT_FD"])
+    boot = int(os.environ["WIRE_MP_BOOT_FD"])
     # keep boot open in-process (it's the parent-death sentinel), but CLOEXEC so agy's own Go
     # child processes don't inherit it
     _set_cloexec(boot)
@@ -108,7 +108,7 @@ def start():
     """Run the child on a daemon thread (called from agy_process import when the embedded-worker
     channel is wired). No-op if the boot fd is absent or stale."""
     try:
-        boot = int(os.environ.get("AGY_MP_BOOT_FD", "-1"))
+        boot = int(os.environ.get("WIRE_MP_BOOT_FD", "-1"))
         if boot < 0:
             return
         os.fstat(boot)

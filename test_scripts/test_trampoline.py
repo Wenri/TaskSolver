@@ -80,7 +80,7 @@ def run(extra, workdir, timeout=200.0):
                 genai_text += obj["text"]
     combined = out + "\n" + logtxt
     answer = "\n".join(l for l in out.splitlines()
-                       if l.strip() and "antigravity" not in l
+                       if l.strip() and "antigravity" not in l and "wirecap" not in l
                        and "gohook" not in l and "gomod" not in l)
     return {
         "kinds": dict(kinds), "log": logtxt, "genai_text": genai_text,

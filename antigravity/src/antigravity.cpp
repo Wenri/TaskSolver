@@ -18,7 +18,7 @@
 #include <string_view>
 
 #include "frida-gum.h"
-#include "pybridge.h"
+#include "wirecap.h"
 #include "symbols_gen.h"
 #include "cgotrampoline.h"
 #include "procdef.h"   /* agy_mech_t, the constexpr HOOKS[] table, HK_COUNT, and hk("id") lookup */
@@ -94,10 +94,10 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
     case hk("SMOKE_GETENV"): {
         /* os.Getenv(key string): key.ptr=RAX, key.len=RBX — send the key so we
          * can confirm real string data flows through to Python. */
-        agy_event_t ev = { .kind = "smoke", .stream_id = 0,
+        wire_event_t ev = { .kind = "smoke", .stream_id = 0,
                            .data = (const uint8_t *)cpu->rax, .len = (size_t)cpu->rbx,
-                           .mode = AGY_ASYNC };
-        agy_py_emit(&ev);
+                           .mode = WIRE_ASYNC };
+        wire_emit(&ev);
         break;
     }
     case hk("FILE_OPEN"): {
@@ -109,22 +109,22 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         size_t len = (size_t)cpu->rbx;
         if (p && len > 0 && len < 4096 &&
             (mem_has(p, len, "conversations/") || mem_has(p, len, "/brain/"))) {
-            agy_event_t ev = { .kind = "file_open", .stream_id = 0,
-                               .data = (const uint8_t *)p, .len = len, .mode = AGY_ASYNC };
-            agy_py_emit(&ev);
+            wire_event_t ev = { .kind = "file_open", .stream_id = 0,
+                               .data = (const uint8_t *)p, .len = len, .mode = WIRE_ASYNC };
+            wire_emit(&ev);
         }
         break;
     }
     case hk("TLS_WRITE"): {
         /* crypto/tls.(*Conn).Write(c=RAX, b.ptr=RBX, b.len=RCX, b.cap=RDI) */
         uint64_t conn = cpu->rax, ptr = cpu->rbx, len = cpu->rcx;
-        agy_event_t ev = { .kind = "tls_write", .stream_id = conn,
+        wire_event_t ev = { .kind = "tls_write", .stream_id = conn,
                            .data = (const uint8_t *)ptr, .len = (size_t)len,
-                           .mode = g_tls_write_sync ? AGY_SYNC : AGY_ASYNC };
-        agy_py_emit(&ev);   /* SYNC: on a rewrite the bridge already replaced ev.data (== ptr) in
+                           .mode = g_tls_write_sync ? WIRE_SYNC : WIRE_ASYNC };
+        wire_emit(&ev);   /* SYNC: on a rewrite the bridge already replaced ev.data (== ptr) in
                              * place; verdict says so, out_len is the new (equal-or-shorter) length. */
         if (ev.verdict) cpu->rcx = ev.out_len;   /* shrink the slice length the callee sees */
-        agy_py_free(&ev);
+        wire_free(&ev);
         break;
     }
     case hk("TLS_READ"): {
@@ -143,8 +143,8 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
     }
     case hk("HTTP_RT"): {
         /* net/http.(*Transport).RoundTrip(t=RAX, req=RBX): use req ptr as id */
-        agy_event_t ev = { .kind = "http_rt", .stream_id = cpu->rbx, .mode = AGY_ASYNC };
-        agy_py_emit(&ev);
+        wire_event_t ev = { .kind = "http_rt", .stream_id = cpu->rbx, .mode = WIRE_ASYNC };
+        wire_emit(&ev);
         break;
     }
     case hk("H2_PIPE_WRITE"): {
@@ -153,10 +153,10 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
          * valid at entry. CPU-only func, so hooking is safe (no park). */
         uint64_t pipe = cpu->rax, ptr = cpu->rbx, len = cpu->rcx;
         if (ptr && len && len < (16u << 20)) {
-            agy_event_t ev = { .kind = "resp", .stream_id = pipe,
+            wire_event_t ev = { .kind = "resp", .stream_id = pipe,
                                .data = (const uint8_t *)ptr, .len = (size_t)len,
-                               .mode = AGY_ASYNC };
-            agy_py_emit(&ev);
+                               .mode = WIRE_ASYNC };
+            wire_emit(&ev);
         }
         break;
     }
@@ -173,10 +173,10 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
         int64_t n = (int64_t)cpu->rax;   /* return value: bytes read */
         struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
         if (n > 0 && s->ptr) {
-            agy_event_t ev = { .kind = "tls_read", .stream_id = s->conn,
+            wire_event_t ev = { .kind = "tls_read", .stream_id = s->conn,
                                .data = (const uint8_t *)s->ptr, .len = (size_t)n,
-                               .mode = AGY_ASYNC };
-            agy_py_emit(&ev);
+                               .mode = WIRE_ASYNC };
+            wire_emit(&ev);
         }
     } else if (id == hk("TLS_DECRYPT")) {
         /* (*halfConn).decrypt returns ([]byte plaintext, recordType, error):
@@ -185,10 +185,10 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
         struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
         uint64_t ptr = cpu->rax, len = cpu->rbx;
         if (ptr && (int64_t)len > 0 && len < (16u << 20)) {
-            agy_event_t ev = { .kind = HOOKS[id].kind, .stream_id = s->conn,
+            wire_event_t ev = { .kind = HOOKS[id].kind, .stream_id = s->conn,
                                .data = (const uint8_t *)ptr, .len = (size_t)len,
-                               .mode = AGY_ASYNC };
-            agy_py_emit(&ev);
+                               .mode = WIRE_ASYNC };
+            wire_emit(&ev);
         }
     } else if (HOOKS[id].retcap > 0) {
         /* Return-[]byte/string leaf getters (retcap>0 in procdef.h): RAX=ptr, RBX=len (CPU-only
@@ -197,10 +197,10 @@ static void on_leave(GumInvocationContext *ic, gpointer user_data)
          * are retcap<0 — handled by the ID branches above, not here.) */
         uint64_t ptr = cpu->rax, len = cpu->rbx;
         if (ptr && len >= (uint32_t)HOOKS[id].retcap && len < (16u << 20)) {
-            agy_event_t ev = { .kind = HOOKS[id].kind, .stream_id = 0,
+            wire_event_t ev = { .kind = HOOKS[id].kind, .stream_id = 0,
                                .data = (const uint8_t *)ptr, .len = (size_t)len,
-                               .mode = AGY_ASYNC };
-            agy_py_emit(&ev);
+                               .mode = WIRE_ASYNC };
+            wire_emit(&ev);
         }
     }
 }
@@ -274,7 +274,7 @@ static void install_hooks(void)
         GumInvocationListener *lis = HOOKS[i].retcap ? l_full : l_enter;
         GumAttachReturn r = gum_interceptor_attach(interceptor, addr, lis, &opt);
         LOG("attach %-34s @ %p  (%s%s)  ret=%d", HOOKS[i].name, addr,
-            HOOKS[i].mode == AGY_SYNC ? "sync" : "async",
+            HOOKS[i].mode == WIRE_SYNC ? "sync" : "async",
             HOOKS[i].retcap ? ",leave" : "", (int)r);
     }
     gum_interceptor_end_transaction(interceptor);
@@ -294,10 +294,10 @@ int getaddrinfo(const char *node, const char *service,
     if (!real) real = (int (*)(const char *, const char *, const struct addrinfo *,
                                struct addrinfo **))dlsym(RTLD_NEXT, "getaddrinfo");
     int rc = real(node, service, hints, res);
-    if (agy_py_ready() && node) {
-        agy_event_t ev = { .kind = "dns", .data = (const uint8_t *)node,
-                           .len = std::strlen(node), .mode = AGY_ASYNC };
-        agy_py_emit(&ev);
+    if (wire_ready() && node) {
+        wire_event_t ev = { .kind = "dns", .data = (const uint8_t *)node,
+                           .len = std::strlen(node), .mode = WIRE_ASYNC };
+        wire_emit(&ev);
     }
     return rc;
 }
@@ -330,7 +330,7 @@ static void agy_init(void)
     }
 
     /* Start the embedded Python bridge, then install the full working hook union. */
-    if (agy_py_start() != 0) { LOG("python bridge failed to start; not installing hooks"); return; }
+    if (wire_start() != 0) { LOG("python bridge failed to start; not installing hooks"); return; }
     install_hooks();
     LOG("initialized");
 }

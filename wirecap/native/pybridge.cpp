@@ -2,8 +2,8 @@
  *
  * C++23 TU, like the rest of the shim. Boost.Thread is used over std::thread because only
  * boost::thread::attributes can set the worker's 16 MB stack — libpython's C stack is deep and
- * std::thread/jthread expose no stack-size API. The exported API has C linkage (see pybridge.h)
- * so the sibling TUs (antigravity.cpp, gomod.cpp, cgotrampoline.cpp) link against it.
+ * std::thread/jthread expose no stack-size API. The exported API has C linkage (see wirecap.h)
+ * so C/C++/Rust front-ends (the antigravity shim; the patched codex build) link against it.
  *
  * Boost.Python (bp::) handles the Python object/call/refcount layer (import, attrs, calling
  * dispatch, extracting the result) — RAII refcounting + error_already_set instead of manual
@@ -20,7 +20,7 @@
  * Py_DECREF without the GIL in this never-Py_Finalize'd interp). */
 #define PY_SSIZE_T_CLEAN   /* required for "#" formats (y#) on Python 3.10+ */
 #include <boost/python.hpp>   /* pulls in Python.h first, with the right guards */
-#include "pybridge.h"
+#include "wirecap.h"
 
 #include <boost/thread.hpp>
 #include <boost/thread/condition_variable.hpp>
@@ -35,7 +35,7 @@
 
 namespace bp = boost::python;
 
-#define PYLOG(...) do { std::fprintf(stderr, "[antigravity/py] " __VA_ARGS__); std::fputc('\n', stderr); } while (0)
+#define PYLOG(...) do { std::fprintf(stderr, "[wirecap/py] " __VA_ARGS__); std::fputc('\n', stderr); } while (0)
 
 namespace {
 
@@ -52,7 +52,7 @@ struct job {
     const char          *kind = nullptr;    /* static literal, not owned */
     uint64_t             stream_id = 0;
     std::vector<uint8_t> data;              /* input bytes (owned; auto-freed) */
-    agy_mode_t           mode = AGY_ASYNC;
+    wire_mode_t           mode = WIRE_ASYNC;
     std::promise<Result> *result = nullptr; /* SYNC: emitter's stack promise; ASYNC: null */
 };
 
@@ -62,7 +62,7 @@ struct job {
 class PyBridge {
 public:
     int  start();               /* create the worker thread; block until it signals ready */
-    void emit(agy_event_t *ev); /* enqueue an event (ASYNC) or block for a verdict (SYNC) */
+    void emit(wire_event_t *ev); /* enqueue an event (ASYNC) or block for a verdict (SYNC) */
     bool ready() const { return ready_ == 1; }
     void shutdown();            /* cooperatively stop + join the worker; idempotent */
     ~PyBridge() { shutdown(); } /* fallback: join the worker BEFORE members destruct, so a dtor on
@@ -128,7 +128,7 @@ Result PyBridge::run_dispatch(const job &j)
                                             (unsigned long long)j.stream_id,
                                             arg);
 
-        if (j.mode == AGY_SYNC && !r.is_none() && PyBytes_Check(r.ptr())) {
+        if (j.mode == WIRE_SYNC && !r.is_none() && PyBytes_Check(r.ptr())) {
             const char *p = PyBytes_AS_STRING(r.ptr());
             res.out.assign(p, p + PyBytes_GET_SIZE(r.ptr()));
             res.verdict = 1;
@@ -162,10 +162,10 @@ std::vector<uint8_t> PyBridge::copy_capped(const uint8_t *src, size_t len) const
 
 void PyBridge::worker_main()
 {
-    const char *modname = std::getenv("AGY_PROC_MODULE");
+    const char *modname = std::getenv("WIRE_MODULE");
     if (!modname || !*modname) modname = "pyagy.agy_process";
-    const char *pypath = std::getenv("AGY_PROC_PYTHONPATH");
-    const char *mc = std::getenv("AGY_PROC_MAXCOPY");
+    const char *pypath = std::getenv("WIRE_PYTHONPATH");
+    const char *mc = std::getenv("WIRE_MAXCOPY");
     if (mc && *mc) { long v = std::strtol(mc, nullptr, 0); if (v > 0) maxcopy_ = (size_t)v; }
 
     Py_InitializeEx(0);  /* raw C-API bootstrap — Boost.Python has no embedding entry point */
@@ -174,9 +174,20 @@ void PyBridge::worker_main()
      * fine; all of them (sys/mod/disp) destruct before the GIL drops. */
     try {
         bp::object sys = bp::import(bp::str("sys"));
-        sys.attr("is_agy_shim") = true;                 /* → Py_True */
-        if (pypath && *pypath)
-            sys.attr("path").attr("insert")(0, bp::str(pypath));   /* sys.path.insert(0, pypath) */
+        sys.attr("_wire_shim") = true;                 /* → Py_True */
+        /* WIRE_PYTHONPATH is os.pathsep-separated: the shared decode layer (wirecap.*) and the
+         * provider package (pyagy/pycodex) live under different roots, so more than one is needed.
+         * Insert each at 0 (disjoint top-level packages → relative order is irrelevant). */
+        if (pypath && *pypath) {
+            bp::object insert = sys.attr("path").attr("insert");
+            std::string sp(pypath);
+            for (size_t i = 0; i < sp.size(); ) {
+                size_t j = sp.find(':', i);
+                if (j == std::string::npos) j = sp.size();
+                if (j > i) insert(0, bp::str(sp.substr(i, j - i)));
+                i = j + 1;
+            }
+        }
 
         bp::object mod = bp::import(bp::str(modname));
         bp::object disp = mod.attr("dispatch");         /* transient new-ref, destructs under the GIL */
@@ -242,7 +253,7 @@ int PyBridge::start()
     return ready_ == 1 ? 0 : -1;
 }
 
-void PyBridge::emit(agy_event_t *ev)
+void PyBridge::emit(wire_event_t *ev)
 {
     if (ready_ != 1) return;
 
@@ -250,7 +261,7 @@ void PyBridge::emit(agy_event_t *ev)
     job j{ .kind = ev->kind, .stream_id = ev->stream_id,
            .data = copy_capped(ev->data, ev->len), .mode = ev->mode };
 
-    if (ev->mode == AGY_ASYNC) {          /* fire-and-forget (on refuse the job just destructs here) */
+    if (ev->mode == WIRE_ASYNC) {          /* fire-and-forget (on refuse the job just destructs here) */
         enqueue(std::move(j));
         return;
     }
@@ -292,13 +303,21 @@ void PyBridge::shutdown()
 
 }  // anonymous namespace
 
-/* C ABI entry points (pybridge.h) — thin delegators to the singleton. */
-extern "C" int  agy_py_ready(void) { return bridge().ready() ? 1 : 0; }
-extern "C" int  agy_py_start(void) { return bridge().start(); }
-extern "C" void agy_py_emit(agy_event_t *ev) { bridge().emit(ev); }
-extern "C" void agy_py_shutdown(void) { bridge().shutdown(); }
+/* C ABI entry points (wirecap.h) — thin delegators to the singleton. */
+extern "C" int  wire_ready(void) { return bridge().ready() ? 1 : 0; }
+extern "C" int  wire_start(void) { return bridge().start(); }
+extern "C" void wire_emit(wire_event_t *ev) { bridge().emit(ev); }
+extern "C" void wire_shutdown(void) { bridge().shutdown(); }
 
-extern "C" void agy_py_free(agy_event_t *ev)   /* the SYNC replacement was applied in place in emit();
+/* Scalar-arg ASYNC convenience (easy FFI): build a transient event and emit it. */
+extern "C" void wire_emit_async(const char *kind, uint64_t stream_id,
+                                const uint8_t *data, size_t len)
+{
+    wire_event_t ev = { kind, stream_id, data, len, WIRE_ASYNC, 0, 0 };
+    bridge().emit(&ev);
+}
+
+extern "C" void wire_free(wire_event_t *ev)   /* the SYNC replacement was applied in place in emit();
                                                 * nothing to free — just reset the output fields. */
 {
     ev->out_len = 0;

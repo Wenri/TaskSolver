@@ -31,7 +31,7 @@ def strip_ansi(b) -> str:
 # Our own shim/log lines that leak onto agy's PTY (the shim logs to stderr, which the pty
 # merges with stdout); an instrumented run's transcript carries them, so drop them to
 # recover the clean answer text.
-_LOG_MARKERS = ("[antigravity", "[agy_process]", "gohook", "gomod")
+_LOG_MARKERS = ("[antigravity", "[wirecap", "[agy_process]", "gohook", "gomod")
 
 
 def answer_text(transcript) -> str:

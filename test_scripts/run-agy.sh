@@ -27,7 +27,7 @@ agy, *args = sys.argv[1:]
 env = instrumented_env(
     capture=os.environ.get("AGY_PROC_CAPTURE", os.path.join(os.getcwd(), "agy-capture.jsonl")),
     log=os.environ.get("AGY_PROC_LOG", os.path.join(os.getcwd(), "antigravity.log")),
-    module=os.environ.get("AGY_PROC_MODULE", "pyagy.agy_process"),
+    module=os.environ.get("WIRE_MODULE", "pyagy.agy_process"),
     root=${ANTIGRAVITY@Q},
 )
 argv = preload_argv(agy, args, env=env)   # run agy through its PT_INTERP with --preload (no LD_PRELOAD)

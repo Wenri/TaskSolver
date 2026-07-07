@@ -138,9 +138,15 @@ add_custom_command(
   VERBATIM)
 add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h")
 
+# ---- the shared native bridge (embedded CPython worker) — the wire_* C ABI the shim calls.
+# Extracted to wirecap/native so the codex build links the same bridge; built as a static lib
+# whose PUBLIC usage requirements (wirecap.h include + libpython embed + boost + rpath) flow into
+# the shim below. ------------------------------------------------------------------------------
+add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wirecap_bridge")
+
 # ---- the shim: vendor/antigravity.so (a MODULE = dlopen/LD_PRELOAD .so) ------------------------
 add_library(antigravity MODULE
-  src/antigravity.cpp src/gomod.cpp src/cgotrampoline.cpp src/pybridge.cpp)
+  src/antigravity.cpp src/gomod.cpp src/cgotrampoline.cpp)
 add_dependencies(antigravity gen_symbols)
 set_target_properties(antigravity PROPERTIES
   PREFIX "" OUTPUT_NAME "antigravity" SUFFIX ".so"
@@ -162,9 +168,9 @@ target_include_directories(antigravity PRIVATE "${GUM}" "${CONDA_PREFIX}/include
 # hardcoded (libboost_python313 is python-version-specific → matches the embedded libpython3.13);
 # found at runtime via the rpath below → dynamic link, no /nix rpath.
 target_link_libraries(antigravity PRIVATE
+  wirecap_bridge                       # the shared bridge (PUBLIC-propagates libpython embed + boost + rpath)
   "${GUM}/libfrida-gum.a"
-  ${PY_LDFLAGS}
-  -L${CONDA_PREFIX}/lib boost_thread boost_python313 rt resolv dl m -pthread)
+  -L${CONDA_PREFIX}/lib rt resolv dl m -pthread)
 target_link_options(antigravity PRIVATE
   -Wl,--exclude-libs,ALL -Wl,--gc-sections -Wl,-rpath,${CONDA_PREFIX}/lib)
 

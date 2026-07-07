@@ -217,7 +217,7 @@ def dispatch(kind, stream_id, data):
 # exported), run the pickled target on a daemon thread — separate from this dispatch worker so a
 # blocking recv() there can't starve hook dispatch. The capture pipeline above stays live, so the
 # target can consume decoded events in-process AND stream results over the Connection.
-if os.environ.get("AGY_MP_BOOT_FD") and getattr(sys, "is_agy_shim", False):
+if os.environ.get("WIRE_MP_BOOT_FD") and getattr(sys, "_wire_shim", False):
     try:
         from . import mp_child
         mp_child.start()

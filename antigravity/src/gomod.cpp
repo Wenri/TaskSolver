@@ -15,7 +15,7 @@
  *     stack), so it never overflows it.
  */
 #include "gomod.h"
-#include "pybridge.h"
+#include "wirecap.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

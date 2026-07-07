@@ -20,7 +20,7 @@
 #include "frida-gum.h"
 #include "gomod.h"
 #include "cgotrampoline.h"
-#include "pybridge.h"
+#include "wirecap.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -143,9 +143,9 @@ void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base)
     size_t off = kl + 1;
     std::memcpy(buf + off, frames.data(), (size_t)n * 8);
     off += (size_t)n * 8;
-    agy_event_t ev = { .kind = "callstack", .stream_id = rbp,
-                       .data = buf, .len = off, .mode = AGY_ASYNC };
-    agy_py_emit(&ev);
+    wire_event_t ev = { .kind = "callstack", .stream_id = rbp,
+                       .data = buf, .len = off, .mode = WIRE_ASYNC };
+    wire_emit(&ev);
 }
 
 /* True iff >=80% of the n bytes look like text (tab/newline count as printable) — the gate
@@ -254,9 +254,9 @@ static void cgt_diag(agy_block *b)
     struct walkctx c = { rep, sizeof(rep), &o, budget, {0}, 0 };
     for (int i = 0; i <= 4; i++)                 /* rax(receiver), rbx, rcx, rdi, rsi */
         cgt_walk(&c, r[i], depth, nm[i]);
-    agy_event_t ev = { .kind = "cgt_args", .stream_id = r[0],
-                       .data = (const uint8_t *)rep, .len = o, .mode = AGY_ASYNC };
-    agy_py_emit(&ev);
+    wire_event_t ev = { .kind = "cgt_args", .stream_id = r[0],
+                       .data = (const uint8_t *)rep, .len = o, .mode = WIRE_ASYNC };
+    wire_emit(&ev);
 }
 
 /* Plan 7 — clean RESPONSE decode at the SHALLOW consumer boundary. The live probe
@@ -268,7 +268,7 @@ static void cgt_diag(agy_block *b)
  * stable cortex proto layout (thinking sits deeper at +0x28). updateWithStep fires a
  * few times/turn; the text-bearing fires carry the FULL answer (not per-delta
  * fragments), the others have an empty response string → skipped by the len check.
- * Fault-safe (agy_safe_read) + read into a local buffer (agy_py_emit copies it). */
+ * Fault-safe (agy_safe_read) + read into a local buffer (wire_emit copies it). */
 #define CGT_RESP_CAP 16384
 static void cgt_response_emit(agy_block *b)
 {
@@ -282,9 +282,9 @@ static void cgt_response_emit(agy_block *b)
     size_t n = len < CGT_RESP_CAP ? (size_t)len : CGT_RESP_CAP;
     if (agy_safe_read(ptr, buf, n) != (ssize_t)n) return;
     if (!mostly_printable((const unsigned char *)buf, n)) return;  /* reject non-text (wrong field) */
-    agy_event_t ev = { .kind = "app_response", .stream_id = b->regs.rax,
-                       .data = (const uint8_t *)buf, .len = n, .mode = AGY_ASYNC };
-    agy_py_emit(&ev);
+    wire_event_t ev = { .kind = "app_response", .stream_id = b->regs.rax,
+                       .data = (const uint8_t *)buf, .len = n, .mode = WIRE_ASYNC };
+    wire_emit(&ev);
 }
 
 /* Emit an entry-arg []byte (ptr/len already sitting in arg registers) as a capture
@@ -297,13 +297,13 @@ static void cgt_bytes_emit(const char *kind, uint64_t id, uint64_t ptr, uint64_t
     char buf[CGT_RESP_CAP];
     size_t n = len < CGT_RESP_CAP ? (size_t)len : CGT_RESP_CAP;
     if (agy_safe_read(ptr, buf, n) != (long)n) return;
-    agy_event_t ev = { .kind = kind, .stream_id = id,
-                       .data = (const uint8_t *)buf, .len = n, .mode = AGY_ASYNC };
-    agy_py_emit(&ev);
+    wire_event_t ev = { .kind = kind, .stream_id = id,
+                       .data = (const uint8_t *)buf, .len = n, .mode = WIRE_ASYNC };
+    wire_emit(&ev);
 }
 
 /* The C hook — runs on the g0/system stack during cgocall. MUST stay light and
- * must not allocate Go memory; agy_py_emit() copies + enqueues to the worker.
+ * must not allocate Go memory; wire_emit() copies + enqueues to the worker.
  * Emits the receiver (RAX) as stream_id + the borrowed rodata kind tag. With
  * AGY_PROC_CGT_ARGS set, also emits a diagnostic arg-register report. */
 static uint64_t g_gh_base;   /* main-module base, for reducing PCs to link vaddrs */
@@ -354,8 +354,8 @@ static void agy_cgo_hook(agy_block *b)
     }
     if (kind == "http_rt") {
         /* net/http.(*Transport).RoundTrip(t=rax, req=rbx): marker keyed by the request ptr */
-        agy_event_t rt = { .kind = "http_rt", .stream_id = b->regs.rbx, .mode = AGY_ASYNC };
-        agy_py_emit(&rt);
+        wire_event_t rt = { .kind = "http_rt", .stream_id = b->regs.rbx, .mode = WIRE_ASYNC };
+        wire_emit(&rt);
         return;
     }
     if (kind == "exit") {
@@ -363,10 +363,10 @@ static void agy_cgo_hook(agy_block *b)
          * writes it BEFORE agy's exit_group syscall (an ASYNC event would race process death);
          * FULLCGO hands off the P so other goroutines run while we briefly block. The code rides
          * stream_id; Python on_exit records {"kind":"exit","code":N}. */
-        agy_event_t ev = { .kind = "exit", .stream_id = b->regs.rax, .mode = AGY_SYNC };
-        agy_py_emit(&ev);        /* SYNC: marker recorded before we stop the worker (below) */
-        agy_py_free(&ev);
-        agy_py_shutdown();       /* now cooperatively stop + join the worker (deterministic teardown) */
+        wire_event_t ev = { .kind = "exit", .stream_id = b->regs.rax, .mode = WIRE_SYNC };
+        wire_emit(&ev);        /* SYNC: marker recorded before we stop the worker (below) */
+        wire_free(&ev);
+        wire_shutdown();       /* now cooperatively stop + join the worker (deterministic teardown) */
         return;
     }
     if (kind == "resp_chunk") {
@@ -402,16 +402,16 @@ static void agy_cgo_hook(agy_block *b)
                 GHLOG("os.readlink(/proc/self/exe): kernel=%s -> RETURN %s", kr, g_real_exe);
             }
             /* emit the substitute (the path we handed back) so a test can assert it */
-            agy_event_t ev = { .kind = "readlink_filter", .stream_id = nptr,
+            wire_event_t ev = { .kind = "readlink_filter", .stream_id = nptr,
                                .data = (const uint8_t *)g_real_exe, .len = g_real_exe_len,
-                               .mode = AGY_ASYNC };
-            agy_py_emit(&ev);
+                               .mode = WIRE_ASYNC };
+            wire_emit(&ev);
         }
         return;   /* non-match / no real-exe → PASS (action stays 0) */
     }
-    agy_event_t ev = { .kind = (const char *)b->kind,
-                       .stream_id = b->regs.rax, .mode = AGY_ASYNC };
-    agy_py_emit(&ev);
+    wire_event_t ev = { .kind = (const char *)b->kind,
+                       .stream_id = b->regs.rax, .mode = WIRE_ASYNC };
+    wire_emit(&ev);
 }
 
 /* Recognize the Go frame-setup prologue we overwrite: push rbp; mov rbp,rsp;

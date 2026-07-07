@@ -162,7 +162,7 @@ class PtyPopen(_ForkPopen):
         # worker-channel signal; its payload carries the tracker fd + the pickled target, whose args
         # carry the caller's queue).
         extra = {**(getattr(process_obj, "_extra_env", None) or {}), **env_ovr,
-                 "AGY_MP_BOOT_FD": str(boot_r)}
+                 "WIRE_MP_BOOT_FD": str(boot_r)}
         env = instrumented_env(capture=capture, extra_env=extra)
         agy_args = getattr(process_obj, "_agy_args", None) or ["--print", "agy-mp"]
         # Inject the shim via agy's PT_INTERP + --preload (per-exec) rather than LD_PRELOAD, which

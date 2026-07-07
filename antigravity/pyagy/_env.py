@@ -70,8 +70,12 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
     env = dict(base if base is not None else os.environ)
     env.update({
         "AGY_PROC_ENABLE": "1",
-        "AGY_PROC_MODULE": module,
-        "AGY_PROC_PYTHONPATH": root,
+        # WIRE_MODULE / WIRE_PYTHONPATH are the shared native bridge's contract (wirecap/native).
+        # The bridge splits WIRE_PYTHONPATH on os.pathsep and inserts each root — the shared
+        # `wirecap` package lives at the repo root, the `pyagy` package under antigravity/, so the
+        # embedded interpreter needs BOTH roots to import pyagy.agy_process (which imports wirecap).
+        "WIRE_MODULE": module,
+        "WIRE_PYTHONPATH": os.path.dirname(root) + os.pathsep + root,
         "AGY_PROC_CAPTURE": os.path.abspath(capture),
         # install the os.OpenFile conversation-id probe (overlay) so instrumented runs learn
         # the exact conversation id in-process (agy doesn't expose it via env); mtime is the
