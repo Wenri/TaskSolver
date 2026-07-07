@@ -123,6 +123,8 @@ paramiko = ">=5.0.0,<6"
 # build_py hook (during `pixi install`) and the manual `pixi run build-shim`.
 cmake = ">=4.3.4,<5"
 ninja = ">=1.11"
+patchelf = ">=0.17.2,<0.18"
+py-lief = ">=0.17.6,<0.18"
 
 # The antigravity shim build lives in antigravity/CMakeLists.txt (setup.py's build_py hook runs
 # `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …` during the package build,

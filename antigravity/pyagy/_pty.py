@@ -6,7 +6,8 @@ This class owns that fork, the winsize, and the terminal-query auto-reply — an
 `multiprocessing.popen_fork.Popen`, the process lifecycle too (`poll`/`wait`/`terminate`/`kill`
 are inherited and act on agy's pid + the PTY-master sentinel; only `_launch`/`close` are ours).
 
-Every launch is instrumented (LD_PRELOAD shim + capture on the pinned vendor/agy) and always wires
+Every launch is instrumented (the shim is injected via agy's PT_INTERP + --preload — never
+LD_PRELOAD, which leaks into agy's children — plus capture on the pinned vendor/agy) and always wires
 the embedded-worker channel — a boot pipe carrying the pickled target (with the caller's result
 queue in its args) + the resource_tracker fd, inherited across agy's execve. Like
 `popen_spawn_posix`, this Popen owns the fork + fd inheritance but NOT the result queue: the caller
@@ -30,7 +31,7 @@ from multiprocessing.popen_fork import Popen as _ForkPopen
 from multiprocessing.popen_spawn_posix import _DupFd
 
 from . import conversations as _conv
-from ._env import ROOT, instrumented_env
+from ._env import ROOT, instrumented_env, preload_argv
 from ._term import answer_queries, answer_trust, strip_ansi
 from .conversations import ensure_git_workspace
 
@@ -163,7 +164,14 @@ class PtyPopen(_ForkPopen):
         extra = {**(getattr(process_obj, "_extra_env", None) or {}), **env_ovr,
                  "AGY_MP_BOOT_FD": str(boot_r)}
         env = instrumented_env(capture=capture, extra_env=extra)
-        argv = [agy, *(getattr(process_obj, "_agy_args", None) or ["--print", "agy-mp"])]
+        agy_args = getattr(process_obj, "_agy_args", None) or ["--print", "agy-mp"]
+        # Inject the shim via agy's PT_INTERP + --preload (per-exec) rather than LD_PRELOAD, which
+        # every child agy spawns would inherit and needlessly load the shim into. An explicit empty
+        # LD_PRELOAD in extra_env opts out (an uninstrumented baseline — e.g. test auth probes).
+        if env.pop("LD_PRELOAD", None) == "":
+            argv = [agy, *agy_args]
+        else:
+            argv = preload_argv(agy, agy_args, env=env)
 
         # Build the boot payload BEFORE the fork: pickling process_obj under set_spawning_popen runs
         # our duplicate_for_child on the queue's pipe fds (carried in process_obj's args) so they

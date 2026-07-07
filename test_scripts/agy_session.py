@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive an `agy` session under a controlled PTY + the antigravity network hooks, for capture
 experiments. agy is a TUI that wants a real terminal, so we run it under a pty we own; the
-LD_PRELOAD shim captures the model traffic to the AGY_PROC_CAPTURE JSONL, and an in-agy worker
+preloaded shim captures the model traffic to the AGY_PROC_CAPTURE JSONL, and an in-agy worker
 streams the decoded answer home over a caller-owned SimpleQueue (collected by collect()/ask()).
 
 Two "outputs":

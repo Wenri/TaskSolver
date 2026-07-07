@@ -1,5 +1,5 @@
 """AgyProcess — the ``multiprocessing.Process`` for launching the agy CLI. Always instrumented
-(LD_PRELOAD shim + capture JSONL, on the pinned vendor/agy) and always runs an in-agy worker target.
+(preloaded shim + capture JSONL, on the pinned vendor/agy) and always runs an in-agy worker target.
 
 Modeled on stock ``Process``: it does NOT own the result channel. The **caller** creates the result
 ``SimpleQueue`` and passes it as a target arg — ``AgyProcess(target=stream_turns, args=(q,))`` — so

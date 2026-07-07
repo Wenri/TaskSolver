@@ -1,6 +1,13 @@
-"""Environment wiring for an instrumented agy run: LD_PRELOAD the shim and wire the
-in-process Python subsystem (``pyagy.agy_process``) + capture JSONL. Used by
-:class:`pyagy.agyprocess.AgyProcess` (the single agy launcher) and test_scripts/run-agy.sh.
+"""Environment + argv wiring for an instrumented agy run: inject the antigravity shim via the
+program interpreter's ``--preload`` (see :func:`preload_argv`) and wire the in-process Python
+subsystem (``pyagy.agy_process``) + capture JSONL. Used by :class:`pyagy.agyprocess.AgyProcess`
+(the single agy launcher) and test_scripts/run-agy.sh.
+
+The shim is injected as a per-exec loader argument, NOT via ``LD_PRELOAD``: an env var is inherited
+by every process agy spawns (a Playwright/Node helper, each ``bash -c`` tool command), each of which
+then needlessly loads the shim — the reason the shim carries a build-id / ``_AGY_SBOXSERVE`` bail-out.
+Running agy through its own ``PT_INTERP`` with ``--preload`` (+ ``--library-path`` for the shim's
+libpython) scopes the injection to the one agy exec, leaving nothing shim-related in the environment.
 """
 import os
 
@@ -14,16 +21,49 @@ def _prepend(env, key, value, sep=os.pathsep):
     env[key] = value + (sep + existing if existing else "")
 
 
+def _elf_interp(path):
+    """The program interpreter (``PT_INTERP``) baked into an ELF — the dynamic loader the kernel
+    would use to run it (e.g. ``/lib64/ld-linux-x86-64.so.2``). We invoke that loader explicitly so
+    ``--preload`` injects the shim for this one exec instead of via an inherited ``LD_PRELOAD``.
+    Parsed with LIEF; raises if the binary has no interpreter (statically linked). LIEF is imported
+    lazily so the shim's embedded interpreter — which imports ``pyagy.agy_process`` under ``-S``,
+    with no site-packages on the path — never needs it (only the parent-side launcher calls this)."""
+    import lief
+    binary = lief.parse(path)
+    if binary is None:
+        raise ValueError(f"{path}: not parseable as an ELF binary")
+    if not binary.has_interpreter:
+        raise ValueError(f"{path}: no PT_INTERP (statically linked?)")
+    return binary.interpreter
+
+
+def preload_argv(agy_bin, agy_args, shim=None, env=None):
+    """Build the argv that runs ``agy_bin`` with the shim injected via its interpreter's
+    ``--preload`` — a per-exec injection that (unlike ``LD_PRELOAD``) agy's children do not inherit.
+    ``--argv0`` preserves agy's own ``argv[0]``; ``--library-path`` points the loader at
+    ``$CONDA_PREFIX/lib`` (+ any existing ``LD_LIBRARY_PATH``) so the shim's libpython resolves
+    without leaving ``LD_LIBRARY_PATH`` in the environment either."""
+    shim = shim or SHIM
+    env = os.environ if env is None else env
+    argv = [_elf_interp(agy_bin), "--argv0", agy_bin]
+    libpath = [p for p in (os.path.join(env["CONDA_PREFIX"], "lib") if env.get("CONDA_PREFIX") else None,
+                           env.get("LD_LIBRARY_PATH")) if p]
+    if libpath:
+        argv += ["--library-path", os.pathsep.join(libpath)]
+    return argv + ["--preload", shim, agy_bin, *agy_args]
+
+
 def instrumented_env(capture="agy-capture.jsonl", log=None,
-                     module="pyagy.agy_process", root=None, shim=None,
+                     module="pyagy.agy_process", root=None,
                      base=None, extra_env=None):
-    """Environment that LD_PRELOADs the antigravity shim and points its embedded
-    interpreter at ``module`` (default ``pyagy.agy_process``), writing hook events to
-    the ``capture`` JSONL. The shim installs the full working hook union (wire + app +
-    rpc) on every run — the only gate is ``AGY_PROC_ENABLE`` (set here).
-    Mirrors run-agy.sh; ``extra_env`` (applied last) can override any AGY_PROC* knob."""
+    """Environment for an instrumented agy run: points the shim's embedded interpreter at
+    ``module`` (default ``pyagy.agy_process``) and writes hook events to the ``capture`` JSONL.
+    The shim installs the full working hook union (wire + app + rpc) on every run — the only gate
+    is ``AGY_PROC_ENABLE`` (set here). This sets NO ``LD_PRELOAD``/``LD_LIBRARY_PATH``: the shim is
+    injected via :func:`preload_argv` (the loader's ``--preload``/``--library-path``) so nothing
+    shim-related leaks into agy's children. Mirrors run-agy.sh; ``extra_env`` (applied last) can
+    override any AGY_PROC* knob."""
     root = root or ROOT
-    shim = shim or os.path.join(root, "vendor", "antigravity.so")
     env = dict(base if base is not None else os.environ)
     env.update({
         "AGY_PROC_ENABLE": "1",
@@ -40,13 +80,6 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
         "AGY_CLI_DISABLE_AUTO_UPDATE": "true",   # disable agy's background self-update
     })
     _prepend(env, "PYTHONPATH", root)
-    _prepend(env, "LD_PRELOAD", shim)
-    # The shim is linked with an RPATH to the build-time $CONDA_PREFIX/lib, but a pixi run
-    # leaves LD_LIBRARY_PATH empty — add it so the LD_PRELOAD always resolves libpython
-    # (else the preload fails with "libpython3.13.so: cannot open shared object").
-    conda = env.get("CONDA_PREFIX")
-    if conda:
-        _prepend(env, "LD_LIBRARY_PATH", os.path.join(conda, "lib"))
     if log:
         env["AGY_PROC_LOG"] = os.path.abspath(log)
     if extra_env:

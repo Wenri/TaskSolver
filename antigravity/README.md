@@ -63,9 +63,9 @@ silently applied to a different build. Re-run the extractor after any `agy` upda
         │   │        write verdict → signal condvar       │                   │
         │   └───────────────────────────────────────────┘                   │
         └────────────────────────────────────────────────────────────────────┘
-             ▲ LD_PRELOAD=antigravity.so  (constructor: gum_init_embedded,
-                                       verify build-id, load symbols.json,
-                                       install hooks, spawn pyworker)
+             ▲ ld.so --preload antigravity.so  (per-exec, not LD_PRELOAD — see below;
+                                       constructor: gum_init_embedded, verify build-id,
+                                       load symbols.json, install hooks, spawn pyworker)
 ```
 
 ### Why a dedicated worker thread with a big stack
@@ -629,10 +629,13 @@ capture that kind (e.g. no `rpc_*` events):
   | `AGY_PROC_H2` / `AGY_PROC_CORRELATE` | — | `=0` disables HTTP/2 reassembly / the genai-turn correlator |
 
 - **Always instrumented:** every launch goes through `AgyProcess` and loads the shim on the
-  pinned `vendor/agy` (build-id-matched) — there is no clean/degrade path. `instrumented_env`
-  puts `$CONDA_PREFIX/lib` on `LD_LIBRARY_PATH` so the `LD_PRELOAD` always resolves libpython;
-  `AgyResponse.instrumented` is therefore always `True`. The shim + `vendor/agy` are a
-  prerequisite (`pixi run build-shim`).
+  pinned `vendor/agy` (build-id-matched) — there is no clean/degrade path. The shim is injected
+  by running agy through its own `PT_INTERP` with the loader's `--preload` (`_env.preload_argv`),
+  **not** `LD_PRELOAD`: an env var is inherited by every process agy spawns (a Playwright/Node
+  helper, each `bash -c` tool command), each of which would then needlessly load the shim. The
+  loader's `--library-path` points at `$CONDA_PREFIX/lib` so the shim's libpython resolves, so no
+  `LD_PRELOAD`/`LD_LIBRARY_PATH` is left in the environment at all. `AgyResponse.instrumented` is
+  therefore always `True`. The shim + `vendor/agy` are a prerequisite (`pixi run build-shim`).
 - **Offline tests** (no agy/network/creds): `test_scripts/test_http1sse.py`,
   `test_config.py`, `test_client.py`, `test_appresponse.py`, `test_rpctrace.py`,
   `test_symbolize.py`, plus the `rewrite`/`config` offline suites. **Live** (skip cleanly
