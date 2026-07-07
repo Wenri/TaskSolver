@@ -91,11 +91,13 @@ class KimiModel(object):
         def kimi_thread(idx, request_payload, results):
             mod_payload = deepcopy(request_payload)
 
-            raw_response = self.client.messages.create(
+            with self.client.messages.stream(
                 model=self.model,
                 messages=[mod_payload["messages"]],
                 max_tokens=mod_payload["max_tokens"],
-            )
+            ) as stream:
+                stream.until_done()
+                raw_response = stream.get_final_message()
 
             response = raw_response.dict()
             text_content = self._combine_text_blocks(response.get("content"))
@@ -202,11 +204,16 @@ class KimiModel(object):
                     response_metadata=meta_data[0],
                     request_payload=p,
                 )
-            except GPTOutputParseException:
+            except GPTOutputParseException as exc:
                 reattempt += 1
                 if reattempt > max_tries:
                     logger.error(f"max tries ({max_tries}) exceeded.")
-                    raise GPTMaxTriesExceededException
+                    raise GPTMaxTriesExceededException(
+                        f"Failed to parse Kimi response after {reattempt} attempts: {exc}",
+                        raw_response=content,
+                        response_metadata=meta_data[0],
+                        request_payload=p,
+                    ) from exc
 
                 logger.warning(f"Reattempt #{reattempt} querying LLM")
                 continue
@@ -248,11 +255,16 @@ class KimiModel(object):
                         request_payload=p,
                     )
                     parsed_response.append(parsed)
-            except GPTOutputParseException:
+            except GPTOutputParseException as exc:
                 reattempt += 1
                 if reattempt > max_tries:
                     logger.error(f"max tries ({max_tries}) exceeded.")
-                    raise GPTMaxTriesExceededException
+                    raise GPTMaxTriesExceededException(
+                        f"Failed to parse Kimi response after {reattempt} attempts: {exc}",
+                        raw_response=content,
+                        response_metadata=meta_data[idx],
+                        request_payload=p,
+                    ) from exc
 
                 logger.warning(f"Reattempt #{reattempt} querying LLM")
                 continue

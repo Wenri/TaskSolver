@@ -31,7 +31,17 @@ class GPTMaxTriesExceededException(Exception):
     raised in ask() when max attempt threshold has been exceeded.
     @GPT4-doc-end
     """
-    pass
+    def __init__(
+        self,
+        *args,
+        raw_response=None,
+        response_metadata=None,
+        request_payload=None,
+    ):
+        super().__init__(*args)
+        self.raw_response = raw_response
+        self.response_metadata = response_metadata
+        self.request_payload = request_payload
 
 class InvalidParsedAnswer(Exception):
     """ 
