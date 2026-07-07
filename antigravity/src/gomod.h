@@ -167,8 +167,12 @@ typedef struct {
 
 /* The block the trampoline builds on its stack and passes to the C hook (RDI).
  * `kind` is a borrowed const char* (the procdef.h kind tag) baked into the
- * trampoline as an imm64; regs are the target's snapshotted arg registers. */
-typedef struct { uint64_t kind; agy_go_regs regs; } agy_block;
+ * trampoline as an imm64; regs are the target's snapshotted arg registers.
+ * `action` is the filter verdict the hook writes back: 0 = PASS (run the body,
+ * the default), nonzero = RETURN (the hook has written the Go-ABI return values
+ * into `regs`; the stub restores them and `ret`s to the caller, skipping the
+ * body). It occupies the former frame pad (OFF_ACTION), so GH_FRAME is unchanged. */
+typedef struct { uint64_t kind; agy_go_regs regs; uint64_t action; } agy_block;
 
 /* _func total stride in pclntable: 44-byte header + funcdata[2] (no pcdata). */
 #define AGY_FUNC_STRIDE 52

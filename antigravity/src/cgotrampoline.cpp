@@ -48,17 +48,20 @@
  * [frame_lo,frame_hi) window. A transient sub would make the real spdelta frame+N there
  * while pcsp says frame → throw("unknown pc"). (The asmcgo path may use a transient sub:
  * it never enters _Gsyscall, so GC never scans our frame mid-call.)
- *   GH_FRAME = GH_SPILL(16) + block(96) + 8 pad = 120  (120 ≡ 8 mod 16 ✓). */
+ *   GH_FRAME = GH_SPILL(16) + block(96) + action(8) = 120  (120 ≡ 8 mod 16 ✓).
+ * The former 8-byte pad is now the `action` slot (OFF_ACTION) — a defined 0/1, not garbage. */
 #define GH_SPILL  16          /* cgocall's caller-provided register-arg spill slots */
-#define GH_FRAME  (GH_SPILL + 96 + 8)   /* == 120 */
-#define GH_SLOT   256         /* per-trampoline slot (== FuncTabBucketSize/16) */
+#define GH_FRAME  (GH_SPILL + 96 + 8)   /* == 120; the trailing +8 is the action slot */
+#define GH_SLOT   320         /* per-trampoline slot; headroom over the emitted stub (bounds-checked in add()) */
 
 /* block offsets (rsp-relative after `sub rsp,GH_FRAME`); mirror agy_block. The block
- * sits ABOVE the GH_SPILL scratch, so every offset is GH_SPILL-based. */
+ * sits ABOVE the GH_SPILL scratch, so every offset is GH_SPILL-based. OFF_ACTION is the
+ * filter verdict slot (0=PASS / nonzero=RETURN), read by the shared tail. */
 enum { OFF_KIND = GH_SPILL,      OFF_RAX = GH_SPILL + 8,  OFF_RBX = GH_SPILL + 16,
        OFF_RCX  = GH_SPILL + 24, OFF_RDI = GH_SPILL + 32, OFF_RSI = GH_SPILL + 40,
        OFF_R8   = GH_SPILL + 48, OFF_R9  = GH_SPILL + 56, OFF_R10 = GH_SPILL + 64,
-       OFF_R11  = GH_SPILL + 72, OFF_RDX = GH_SPILL + 80, OFF_RBP = GH_SPILL + 88 };
+       OFF_R11  = GH_SPILL + 72, OFF_RDX = GH_SPILL + 80, OFF_RBP = GH_SPILL + 88,
+       OFF_ACTION = GH_SPILL + 96 };
 
 /* The arg registers snapshotted into / restored from the block, in the agy_go_regs order.
  * One table drives both the spill and restore emitters below, so they can't drift out of
@@ -72,8 +75,12 @@ static constexpr struct { gssize off; GumX86Reg reg; } GH_REGS[] = {
 };
 
 /* xorps xmm15,xmm15 — Go's ABI requires X15 zeroed across a (asm)cgocall
- * boundary; emitted verbatim into both call paths below. */
+ * boundary; emitted verbatim into both call paths below. Also re-emitted before the
+ * RETURN-mode `ret` to restore the X15=0 invariant the caller expects. */
 static const guint8 XORPS_XMM15[] = { 0x45, 0x0f, 0x57, 0xff };
+/* test r12,r12  (REX.WRB 4D, opcode 85, ModRM 11/100/100 = E4) — sets ZF from the
+ * filter verdict in R12. gum has no put_test, so emit the 3 bytes verbatim. */
+static const guint8 TEST_R12_R12[] = { 0x4d, 0x85, 0xe4 };
 
 /* Fault-safe read of up to n bytes from a possibly-bogus address in our OWN
  * process: process_vm_readv returns -1/EFAULT for unmapped pages instead of
@@ -430,6 +437,11 @@ void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
     /* block.kind = borrowed const char* (imm64) via RAX (already saved) */
     gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)kind);
     gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_KIND, GUM_X86_RAX);
+    /* block.action = 0 (PASS) — full 64-bit zero so a non-opting hook reads a defined 0, not
+     * stack garbage (a 32-bit store would leave the high half garbage → spurious RETURN). RAX is
+     * dead here (kind already stored) and is reloaded with agy_gomod_ensure next, so the clobber is free. */
+    gum_x86_writer_put_xor_reg_reg(w, GUM_X86_RAX, GUM_X86_RAX);
+    gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_ACTION, GUM_X86_RAX);
 
     /* Register the synthetic moduledata (once) BEFORE the cgocall opens the
      * _Gsyscall GC-scan window. Runs on the goroutine stack in _Grunning (our
@@ -468,16 +480,38 @@ void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
         gum_x86_writer_put_call_reg(w, GUM_X86_R12);
     }
 
-    /* restore the target's registers, then close the frame */
+    /* restore the target's registers */
     for (auto &r : GH_REGS)
         gum_x86_writer_put_mov_reg_reg_offset_ptr(w, r.reg, GUM_X86_RSP, r.off);
+    /* filter verdict → R12 (scratch: not in GH_REGS, it held the call target, and it's an
+     * ABIInternal scratch reg, so clobbering it before the PASS jmp into the body is safe).
+     * Read while the frame is still live (before `add rsp`); include it in [frame_lo,frame_hi). */
+    gum_x86_writer_put_mov_reg_reg_offset_ptr(w, GUM_X86_R12, GUM_X86_RSP, OFF_ACTION);
     hi = gum_x86_writer_offset(w);
     gum_x86_writer_put_add_reg_imm(w, GUM_X86_RSP, GH_FRAME);
 
-    /* run the overwritten original instructions, then jmp back past them */
+    /* PASS (action==0, the common path + every hook that doesn't opt in) vs RETURN (action!=0).
+     * Both execute AFTER cgocall returned (in _Grunning, outside any GC-scan window), and RETURN
+     * rewrites no return address — we intercept before the frame-setup prologue, so `[rsp]` is the
+     * caller's own return address. This is why it is NOT the retired gum-leave GC-unwind hazard. */
+    gum_x86_writer_put_bytes(w, TEST_R12_R12, sizeof TEST_R12_R12);
+    gum_x86_writer_put_jcc_near_label(w, X86_INS_JNE, slot, GUM_NO_HINT);   /* slot = unique ret label */
+    /* PASS: run the overwritten original instructions, then jmp back past them */
     gum_x86_writer_put_bytes(w, orig, ov);
     gum_x86_writer_put_jmp_address(w, (GumAddress)(hook_addr + ov));
+    /* RETURN: the hook wrote the Go-ABI return regs into the block (restored above); restore the
+     * X15=0 invariant and ret to the caller, skipping the body. */
+    gum_x86_writer_put_label(w, slot);
+    gum_x86_writer_put_bytes(w, XORPS_XMM15, sizeof XORPS_XMM15);
+    gum_x86_writer_put_ret(w);
     gum_x86_writer_flush(w);
+    /* Slot-budget guard: the emit is unbounded and would silently corrupt the next slot's code.
+     * On overflow, refuse to install (don't patch, don't count) — the slot is reused by the next add. */
+    uint32_t emitted = gum_x86_writer_offset(w);
+    if (emitted > GH_SLOT) {
+        GHLOG("slot overflow kind=%s (%u > %d bytes); NOT installed", kind, emitted, GH_SLOT);
+        return;
+    }
     /* The shared pcsp must describe a FULL-CGO slot's frame window — those are the only
      * slots GC unwinds (asmcgo never enters _Gsyscall, so its frames are never scanned).
      * Prefer a full-cgo slot; fall back to an asmcgo one only if the region is all-asmcgo. */
@@ -497,7 +531,8 @@ void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
         return;
     }
 
-    GHLOG("cgo-trampoline kind=%s @ +%u -> %p (overwrite %u bytes)", kind, skip, (void *)slot, ov);
+    GHLOG("cgo-trampoline kind=%s @ +%u -> %p (overwrite %u bytes, stub %u/%d)",
+          kind, skip, (void *)slot, ov, emitted, GH_SLOT);
     made_++;
 }
 
