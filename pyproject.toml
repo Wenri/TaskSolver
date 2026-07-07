@@ -186,6 +186,11 @@ build-shim = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --buil
 shim-symbols = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target symbols && cmake --build antigravity/build"
 shim-agy-update = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target agy-update"
 
+# codex: build the (patched, from-source) codex CLI as a glibc-dynamic ELF (the DEFAULT host
+# target — NOT the static-musl release target, which can't embed the pixi libpython). LIBCLANG_PATH
+# lets aws-lc-rs/rustls' bindgen find libclang. Output at codex/vendor/codex-rs/target/release/codex.
+build-codex = "bash -lc 'export LIBCLANG_PATH=\"$CONDA_PREFIX/lib\"; cd codex/vendor/codex-rs && cargo build --release -p codex-cli'"
+
 # --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---
 # The `local` and `app` features auto-map to the same-named
 # [project.optional-dependencies] extras above, and are merged into the single
