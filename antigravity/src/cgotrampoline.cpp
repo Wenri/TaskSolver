@@ -562,11 +562,12 @@ void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
         GHLOG("slot overflow kind=%s (%u > %d bytes); NOT installed", kind, emitted, GH_SLOT);
         return;
     }
-    /* The shared pcsp must describe a FULL-CGO slot's frame window — those are the only
-     * slots GC unwinds (asmcgo never enters _Gsyscall, so its frames are never scanned).
-     * Prefer a full-cgo slot; fall back to an asmcgo one only if the region is all-asmcgo. */
-    if (!asmcgo) { frame_lo_ = lo; frame_hi_ = hi; frame_is_fullcgo_ = 1; }
-    else if (!frame_is_fullcgo_) { frame_lo_ = lo; frame_hi_ = hi; }
+    /* The shared pcsp must describe a FULL-CGO slot's frame window — those are the only slots GC
+     * unwinds (asmcgo never enters _Gsyscall, so its frames are never scanned). Record any full-cgo
+     * slot's geometry; all full-cgo stubs are byte-identical, so which one wins doesn't matter.
+     * ASSUMES the table has >=1 full-cgo hook (always true — parking funcs require full-cgo). An
+     * all-asmcgo region would leave (0,0), but then nothing enters _Gsyscall, so the pcsp is unused. */
+    if (!asmcgo) { frame_lo_ = lo; frame_hi_ = hi; }
 
     /* patch target+skip: jmp rel32 to the slot, nop-pad to the whole prologue */
     struct patch_ctx pc = { .n = ov };

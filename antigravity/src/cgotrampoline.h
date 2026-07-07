@@ -80,8 +80,7 @@ private:
     uint8_t *region_ = nullptr;          /* gum RWX pages holding the trampolines (permanent) */
     struct _GumX86Writer *w_ = nullptr;  /* gum code writer (released in the dtor) */
     int made_ = 0, max_ = 0;
-    uint32_t frame_lo_ = 0, frame_hi_ = 0;
-    int frame_is_fullcgo_ = 0;   /* the shared pcsp must match a full-cgo slot (only those get GC-unwound) */
+    uint32_t frame_lo_ = 0, frame_hi_ = 0;   /* a full-cgo slot's frame window for the shared pcsp */
 };
 
 #endif /* AGY_CGOTRAMPOLINE_H */
