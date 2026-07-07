@@ -31,28 +31,10 @@ import tempfile
 import time
 from dataclasses import dataclass
 
-
-_scratch_ws = None
-
-
-def ensure_git_workspace(path=None) -> str:
-    """Return a git workspace path (agy refuses to run without one). Creates a
-    reusable throwaway repo if none is given."""
-    global _scratch_ws
-    if path:
-        return path
-    if _scratch_ws and os.path.isdir(os.path.join(_scratch_ws, ".git")):
-        return _scratch_ws
-    d = tempfile.mkdtemp(prefix="agy-ws-")
-    subprocess.run(["git", "init", "-q"], cwd=d, check=False)
-    subprocess.run(["git", "config", "user.email", "agy@local"], cwd=d, check=False)
-    subprocess.run(["git", "config", "user.name", "agy"], cwd=d, check=False)
-    with open(os.path.join(d, "README.md"), "w") as f:
-        f.write("# agy scratch workspace\n")
-    subprocess.run(["git", "add", "-A"], cwd=d, check=False)
-    subprocess.run(["git", "commit", "-qm", "init"], cwd=d, check=False)
-    _scratch_ws = d
-    return d
+# The throwaway-git-workspace helper is provider-neutral (agy + codex both need one) and lives in
+# the shared runtime package; re-exported here so pyagy.ensure_git_workspace and _pty's import are
+# unchanged.
+from wirecap.runtime.workspace import ensure_git_workspace  # noqa: F401
 
 
 def _gemini_dir(home=None):

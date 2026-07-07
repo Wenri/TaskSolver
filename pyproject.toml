@@ -126,6 +126,10 @@ cmake = ">=4.3.4,<5"
 ninja = ">=1.11"
 patchelf = ">=0.17.2,<0.18"
 py-lief = ">=0.17.6,<0.18"
+rust = ">=1.96.1,<1.97"
+clang = ">=22.1.8,<23"
+libclang = ">=22.1.8,<23"
+libcap = ">=2.78,<3"
 
 # The antigravity shim build lives in antigravity/CMakeLists.txt (setup.py's build_py hook runs
 # `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …` during the package build,
