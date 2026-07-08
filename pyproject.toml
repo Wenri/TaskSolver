@@ -21,8 +21,10 @@ dependencies = [
     "pymongo",            # provides the `bson` module (standalone `bson` breaks on Python 3.14)
     "openai",             # gpt4v + vLLM adapters
     "anthropic",          # claude + kimi adapters
-    "google-generativeai" # gemini adapter
-, "frida>=17.15.3,<18", "frida-tools>=14.10.4,<15"]
+    "google-generativeai", # gemini adapter
+    "frida>=17.15.3,<18", "frida-tools>=14.10.4,<15",   # antigravity/pyagy: instrument the agy binary
+    "pygit2",             # wirecap/runtime/workspace.py: scratch git workspace pyagy/pycodex run in
+]
 
 [project.optional-dependencies]
 # These extras are plain PEP 621 metadata so the package stays installable as a
