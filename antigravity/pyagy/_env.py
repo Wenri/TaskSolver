@@ -24,6 +24,19 @@ def _prepend(env, key, value, sep=os.pathsep):
     env[key] = value + (sep + existing if existing else "")
 
 
+def _wire_pythonpath(root):
+    """Roots the embedded interpreter needs to import ``pyagy.agy_process`` + ``wirecap``.
+    Source checkout: ``wirecap`` lives at the repo root (root's parent), ``pyagy`` under
+    ``antigravity/`` — both roots. Wheel install: both packages sit in ``root`` itself
+    (site-packages), and root's parent is the Python *stdlib* dir — including it would let a
+    foreign-version stdlib shadow the embedded interpreter's own (e.g. 3.14 ``textwrap`` under
+    the shim's 3.13), so add the parent only when it actually holds ``wirecap``."""
+    parent = os.path.dirname(root)
+    if os.path.isdir(os.path.join(parent, "wirecap")):
+        return parent + os.pathsep + root
+    return root
+
+
 def _elf_interp(path):
     """The program interpreter (``PT_INTERP``) baked into an ELF — the dynamic loader the kernel
     would use to run it (e.g. ``/lib64/ld-linux-x86-64.so.2``). We invoke that loader explicitly so
@@ -74,11 +87,10 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
     env.update({
         "AGY_PROC_ENABLE": "1",
         # WIRE_MODULE / WIRE_PYTHONPATH are the shared native bridge's contract (wirecap/native).
-        # The bridge splits WIRE_PYTHONPATH on os.pathsep and inserts each root — the shared
-        # `wirecap` package lives at the repo root, the `pyagy` package under antigravity/, so the
-        # embedded interpreter needs BOTH roots to import pyagy.agy_process (which imports wirecap).
+        # The bridge splits WIRE_PYTHONPATH on os.pathsep and inserts each root; see
+        # _wire_pythonpath for the source-checkout vs wheel-install layouts.
         "WIRE_MODULE": module,
-        "WIRE_PYTHONPATH": os.path.dirname(root) + os.pathsep + root,
+        "WIRE_PYTHONPATH": _wire_pythonpath(root),
         "AGY_PROC_CAPTURE": os.path.abspath(capture),
         # install the os.OpenFile conversation-id probe (overlay) so instrumented runs learn
         # the exact conversation id in-process (agy doesn't expose it via env); mtime is the
