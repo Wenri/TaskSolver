@@ -8,6 +8,7 @@ from typing import Union, Dict
 from bson import ObjectId
 from .event import *
 from .keychain import KeyChain
+import os
 import time
 
 import pickle
@@ -89,7 +90,47 @@ class Agent(object):
                         f"supported built-in aliases: {supported}."
                     )
             self.visual_interface = ClaudeCodeModel(None, task, model=model)
-        
+
+        elif vision_model in ("agy", "antigravity") or vision_model.startswith("agy-"):
+            from pyagy import AgyModel
+
+            logger.info(f"creating Antigravity agy CLI-based agent of type: {vision_model}")
+            # `agy` / `antigravity` -> let agy pick its default model;
+            # `agy-<model>` -> `agy --model <model>` (suffix passed through verbatim,
+            # e.g. `agy-gemini-3-pro`). No API key: agy reuses the local
+            # ~/.gemini/antigravity-cli/ login.
+            model = None if vision_model in ("agy", "antigravity") else vision_model[len("agy-"):]
+            if model == "":
+                raise ValueError(
+                    f"Empty agy model suffix in {vision_model!r}; use `agy` or "
+                    "`agy-<model>` (e.g. `agy-gemini-3-pro`)."
+                )
+            self.visual_interface = AgyModel(None, task, model=model, print_timeout=1800)
+
+        elif vision_model == "codex" or vision_model.startswith("codex-"):
+            from pycodex import CodexModel
+
+            logger.info(f"creating Codex CLI-based agent of type: {vision_model}")
+            # `codex` -> codex default model; `codex-<model>` -> `codex exec -m <model>`
+            # (e.g. `codex-gpt-5-codex`).
+            model = None if vision_model == "codex" else vision_model[len("codex-"):]
+            if model == "":
+                raise ValueError(
+                    f"Empty codex model suffix in {vision_model!r}; use `codex` or "
+                    "`codex-<model>` (e.g. `codex-gpt-5-codex`)."
+                )
+            # An explicit key (or KeyChain["openai"]) is forwarded as OPENAI_API_KEY;
+            # otherwise fall back to the environment, else codex's own login
+            # (~/.codex/auth.json). KeyChain.add_key stores the literal path string when
+            # the credentials file is missing, so path-shaped values count as absent.
+            if isinstance(api_key, KeyChain):
+                api_key = api_key.keys.get("openai")
+            if isinstance(api_key, str) and (os.sep in api_key or api_key.endswith(".txt")):
+                api_key = None
+            if not api_key:
+                api_key = os.environ.get("OPENAI_API_KEY") or None
+            self.visual_interface = CodexModel(api_key, task, model=model, timeout=1800)
+
         elif vision_model in ('qwen3', 'qwen3-5', 'qwen3-6'):
             from .vllm import VLLMModel, resolve_qwen3_api_key, resolve_qwen3_base_url, resolve_qwen3_model_name, resolve_qwen3_builtin_endpoint
 

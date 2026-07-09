@@ -15,6 +15,12 @@ REPO = os.path.dirname(ROOT)                                          # repo roo
 # CODEX_BIN. Built by `pixi run build-codex`.
 CODEX_BIN = os.environ.get("CODEX_BIN") or os.path.join(
     ROOT, "vendor", "codex-rs", "target", "release", "codex")
+# The pixi/conda env prefix this codex build links against — supplies libpython3.13 +
+# Boost via <prefix>/lib (the binary bakes no RPATH) and the matching 3.13 stdlib for
+# the embedded interpreter. Set it when running codex from a foreign env (e.g. a
+# consumer project's pixi env whose CONDA_PREFIX carries a different Python).
+# Unset -> current behavior (caller's CONDA_PREFIX).
+CODEX_RUNTIME_PREFIX = os.environ.get("CODEX_RUNTIME_PREFIX")
 
 
 def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_env=None):
@@ -22,17 +28,27 @@ def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_e
 
     Sets the neutral bridge contract (``WIRE_ENABLE`` gates the bridge on; ``WIRE_MODULE`` is the
     dispatch module; ``WIRE_PYTHONPATH`` gives the embedded interpreter both roots — repo-root for
-    ``wirecap`` + ``codex/`` for ``pycodex``). ``PYTHONHOME`` points libpython at the conda stdlib
-    (the binary's RPATH already resolves libpython3.13 itself). ``OPENAI_API_KEY`` (if set) is
-    inherited for API-key auth; otherwise codex uses its ``~/.codex/auth.json`` login."""
+    ``wirecap`` + ``codex/`` for ``pycodex``). The binary bakes no RPATH and embeds the build
+    env's libpython, so with ``CODEX_RUNTIME_PREFIX`` set that env's ``lib`` + stdlib are wired
+    into the child via ``LD_LIBRARY_PATH``/``PYTHONHOME``; unset, ``PYTHONHOME`` falls back to the
+    caller's conda stdlib (correct only when the caller env IS the build env). ``OPENAI_API_KEY``
+    (if set) is inherited for API-key auth; otherwise codex uses its ``~/.codex/auth.json`` login."""
     env = dict(base if base is not None else os.environ)
     env["WIRE_ENABLE"] = "1"
     env["WIRE_MODULE"] = module
     env["WIRE_PYTHONPATH"] = REPO + os.pathsep + ROOT
     env["WIRE_CAPTURE"] = os.path.abspath(capture)
-    conda = env.get("CONDA_PREFIX")
-    if conda and not env.get("PYTHONHOME"):
-        env["PYTHONHOME"] = conda          # embedded interpreter finds the conda stdlib
+    if CODEX_RUNTIME_PREFIX:
+        # Child-scoped: point the loader + embedded interpreter at the env codex was
+        # built against, without polluting the caller's environment.
+        env["PYTHONHOME"] = CODEX_RUNTIME_PREFIX
+        lib = os.path.join(CODEX_RUNTIME_PREFIX, "lib")
+        env["LD_LIBRARY_PATH"] = lib + (
+            os.pathsep + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
+    else:
+        conda = env.get("CONDA_PREFIX")
+        if conda and not env.get("PYTHONHOME"):
+            env["PYTHONHOME"] = conda      # embedded interpreter finds the conda stdlib
     env.setdefault("CODEX_DISABLE_UPDATE_CHECK", "1")
     if extra_env:
         env.update(extra_env)

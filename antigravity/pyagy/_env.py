@@ -13,7 +13,10 @@ import os
 
 # antigravity/ — the dir holding vendor/antigravity.so and the pyagy package.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SHIM = os.path.join(ROOT, "vendor", "antigravity.so")
+# AGY_SHIM overrides the vendored shim path — needed when pyagy is consumed as a wheel
+# (vendor/ never ships) and the artifacts live in a checkout. Must be the same build as
+# the agy that AGY_BIN points at (the shim is build-id coupled). Mirrors CODEX_BIN.
+SHIM = os.environ.get("AGY_SHIM") or os.path.join(ROOT, "vendor", "antigravity.so")
 
 
 def _prepend(env, key, value, sep=os.pathsep):

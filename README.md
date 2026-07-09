@@ -13,6 +13,8 @@ One `Agent`, many backends — selected by the `vision_model` id. Provider adapt
 | OpenAI | `gpt-4o`, `gpt-4o-mini`, `o1`, `o3-mini` | OpenAI API (`chat.completions`) |
 | Anthropic | `claude-sonnet-4-6`, `claude-opus-4-7`, `claude-haiku-4-5` | Anthropic Messages API |
 | Claude Code CLI | `claude-code-sonnet-4-6`, `claude-code-opus-4-7`, `claude-code-fable-5` | local `claude` CLI subprocess |
+| Antigravity CLI | `agy`, `antigravity`, `agy-gemini-3-pro` | local `agy` CLI under a PTY (`pyagy`); wheel installs set `AGY_BIN`+`AGY_SHIM` |
+| Codex CLI | `codex`, `codex-gpt-5-codex` | local `codex exec` subprocess (`pycodex`); wheel installs set `CODEX_BIN`+`CODEX_RUNTIME_PREFIX` |
 | vLLM (OpenAI-compatible) | `qwen3`, `qwen3-5`, `qwen3-6` | OpenAI client with a custom `base_url` |
 | Moonshot / Kimi | `kimi2-6`, `kimi-k2.7-code` | Anthropic-compatible endpoint |
 | Gemini | `gemini-3-pro`, `gemini-3-flash`, `gemini-2.0-flash` | Google GenAI SDK |

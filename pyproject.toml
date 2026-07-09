@@ -24,6 +24,7 @@ dependencies = [
     "google-generativeai", # gemini adapter
     "frida>=17.15.3,<18", "frida-tools>=14.10.4,<15",   # antigravity/pyagy: instrument the agy binary
     "pygit2",             # wirecap/runtime/workspace.py: scratch git workspace pyagy/pycodex run in
+    "lief",               # pyagy/_env.py _elf_interp: parse agy's PT_INTERP at launch time
 ]
 
 [project.optional-dependencies]
