@@ -11,6 +11,17 @@ import os
 # codex/ — holds the pycodex package + the vendored + built codex binary.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # .../codex
 REPO = os.path.dirname(ROOT)                                          # repo root (holds wirecap)
+
+
+def _wire_pythonpath():
+    """Roots the embedded interpreter needs to import ``pycodex.codex_process`` + ``wirecap``.
+    Source checkout: ``wirecap`` lives at the repo root, ``pycodex`` under ``codex/`` — both
+    roots. Wheel install: both packages sit in ``ROOT`` itself (site-packages), and ``REPO``
+    is the Python *stdlib* dir — including it would let a foreign-version stdlib shadow the
+    embedded interpreter's own, so add it only when it actually holds ``wirecap``."""
+    if os.path.isdir(os.path.join(REPO, "wirecap")):
+        return REPO + os.pathsep + ROOT
+    return ROOT
 # The from-source, wirecap-patched codex (gnu-dynamic; embeds the pixi libpython). Override with
 # CODEX_BIN. Built by `pixi run build-codex`.
 CODEX_BIN = os.environ.get("CODEX_BIN") or os.path.join(
@@ -36,7 +47,7 @@ def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_e
     env = dict(base if base is not None else os.environ)
     env["WIRE_ENABLE"] = "1"
     env["WIRE_MODULE"] = module
-    env["WIRE_PYTHONPATH"] = REPO + os.pathsep + ROOT
+    env["WIRE_PYTHONPATH"] = _wire_pythonpath()
     env["WIRE_CAPTURE"] = os.path.abspath(capture)
     if CODEX_RUNTIME_PREFIX:
         # Child-scoped: point the loader + embedded interpreter at the env codex was
