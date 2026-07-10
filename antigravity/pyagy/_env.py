@@ -64,7 +64,7 @@ def preload_argv(agy_bin, agy_args, shim=None, env=None):
 
 
 def instrumented_env(capture="agy-capture.jsonl", log=None,
-                     module="pyagy.agy_process", root=None,
+                     module="pyagy.agy_process",
                      base=None, extra_env=None):
     """Environment for an instrumented agy run: points the shim's embedded interpreter at
     ``module`` (default ``pyagy.agy_process``) and writes hook events to the ``capture`` JSONL.
@@ -74,7 +74,6 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
     the embedded interpreter finds pyagy/wirecap via ``site`` (see ``PYTHONHOME`` below), so nothing
     shim-related leaks into agy's children. Mirrors run-agy.sh; ``extra_env`` (applied last) can
     override any AGY_PROC* knob."""
-    del root  # kept for signature compatibility; sys.path is no longer injected
     env = dict(base if base is not None else os.environ)
     env.update({
         "AGY_PROC_ENABLE": "1",
