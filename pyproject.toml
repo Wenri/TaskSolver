@@ -100,14 +100,16 @@ pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pym
 # needs <linux/limits.h>, but this WSLackware host has none in /usr/include. The shim
 # build points -idirafter at this package's sysroot in place — no copy — at
 # $CONDA_PREFIX/x86_64-conda-linux-gnu/sysroot/usr/include.
-kernel-headers_linux-64 = ">=4"
+kernel-headers_linux-64 = ">=6"   # -> sysroot 2.39 (matches 3D-CoT; relaxing binutils would otherwise drop it to 2.28/kh-4.18)
 # Conda C/C++ compilers for the antigravity shim — the automatic build_py build AND manual
 # `pixi run build-shim`. Use them instead of a bare PATH `gcc`/`g++`: on a Nix host those are
 # Nix's, which bake /nix/store glibc rpaths into the shim and break its LD_PRELOAD. cmake picks
-# them up via $CXX/$CC exported by the env. gxx pulls gcc; both pinned <13.3 to match the local
-# feature (shared solve group). All shim TUs are C++23 (Boost.Thread/Boost.Python).
-gcc_linux-64 = ">=11,<13.3"
-gxx_linux-64 = ">=11,<13.3"
+# them up via $CXX/$CC exported by the env. gxx pulls gcc; pinned >=13,<13.3 (gcc 13.2) — the
+# newest gcc conda-forge ships a 13.x compiler wrapper for, and what the 3D-CoT consumer builds
+# with, so both build the natives on the same toolchain (gcc 13.2 + binutils 2.40). Shared solve
+# group with the local feature. All shim TUs are C++23 (Boost.Thread/Boost.Python).
+gcc_linux-64 = ">=13,<13.3"
+gxx_linux-64 = ">=13,<13.3"
 # Boost.Thread for the pybridge worker (its thread::attributes sets the libpython worker's
 # 16 MB stack — no std API can). libboost-devel = headers + link libs; it pulls libboost (the
 # runtime libboost_thread.so, found at runtime via the shim's -rpath $CONDA_PREFIX/lib).
@@ -119,7 +121,9 @@ libboost-python-devel = ">=1.88"
 hpack = ">=4"
 brotli-python = ">=1.1"
 gdb = ">=17.2,<18"
-binutils = ">=2.45.1,<3"
+# binutils is NOT pinned: it comes from the gcc/gxx wrapper, which exact-pins the
+# binutils_linux-64 build it was made against (gcc-13.2's wrapper -> binutils 2.40).
+# Forcing binutils >=2.45 here would exclude gcc 13.2 and drop the toolchain to gcc 12.4.
 gh = ">=2.96.0,<3"
 glab = ">=1.106.0,<2"
 paramiko = ">=5.0.0,<6"
@@ -166,9 +170,9 @@ pip = "*"
 setuptools = ">=61"
 cmake = ">=4.3.4,<5"          # drives the shim build (antigravity/CMakeLists.txt) in build_py
 ninja = ">=1.11"             # cmake generator for the shim build
-kernel-headers_linux-64 = ">=4"
-gcc_linux-64 = ">=11,<13.3"   # pulled by gxx; conda toolchain, not the Nix gcc on PATH
-gxx_linux-64 = ">=11,<13.3"   # all shim TUs are C++23 (Boost.Thread/Boost.Python) → conda g++
+kernel-headers_linux-64 = ">=6"   # -> sysroot 2.39 (matches 3D-CoT; relaxing binutils would otherwise drop it to 2.28/kh-4.18)
+gcc_linux-64 = ">=13,<13.3"   # pulled by gxx; conda toolchain, not the Nix gcc on PATH
+gxx_linux-64 = ">=13,<13.3"   # all shim TUs are C++23 (Boost.Thread/Boost.Python) → conda g++
 libboost-devel = ">=1.88"     # Boost.Thread (headers + libboost_thread) for the pybridge worker
 libboost-python-devel = ">=1.88"   # Boost.Python (embedding) — py313 build matches libpython3.13
 # codex build (build_py also compiles the vendored codex CLI, gnu-dynamic, linking the shared
@@ -220,7 +224,7 @@ no-build-isolation = ["flash-attn"]
 [tool.pixi.feature.local.dependencies]
 cmake = ">=4"
 ninja = "*"
-gxx_linux-64 = ">=11,<13.3"
+gxx_linux-64 = ">=13,<13.3"
 
 [tool.pixi.feature.local.activation.env]
 CUDA_HOME = "/usr/local/cuda-13.0"
