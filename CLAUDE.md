@@ -23,11 +23,12 @@ pixi shell                                             # interactive shell insid
 # from JavaScript without subprocess overhead.  It is compiled from source
 # against pixi's Python (--build-from-source) so the native addon links the
 # same libpython that owns numpy/torch/etc.  The embedded interpreter needs
-# PYTHONHOME=$CONDA_PREFIX to find conda's stdlib + site-packages; it is no
-# longer a global activation var (the agy/codex backends set it per-child), so
-# set it inline when running the smoke.  Recompile after a Python-version change.
+# PYTHONHOME=$CONDA_PREFIX to find conda's stdlib + site-packages; that is no
+# longer a global activation var (only the agy/codex launchers set it per-child),
+# so the `pymport-test` task carries it in its own `env`.  Recompile after a
+# Python-version change.
 pixi run npm-install                                   # compile pymport from source
-PYTHONHOME=$CONDA_PREFIX pixi run pymport-test          # smoke test: prints Python + numpy versions
+pixi run pymport-test                                  # smoke test: prints Python + numpy versions
 
 # Smoke tests (these ARE the test suite — no pytest, no lint config)
 python test_scripts/text_only.py --model claude-code   # choices: claude, claude-code, gpt, gemini, qwen, intern

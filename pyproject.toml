@@ -191,7 +191,9 @@ PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig"
 
 [tool.pixi.tasks]
 npm-install = "npm_config_build_from_source=true CXXFLAGS='-std=c++17' npm install"
-pymport-test = { cmd = "node -e \"const {pymport,proxify}=require('pymport'); const sys=proxify(pymport('sys')); console.log('Python',sys.version.toString()); const np=proxify(pymport('numpy')); console.log('numpy',np.__version__.toString());\"", depends-on = ["npm-install"] }
+# PYTHONHOME scoped to this task: the pymport-embedded interpreter needs it to find the conda
+# stdlib, and it's no longer a global activation var (only the agy/codex launchers set it per-child).
+pymport-test = { cmd = "node -e \"const {pymport,proxify}=require('pymport'); const sys=proxify(pymport('sys')); console.log('Python',sys.version.toString()); const np=proxify(pymport('numpy')); console.log('numpy',np.__version__.toString());\"", env = { PYTHONHOME = "$CONDA_PREFIX" }, depends-on = ["npm-install"] }
 
 # `pixi install` is the canonical build — setup.py's build_py compiles the antigravity shim +
 # wirecap_bridge AND the codex CLI (see [tool.pixi.package.host-dependencies]). The tasks below are
