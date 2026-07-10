@@ -134,6 +134,7 @@ clang = ">=22.1.8,<23"
 libclang = ">=22.1.8,<23"
 libcap = ">=2.78,<3"
 pygit2 = ">=1.19.3,<2"
+htop = ">=3.5.1,<4"
 
 # The antigravity shim build lives in antigravity/CMakeLists.txt (setup.py's build_py hook runs
 # `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …` during the package build,
@@ -179,17 +180,14 @@ libclang = ">=22.1.8,<23"
 openssl = "*"
 libcap = ">=2.78,<3"
 
-# --- pymport (Node.js ↔ Python bridge, compiled from source) ----------------
-# pymport embeds libpython as a shared library inside Node.js.  It must be
-# compiled from source (--build-from-source) so node-gyp links against pixi's
-# libpython3.13.  At runtime PYTHONHOME tells the embedded interpreter where
-# to find the conda env's stdlib + site-packages (numpy, torch, …).
+# PKG_CONFIG_PATH lets node-gyp find python3-embed when the `pymport-test` dev task
+# (a Node.js ↔ Python bridge diagnostic; not used by the package) compiles pymport.
+# No PYTHONHOME / LD_LIBRARY_PATH here: the agy/codex embedded interpreters get
+# PYTHONHOME per-child from their launchers (pyagy/pycodex `_env.py`), the codex
+# binary self-resolves libpython/Boost via its $ORIGIN RUNPATH, and the shim via the
+# loader's --library-path. (If you run `pymport-test`, set PYTHONHOME yourself.)
 [tool.pixi.activation.env]
-PYTHONHOME = "$CONDA_PREFIX"
 PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig"
-# The from-source codex binary bakes no RPATH — resolve its libpython/Boost from
-# this env's lib at runtime (the shim is unaffected: it carries an RPATH).
-LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
 [tool.pixi.tasks]
 npm-install = "npm_config_build_from_source=true CXXFLAGS='-std=c++17' npm install"

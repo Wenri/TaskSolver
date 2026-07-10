@@ -18,16 +18,16 @@ pixi install            # default env, GPU-free; `pixi install -e cuda` for the 
 pixi run python test_scripts/text_only.py --model claude-code
 pixi shell                                             # interactive shell inside the env
 
-# pymport (Node.js ↔ Python bridge)
+# pymport (Node.js ↔ Python bridge) — dev diagnostic, not used by the package
 # pymport embeds libpython3.13 inside Node.js so you can call Python libraries
 # from JavaScript without subprocess overhead.  It is compiled from source
 # against pixi's Python (--build-from-source) so the native addon links the
-# same libpython that owns numpy/torch/etc.  PYTHONHOME=$CONDA_PREFIX is set
-# as a pixi activation env var so the embedded interpreter discovers conda's
-# stdlib + site-packages at runtime.  If the pixi Python version changes,
-# recompile with `pixi run npm-install`.
+# same libpython that owns numpy/torch/etc.  The embedded interpreter needs
+# PYTHONHOME=$CONDA_PREFIX to find conda's stdlib + site-packages; it is no
+# longer a global activation var (the agy/codex backends set it per-child), so
+# set it inline when running the smoke.  Recompile after a Python-version change.
 pixi run npm-install                                   # compile pymport from source
-pixi run pymport-test                                  # smoke test: prints Python + numpy versions
+PYTHONHOME=$CONDA_PREFIX pixi run pymport-test          # smoke test: prints Python + numpy versions
 
 # Smoke tests (these ARE the test suite — no pytest, no lint config)
 python test_scripts/text_only.py --model claude-code   # choices: claude, claude-code, gpt, gemini, qwen, intern
