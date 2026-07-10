@@ -420,9 +420,9 @@ The shim's in-process module is **`pyagy.agy_process`** (loaded by `antigravity.
 which (at configure time) vendors the deps and then compiles
 `antigravity/vendor/antigravity.so`. Since the shim is x86-64-specific and a main
 target, the package is **arch-specific (linux-64)** (`[tool.pixi.package.build.config]
-noarch=false`) and the build is **required** — it fails loudly if the toolchain
-(g++ / frida-gum / libpython) is missing. Set `ANTIGRAVITY_SKIP_BUILD=1` to build
-just the Python library without the shim. (`cmake`, `ninja`, `hpack`, and `brotli-python`
+noarch=false`) and the build is **required, with no skip/opt-out** — it fails loudly
+if the toolchain (g++ / frida-gum / libpython) is missing, because a wheel without the
+shim can't run the `agy` backend. (`cmake`, `ninja`, `hpack`, and `brotli-python`
 are pixi/conda deps — no `pip install` needed.)
 
 pixi caches the package build, so **after an agy update** rebuild the shim explicitly via

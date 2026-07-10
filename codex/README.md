@@ -31,8 +31,9 @@ then re-apply the emit edits if they drifted, and re-run `pixi install` (which r
 ## Build + run
 Built from source as a **gnu-dynamic** ELF (NOT the static-musl release artifact — it must embed
 the pixi libpython) by **`pixi install`** (setup.py's build_py, after the shim) →
-`vendor/codex-rs/target/release/codex` (point `CODEX_BIN` elsewhere to override; `CODEX_SKIP_BUILD=1`
-skips the ~23-min compile). Needs `rust`, `clang`/`libclang`, `openssl`, `libcap` (pixi host-deps).
+`vendor/codex-rs/target/release/codex`, then bundled into the wheel at `pycodex/vendor/codex` and
+resolved package-only. The build is **required, with no skip/opt-out** (a wheel without codex can't
+run the `codex` backend). Needs `rust`, `clang`/`libclang`, `openssl`, `libcap` (pixi host-deps).
 Auth: `OPENAI_API_KEY` or `codex login`. Then:
 
     from pycodex import ask

@@ -10,19 +10,18 @@ produces everything (the package is arch-specific — linux-64; see
      (gnu-dynamic, linking the bridge from step 1 + libpython), via Cargo. This runs AFTER the
      shim so `libwirecap_bridge.a` exists for codex's build.rs.
 
-Both are REQUIRED and fail the build loudly (missing toolchain, fetch failure, etc.). Opt out of
-either with `ANTIGRAVITY_SKIP_BUILD=1` / `CODEX_SKIP_BUILD=1` (e.g. to build the pure-Python
-library, or to skip codex's heavy ~150-crate compile, on a host without that toolchain). This
-hook only runs when building tasksolver from source; installing a prebuilt package does not
-trigger it.
+Both are REQUIRED and fail the build loudly if the toolchain (cmake/ninja/cargo/boost/libclang/
+kernel-headers) or network (the agy download) is missing. There is NO opt-out: skipping either
+would ship a wheel whose `agy*`/`codex*` backends don't work — a broken package, not a lighter
+one — so a tasksolver build always produces the natives or fails. (This hook only runs when
+building from source; installing a prebuilt wheel does not trigger it.)
 
 After building, `_bundle_artifacts` copies the shim + agy into `pyagy/vendor/` and the
 (debug-stripped) codex into `pycodex/vendor/` INSIDE the wheel (build_lib), so the wheel is
 self-contained — the runtime resolver (`pyagy/pycodex/_env.py:_vendored`) finds them there (or, in
 a source/editable checkout, in the sibling `vendor/`). The artifacts are ALWAYS packaged, never
 supplied externally — there is no env-var override. `BinaryDistribution` forces the platform+ABI
-wheel tag. A skip-flag/pure-Python build (artifacts absent) still produces a valid wheel, but the
-`agy*`/`codex*` backends are then unavailable — use the skip flags only when you don't need them.
+wheel tag.
 """
 import os
 import shutil
@@ -52,11 +51,8 @@ class BuildPyNative(build_py):
         self._bundle_artifacts(root)         # copy (+strip codex) into the wheel under pyagy/pycodex
 
     def _build_antigravity_shim(self, root):
-        if os.environ.get("ANTIGRAVITY_SKIP_BUILD"):
-            sys.stderr.write("[setup] ANTIGRAVITY_SKIP_BUILD set — skipping antigravity.so build\n")
-            return
         if not os.path.isdir(os.path.join(root, "antigravity")):
-            return  # antigravity/ absent (e.g. partial checkout) — nothing to build
+            return  # antigravity/ absent (degenerate checkout with the source tree missing)
         # CMake + Ninja (both pixi host-dependencies) run the whole chain: configure fetches agy
         # (sha512-verified) + the frida-gum devkit into vendor/, then the build generates
         # symbols_gen.h from the committed symbols.json and compiles wirecap_bridge + the shim.
@@ -67,12 +63,9 @@ class BuildPyNative(build_py):
         sys.stderr.write("[setup] antigravity.so + wirecap_bridge built\n")
 
     def _build_codex(self, root):
-        if os.environ.get("CODEX_SKIP_BUILD"):
-            sys.stderr.write("[setup] CODEX_SKIP_BUILD set — skipping codex build\n")
-            return
         codex_rs = os.path.join(root, "codex", "vendor", "codex-rs")
         if not os.path.isdir(codex_rs):
-            return  # codex/ not vendored (e.g. partial checkout) — nothing to build
+            return  # codex-rs absent (degenerate checkout with the source tree missing)
         # cargo build the codex CLI in the DEFAULT host target (x86_64-unknown-linux-gnu, dynamic
         # glibc — NOT the static-musl release target, which can't embed the pixi libpython). Its
         # build.rs links the wirecap_bridge produced above + libpython. LIBCLANG_PATH lets
@@ -88,9 +81,9 @@ class BuildPyNative(build_py):
     def _bundle_artifacts(self, root):
         # Make the wheel self-contained: copy the native artifacts from their sibling vendor/
         # build dirs into the package tree under build_lib, so bdist_wheel zips them in and the
-        # runtime resolver (_vendored) finds them at pyagy/vendor/… and pycodex/vendor/…. Each
-        # copy is best-effort on existence: a skip-flag / pure-Python build (artifacts absent)
-        # simply yields a pure-Python wheel, with the env-var overrides as the delivery path.
+        # runtime resolver (_vendored) finds them at pyagy/vendor/… and pycodex/vendor/…. The
+        # existence check is defensive — after the required builds above the artifacts are present;
+        # it only no-ops on a degenerate sourceless checkout that skipped the builds entirely.
         jobs = [
             (os.path.join(root, "antigravity", "vendor", "antigravity.so"), "pyagy", "antigravity.so", False),
             (os.path.join(root, "antigravity", "vendor", "agy"),            "pyagy", "agy",            False),  # build-id coupled to the shim — never strip
