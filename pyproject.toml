@@ -187,6 +187,9 @@ libcap = ">=2.78,<3"
 [tool.pixi.activation.env]
 PYTHONHOME = "$CONDA_PREFIX"
 PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig"
+# The from-source codex binary bakes no RPATH — resolve its libpython/Boost from
+# this env's lib at runtime (the shim is unaffected: it carries an RPATH).
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
 [tool.pixi.tasks]
 npm-install = "npm_config_build_from_source=true CXXFLAGS='-std=c++17' npm install"
