@@ -11,12 +11,22 @@ libpython) scopes the injection to the one agy exec, leaving nothing shim-relate
 """
 import os
 
-# antigravity/ — the dir holding vendor/antigravity.so and the pyagy package.
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# AGY_SHIM overrides the vendored shim path — needed when pyagy is consumed as a wheel
-# (vendor/ never ships) and the artifacts live in a checkout. Must be the same build as
-# the agy that AGY_BIN points at (the shim is build-id coupled). Mirrors CODEX_BIN.
-SHIM = os.environ.get("AGY_SHIM") or os.path.join(ROOT, "vendor", "antigravity.so")
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pyagy
+
+
+def _vendored(in_pkg_rel, sibling_rel):
+    """Resolve a native artifact by layout. A self-contained wheel bundles it under the
+    package (``pyagy/vendor/…``); a source/editable checkout keeps it in the sibling
+    ``antigravity/vendor/…``. Prefer the in-package copy, fall back to the sibling; callers
+    OR an explicit env override (AGY_SHIM/AGY_BIN) ahead of this."""
+    in_pkg = os.path.join(_PKG_DIR, in_pkg_rel)
+    return in_pkg if os.path.exists(in_pkg) else os.path.join(_PKG_DIR, sibling_rel)
+
+
+# AGY_SHIM overrides the resolved shim path (dev escape hatch); otherwise the bundled
+# pyagy/vendor/antigravity.so (wheel) or the sibling antigravity/vendor/antigravity.so
+# (checkout). Must be the same build as the agy AGY_BIN/_VENDOR_AGY points at (build-id coupled).
+SHIM = os.environ.get("AGY_SHIM") or _vendored("vendor/antigravity.so", "../vendor/antigravity.so")
 
 
 def _elf_interp(path):

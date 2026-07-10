@@ -8,12 +8,22 @@ bridge decodes ``codex_turn``s into that file, which the client reads after the 
 """
 import os
 
-# codex/ — holds the pycodex package + the vendored + built codex binary.
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # .../codex
-# The from-source, wirecap-patched codex (gnu-dynamic; embeds the pixi libpython). Override with
-# CODEX_BIN. Built by `pixi run build-codex`.
-CODEX_BIN = os.environ.get("CODEX_BIN") or os.path.join(
-    ROOT, "vendor", "codex-rs", "target", "release", "codex")
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pycodex
+
+
+def _vendored(in_pkg_rel, sibling_rel):
+    """Resolve the codex binary by layout: a self-contained wheel bundles it under the package
+    (``pycodex/vendor/codex``); a source/editable checkout keeps the cargo output at the sibling
+    ``codex/vendor/codex-rs/target/release/codex``. Prefer in-package, fall back to sibling; the
+    CODEX_BIN env override is applied ahead of this."""
+    in_pkg = os.path.join(_PKG_DIR, in_pkg_rel)
+    return in_pkg if os.path.exists(in_pkg) else os.path.join(_PKG_DIR, sibling_rel)
+
+
+# The from-source, wirecap-patched codex (gnu-dynamic; embeds the pixi libpython). CODEX_BIN
+# overrides; otherwise the bundled pycodex/vendor/codex (wheel) or the cargo output in a checkout.
+CODEX_BIN = os.environ.get("CODEX_BIN") or _vendored(
+    "vendor/codex", "../vendor/codex-rs/target/release/codex")
 
 
 def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_env=None):

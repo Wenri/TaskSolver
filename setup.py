@@ -15,13 +15,31 @@ either with `ANTIGRAVITY_SKIP_BUILD=1` / `CODEX_SKIP_BUILD=1` (e.g. to build the
 library, or to skip codex's heavy ~150-crate compile, on a host without that toolchain). This
 hook only runs when building tasksolver from source; installing a prebuilt package does not
 trigger it.
+
+After building, `_bundle_artifacts` copies the shim + agy into `pyagy/vendor/` and the
+(debug-stripped) codex into `pycodex/vendor/` INSIDE the wheel (build_lib), so the wheel is
+self-contained — the runtime resolver (`pyagy/pycodex/_env.py:_vendored`) finds them there with
+no env vars or sibling checkout. `BinaryDistribution` forces the platform+ABI wheel tag. A
+skip-flag/pure-Python build (artifacts absent) still produces a valid wheel; consumers then
+supply the natives via `AGY_BIN`/`AGY_SHIM`/`CODEX_BIN`.
 """
 import os
+import shutil
 import subprocess
 import sys
 
-from setuptools import setup
+from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py
+
+
+class BinaryDistribution(Distribution):
+    """Force a non-purelib, platform+ABI-tagged wheel. The natives are produced by the build_py
+    hook (not setuptools ext_modules), so setuptools would otherwise tag the wheel py3-none-any;
+    has_ext_modules=True flips Root-Is-Purelib to false and yields e.g. cp313-cp313-linux_x86_64,
+    which correctly pins the wheel to the interpreter its bundled libpython was built against."""
+
+    def has_ext_modules(self):
+        return True
 
 
 class BuildPyNative(build_py):
@@ -30,6 +48,7 @@ class BuildPyNative(build_py):
         root = os.path.dirname(os.path.abspath(__file__))
         self._build_antigravity_shim(root)   # builds wirecap_bridge + antigravity.so
         self._build_codex(root)              # links the bridge from the shim step → must follow it
+        self._bundle_artifacts(root)         # copy (+strip codex) into the wheel under pyagy/pycodex
 
     def _build_antigravity_shim(self, root):
         if os.environ.get("ANTIGRAVITY_SKIP_BUILD"):
@@ -65,5 +84,32 @@ class BuildPyNative(build_py):
                        cwd=codex_rs, env=env, check=True)
         sys.stderr.write("[setup] codex built (gnu-dynamic, wirecap-patched)\n")
 
+    def _bundle_artifacts(self, root):
+        # Make the wheel self-contained: copy the native artifacts from their sibling vendor/
+        # build dirs into the package tree under build_lib, so bdist_wheel zips them in and the
+        # runtime resolver (_vendored) finds them at pyagy/vendor/… and pycodex/vendor/…. Each
+        # copy is best-effort on existence: a skip-flag / pure-Python build (artifacts absent)
+        # simply yields a pure-Python wheel, with the env-var overrides as the delivery path.
+        jobs = [
+            (os.path.join(root, "antigravity", "vendor", "antigravity.so"), "pyagy", "antigravity.so", False),
+            (os.path.join(root, "antigravity", "vendor", "agy"),            "pyagy", "agy",            False),  # build-id coupled to the shim — never strip
+            (os.path.join(root, "codex", "vendor", "codex-rs", "target", "release", "codex"), "pycodex", "codex", True),  # ~72% debuginfo — strip for the wheel
+        ]
+        for src, pkg, name, do_strip in jobs:
+            if not os.path.isfile(src):
+                sys.stderr.write(f"[setup] bundle: {src} absent — not bundling (pure-Python wheel)\n")
+                continue
+            dest_dir = os.path.join(self.build_lib, pkg, "vendor")
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = os.path.join(dest_dir, name)
+            shutil.copy2(src, dest)   # preserves the executable bit
+            if do_strip:
+                strip = os.environ.get("STRIP") or "strip"
+                try:
+                    subprocess.run([strip, "--strip-debug", dest], check=True)
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    sys.stderr.write(f"[setup] bundle: strip of {dest} failed ({exc}); shipping unstripped\n")
+            sys.stderr.write(f"[setup] bundled {pkg}/vendor/{name}\n")
 
-setup(cmdclass={"build_py": BuildPyNative})
+
+setup(distclass=BinaryDistribution, cmdclass={"build_py": BuildPyNative})

@@ -31,11 +31,13 @@ from multiprocessing.popen_fork import Popen as _ForkPopen
 from multiprocessing.popen_spawn_posix import _DupFd
 
 from . import conversations as _conv
-from ._env import ROOT, instrumented_env, preload_argv
+from ._env import _vendored, instrumented_env, preload_argv
 from ._term import answer_queries, answer_trust, strip_ansi
 from .conversations import ensure_git_workspace
 
-_VENDOR_AGY = os.path.join(ROOT, "vendor", "agy")   # the pinned agy whose build-id matches the shim
+# the pinned agy whose build-id matches the shim: bundled pyagy/vendor/agy (wheel) or the
+# sibling antigravity/vendor/agy (checkout). AGY_BIN overrides at the launch site below.
+_VENDOR_AGY = _vendored("vendor/agy", "../vendor/agy")
 
 
 def _close_agy(fd, boot_w):
