@@ -10,7 +10,6 @@ import os
 
 # codex/ — holds the pycodex package + the vendored + built codex binary.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # .../codex
-REPO = os.path.dirname(ROOT)                                          # repo root (holds wirecap)
 # The from-source, wirecap-patched codex (gnu-dynamic; embeds the pixi libpython). Override with
 # CODEX_BIN. Built by `pixi run build-codex`.
 CODEX_BIN = os.environ.get("CODEX_BIN") or os.path.join(
@@ -21,20 +20,20 @@ def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_e
     """Environment that enables the wirecap bridge in codex and points it at ``capture``.
 
     Sets the neutral bridge contract (``WIRE_ENABLE`` gates the bridge on; ``WIRE_MODULE`` is the
-    dispatch module; ``WIRE_PYTHONPATH`` gives the embedded interpreter both roots — repo-root for
-    ``wirecap`` + ``codex/`` for ``pycodex``). The binary bakes no RPATH and embeds the build
-    env's libpython: the caller's env must be same-version with the build env (its
-    ``LD_LIBRARY_PATH`` supplies libpython/Boost, and ``PYTHONHOME`` points the embedded
-    interpreter at the conda stdlib). ``OPENAI_API_KEY`` (if set) is inherited for API-key auth;
-    otherwise codex uses its ``~/.codex/auth.json`` login."""
+    dispatch module). No sys.path is injected: the bridge runs `site`, so the embedded interpreter
+    imports pycodex/wirecap from its own env's site-packages — the same install the parent runs.
+    The binary bakes no RPATH and embeds the build env's libpython, so the caller's env must be
+    same-version with the build env: its ``LD_LIBRARY_PATH`` supplies libpython/Boost, and
+    ``PYTHONHOME`` points the embedded interpreter at that env's stdlib + site-packages.
+    ``OPENAI_API_KEY`` (if set) is inherited for API-key auth; otherwise codex uses its
+    ``~/.codex/auth.json`` login."""
     env = dict(base if base is not None else os.environ)
     env["WIRE_ENABLE"] = "1"
     env["WIRE_MODULE"] = module
-    env["WIRE_PYTHONPATH"] = REPO + os.pathsep + ROOT
     env["WIRE_CAPTURE"] = os.path.abspath(capture)
     conda = env.get("CONDA_PREFIX")
     if conda and not env.get("PYTHONHOME"):
-        env["PYTHONHOME"] = conda          # embedded interpreter finds the conda stdlib
+        env["PYTHONHOME"] = conda          # embedded interpreter finds the conda stdlib + site-packages
     env.setdefault("CODEX_DISABLE_UPDATE_CHECK", "1")
     if extra_env:
         env.update(extra_env)

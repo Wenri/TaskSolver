@@ -34,8 +34,8 @@ typedef struct {
 } wire_event_t;
 
 /* Start the interpreter + worker thread. Reads env:
- *   WIRE_MODULE     python module to import (default "pyagy.agy_process")
- *   WIRE_PYTHONPATH os.pathsep-separated roots prepended to sys.path (each inserted at 0)
+ *   WIRE_MODULE     python module to import (default "pyagy.agy_process"); resolved from the
+ *                   embedded interpreter's own site-packages (site runs; PYTHONHOME selects the env)
  *   WIRE_MAXCOPY    max bytes copied per event (default 1<<20)
  * Returns 0 on success. Never aborts the host on failure. */
 int  wire_start(void);

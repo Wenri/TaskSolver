@@ -9,9 +9,10 @@ The patched codex build's embedded worker (wirecap/native) imports this module a
 They feed a correlator that pairs the request with its stream events and emits a decoded
 ``codex_turn`` (see :mod:`responses_decode`). Everything is recorded to the ``WIRE_CAPTURE`` JSONL.
 
-Stdlib-only (same rule as pyagy.agy_process): loaded by codex's embedded libpython under a bare
-interpreter with only ``WIRE_PYTHONPATH`` on ``sys.path`` — never import ``tasksolver`` or a
-non-stdlib package here (the shared decode layer it uses, ``wirecap.decode``, is itself pure).
+Stdlib-only (same rule as pyagy.agy_process): loaded by codex's embedded libpython, which resolves
+this module from its own env's site-packages (``site`` runs; ``PYTHONHOME`` selects the env) — never
+import ``tasksolver`` or a non-stdlib package here (the shared decode layer it uses, ``wirecap.decode``,
+is itself pure).
 """
 import json
 import os

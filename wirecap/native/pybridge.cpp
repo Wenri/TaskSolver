@@ -164,7 +164,6 @@ void PyBridge::worker_main()
 {
     const char *modname = std::getenv("WIRE_MODULE");
     if (!modname || !*modname) modname = "pyagy.agy_process";
-    const char *pypath = std::getenv("WIRE_PYTHONPATH");
     const char *mc = std::getenv("WIRE_MAXCOPY");
     if (mc && *mc) { long v = std::strtol(mc, nullptr, 0); if (v > 0) maxcopy_ = (size_t)v; }
 
@@ -175,20 +174,10 @@ void PyBridge::worker_main()
     try {
         bp::object sys = bp::import(bp::str("sys"));
         sys.attr("_wire_shim") = true;                 /* → Py_True */
-        /* WIRE_PYTHONPATH is os.pathsep-separated: the shared decode layer (wirecap.*) and the
-         * provider package (pyagy/pycodex) live under different roots, so more than one is needed.
-         * Insert each at 0 (disjoint top-level packages → relative order is irrelevant). */
-        if (pypath && *pypath) {
-            bp::object insert = sys.attr("path").attr("insert");
-            std::string sp(pypath);
-            for (size_t i = 0; i < sp.size(); ) {
-                size_t j = sp.find(':', i);
-                if (j == std::string::npos) j = sp.size();
-                if (j > i) insert(0, bp::str(sp.substr(i, j - i)));
-                i = j + 1;
-            }
-        }
-
+        /* No sys.path munging: Py_InitializeEx(0) runs `site`, so the embedded interpreter's own
+         * prefix (PYTHONHOME points it at the launching env) already carries site-packages. WIRE_MODULE
+         * (wirecap.* + pyagy/pycodex) is imported from that env's normal install — same copy the parent
+         * runs. The env must be the same Python version the artifact was built against. */
         bp::object mod = bp::import(bp::str(modname));
         bp::object disp = mod.attr("dispatch");         /* transient new-ref, destructs under the GIL */
         /* Pin ONE strong raw ref forever. dispatch_ MUST stay a raw PyObject* (not a bp::object) —

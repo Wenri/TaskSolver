@@ -19,18 +19,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHIM = os.environ.get("AGY_SHIM") or os.path.join(ROOT, "vendor", "antigravity.so")
 
 
-def _prepend(env, key, value, sep=os.pathsep):
-    existing = env.get(key)
-    env[key] = value + (sep + existing if existing else "")
-
-
 def _elf_interp(path):
     """The program interpreter (``PT_INTERP``) baked into an ELF — the dynamic loader the kernel
     would use to run it (e.g. ``/lib64/ld-linux-x86-64.so.2``). We invoke that loader explicitly so
     ``--preload`` injects the shim for this one exec instead of via an inherited ``LD_PRELOAD``.
     Parsed with LIEF; raises if the binary has no interpreter (statically linked). LIEF is imported
-    lazily so the shim's embedded interpreter — which imports ``pyagy.agy_process`` under ``-S``,
-    with no site-packages on the path — never needs it (only the parent-side launcher calls this)."""
+    lazily so the shim's embedded interpreter — which imports only the stdlib-pure decode layer, not
+    this launcher module — never needs it (only the parent-side launcher calls this)."""
     import lief
     binary = lief.parse(path)
     if binary is None:
@@ -65,22 +60,20 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
     """Environment for an instrumented agy run: points the shim's embedded interpreter at
     ``module`` (default ``pyagy.agy_process``) and writes hook events to the ``capture`` JSONL.
     The shim installs the full working hook union (wire + app + rpc) on every run — the only gate
-    is ``AGY_PROC_ENABLE`` (set here). This sets NO ``LD_PRELOAD``/``LD_LIBRARY_PATH``: the shim is
-    injected via :func:`preload_argv` (the loader's ``--preload``/``--library-path``) so nothing
+    is ``AGY_PROC_ENABLE`` (set here). This sets NO ``LD_PRELOAD``/``LD_LIBRARY_PATH``/``PYTHONPATH``:
+    the shim is injected via :func:`preload_argv` (the loader's ``--preload``/``--library-path``) and
+    the embedded interpreter finds pyagy/wirecap via ``site`` (see ``PYTHONHOME`` below), so nothing
     shim-related leaks into agy's children. Mirrors run-agy.sh; ``extra_env`` (applied last) can
     override any AGY_PROC* knob."""
-    root = root or ROOT
+    del root  # kept for signature compatibility; sys.path is no longer injected
     env = dict(base if base is not None else os.environ)
     env.update({
         "AGY_PROC_ENABLE": "1",
-        # WIRE_MODULE / WIRE_PYTHONPATH are the shared native bridge's contract (wirecap/native).
-        # The bridge splits WIRE_PYTHONPATH on os.pathsep and inserts each root — the shared
-        # `wirecap` package lives at the repo root, the `pyagy` package under antigravity/, so the
-        # embedded interpreter needs BOTH roots to import pyagy.agy_process (which imports wirecap).
-        # (Wheel install: both packages sit in root = site-packages, and the extra parent entry is
-        # the same-version stdlib dir — the consumer env must match the shim's Python version.)
+        # WIRE_MODULE is the shared native bridge's contract (wirecap/native). The bridge no longer
+        # takes a sys.path from us: Py_InitializeEx runs `site`, so the embedded interpreter imports
+        # pyagy.agy_process (+ wirecap) from its own env's site-packages — the same install the parent
+        # runs, pinned to that env by PYTHONHOME below. No PYTHONPATH is exported into agy's children.
         "WIRE_MODULE": module,
-        "WIRE_PYTHONPATH": os.path.dirname(root) + os.pathsep + root,
         "AGY_PROC_CAPTURE": os.path.abspath(capture),
         # install the os.OpenFile conversation-id probe (overlay) so instrumented runs learn
         # the exact conversation id in-process (agy doesn't expose it via env); mtime is the
@@ -91,7 +84,11 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
         "TERM": env.get("TERM", "xterm-256color"),
         "AGY_CLI_DISABLE_AUTO_UPDATE": "true",   # disable agy's background self-update
     })
-    _prepend(env, "PYTHONPATH", root)
+    # Point the embedded interpreter's prefix at the launching env (mirrors pycodex) so `site`
+    # resolves pyagy/wirecap from THIS env's site-packages — the same copy the parent imported —
+    # rather than the shim's build-env prefix. The env must be the shim's Python version.
+    if env.get("CONDA_PREFIX"):
+        env.setdefault("PYTHONHOME", env["CONDA_PREFIX"])
     if log:
         env["AGY_PROC_LOG"] = os.path.abspath(log)
     if extra_env:
