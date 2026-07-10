@@ -36,7 +36,7 @@ from ._term import answer_queries, answer_trust, strip_ansi
 from .conversations import ensure_git_workspace
 
 # the pinned agy whose build-id matches the shim: bundled pyagy/vendor/agy (wheel) or the
-# sibling antigravity/vendor/agy (checkout). AGY_BIN overrides at the launch site below.
+# sibling antigravity/vendor/agy (checkout) — never an external path.
 _VENDOR_AGY = _vendored("vendor/agy", "../vendor/agy")
 
 
@@ -140,9 +140,9 @@ class PtyPopen(_ForkPopen):
 
     # --- launch + lifecycle (the parts that differ from the stock fork Popen) ---
     def _launch(self, process_obj):
-        # instrumentation needs the build-id-matched binary: prefer an explicit agy_bin, then
-        # the AGY_BIN env override (tests/run-agy.sh point it at vendor/agy), else the pin.
-        agy = getattr(process_obj, "_agy_bin", None) or os.environ.get("AGY_BIN") or _VENDOR_AGY
+        # instrumentation needs the build-id-matched binary: an explicit programmatic agy_bin
+        # (tests inject one), else the packaged agy (_VENDOR_AGY — bundled or sibling, never external).
+        agy = getattr(process_obj, "_agy_bin", None) or _VENDOR_AGY
         workdir = ensure_git_workspace(getattr(process_obj, "_workdir", None))
         self._workspace = workdir                            # resolved workspace (AgyProcess.workspace)
         capture = getattr(process_obj, "_capture", None) or os.path.join(workdir, "agy-capture.jsonl")

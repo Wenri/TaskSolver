@@ -15,18 +15,17 @@ _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pyagy
 
 
 def _vendored(in_pkg_rel, sibling_rel):
-    """Resolve a native artifact by layout. A self-contained wheel bundles it under the
-    package (``pyagy/vendor/…``); a source/editable checkout keeps it in the sibling
-    ``antigravity/vendor/…``. Prefer the in-package copy, fall back to the sibling; callers
-    OR an explicit env override (AGY_SHIM/AGY_BIN) ahead of this."""
+    """Resolve a native artifact from within the package — never an external path. A
+    self-contained wheel bundles it under the package (``pyagy/vendor/…``); a source/editable
+    checkout keeps it in the sibling ``antigravity/vendor/…``. Prefer the in-package copy, fall
+    back to the sibling. No env override: the artifacts are always shipped with the package."""
     in_pkg = os.path.join(_PKG_DIR, in_pkg_rel)
     return in_pkg if os.path.exists(in_pkg) else os.path.join(_PKG_DIR, sibling_rel)
 
 
-# AGY_SHIM overrides the resolved shim path (dev escape hatch); otherwise the bundled
-# pyagy/vendor/antigravity.so (wheel) or the sibling antigravity/vendor/antigravity.so
-# (checkout). Must be the same build as the agy AGY_BIN/_VENDOR_AGY points at (build-id coupled).
-SHIM = os.environ.get("AGY_SHIM") or _vendored("vendor/antigravity.so", "../vendor/antigravity.so")
+# The bundled pyagy/vendor/antigravity.so (wheel) or the sibling antigravity/vendor/antigravity.so
+# (checkout) — build-id coupled to the agy that _VENDOR_AGY resolves to (same build).
+SHIM = _vendored("vendor/antigravity.so", "../vendor/antigravity.so")
 
 
 def _elf_interp(path):

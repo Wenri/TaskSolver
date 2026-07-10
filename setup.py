@@ -18,10 +18,11 @@ trigger it.
 
 After building, `_bundle_artifacts` copies the shim + agy into `pyagy/vendor/` and the
 (debug-stripped) codex into `pycodex/vendor/` INSIDE the wheel (build_lib), so the wheel is
-self-contained — the runtime resolver (`pyagy/pycodex/_env.py:_vendored`) finds them there with
-no env vars or sibling checkout. `BinaryDistribution` forces the platform+ABI wheel tag. A
-skip-flag/pure-Python build (artifacts absent) still produces a valid wheel; consumers then
-supply the natives via `AGY_BIN`/`AGY_SHIM`/`CODEX_BIN`.
+self-contained — the runtime resolver (`pyagy/pycodex/_env.py:_vendored`) finds them there (or, in
+a source/editable checkout, in the sibling `vendor/`). The artifacts are ALWAYS packaged, never
+supplied externally — there is no env-var override. `BinaryDistribution` forces the platform+ABI
+wheel tag. A skip-flag/pure-Python build (artifacts absent) still produces a valid wheel, but the
+`agy*`/`codex*` backends are then unavailable — use the skip flags only when you don't need them.
 """
 import os
 import shutil
