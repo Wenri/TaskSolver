@@ -88,6 +88,9 @@ preview = ["pixi-build"]
 [tool.pixi.dependencies]
 python = "3.13.*"
 tasksolver = { path = "." }
+# jiter (anthropic/openai's Rust JSON core): take the conda build, not the pypi wheel the SDKs
+# would pull, so it matches the 3D-CoT consumer's conda jiter.
+jiter = "*"
 nodejs = ">=25,<26"
 # NOTE: bun was removed — it pins icu 75, which conflicts with boost 1.91 (icu 78, pulled in
 # for Boost.Thread); nodejs (what pymport uses) is icu-78 and coexists fine. Re-add bun in a
