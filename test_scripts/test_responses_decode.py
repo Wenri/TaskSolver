@@ -95,11 +95,12 @@ def test_correlator_pre_parsed():
 
 
 def test_import_purity():
-    print("[purity] pycodex.codex_process imports stdlib-only under python3 -S")
+    print("[purity] pycodex.codex_process + wirecap.decode.mp_child imports stdlib-only under python3 -S")
     code = ("import sys; sys.path[:0] = [%r, %r]; import pycodex.codex_process.responses_decode; "
+            "import wirecap.decode.mp_child; "   # the shared embedded-child runner must stay stdlib-pure at import
             "assert 'tasksolver' not in sys.modules; print('pure')" % (_REPO, _CODEX))
     r = subprocess.run([sys.executable, "-S", "-c", code], capture_output=True, text=True)
-    check(r.returncode == 0 and "pure" in r.stdout, "purity: codex_process is stdlib-only (python3 -S)")
+    check(r.returncode == 0 and "pure" in r.stdout, "purity: codex_process + mp_child are stdlib-only (python3 -S)")
     if r.returncode != 0:
         print(r.stderr)
 

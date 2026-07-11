@@ -1,23 +1,37 @@
-"""In-agy child runner for AgyProcess — make the shim's embedded interpreter act as a
+"""In-host child runner — make a wirecap-instrumented CLI's embedded interpreter act as a
 REAL `multiprocessing.spawn` child, WITHOUT the process-ownership teardown that stock
-`spawn_main`/`_bootstrap` would inflict on agy (which owns the process, not us).
+`spawn_main`/`_bootstrap` would inflict on the host (agy/codex own the process, not us).
 
-Started on a daemon thread by `agy_process.__init__` when the worker channel is wired
-(`WIRE_MP_BOOT_FD` is set), so a blocking `get()` here can't starve the hook-dispatch worker
+Shared by every wrapper (pyagy, pycodex): the parent launches the host through a
+`wirecap.runtime.process.WirePopen`, which wires a boot pipe (`WIRE_MP_BOOT_FD`) + a caller-owned
+result `SimpleQueue`; this module (loaded into the embedded interpreter as part of the WIRE_MODULE
+import) unpickles the spawn payload off the boot pipe and runs the pickled target, which `.put`s
+native Python objects home over that queue.
+
+Started on a daemon thread by the provider's WIRE_MODULE `__init__` when the worker channel is
+wired (`WIRE_MP_BOOT_FD` set), so a blocking `get()` here can't starve the hook-dispatch worker
 (blocking releases the GIL).
 
-The three neutralizations (see plan why-make-agy-a-splendid-rainbow.md):
-  * `sys.stdin = None`            → `util._close_stdin()` early-returns (won't close the PTY's fd 0)
-  * `threading._shutdown` no-op   → `_bootstrap`'s finally won't tear down agy's threads
+The three neutralizations:
+  * `sys.stdin = None`            → `util._close_stdin()` early-returns (won't close the host's fd 0)
+  * `threading._shutdown` no-op   → `_bootstrap`'s finally won't tear down the host's threads
   * trimmed `prepare()`           → apply authkey/name only; skip sys.path=/os.chdir/_fixup_main
 We call `proc._bootstrap()` DIRECTLY (not `spawn_main`), which also skips its `sys.exit()`
 and the `is_forking(sys.argv)` assert. `_bootstrap` runs the target and RETURNS the exitcode.
+
+Stdlib-only (same rule as the WIRE_MODULE it is loaded beside): the only provider touch is a
+RUNTIME `importlib.import_module(os.environ["WIRE_MODULE"])` inside `stream_turns` (never at import).
 """
 import os
 import sys
 import threading
 import time
 import traceback
+
+# Completion sentinels the target/runner puts on the result queue (the parent compares the imported
+# symbols, so the wire never drifts on a string literal). Tuple tag → distinguishable from turn dicts.
+DONE = "_wire_done"   # ("_wire_done", exitcode) — normal completion (host owns process lifetime)
+EXC = "_wire_exc"     # ("_wire_exc", traceback) — the target raised; firewalled off Py_Exit
 
 _result_conn = None   # the result SimpleQueue (child side), sourced from proc._args[0] in _run;
 #                       the target puts objects here (also handed to the target as its arg0)
@@ -37,8 +51,8 @@ def _set_cloexec(fd):
 
 def _trimmed_prepare(data):
     # Only what a child legitimately needs; SKIP the process-hostile bits of the stock
-    # spawn.prepare(): sys.path= (drops the shim's PYTHONPATH), os.chdir (moves agy's cwd),
-    # sys.argv=, and _fixup_main_* (re-imports the parent's __main__ into agy).
+    # spawn.prepare(): sys.path= (drops the shim's PYTHONPATH), os.chdir (moves the host's cwd),
+    # sys.argv=, and _fixup_main_* (re-imports the parent's __main__ into the host).
     from multiprocessing import process
     if data.get("name"):
         process.current_process().name = data["name"]
@@ -53,26 +67,30 @@ def _run():
     global _result_conn
     from multiprocessing import reduction, resource_tracker
     boot = int(os.environ["WIRE_MP_BOOT_FD"])
-    # keep boot open in-process (it's the parent-death sentinel), but CLOEXEC so agy's own Go
+    # keep boot open in-process (it's the parent-death sentinel), but CLOEXEC so the host's own
     # child processes don't inherit it
     _set_cloexec(boot)
     with os.fdopen(boot, "rb", closefd=False) as fp:  # closefd=False: boot outlives the read — the parent
         tracker_fd = reduction.pickle.load(fp)      #   holds its write end open, so boot's EOF = our death
         # Re-attach to the parent's resource_tracker (as spawn_main does) so the queue's SemLocks share
         # it instead of this interpreter booting a second tracker. CLOEXEC: keep it in-process; don't
-        # leak it into agy's Go child processes. Installed BEFORE proc unpickles, so the queue's
+        # leak it into the host's child processes. Installed BEFORE proc unpickles, so the queue's
         # SemLocks (rebuilt with proc's args) re-attach to this tracker rather than a fresh one.
         resource_tracker._resource_tracker._fd = tracker_fd
         _set_cloexec(tracker_fd)
         prep = reduction.pickle.load(fp)
         _trimmed_prepare(prep)
-        proc = reduction.pickle.load(fp)            # the AgyProcess instance (target + args)
+        proc = reduction.pickle.load(fp)            # the WireProcess instance (target + args)
 
     # The result SimpleQueue rides proc's args (arg0 = result conn, stock-mp style: the caller passes
-    # it via AgyProcess(target=..., args=(q,))). Pull it out for get_result_conn() + the firewall
+    # it via WireProcess(target=..., args=(q,))). Pull it out for get_result_conn() + the firewall
     # puts below; the pipe fds were inherited across execve, the SemLocks sem_opened by name.
     _result_conn = proc._args[0]
     _result_conn._reader.close()                    # child only puts; drop the inherited reader end
+    # CLOEXEC the writer too: the host spawns its own tool grandchildren (codex runs shells/apply_patch),
+    # and if they inherited this writer they'd pin the pipe so the parent never sees EOF on our death.
+    # CLOEXEC affects execve only, not this daemon thread's put()s — safe, and it also tightens agy.
+    _set_cloexec(_result_conn._writer.fileno())
 
     sys.stdin = None                                 # neutralization 1
     _orig_shutdown = threading._shutdown             # neutralization 2
@@ -86,13 +104,13 @@ def _run():
     except BaseException as e:                       # firewall: an escaped error must never reach Py_Exit
         exitcode = 1
         try:
-            _result_conn.put(("_agy_exc", "".join(traceback.format_exception(e))))
+            _result_conn.put((EXC, "".join(traceback.format_exception(e))))
         except Exception:
             pass
     finally:
         threading._shutdown = _orig_shutdown
     try:
-        _result_conn.put(("_agy_done", exitcode))   # completion sentinel (agy owns process lifetime)
+        _result_conn.put((DONE, exitcode))          # completion sentinel (host owns process lifetime)
     except Exception:
         pass
 
@@ -105,7 +123,7 @@ def main():
 
 
 def start():
-    """Run the child on a daemon thread (called from agy_process import when the embedded-worker
+    """Run the child on a daemon thread (called from the WIRE_MODULE import when the embedded-worker
     channel is wired). No-op if the boot fd is absent or stale."""
     try:
         boot = int(os.environ.get("WIRE_MP_BOOT_FD", "-1"))
@@ -114,20 +132,24 @@ def start():
         os.fstat(boot)
     except (ValueError, OSError):
         return
-    threading.Thread(target=main, name="agy-mp-child", daemon=True).start()
+    threading.Thread(target=main, name="wire-mp-child", daemon=True).start()
 
 
 def stream_turns(conn, kinds=None, max_wait=300):
-    """Built-in AgyProcess target: stream agy's DECODED model turns home over the result queue
-    `conn` — arg0, passed by the caller via ``AgyProcess(target=stream_turns, args=(q,))`` (stock-mp
-    style) — as they're produced, until agy exits (the parent then sees EOF on get()) or max_wait.
-    The shim always installs the capture hooks, so genai_turn events flow. Uses a subscribe
-    → in-process queue → single-sender loop, so the put side has no cross-thread race."""
+    """Built-in WireProcess target: stream the host's DECODED model turns home over the result queue
+    `conn` — arg0, passed by the caller via ``WireProcess(target=stream_turns, args=(q,))`` (stock-mp
+    style) — as they're produced, until the host exits (the parent then sees EOF on get()) or max_wait.
+    `subscribe` is resolved from the live WIRE_MODULE (the provider's in-process module) so this stays
+    provider-neutral. `kinds` None = every decoded dict; else only those kinds — the parent filters
+    again, so a superset here is harmless. Uses a subscribe → in-process queue → single-sender loop,
+    so the put side has no cross-thread race."""
+    import importlib
     import queue as _q
-    from . import subscribe as _subscribe
-    kinds = set(kinds or ("genai_turn", "app_response", "resp_text", "resp_thinking"))
+    subscribe = importlib.import_module(os.environ["WIRE_MODULE"]).subscribe
+    want = set(kinds) if kinds else None
     q = _q.Queue()
-    _subscribe(lambda obj: q.put(obj) if isinstance(obj, dict) and obj.get("kind") in kinds else None)
+    subscribe(lambda obj: q.put(obj) if isinstance(obj, dict) and obj.get("kind")
+              and (want is None or obj["kind"] in want) else None)
     end = time.time() + max_wait
     while time.time() < end:
         try:
@@ -147,10 +169,10 @@ def _demo_target(conn, *args, **kwargs):
     # and is_alive() is True here because the parent is alive (its boot-pipe write end is open).
     import multiprocessing as _mp
     parent = _mp.parent_process()
-    conn.put({"agy_mp": "ok", "args": args, "kwargs": kwargs,
+    conn.put({"wire_mp": "ok", "args": args, "kwargs": kwargs,
               "pid": os.getpid(), "py": sys.version.split()[0],
               "parent_alive": parent.is_alive(), "ppid": parent.pid})
 
 
 def _raise_target(conn, *args, **kwargs):
-    raise ValueError("agy-mp boom")   # -> _bootstrap catches it, exitcode 1 over ("_agy_done", 1)
+    raise ValueError("wire-mp boom")   # -> _bootstrap catches it, exitcode 1 over (EXC, tb) then (DONE, 1)

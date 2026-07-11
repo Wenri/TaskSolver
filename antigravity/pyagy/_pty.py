@@ -14,7 +14,7 @@ queue in its args) + the resource_tracker fd, inherited across agy's execve. Lik
 (client.py) creates the SimpleQueue, passes it as a target arg, and drains it via `_service` —
 which services the PTY (drain + answer queries) while waiting on the caller-supplied reader, so no
 background thread is needed. The PTY transcript is kept on `self.raw` (via `transcript`) as a
-diagnostic byproduct. See `agy_process/mp_child.py`.
+diagnostic byproduct. See `wirecap/decode/mp_child.py`.
 
 `AgyProcess` (pyagy/agyprocess.py) is the user-facing `SpawnProcess` handle; this is its `_Popen`.
 """

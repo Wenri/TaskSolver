@@ -219,7 +219,7 @@ def dispatch(kind, stream_id, data):
 # target can consume decoded events in-process AND stream results over the Connection.
 if os.environ.get("WIRE_MP_BOOT_FD") and getattr(sys, "_wire_shim", False):
     try:
-        from . import mp_child
+        from wirecap.decode import mp_child
         mp_child.start()
     except Exception:
         traceback.print_exc()

@@ -42,6 +42,7 @@ from ._term import answer_text as _answer_text
 from ._pty import service_many as _service_many
 from .agyprocess import AgyProcess
 from .conversations import ensure_git_workspace
+from wirecap.decode.mp_child import DONE as _DONE, EXC as _EXC   # result-queue completion sentinels
 
 _UNIQ = [0]
 _ANSWER_KINDS = ("genai_turn", "app_response")   # decoded objects the default target streams home
@@ -381,7 +382,7 @@ def _close_channel(q):
 
 def _collect(proc, q, timeout=300.0, kinds=_ANSWER_KINDS):
     """One-shot: drain the PTY and collect the decoded objects (of ``kinds``) the target streams home
-    over ``q`` until agy exits / the target signals done (``_agy_done``/``_agy_exc``) / ``timeout``.
+    over ``q`` until agy exits / the target signals done (``_wire_done``/``_wire_exc``) / ``timeout``.
     Returns the dicts in arrival order (possibly empty; use ``proc.transcript`` as the fallback)."""
     reader = q._reader
     got, start = [], time.time()
@@ -390,7 +391,7 @@ def _collect(proc, q, timeout=300.0, kinds=_ANSWER_KINDS):
             try:
                 while reader.poll(0):
                     o = q.get()
-                    if isinstance(o, tuple) and o and o[0] in ("_agy_done", "_agy_exc"):
+                    if isinstance(o, tuple) and o and o[0] in (_DONE, _EXC):
                         proc.reap()                 # reap agy so exit_status is set
                         return got
                     if isinstance(o, dict) and o.get("kind") in kinds:
@@ -457,7 +458,7 @@ def _collect_many(procs, queues, timeout=300.0, kinds=_ANSWER_KINDS):
             try:
                 while r.poll(0):
                     o = queues[i].get()
-                    if isinstance(o, tuple) and o and o[0] in ("_agy_done", "_agy_exc"):
+                    if isinstance(o, tuple) and o and o[0] in (_DONE, _EXC):
                         procs[i].reap()               # reap agy so exit_status is set
                         done[i] = True
                         break

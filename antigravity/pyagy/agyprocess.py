@@ -4,7 +4,7 @@
 Modeled on stock ``Process``: it does NOT own the result channel. The **caller** creates the result
 ``SimpleQueue`` and passes it as a target arg — ``AgyProcess(target=stream_turns, args=(q,))`` — so
 it rides ``process_obj``'s pickle, exactly like ``Process(target=f, args=(q,))``. The target (default
-``agy_process.mp_child.stream_turns``) runs inside agy's embedded interpreter and ``.put``s decoded
+``wirecap.decode.mp_child.stream_turns``) runs inside agy's embedded interpreter and ``.put``s decoded
 objects on that queue; the caller (client.py) drains it via ``service_pty(timeout, [q._reader])`` +
 ``q.get()``. The PTY transcript is drained as a byproduct and kept on ``transcript`` for diagnostics
 (crashes, and a fallback answer when no turn decodes).
@@ -14,7 +14,7 @@ objects on that queue; the caller (client.py) drains it via ``service_pty(timeou
     q = get_context("spawn").SimpleQueue()
     p = AgyProcess(prompt="What is 2+2?", args=(q,)); p.start(); q._writer.close()
     while p.service_pty(1.0, [q._reader]):
-        obj = q.get()                       # decoded turns; ("_agy_done", code) on completion
+        obj = q.get()                       # decoded turns; ("_wire_done", code) on completion
         ...
     p.close()
 
@@ -70,7 +70,7 @@ class AgyProcess(SpawnProcess):
                  capture=None, data_dir=None, trust=True, extra_env=None, echo=False,
                  daemon=None):
         if target is None:               # default worker: stream agy's decoded answer home
-            from .agy_process.mp_child import stream_turns
+            from wirecap.decode.mp_child import stream_turns
             target = stream_turns
         super().__init__(group=None, target=target, name=name,
                          args=args, kwargs=(kwargs or {}), daemon=daemon)

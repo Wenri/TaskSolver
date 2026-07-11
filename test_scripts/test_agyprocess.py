@@ -20,14 +20,14 @@ sys.path.insert(0, _ANTI)
 sys.path.insert(0, _REPO)
 
 from pyagy.agyprocess import AgyProcess                       # noqa: E402
-from pyagy.agy_process.mp_child import _demo_target, _raise_target, stream_turns  # noqa: E402
+from wirecap.decode.mp_child import _demo_target, _raise_target, stream_turns, DONE  # noqa: E402
 from pyagy.client import _new_channel, _close_channel, _ask_turn  # noqa: E402  (caller-side helpers)
 
 _fail = []
 
 
 def _drain(p, q, n=2, timeout=45):
-    """Collect up to ``n`` RAW objects off the caller's queue (incl. the ("_agy_done", code)
+    """Collect up to ``n`` RAW objects off the caller's queue (incl. the (DONE, code)
     sentinel), draining the PTY in the same wait via ``service_pty`` (no background thread)."""
     got, end, reader = [], time.time() + timeout, q._reader
     while time.time() < end and len(got) < n:
@@ -57,10 +57,10 @@ def case_roundtrip():
     p = AgyProcess(target=_demo_target, args=(q, "hi", 7)); p.start(); q._writer.close()
     got = _drain(p, q); _teardown(p, q)
     obj = next((x for x in got if isinstance(x, dict)), None)
-    done = any(x == ("_agy_done", 0) for x in got)
+    done = any(x == (DONE, 0) for x in got)
     # parent_alive/ppid exercise the parent-death sentinel: parent_process() sees the controlling
     # process (our pid) and reports it alive (the boot pipe only EOFs when we die).
-    ok = obj is not None and obj.get("agy_mp") == "ok" and list(obj.get("args", ())) == ["hi", 7] \
+    ok = obj is not None and obj.get("wire_mp") == "ok" and list(obj.get("args", ())) == ["hi", 7] \
         and obj.get("py", "").startswith("3.13") and done \
         and obj.get("parent_alive") is True and obj.get("ppid") == os.getpid()
     print(f"  {'ok  ' if ok else 'FAIL'} round-trip: native object + clean exitcode + parent sentinel  got={got}")
@@ -70,11 +70,11 @@ def case_roundtrip():
 
 def case_exception():
     # target raises → mp's _bootstrap catches it and returns exitcode 1 (traceback to agy's
-    # stderr); the parent sees ("_agy_done", 1). (agy's own process exitcode is separate.)
+    # stderr); the parent sees (DONE, 1). (agy's own process exitcode is separate.)
     q = _new_channel()
     p = AgyProcess(target=_raise_target, args=(q,)); p.start(); q._writer.close()
     got = _drain(p, q); _teardown(p, q)
-    ok = any(x == ("_agy_done", 1) for x in got)
+    ok = any(x == (DONE, 1) for x in got)
     print(f"  {'ok  ' if ok else 'FAIL'} exception: firewalled, target exitcode 1  got={got}")
     if not ok:
         _fail.append("exception")
