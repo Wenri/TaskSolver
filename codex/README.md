@@ -38,3 +38,13 @@ Auth: `OPENAI_API_KEY` or `codex login`. Then:
 
     from pycodex import ask
     r = ask("What is 2+2?")            # -> CodexResponse(.text, .model, .usage, .request, .turns)
+
+## Transport
+`pycodex` drives codex through the **same wirecap mp-child machinery as agy** (the shared
+`wirecap.runtime.process.WirePopen`/`WireProcess` base + `wirecap.decode.mp_child`): `ask()` launches
+`codex exec` as a `multiprocessing.spawn` child over a boot pipe, and the compiled-in bridge's
+`mp_child` streams decoded `codex_turn`s home over a result `SimpleQueue`. codex is a non-TTY
+one-shot (no PTY; unlike agy) with **no terminal signal to Python**, so completion is death-based
+(`os.pidfd_open`, or EOF+reap where pidfd is unavailable) and the durable `WIRE_CAPTURE` JSONL stays
+**authoritative** for the returned turns — the live stream is a parity bonus surfaced as
+`CodexResponse.n_streamed`.

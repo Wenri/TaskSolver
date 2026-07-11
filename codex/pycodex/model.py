@@ -43,7 +43,7 @@ class CodexModel(object):
                 "codex exec returned no output "
                 f"(exit_status={r.exit_status}, workspace={r.workspace}). "
                 "Ensure codex is authenticated (OPENAI_API_KEY or `codex login`) and the "
-                f"built binary exists (`pixi run build-codex`).\nTranscript head:\n{r.transcript[:500]}")
+                f"built binary exists (`pixi install`).\nTranscript head:\n{r.transcript[:500]}")
         return {"result": r.text, "transcript": r.transcript, "exit_status": r.exit_status,
                 "workspace": r.workspace, "model": r.model, "usage": r.usage}
 

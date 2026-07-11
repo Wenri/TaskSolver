@@ -1,10 +1,14 @@
 """Environment + argv wiring for an instrumented codex run.
 
-Unlike pyagy (which LD-preloads a shim into a closed Go binary under a PTY), codex is built
-from source with the wirecap bridge compiled in, and ``codex exec`` is a non-TTY one-shot — so
-this is much simpler: no shim/preload, no PTY, no embedded-worker channel. We just point the
-already-instrumented codex at a capture JSONL via the neutral ``WIRE_*`` knobs and run it; the
-bridge decodes ``codex_turn``s into that file, which the client reads after the run.
+Unlike pyagy (which LD-preloads a shim into a closed Go binary), codex is built from source with
+the wirecap bridge compiled in, and ``codex exec`` is a non-TTY one-shot — so there is no
+shim/preload and no PTY. It DOES use the same embedded-worker channel as agy: the launcher
+(``codexprocess.CodexPopen``, on the shared ``wirecap.runtime.process`` base) injects
+``WIRE_MP_BOOT_FD`` so the bridge's ``wirecap.decode.mp_child`` streams decoded ``codex_turn``s home
+over a result queue. This module only builds the run env (the neutral ``WIRE_*`` knobs +
+``PYTHONHOME`` + auth passthrough) and the ``codex exec`` argv — ``WIRE_MP_BOOT_FD`` is added by the
+launcher, and the bridge also records every turn to the ``WIRE_CAPTURE`` JSONL (which stays
+authoritative for the returned turns).
 """
 import os
 
