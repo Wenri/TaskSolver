@@ -26,7 +26,7 @@ transcript over the PTY (a byproduct on ``transcript``).
 """
 import time
 
-from multiprocessing.context import SpawnProcess
+from wirecap.runtime.process import WireProcess
 
 from . import conversations as _conv
 from ._pty import PtyPopen
@@ -52,12 +52,12 @@ def _agy_argv(prompt, persistent, model, skip_permissions, extra_flags,
     return argv
 
 
-class AgyProcess(SpawnProcess):
-    """`multiprocessing.Process`-shaped handle for an agy run (always instrumented, always a
-    worker). Like stock ``Process`` it does not own the result channel: the caller passes a
-    ``SimpleQueue`` via ``args=(q,)`` and drains it (see client.py's collect/ask/collect_many, which
-    use ``service_pty`` + ``q.get()``). The PTY transcript is a byproduct on ``transcript`` (used for
-    crash/fallback diagnostics)."""
+class AgyProcess(WireProcess):
+    """`WireProcess` handle for an agy run (always instrumented, always a worker). Like stock
+    ``Process`` it does not own the result channel: the caller passes a ``SimpleQueue`` via
+    ``args=(q,)`` and drains it (see client.py's collect/ask/collect_many, which use ``service_pty``
+    + ``q.get()``). ``reap``/``exit_status``/``close`` are inherited from ``WireProcess``; the PTY
+    transcript is a byproduct on ``transcript`` (used for crash/fallback diagnostics)."""
 
     @staticmethod
     def _Popen(process_obj):
@@ -69,11 +69,7 @@ class AgyProcess(SpawnProcess):
                  conversation_id=None, continue_latest=False, workdir=None,
                  capture=None, data_dir=None, trust=True, extra_env=None, echo=False,
                  daemon=None):
-        if target is None:               # default worker: stream agy's decoded answer home
-            from wirecap.decode.mp_child import stream_turns
-            target = stream_turns
-        super().__init__(group=None, target=target, name=name,
-                         args=args, kwargs=(kwargs or {}), daemon=daemon)
+        super().__init__(target=target, name=name, args=args, kwargs=kwargs, daemon=daemon)
         # argv: an explicit agy_args tail wins; else assemble it from the flags. One-shot uses
         # `agy --print <prompt>`; persistent uses `--prompt-interactive` (drive via .ask()/.send()).
         self._agy_args = agy_args if agy_args is not None else _agy_argv(
@@ -107,11 +103,6 @@ class AgyProcess(SpawnProcess):
     @last_output.setter
     def last_output(self, ts):
         self._popen._last_output = ts
-
-    def reap(self):
-        """Non-blocking reap of agy so ``exit_status`` is set; True once it has exited. The caller's
-        collect loop calls this when the target signals done / the queue EOFs."""
-        return self._popen.exited()
 
     @property
     def conversation_id(self):
@@ -158,18 +149,3 @@ class AgyProcess(SpawnProcess):
     def home(self):
         """The scoped HOME for this run (data_dir scoping), or None for the global store."""
         return getattr(self._popen, "_home", None)
-
-    @property
-    def exit_status(self):
-        """agy's raw waitpid exit status, or None if not yet reaped."""
-        return self._popen.status
-
-    def close(self, interrupt=False):
-        """Stop agy (``interrupt=True`` presses Ctrl-C first, for the TUI) and close the PTY."""
-        self._popen.close(interrupt=interrupt)
-        # We reap agy ourselves (agy owns its lifetime), so multiprocessing's active-children set
-        # never sees it exit — drop it, else this Process (and the result SimpleQueue it carries in
-        # ``args``, with its two named semaphores) is pinned in `_children` and leaks until
-        # interpreter exit instead of being GC'd + sem_unlinked once the caller releases the handle.
-        from multiprocessing.process import _children
-        _children.discard(self)
