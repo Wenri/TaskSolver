@@ -107,15 +107,65 @@ class VLLMModel(object):
             base_url=self.base_url,
             timeout=180.0,
         )
-        response = client.chat.completions.create(
+
+        stream = client.chat.completions.create(
             model=self.model,
             messages=payload["messages"],
             max_tokens=payload["max_tokens"],
             n=n_choices,
             extra_body=self._default_extra_body(),
+            stream=True,
+            stream_options={"include_usage": True},
         )
 
-        response = response.dict()
+        choice_state = {
+            i: {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                },
+                "finish_reason": None,
+            }
+            for i in range(n_choices)
+        }
+        usage = None
+
+        for chunk in stream:
+            chunk_dict = chunk.dict()
+
+            if chunk_dict.get("usage"):
+                usage = chunk_dict["usage"]
+
+            for choice in chunk_dict["choices"]:
+                index = choice["index"]
+                delta = choice["delta"]
+
+                if delta.get("role"):
+                    choice_state[index]["message"]["role"] = delta["role"]
+
+                if delta.get("content"):
+                    choice_state[index]["message"]["content"] += delta["content"]
+
+                if delta.get("reasoning_content"):
+                    message = choice_state[index]["message"]
+                    message["reasoning_content"] = (
+                        message.get("reasoning_content", "") + delta["reasoning_content"]
+                    )
+
+                if choice.get("finish_reason"):
+                    choice_state[index]["finish_reason"] = choice["finish_reason"]
+
+        response = {
+            "choices": [
+                {
+                    "message": choice_state[i]["message"],
+                    "finish_reason": choice_state[i]["finish_reason"],
+                }
+                for i in range(n_choices)
+            ],
+            "usage": usage,
+        }
+
         messages = []
         for choice in response["choices"]:
             message = choice["message"]

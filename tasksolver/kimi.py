@@ -128,7 +128,7 @@ class KimiModel(object):
     @staticmethod
     def prepare_payload(
         question: Question,
-        max_tokens=1000,
+        max_tokens=100000,
         verbose: bool = False,
         prepend: Union[dict, None] = None,
         **kwargs,
@@ -174,7 +174,7 @@ class KimiModel(object):
     def rough_guess(
         self,
         question: Question,
-        max_tokens=1000,
+        max_tokens=100000,
         max_tries=1,
         query_id: int = 0,
         verbose=False,
@@ -225,7 +225,7 @@ class KimiModel(object):
         self,
         num_threads: int,
         question: Question,
-        max_tokens=1000,
+        max_tokens=100000,
         verbose=False,
         max_tries=1,
     ) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
@@ -272,6 +272,6 @@ class KimiModel(object):
 
         return parsed_response, response, meta_data, p
 
-    def run_once(self, question: Question, max_tokens=1000, **kwargs):
+    def run_once(self, question: Question, max_tokens=100000, **kwargs):
         q = self.task.first_question(question)
         return self.rough_guess(q, max_tokens=max_tokens, **kwargs)
