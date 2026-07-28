@@ -32,13 +32,24 @@ endif()
 
 set(GUM "${CMAKE_SOURCE_DIR}/vendor/frida-gum")
 
-# ---- pinned agy release (bump via symbols/agy_update.sh, then keep these three in sync) --------
+# ---- pinned agy release (keep these three in sync; then `pixi run shim-symbols`) ---------------
 # agy self-updates in the background, so a local install's build-id DRIFTS; we vendor a PINNED,
 # sha512-verified release so the addresses in symbols.json stay valid. AGY_BIN is an escape hatch:
 # point it at a local agy build to vendor instead of downloading (must match symbols.json's build-id).
-set(AGY_VERSION "1.0.16")
-set(AGY_URL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.0.16-4893150192467968/linux-x64/cli_linux_x64.tar.gz")
-set(AGY_SHA512 "2e3362fb360d350285c3a79891772652ea56608121e4e89091abe553e8203c379e30bac86bde109ecc0b3266cb6eb871a68ef28a993aeca7944456f0f720ae31")
+#
+# Pinned from the GitHub releases (github.com/google-antigravity/antigravity-cli), NOT the GCS
+# auto-updater: the updater only ever serves "latest" and the bucket denies listing, so it cannot
+# fetch a specific older version — while the releases expose every version at a stable URL. The
+# assets are the same official artifacts: 1.0.16's asset sha512 is byte-identical to the GCS
+# tarball we ran for weeks, and the tarball member is still `antigravity` (extracted below).
+#
+# WHY 1.1.5 AND NOT LATEST: 1.1.6 (2026-07-24) added a client-side eligibility check that hard-exits
+# with "not currently available in your location" before any model call, so 1.1.6/1.1.7/1.1.8 cannot
+# run — and thus cannot be captured — from here. 1.1.5 is the newest version that still runs
+# (bisected 1.1.1→1.1.8). Re-test the newer ones if that regional gate is ever lifted.
+set(AGY_VERSION "1.1.5")
+set(AGY_URL "https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.5/agy_cli_linux_x64.tar.gz")
+set(AGY_SHA512 "906bff59c73bed630274f67efc77e3fa2064fe126f4d7521c7e58dc6773d8d1f3ce8688f1178f7ef65776728f782a8ebc211189617cfbb42e7df48f5614ad1f5")
 set(AGY_BIN "" CACHE STRING "optional: local agy binary to vendor instead of downloading")
 set(FRIDA_VER "17.15.3")
 # WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag; a freshly-fetched agy must be
