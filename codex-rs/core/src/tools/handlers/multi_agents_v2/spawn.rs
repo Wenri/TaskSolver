@@ -3,13 +3,11 @@ use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
-use crate::agent::role::apply_role_to_config;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
-use crate::turn_timing::now_unix_timestamp_ms;
 use codex_protocol::AgentPath;
 use codex_tools::ToolSpec;
 
@@ -65,24 +63,20 @@ async fn handle_spawn_agent(
     if let Some(service_tier) = args.service_tier.as_ref() {
         config.service_tier = Some(service_tier.clone());
     }
-    if matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)) {
-        reject_full_fork_spawn_overrides(
-            role_name,
-            args.model.as_deref(),
-            args.reasoning_effort.clone(),
-        )?;
-    } else {
-        apply_requested_spawn_agent_model_overrides(
-            &session,
-            turn.as_ref(),
-            &mut config,
-            args.model.as_deref(),
-            args.reasoning_effort.clone(),
-        )
-        .await?;
-        apply_role_to_config(&mut config, role_name)
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
+    let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
+    if is_full_history_fork {
+        reject_full_fork_agent_type_override(role_name)?;
+    }
+    apply_requested_spawn_agent_model_overrides(
+        &session,
+        turn.as_ref(),
+        &mut config,
+        args.model.as_deref(),
+        args.reasoning_effort.clone(),
+    )
+    .await?;
+    if !is_full_history_fork {
+        apply_spawn_agent_role(&session, &mut config, role_name).await?;
     }
     apply_spawn_agent_service_tier(
         &session,
@@ -140,19 +134,17 @@ async fn handle_spawn_agent(
         .as_ref()
         .and_then(|snapshot| snapshot.session_source.get_nickname())
         .or(spawned_agent.metadata.agent_nickname);
-    session
-        .send_event(
-            &turn,
-            SubAgentActivityEvent {
-                event_id: call_id,
-                occurred_at_ms: now_unix_timestamp_ms(),
-                agent_thread_id: new_thread_id,
-                agent_path: new_agent_path.clone(),
-                kind: SubAgentActivityKind::Started,
-            }
-            .into(),
-        )
-        .await;
+    emit_sub_agent_activity(
+        &session,
+        &turn,
+        SubAgentActivityItem {
+            id: call_id,
+            agent_thread_id: new_thread_id,
+            agent_path: new_agent_path.clone(),
+            kind: SubAgentActivityKind::Started,
+        },
+    )
+    .await;
     let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",

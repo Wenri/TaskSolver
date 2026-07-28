@@ -4,6 +4,7 @@
 //! proxies are the fallback, and the final fallback is a direct connection.
 //! When disabled, callers retain the existing reqwest builder behavior.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
@@ -11,18 +12,21 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use tokio::sync::Semaphore;
 
 use crate::custom_ca::BuildCustomCaTransportError;
 use crate::custom_ca::build_reqwest_client_with_custom_ca;
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+use crate::default_client::HttpClient;
 use sha2::Digest;
-#[cfg(any(target_os = "windows", target_os = "macos"))]
 use sha2::Sha256;
 use thiserror::Error;
 
 const SYSTEM_PROXY_SUCCESS_CACHE_TTL: Duration = Duration::from_secs(60);
 const SYSTEM_PROXY_UNAVAILABLE_CACHE_TTL: Duration = Duration::from_secs(5);
 const SYSTEM_PROXY_CACHE_MAX_ENTRIES: usize = 256;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+static ASYNC_SYSTEM_PROXY_RESOLUTION_PERMIT: Semaphore = Semaphore::const_new(1);
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -96,6 +100,40 @@ pub enum OutboundProxyPolicy {
     RespectSystemProxy,
 }
 
+/// Resolved proxy route for a concrete outbound destination.
+///
+/// `TransportDefault` preserves the underlying transport behavior only when system-proxy support
+/// is disabled. When system resolution is enabled, environment and direct fallbacks are resolved
+/// explicitly so the transport cannot repeat system discovery. Proxy URLs and no-proxy settings
+/// are intentionally redacted from `Debug` output because they may contain credentials or private
+/// hostnames.
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub enum OutboundProxyRoute {
+    /// Preserve the underlying transport's existing proxy behavior.
+    TransportDefault,
+    /// Connect directly and bypass transport-level proxy discovery.
+    Direct,
+    /// Connect through the selected proxy URL.
+    Proxy {
+        url: String,
+        no_proxy: Option<String>,
+    },
+}
+
+impl fmt::Debug for OutboundProxyRoute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TransportDefault => f.write_str("TransportDefault"),
+            Self::Direct => f.write_str("Direct"),
+            Self::Proxy { .. } => f
+                .debug_struct("Proxy")
+                .field("url", &"<redacted>")
+                .field("no_proxy", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
 /// Builds route-specific HTTP clients using one resolved outbound proxy policy.
 ///
 /// Construct this once from the effective application configuration and carry it with the
@@ -119,6 +157,88 @@ impl HttpClientFactory {
         self.outbound_proxy_policy
     }
 
+    /// Resolves the proxy route for a concrete destination.
+    ///
+    /// WebSocket schemes are resolved through their HTTP equivalents so platform PAC and system
+    /// proxy APIs apply the same policy to `ws`/`wss` and `http`/`https` destinations. When system
+    /// resolution is unavailable, explicit environment settings are resolved before falling back
+    /// to a direct route.
+    pub fn resolve_proxy_route(&self, request_url: &str) -> OutboundProxyRoute {
+        resolve_proxy_route(
+            &ProcessEnv,
+            request_url,
+            self.outbound_proxy_policy,
+            resolve_system_proxy,
+        )
+    }
+
+    /// Resolves the proxy route for a concrete destination without blocking a Tokio worker.
+    pub async fn resolve_proxy_route_async(
+        &self,
+        request_url: String,
+    ) -> io::Result<OutboundProxyRoute> {
+        if matches!(
+            self.outbound_proxy_policy,
+            OutboundProxyPolicy::ReqwestDefault
+        ) {
+            return Ok(OutboundProxyRoute::TransportDefault);
+        }
+
+        if let Some(route) = self.cached_proxy_route(&request_url) {
+            return Ok(route);
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        return Ok(self.resolve_proxy_route(&request_url));
+
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            let permit = ASYNC_SYSTEM_PROXY_RESOLUTION_PERMIT
+                .acquire()
+                .await
+                .map_err(io::Error::other)?;
+            let factory = self.clone();
+            tokio::task::spawn_blocking(move || {
+                // Keep the permit with the blocking task: cancelling the caller must not allow a
+                // second PAC/WinHTTP lookup to start while this one is still running.
+                let _permit = permit;
+                factory.resolve_proxy_route(&request_url)
+            })
+            .await
+            .map_err(io::Error::other)
+        }
+    }
+
+    fn cached_proxy_route(&self, request_url: &str) -> Option<OutboundProxyRoute> {
+        let env_proxy_kind = EnvProxyKind::from_request_url(request_url);
+        let request_url = proxy_resolution_url(request_url);
+        if RequestOrigin::parse(&request_url).is_none() {
+            return Some(OutboundProxyRoute::Direct);
+        }
+        cached_system_proxy_decision(&request_url)
+            .map(|decision| route_from_system_decision(&ProcessEnv, env_proxy_kind, decision))
+    }
+
+    /// Builds an HTTP client for a concrete outbound route.
+    pub fn build_client(
+        &self,
+        request_url: &str,
+        route_class: ClientRouteClass,
+    ) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
+        self.build_reqwest_client(reqwest::Client::builder(), request_url, route_class)
+            .map(HttpClient::new)
+    }
+
+    /// Builds a route-aware client without request URL or response-header diagnostics.
+    pub fn build_client_without_request_logging(
+        &self,
+        request_url: &str,
+        route_class: ClientRouteClass,
+    ) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
+        self.build_reqwest_client(reqwest::Client::builder(), request_url, route_class)
+            .map(HttpClient::new_without_request_logging)
+    }
+
     /// Builds a reqwest client for a concrete outbound route.
     pub fn build_reqwest_client(
         &self,
@@ -132,6 +252,102 @@ impl HttpClientFactory {
             route_class,
             self.outbound_proxy_policy,
         )
+    }
+}
+
+fn resolve_proxy_route(
+    env: &dyn EnvSource,
+    request_url: &str,
+    outbound_proxy_policy: OutboundProxyPolicy,
+    resolve_system_proxy: impl FnOnce(&str, &RequestOrigin) -> SystemProxyDecision,
+) -> OutboundProxyRoute {
+    if matches!(outbound_proxy_policy, OutboundProxyPolicy::ReqwestDefault) {
+        return OutboundProxyRoute::TransportDefault;
+    }
+
+    let env_proxy_kind = EnvProxyKind::from_request_url(request_url);
+    let request_url = proxy_resolution_url(request_url);
+    let Some(origin) = RequestOrigin::parse(&request_url) else {
+        return OutboundProxyRoute::Direct;
+    };
+
+    route_from_system_decision(
+        env,
+        env_proxy_kind,
+        resolve_system_proxy(&request_url, &origin),
+    )
+}
+
+fn route_from_system_decision(
+    env: &dyn EnvSource,
+    env_proxy_kind: EnvProxyKind,
+    decision: SystemProxyDecision,
+) -> OutboundProxyRoute {
+    match decision {
+        SystemProxyDecision::Direct => OutboundProxyRoute::Direct,
+        SystemProxyDecision::Proxy { url } => OutboundProxyRoute::Proxy {
+            url,
+            no_proxy: None,
+        },
+        SystemProxyDecision::Unavailable { .. } => resolve_env_proxy_route(env, env_proxy_kind),
+    }
+}
+
+fn resolve_env_proxy_route(
+    env: &dyn EnvSource,
+    env_proxy_kind: EnvProxyKind,
+) -> OutboundProxyRoute {
+    let proxy_url = match env_proxy_kind {
+        EnvProxyKind::Https => {
+            proxy_env_value(env, "HTTPS_PROXY").or_else(|| proxy_env_value(env, "ALL_PROXY"))
+        }
+        EnvProxyKind::SecureWebSocket => proxy_env_value(env, "HTTPS_PROXY")
+            .or_else(|| proxy_env_value(env, "HTTP_PROXY"))
+            .or_else(|| proxy_env_value(env, "ALL_PROXY")),
+        EnvProxyKind::Http => {
+            proxy_env_value(env, "HTTP_PROXY").or_else(|| proxy_env_value(env, "ALL_PROXY"))
+        }
+        EnvProxyKind::Other => proxy_env_value(env, "ALL_PROXY"),
+    };
+    match proxy_url {
+        Some(url) => OutboundProxyRoute::Proxy {
+            url,
+            no_proxy: proxy_env_value(env, "NO_PROXY"),
+        },
+        None => OutboundProxyRoute::Direct,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EnvProxyKind {
+    Http,
+    Https,
+    SecureWebSocket,
+    Other,
+}
+
+impl EnvProxyKind {
+    fn from_request_url(request_url: &str) -> Self {
+        let scheme = request_url
+            .parse::<http::Uri>()
+            .ok()
+            .and_then(|uri| uri.scheme_str().map(str::to_ascii_lowercase));
+        match scheme.as_deref() {
+            Some("http" | "ws") => Self::Http,
+            Some("https") => Self::Https,
+            Some("wss") => Self::SecureWebSocket,
+            Some(_) | None => Self::Other,
+        }
+    }
+}
+
+fn proxy_resolution_url(request_url: &str) -> Cow<'_, str> {
+    if let Some(suffix) = request_url.strip_prefix("wss://") {
+        Cow::Owned(format!("https://{suffix}"))
+    } else if let Some(suffix) = request_url.strip_prefix("ws://") {
+        Cow::Owned(format!("http://{suffix}"))
+    } else {
+        Cow::Borrowed(request_url)
     }
 }
 
@@ -185,22 +401,26 @@ fn configure_proxy_for_route(
     outbound_proxy_policy: OutboundProxyPolicy,
     resolve_system_proxy: impl FnOnce(&str, &RequestOrigin) -> SystemProxyDecision,
 ) -> Result<reqwest::ClientBuilder, BuildRouteAwareHttpClientError> {
-    if matches!(outbound_proxy_policy, OutboundProxyPolicy::ReqwestDefault) {
-        return Ok(builder);
-    }
-    let origin = RequestOrigin::parse(request_url);
+    let route = resolve_proxy_route(
+        env,
+        request_url,
+        outbound_proxy_policy,
+        resolve_system_proxy,
+    );
+    configure_builder_for_resolved_route(builder, route_class, &route)
+}
 
-    let Some(origin) = origin.as_ref() else {
-        return configure_env_proxy_handling(env, builder, /*origin*/ None, route_class);
-    };
-
-    match resolve_system_proxy(request_url, origin) {
-        SystemProxyDecision::Direct => Ok(builder.no_proxy()),
-        SystemProxyDecision::Proxy { url } => {
-            configure_concrete_proxy(builder, route_class, &url, /*no_proxy*/ None)
-        }
-        SystemProxyDecision::Unavailable { .. } => {
-            configure_env_proxy_handling(env, builder, Some(origin), route_class)
+fn configure_builder_for_resolved_route(
+    builder: reqwest::ClientBuilder,
+    route_class: ClientRouteClass,
+    route: &OutboundProxyRoute,
+) -> Result<reqwest::ClientBuilder, BuildRouteAwareHttpClientError> {
+    match route {
+        OutboundProxyRoute::TransportDefault => Ok(builder),
+        OutboundProxyRoute::Direct => Ok(builder.no_proxy()),
+        OutboundProxyRoute::Proxy { url, no_proxy } => {
+            let no_proxy = no_proxy.as_deref().and_then(reqwest::NoProxy::from_string);
+            configure_concrete_proxy(builder, route_class, url, no_proxy)
         }
     }
 }
@@ -220,31 +440,6 @@ fn configure_concrete_proxy(
     Ok(builder.proxy(proxy.no_proxy(no_proxy)))
 }
 
-fn configure_env_proxy_handling(
-    env: &dyn EnvSource,
-    builder: reqwest::ClientBuilder,
-    origin: Option<&RequestOrigin>,
-    route_class: ClientRouteClass,
-) -> Result<reqwest::ClientBuilder, BuildRouteAwareHttpClientError> {
-    if let Some(origin) = origin {
-        let proxy_url = match origin.scheme.as_str() {
-            "https" => {
-                proxy_env_value(env, "HTTPS_PROXY").or_else(|| proxy_env_value(env, "ALL_PROXY"))
-            }
-            "http" => {
-                proxy_env_value(env, "HTTP_PROXY").or_else(|| proxy_env_value(env, "ALL_PROXY"))
-            }
-            _ => proxy_env_value(env, "ALL_PROXY"),
-        };
-        if let Some(proxy_url) = proxy_url {
-            let no_proxy = proxy_env_value(env, "NO_PROXY")
-                .and_then(|value| reqwest::NoProxy::from_string(&value));
-            return configure_concrete_proxy(builder, route_class, &proxy_url, no_proxy);
-        }
-    }
-    Ok(builder.no_proxy())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 struct RequestOrigin {
@@ -259,8 +454,8 @@ impl RequestOrigin {
         let scheme = uri.scheme_str()?.to_ascii_lowercase();
         let host = uri.host()?.trim_matches(['[', ']']).to_ascii_lowercase();
         let port = uri.port_u16().or(match scheme.as_str() {
-            "http" => Some(80),
-            "https" => Some(443),
+            "http" | "ws" => Some(80),
+            "https" | "wss" => Some(443),
             _ => None,
         })?;
         Some(Self { scheme, host, port })
@@ -282,12 +477,32 @@ enum SystemProxyDecision {
 }
 
 fn resolve_system_proxy(request_url: &str, origin: &RequestOrigin) -> SystemProxyDecision {
-    if let Some(decision) = cached_system_proxy_decision(request_url) {
+    let cache = SYSTEM_PROXY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    resolve_system_proxy_with(cache, request_url, origin, resolve_platform_system_proxy)
+}
+
+fn resolve_system_proxy_with(
+    cache: &Mutex<HashMap<String, CachedSystemProxyDecision>>,
+    request_url: &str,
+    origin: &RequestOrigin,
+    resolve_platform_system_proxy: impl FnOnce(&str, &RequestOrigin) -> SystemProxyDecision,
+) -> SystemProxyDecision {
+    let mut cache = match cache.lock() {
+        Ok(cache) => cache,
+        Err(error) => panic!("system proxy cache lock should not be poisoned: {error}"),
+    };
+    let cache_key = system_proxy_cache_key(request_url);
+    if let Some(decision) =
+        cached_system_proxy_decision_from_cache(&mut cache, &cache_key, Instant::now())
+    {
         return decision;
     }
 
+    // Keep cache misses single-flight. Platform PAC/WPAD APIs are synchronous, so async callers
+    // run this work on the blocking pool; serializing misses prevents concurrent requests from
+    // consuming an unbounded number of blocking workers while system lookup is pending.
     let decision = resolve_platform_system_proxy(request_url, origin);
-    cache_system_proxy_decision(request_url, decision.clone());
+    insert_system_proxy_cache_entry(&mut cache, &cache_key, decision.clone(), Instant::now());
     decision
 }
 
@@ -324,14 +539,23 @@ fn cached_system_proxy_decision(request_url: &str) -> Option<SystemProxyDecision
     let cache = SYSTEM_PROXY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().ok()?;
     let key = system_proxy_cache_key(request_url);
-    let cached = cache.get(&key)?;
-    if cached.expires_at > Instant::now() {
+    cached_system_proxy_decision_from_cache(&mut cache, &key, Instant::now())
+}
+
+fn cached_system_proxy_decision_from_cache(
+    cache: &mut HashMap<String, CachedSystemProxyDecision>,
+    cache_key: &str,
+    now: Instant,
+) -> Option<SystemProxyDecision> {
+    let cached = cache.get(cache_key)?;
+    if cached.expires_at > now {
         return Some(cached.decision.clone());
     }
-    cache.remove(&key);
+    cache.remove(cache_key);
     None
 }
 
+#[cfg(test)]
 fn cache_system_proxy_decision(request_url: &str, decision: SystemProxyDecision) {
     let cache = SYSTEM_PROXY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut cache) = cache.lock() {
@@ -373,17 +597,11 @@ fn insert_system_proxy_cache_entry(
 }
 
 fn system_proxy_cache_key(request_url: &str) -> String {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    {
-        // Keep URL-specific PAC decisions without retaining the raw routed URL.
-        let mut hasher = Sha256::new();
-        hasher.update(b"system-proxy-cache-v1\0");
-        hasher.update(request_url.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    request_url.to_string()
+    // Keep URL-specific PAC decisions without retaining the raw routed URL.
+    let mut hasher = Sha256::new();
+    hasher.update(b"system-proxy-cache-v1\0");
+    hasher.update(request_url.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(any(test, target_os = "windows"))]
