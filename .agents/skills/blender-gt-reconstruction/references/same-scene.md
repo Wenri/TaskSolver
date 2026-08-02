@@ -4,8 +4,9 @@
 reconstruction, and you can execute Python in it. If instead the GT sits behind a separate
 read-only viewport server, stop and read [two-instance.md](two-instance.md).
 
-The final scene must contain **both** the unchanged GT model and the generated reconstruction,
-visible side by side.
+The final scene must contain **both** the unchanged GT model and the generated reconstruction.
+They may be moved side by side temporarily while comparing, but the reconstruction must be
+returned to its GT-aligned origin before the final save or export.
 
 ## GT preservation in this mode
 
@@ -28,16 +29,31 @@ Exact measurement is available — use it rather than guessing:
 
 Take these alongside the multi-viewpoint visual inspection in SKILL.md.
 
-## Placement — the comparison offset
+## Placement — origin-authored reconstruction and temporary comparison offset
 
-Construct the model in the GT-aligned frame, then translate **only `recon__root`** for side-by-side
-comparison. Compute the distance from the GT world-space bounding box:
+Construct the model in the GT-aligned frame and make the stored `reconstruct_gt.py` leave
+`recon__root.location` at `(0, 0, 0)`. Do not encode a side-by-side offset in the reconstruction
+script.
+
+For visual comparison only, after executing the stored script, translate **only `recon__root`**
+with a separate MCP code execution. Compute the temporary distance from the GT world-space
+bounding box:
 
 ```python
 comparison_distance = 1.25 * max(gt_bbox_dimensions)
 ```
 
 Prefer translation along world X. Use another axis only when X causes overlap or poor visibility.
+
+This is viewport/comparison state, not model data. Each rerun of `reconstruct_gt.py` must recreate
+the reconstruction at the origin. Apply the temporary offset again separately when another
+side-by-side comparison is needed. Before the final save or export, restore:
+
+```python
+bpy.data.objects["recon__root"].location = (0.0, 0.0, 0.0)
+```
+
+Verify the restored origin after the assignment. Never move the GT to create comparison space.
 
 ## Independence — what is reachable here, and therefore banned
 
@@ -57,17 +73,19 @@ properties, texture frequencies, and pattern dimensions.
 
 ## Comparing
 
-After each run, frame both models in the viewport and keep them visible simultaneously from a
-useful comparison angle. Compare them directly, viewpoint by viewpoint.
+After each run, temporarily offset `recon__root`, frame both models in the viewport, and keep them
+visible simultaneously from a useful comparison angle. Compare them directly, viewpoint by
+viewpoint. Restore the reconstruction to the origin after the final comparison.
 
 ## Final state for this mode
 
 In addition to the SKILL.md checklist:
 
-* both models are visible side by side;
 * the GT model is present and unchanged;
-* `recon__root` carries the comparison offset.
+* the stored `reconstruct_gt.py` contains no comparison offset;
+* `recon__root` is restored to location `(0, 0, 0)` before the final save or export.
 
 ## Also report
 
-* comparison offset and axis.
+* temporary comparison offset and axis used during inspection, and confirmation that it was
+  removed before the final save or export.

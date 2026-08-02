@@ -123,8 +123,10 @@ image, and node group. Examples:
 * `recon__antenna_right`
 
 Construct the model in a coordinate frame aligned with the GT, and keep all part coordinates in
-that GT-aligned frame. **Where the finished model is placed is mode-specific** — see your mode
-reference.
+that GT-aligned frame. The stored `reconstruct_gt.py` script must finish with `recon__root` at the
+GT-aligned origin: location `(0, 0, 0)`, with no comparison offset encoded in the script. A mode
+reference may allow a temporary display transform for comparison, but that transform is not part
+of the reconstruction and must be removed before the final save or export.
 
 ## Independence from the GT
 
@@ -215,6 +217,7 @@ Verify that:
 * only generated reconstruction data is removed during reruns;
 * no major geometric or proportional discrepancy remains;
 * the generated geometry does not depend on GT datablocks.
+* `recon__root` is at location `(0, 0, 0)`, and rerunning `reconstruct_gt.py` leaves it there.
 
 Additionally complete the final-state checklist in the reference(s) you used.
 
