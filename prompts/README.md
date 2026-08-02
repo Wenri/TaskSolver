@@ -24,6 +24,29 @@ reconstructs from **vision alone**. `blender-viewport-only` offers only screensh
 so no numeric measurement is possible and proportions must be inferred visually. Scope is geometry;
 materials are optional. Address the servers by **name**, not port — ports come from the MCP config.
 
+## Serving one as the run's standing instructions
+
+Both CLIs discover an `AGENTS.md` beside the working directory and apply it for the whole session
+(agy walks up from the cwd to the repo root loading `GEMINI.md`/`AGENTS.md`; codex reads `AGENTS.md`
+plus an `AGENTS.override.md`). So a template is best delivered as the workspace's standing
+instructions rather than pasted into every turn — `ensure_git_workspace` seeds it, which is the one
+hook both wrappers already share:
+
+```python
+from wirecap.runtime.workspace import ensure_git_workspace
+
+task = open("prompts/blender_recon_single_instance.md").read()
+ws = ensure_git_workspace(instructions=task)      # writes AGENTS.md into the workspace
+
+import pycodex; pycodex.ask("Reconstruct the GT model.", workspace=ws)
+import pyagy;   pyagy.ask("Reconstruct the GT model.", workspace=ws)
+```
+
+The per-turn prompt then stays short, and the task survives across turns of an interactive session.
+The scratch repo is reused between runs, so its `AGENTS.md` always reflects the latest call —
+passing no `instructions` clears it instead of inheriting the previous run's task. A workspace you
+supply yourself is only ever written to, never stripped of its own `AGENTS.md`.
+
 ## Shared output contract
 
 Both variants produce the same artifacts, which is what makes runs comparable across prompts, models,
