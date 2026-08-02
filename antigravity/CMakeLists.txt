@@ -43,13 +43,14 @@ set(GUM "${CMAKE_SOURCE_DIR}/vendor/frida-gum")
 # assets are the same official artifacts: 1.0.16's asset sha512 is byte-identical to the GCS
 # tarball we ran for weeks, and the tarball member is still `antigravity` (extracted below).
 #
-# WHY 1.1.5 AND NOT LATEST: 1.1.6 (2026-07-24) added a client-side eligibility check that hard-exits
-# with "not currently available in your location" before any model call, so 1.1.6/1.1.7/1.1.8 cannot
-# run — and thus cannot be captured — from here. 1.1.5 is the newest version that still runs
-# (bisected 1.1.1→1.1.8). Re-test the newer ones if that regional gate is ever lifted.
-set(AGY_VERSION "1.1.5")
-set(AGY_URL "https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.5/agy_cli_linux_x64.tar.gz")
-set(AGY_SHA512 "906bff59c73bed630274f67efc77e3fa2064fe126f4d7521c7e58dc6773d8d1f3ce8688f1178f7ef65776728f782a8ebc211189617cfbb42e7df48f5614ad1f5")
+# Version history worth keeping: 1.1.6 (2026-07-24) added a client-side eligibility check that
+# hard-exited with "not currently available in your location" before any model call, which forced the
+# pin down to 1.1.5 for a while (bisected 1.1.1→1.1.8). That gate no longer fires as of 1.1.9
+# (2026-07-31), which was re-tested uninstrumented before this bump — so if a future release starts
+# refusing to run, check for that message before assuming the shim broke.
+set(AGY_VERSION "1.1.9")
+set(AGY_URL "https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.9/agy_cli_linux_x64.tar.gz")
+set(AGY_SHA512 "3bebfd6fdaa43fff77d33e12927f3db2b1449b008e4398dbb986ea5ee73c55fce512de22d9a711855464ec4fcfc37ea85113e47248a610e53c0e6d5e5297ed95")
 set(AGY_BIN "" CACHE STRING "optional: local agy binary to vendor instead of downloading")
 set(FRIDA_VER "17.15.3")
 # WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag; a freshly-fetched agy must be
