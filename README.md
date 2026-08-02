@@ -90,6 +90,9 @@ ws = ensure_git_workspace(skills=[".agents/skills/blender-gt-reconstruction"])
 pycodex.ask("Reconstruct the GT model.", workspace=ws)     # or pyagy.ask(...)
 ```
 
+See [`.agents/skills/README.md`](.agents/skills/README.md) for the layout, how the progressive
+disclosure is split, how to verify a skill reached the model, and how to add one.
+
 ## Antigravity (`agy`) instrumentation
 
 [`antigravity/`](antigravity/) is a research subsystem that instruments Google's Antigravity CLI (`agy`) in-process via an `LD_PRELOAD` shim (frida-gum inline hooks + an embedded CPython), and also exposes `agy` as a TaskSolver-style backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the cgocall-trampoline hook mechanism for parking Go functions, and build/validation notes — validated on both WSL1 and a real cloud kernel (6.18.5, agy 1.0.15), including a gdb instruction-level root-cause proof.
