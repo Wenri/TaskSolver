@@ -53,15 +53,15 @@ class VLLMModel(object):
         self.task = task
         self.model = model
         self.base_url = base_url
+        self.thinking_depth = None
 
     def _normalize_max_tokens(self, max_tokens: int) -> int:
         return max(max_tokens, MIN_QWEN3_MAX_TOKENS)
 
-    @staticmethod
-    def _default_extra_body() -> dict:
+    def _default_extra_body(self) -> dict:
         return {
             "chat_template_kwargs": {
-                "enable_thinking": False,
+                "enable_thinking": self.thinking_depth is not None,
             },
         }
 

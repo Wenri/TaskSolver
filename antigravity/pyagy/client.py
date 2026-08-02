@@ -474,7 +474,7 @@ def _collect_many(procs, queues, timeout=300.0, kinds=_ANSWER_KINDS):
 def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
         capture=True, timeout=300, skip_permissions=False, agy_bin=None, extra_env=None,
         stack=False, arg_probe=False, funcmap=None, conversation_id=None,
-        continue_latest=False, data_dir=None, trust=True):
+        continue_latest=False, data_dir=None, trust=True, extra_flags=None):
     """Run one ``agy --print`` turn and return a decoded :class:`AgyResponse`.
 
     The shim installs the full working hook union, so one turn populates the wire
@@ -509,7 +509,8 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
         p = AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
                        agy_bin=agy_bin, workdir=workspace, capture=cap_path, args=(q,),
                        conversation_id=conversation_id, continue_latest=continue_latest,
-                       data_dir=data_dir, trust=trust, extra_env=overlays)
+                       data_dir=data_dir, trust=trust, extra_env=overlays,
+                       extra_flags=extra_flags)
         p.start()
         q._writer.close()                           # parent reads only; reader now EOFs on agy death
         objs = _collect(p, q, timeout=timeout)      # decoded answer streamed home over the queue
@@ -528,7 +529,7 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
 def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
              capture=True, timeout=300, skip_permissions=False, agy_bin=None, extra_env=None,
              stack=False, arg_probe=False, funcmap=None, conversation_id=None,
-             continue_latest=False, data_dir=None, trust=True):
+             continue_latest=False, data_dir=None, trust=True, extra_flags=None):
     """Run ``n`` independent ``agy --print`` turns of the same ``prompt`` concurrently and
     return a list of ``n`` decoded :class:`AgyResponse` (parallel sampling — e.g. ``AgyModel``
     with ``n_choices>1``). Same kwargs as :func:`ask`; all share one workspace + tools/context,
@@ -541,7 +542,7 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
                     skip_permissions=skip_permissions, agy_bin=agy_bin, extra_env=extra_env,
                     stack=stack, arg_probe=arg_probe, funcmap=funcmap,
                     conversation_id=conversation_id, continue_latest=continue_latest,
-                    data_dir=data_dir, trust=trust)]
+                    data_dir=data_dir, trust=trust, extra_flags=extra_flags)]
     workspace = ensure_git_workspace(workspace)
     overlays, _ = _shim_overlays(rewrite, workspace, stack, arg_probe, extra_env)
     overlays["AGY_PROC_LOG"] = os.path.join(workspace, "pyagy-shim.log")
@@ -556,7 +557,8 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
         procs = [AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
                             agy_bin=agy_bin, workdir=workspace, capture=cap_paths[i], args=(queues[i],),
                             conversation_id=conversation_id, continue_latest=continue_latest,
-                            data_dir=data_dir, trust=trust, extra_env=overlays)
+                            data_dir=data_dir, trust=trust, extra_env=overlays,
+                            extra_flags=extra_flags)
                  for i in range(n)]
         for p, q in zip(procs, queues):
             p.start()                            # non-blocking fork; serial → no fork-in-thread
@@ -594,7 +596,7 @@ class Session:
                  rewrite=None, capture=True, timeout=180, idle=25.0, agy_bin=None,
                  extra_env=None, stack=False, arg_probe=False, funcmap=None,
                  conversation_id=None, continue_latest=False, skip_permissions=False,
-                 data_dir=None, trust=True):
+                 data_dir=None, trust=True, extra_flags=None):
         self.workspace = ensure_git_workspace(workspace)
         self.agy_bin = agy_bin
         self.model = model
@@ -605,6 +607,7 @@ class Session:
         self.arg_probe = arg_probe
         self.funcmap = funcmap
         self.extra_env = extra_env
+        self.extra_flags = extra_flags
         self.rewrite = rewrite
         self._tools = tools
         self._context = context
@@ -640,7 +643,8 @@ class Session:
                                workdir=self.workspace, capture=self.cap_path, args=(self._q,),
                                conversation_id=self._conversation_id,
                                continue_latest=self.continue_latest,
-                               data_dir=self._data_dir, trust=self._trust, extra_env=overlays)
+                               data_dir=self._data_dir, trust=self._trust, extra_env=overlays,
+                               extra_flags=self.extra_flags)
         self._agy.start()
         self._q._writer.close()                      # parent reads only; reader EOFs on agy death
         self._home = self._agy.home                  # scoped store home (for .history())

@@ -18,6 +18,7 @@ class ClaudeCodeModel(object):
         self.claude_key: str = api_key
         self.task: TaskSpec = task
         self.model: str = model if model not in (None, "claude-code") else None
+        self.thinking_depth = None
 
     def ask(self, payload: dict, n_choices=1) -> Tuple[List[dict], List[dict]]:
         """
@@ -58,6 +59,9 @@ class ClaudeCodeModel(object):
         if self.model:
             cmd.extend(["--model", self.model])
             legacy_cmd.extend(["--model", self.model])
+        if self.thinking_depth:
+            cmd.extend(["--effort", self.thinking_depth])
+            legacy_cmd.extend(["--effort", self.thinking_depth])
 
         try:
             completed = self._run_cli_command(cmd)
