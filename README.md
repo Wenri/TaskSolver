@@ -73,6 +73,23 @@ print(parsed)
 
 To dispatch by model-id instead of importing an adapter directly, use `tasksolver.agent.Agent(api_key, task, vision_model="claude-code-sonnet-4-6")` and call `agent.visual_interface.run_once(question)`. Runnable text-only and vision examples live in [`test_scripts/`](test_scripts/).
 
+## Task skills
+
+[`.agents/skills/`](.agents/skills/) holds task skills in the `SKILL.md` format that **both** agy
+and codex read — each is discovered by walking up from the working directory to the repo root, and
+loaded lazily (only its name and description sit in context until the model uses it).
+[`blender-gt-reconstruction`](.agents/skills/blender-gt-reconstruction/) reconstructs a ground-truth
+3D model through a Blender MCP server, in either access mode (GT in the same scene, or behind a
+read-only viewport-only server).
+
+To use one in a throwaway workspace, seed it and pass that workspace to `ask()`:
+
+```python
+from wirecap.runtime.workspace import ensure_git_workspace
+ws = ensure_git_workspace(skills=[".agents/skills/blender-gt-reconstruction"])
+pycodex.ask("Reconstruct the GT model.", workspace=ws)     # or pyagy.ask(...)
+```
+
 ## Antigravity (`agy`) instrumentation
 
 [`antigravity/`](antigravity/) is a research subsystem that instruments Google's Antigravity CLI (`agy`) in-process via an `LD_PRELOAD` shim (frida-gum inline hooks + an embedded CPython), and also exposes `agy` as a TaskSolver-style backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the cgocall-trampoline hook mechanism for parking Go functions, and build/validation notes — validated on both WSL1 and a real cloud kernel (6.18.5, agy 1.0.15), including a gdb instruction-level root-cause proof.
