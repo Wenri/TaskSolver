@@ -143,7 +143,11 @@ def ask(prompt, *, model=None, workspace=None, timeout=300, extra_flags=None,
     """Run one instrumented ``codex exec`` turn and return a :class:`CodexResponse`. The returned
     ``turns`` come from the authoritative capture JSONL; the live stream is drained for parity and
     probed via ``n_streamed``. Requires the built, wirecap-patched codex and codex auth
-    (``OPENAI_API_KEY`` or ``codex login``)."""
+    (``OPENAI_API_KEY`` or ``codex login``).
+
+    To run with seeded ``AGENTS.md`` instructions or skills, seed a workspace with
+    ``ensure_git_workspace(...)`` and pass it as ``workspace=`` — omitting it resolves the shared
+    scratch repo with no seeds, which *clears* any a previous call left there."""
     ws = ensure_git_workspace(workspace)
     capture = os.path.join(ws, "codex-capture.jsonl")
     open(capture, "w").close()   # fresh capture per run: the bridge Recorder appends + the scratch ws

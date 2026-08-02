@@ -484,6 +484,10 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
     ``.stacks``/``.call_graph`` and ``.cgt_args``. ``funcmap`` overrides the symbol map
     used by ``.stacks``.
 
+    To run with seeded ``AGENTS.md`` instructions or skills, seed a workspace with
+    ``ensure_git_workspace(...)`` and pass it as ``workspace=`` — omitting it resolves the
+    shared scratch repo with no seeds, which *clears* any a previous call left there.
+
     ``conversation_id`` resumes a stored conversation (``--conversation=<id>``, works in
     print mode) and ``continue_latest`` resumes the most recent one (``--continue``); the
     resulting :attr:`AgyResponse.conversation_id` is the id this run created/continued, so
