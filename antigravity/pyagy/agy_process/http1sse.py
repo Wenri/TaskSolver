@@ -38,11 +38,24 @@ def assemble_text(events):
 
 
 def extract_usage(events):
-    """The last ``usageMetadata`` seen (token counts) across the stream."""
+    """Token usage from the last ``usageMetadata`` seen across the stream, NORMALIZED to the same
+    flat, provider-neutral counts the codex decoder emits (input/cached_input/output/
+    reasoning_output/total) so one Usage type and one primary-turn picker serve both providers.
+
+    Gemini's raw dict is preserved under ``"raw"``: it carries fields with no neutral equivalent
+    (per-modality breakdowns, tool-use counts), and dropping them would lose data the capture
+    already had."""
     for e in reversed(events):
         u = e.get("response", e).get("usageMetadata")
         if u:
-            return u
+            return {
+                "input_tokens": u.get("promptTokenCount"),
+                "cached_input_tokens": u.get("cachedContentTokenCount"),
+                "output_tokens": u.get("candidatesTokenCount"),
+                "reasoning_output_tokens": u.get("thoughtsTokenCount"),
+                "total_tokens": u.get("totalTokenCount"),
+                "raw": u,
+            }
     return {}
 
 

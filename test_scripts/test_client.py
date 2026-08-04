@@ -45,11 +45,16 @@ def _resp(turns, transcript="hi\n", instrumented=True):
 
 def test_response_accessors():
     print("[offline] AgyResponse primary/usage/accessors")
+    # usage is NORMALIZED by extract_usage to the neutral names shared with pycodex; the provider's
+    # own dict rides along under "raw" (Gemini keeps per-modality/tool-use fields there).
     turns = [
-        {"kind": "genai_turn", "text": "title", "usage": {"totalTokenCount": 58},
+        {"kind": "genai_turn", "text": "title",
+         "usage": {"total_tokens": 58, "raw": {"totalTokenCount": 58}},
          "request": {"model": "flash-lite", "tools": [], "first_user_text": "t"}},
         {"kind": "genai_turn", "text": "ZORPLE", "events": [{"a": 1}],
-         "usage": {"promptTokenCount": 100, "candidatesTokenCount": 5, "totalTokenCount": 16000},
+         "usage": {"input_tokens": 100, "output_tokens": 5, "total_tokens": 16000,
+                   "raw": {"promptTokenCount": 100, "candidatesTokenCount": 5,
+                           "totalTokenCount": 16000}},
          "request": {"model": "flash", "tools": ["a", "b"], "first_user_text": "say zorple"}},
     ]
     r = _resp(turns)

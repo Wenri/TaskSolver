@@ -43,6 +43,7 @@ from ._pty import service_many as _service_many
 from .agyprocess import AgyProcess
 from .conversations import ensure_git_workspace
 from wirecap.decode.mp_child import DONE as _DONE, EXC as _EXC   # result-queue completion sentinels
+from wirecap.decode.turns import Usage, primary_turn, sum_usage   # noqa: F401 (Usage re-exported)
 
 _UNIQ = [0]
 _ANSWER_KINDS = ("genai_turn", "app_response")   # decoded objects the default target streams home
@@ -86,12 +87,6 @@ class RewriteRule:
                 "count": self.count, "regex": self.regex}
 
 
-@dataclass
-class Usage:
-    prompt_tokens: int = 0
-    candidates_tokens: int = 0
-    total_tokens: int = 0
-    raw: dict = field(default_factory=dict)
 
 
 # --- response ----------------------------------------------------------------
@@ -150,10 +145,7 @@ class AgyResponse:
     def primary(self):
         """The substantive model turn (most tokens) — agent turns dwarf the
         title-generation calls. None if nothing was decoded."""
-        if not self.turns:
-            return None
-        return max(self.turns,
-                   key=lambda t: (t.get("usage") or {}).get("totalTokenCount", 0))
+        return primary_turn(self.turns)
 
     @property
     def request(self):
@@ -185,16 +177,7 @@ class AgyResponse:
 
     @property
     def usage(self):
-        u = Usage()
-        for t in self.turns:
-            m = t.get("usage") or {}
-            u.prompt_tokens += m.get("promptTokenCount", 0)
-            u.candidates_tokens += m.get("candidatesTokenCount", 0)
-            u.total_tokens += m.get("totalTokenCount", 0)
-        p = self.primary
-        if p:
-            u.raw = p.get("usage") or {}
-        return u
+        return sum_usage(self.turns)
 
     # --- diagnostic decoders (present only when the matching capture exists) ---
     # These lazily import their agy_process module inside the accessor so a plain

@@ -18,6 +18,7 @@ import multiprocessing.connection as _conn
 from multiprocessing import get_context as _get_context
 
 from wirecap.decode.mp_child import DONE as _DONE, EXC as _EXC   # result-queue completion sentinels
+from wirecap.decode.turns import Usage, primary_turn, sum_usage   # noqa: F401 (Usage re-exported)
 from wirecap.runtime.workspace import ensure_git_workspace
 
 from .codexprocess import CodexProcess
@@ -25,14 +26,6 @@ from .codexprocess import CodexProcess
 _SPAWN = _get_context("spawn")    # context for the caller-owned result SimpleQueue
 
 
-@dataclass
-class Usage:
-    input_tokens: int = 0
-    cached_input_tokens: int = 0
-    output_tokens: int = 0
-    reasoning_output_tokens: int = 0
-    total_tokens: int = 0
-    raw: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -51,9 +44,7 @@ class CodexResponse:
     def primary(self):
         """The substantive model turn (most tokens) — codex runs a small secondary call per exec
         alongside the answer turn, so pick the max-token one. None if nothing decoded."""
-        if not self.turns:
-            return None
-        return max(self.turns, key=lambda t: (t.get("usage") or {}).get("total_tokens") or 0)
+        return primary_turn(self.turns)
 
     @property
     def request(self):
@@ -70,18 +61,7 @@ class CodexResponse:
 
     @property
     def usage(self):
-        u = Usage()
-        for t in self.turns:
-            m = t.get("usage") or {}
-            u.input_tokens += m.get("input_tokens") or 0
-            u.cached_input_tokens += m.get("cached_input_tokens") or 0
-            u.output_tokens += m.get("output_tokens") or 0
-            u.reasoning_output_tokens += m.get("reasoning_output_tokens") or 0
-            u.total_tokens += m.get("total_tokens") or 0
-        p = self.primary
-        if p:
-            u.raw = p.get("usage") or {}
-        return u
+        return sum_usage(self.turns)
 
     def __str__(self):
         return self.text
@@ -115,13 +95,19 @@ def _answer_text(turns, transcript):
 def _drain_stream(proc, q, timeout):
     """Drain ``codex_turn`` dicts off the result queue until codex dies (its pidfd fires) / the
     target signals done / the reader EOFs / ``timeout``. Returns the streamed turns — a live bonus
-    (the JSONL is authoritative); its length is the fd-inheritance liveness probe."""
+    (the JSONL is authoritative); its length is the fd-inheritance liveness probe.
+
+    codex runs under a pty, so this MUST keep the master drained (a full master buffer blocks codex
+    mid-write). ``service_pty`` does that in the same wait used to read results, and accumulates the
+    transcript as a byproduct — the identical arrangement agy's ``_collect`` uses."""
     reader = q._reader
     sentinel = getattr(proc._popen, "sentinel", None)
     watch = [reader] if sentinel is None else [reader, sentinel]
     turns, end, done = [], time.time() + timeout, False
     while not done and time.time() < end:
-        ready = _conn.wait(watch, min(1.0, max(0.0, end - time.time())))
+        slice_ = min(1.0, max(0.0, end - time.time()))
+        proc.service_pty(slice_, watch)     # drains the pty; returns once a watched fd is ready
+        ready = _conn.wait(watch, 0)
         try:
             while reader.poll(0):
                 o = q.get()

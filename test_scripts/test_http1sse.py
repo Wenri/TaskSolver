@@ -113,7 +113,7 @@ def test_response_decode_incremental():
     check(len(events) == 3, "response: 3 data events (DONE skipped)")
     check(h.assemble_text(events) == "ZORPLE", "response: text assembles to ZORPLE")
     check(h.finish_reason(events) == "STOP", "response: finishReason STOP")
-    check(h.extract_usage(events).get("totalTokenCount") == 13, "response: usage extracted")
+    check(h.extract_usage(events).get("total_tokens") == 13, "response: usage extracted")
 
 
 def test_inflate_gzip():
@@ -155,7 +155,7 @@ def test_correlator_cross_stream():
               "correlator: paired across distinct stream ids")
         check(turn.get("request", {}).get("requestId") == "req-abc-123",
               "correlator: request summary attached")
-        check(turn["usage"].get("totalTokenCount") == 13, "correlator: usage attached")
+        check(turn["usage"].get("total_tokens") == 13, "correlator: usage attached")
 
 
 def test_correlator_resp_chunk():
@@ -194,7 +194,7 @@ def test_correlator_resp_chunk():
         check(turn["text"] == "ZORPLE", "resp_chunk: text assembles across lines")
         check(turn["finish_reason"] == "STOP", "resp_chunk: finishReason STOP")
         check(turn["model"] == "gemini-3-pro", "resp_chunk: served model decoded from response")
-        check(turn["usage"].get("totalTokenCount") == 13, "resp_chunk: usage extracted")
+        check(turn["usage"].get("total_tokens") == 13, "resp_chunk: usage extracted")
         check(turn["req_stream"] == 0xAAAA, "resp_chunk: paired with the wire request")
         check(turn.get("request", {}).get("requestId") == "req-abc-123",
               "resp_chunk: request summary attached")
