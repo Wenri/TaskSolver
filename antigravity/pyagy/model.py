@@ -1,34 +1,39 @@
 """AgyModel — a TaskSolver-contract backend that drives the Antigravity `agy` CLI.
 
-Mirrors tasksolver.claude_code.ClaudeCodeModel (agy is the same shape: a local,
-logged-in agent CLI we shell out to). Uses `agy --print` under a PTY in a git
-workspace. No API key needed (agy is logged in via ~/.gemini/antigravity-cli/).
+The agy subclass of :class:`tasksolver.cli_backend.CLIBackendModel`, shared with
+``pycodex.CodexModel`` and ``tasksolver.claude_code.ClaudeCodeModel`` (agy is the same shape: a
+local, logged-in agent CLI we shell out to). Uses `agy --print` under a PTY in a git workspace.
+No API key needed (agy is logged in via ~/.gemini/antigravity-cli/).
 
     from tasksolver.common import TaskSpec, Question
     from pyagy import AgyModel
     model = AgyModel(api_key=None, task=my_task, model="gemini-3-pro")
     parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 """
-from typing import List, Tuple
-
-from loguru import logger
-
-from tasksolver.common import ParsedAnswer, Question, TaskSpec, attach_response_metadata
-from tasksolver.exceptions import GPTMaxTriesExceededException, GPTOutputParseException
+from tasksolver.cli_backend import CLIBackendModel
+from tasksolver.common import TaskSpec
 
 from .client import ask_many as _agy_ask_many
 
 
-class AgyModel(object):
+class AgyModel(CLIBackendModel):
+    backend_label = "agy"
+    command_label = "agy --print"
+    generic_model_aliases = ("agy",)
+    no_output_hint = "Ensure agy is logged in (~/.gemini/antigravity-cli/) and reachable."
+    # agy has a Read tool, so the base's vision preamble is already correct (no override).
+    # AgyProcess is already a multiprocessing.Process (start() forks agy and returns), so parallel
+    # sampling needs no threads: ask_many start()s all n and services them in one event loop
+    # (n_choices == 1 is the plain one-shot).
+    _client_ask_many = staticmethod(_agy_ask_many)
+
     def __init__(self, api_key: str = None, task: TaskSpec = None, model: str = None,
                  workspace: str = None, skip_permissions: bool = False,
                  timeout: int = 300, conversation_id: str = None,
                  continue_latest: bool = False, multi_turn: bool = False,
                  data_dir: str = None, print_timeout: int = None):
-        self.api_key = api_key                       # unused (agy is logged in), kept for contract parity
-        self.task: TaskSpec = task
-        # normalize the generic alias to "let agy pick"
-        self.model: str = model if model not in (None, "agy") else None
+        # api_key is unused (agy is logged in), kept for contract parity
+        super().__init__(api_key=api_key, task=task, model=model)
         self.workspace = workspace
         self.skip_permissions = skip_permissions
         # `timeout` matches CodexModel and both clients; print_timeout was the odd name out (it was
@@ -56,109 +61,16 @@ class AgyModel(object):
         )
 
     def _finish(self, r) -> dict:
-        """Validate one AgyResponse, latch the conversation id (multi_turn), and shape the
-        result dict. Single-threaded — ask() no longer spawns worker threads (AgyProcess is
-        already the native multiprocessing model), so the latch needs no lock."""
-        if not r.text:
-            raise RuntimeError(
-                "agy --print returned no output "
-                f"(exit_status={r.exit_status}, workspace={r.workspace}). "
-                "Ensure agy is logged in (~/.gemini/antigravity-cli/) and reachable. "
-                f"Transcript head:\n{r.transcript[:500]}"
-            )
-        # Latch onto the conversation the first turn created so later multi_turn calls resume it
-        # (--conversation=<id>). n_choices>1 is parallel sampling (no single conversation) — the
-        # first response's id is taken.
+        """The base result dict (incl. model/usage, which AgyResponse has always exposed) plus
+        agy's conversation id, latched from the first turn so later multi_turn calls resume it
+        (--conversation=<id>). n_choices>1 is parallel sampling (no single conversation) — the
+        first response's id is taken. Single-threaded (ask() spawns no worker threads; AgyProcess
+        is already the native multiprocessing model), so the latch needs no lock."""
+        res = super()._finish(r)
         if self.multi_turn and self.conversation_id is None:
             self.conversation_id = r.conversation_id
-        return {"result": r.text, "transcript": r.transcript, "exit_status": r.exit_status,
-                "workspace": r.workspace, "conversation_id": self.conversation_id}
-
-    def ask(self, payload: dict, n_choices: int = 1) -> Tuple[List[dict], List[dict]]:
-        assert n_choices >= 1
-        # AgyProcess is already a multiprocessing.Process (start() forks agy and returns), so
-        # parallel sampling needs no threads: ask_many start()s all n and services them in one
-        # event loop (n_choices == 1 is the plain one-shot).
-        responses = _agy_ask_many(payload["prompt"], n_choices, **self._call_kwargs(payload))
-        results = [self._finish(r) for r in responses]
-        messages = [{"role": "assistant", "content": res["result"]} for res in results]
-        return messages, results
-
-    @staticmethod
-    def prepare_payload(question: Question, max_tokens=1000, verbose: bool = False,
-                        prepend=None, workspace: str = None, **kwargs) -> dict:
-        strings, image_paths = [], []
-        for dic in question.get_json(save_local=True):
-            if dic["type"] == "text":
-                strings.append(dic["text"])
-            elif dic["type"] == "image_url":
-                local_path = dic.get("local_path")
-                if local_path is None:
-                    image = dic.get("image")
-                    if image is None:
-                        raise ValueError("AgyModel needs local image files for vision inputs.")
-                    local_path = Question.get_pil_image_content_savecopy(image)["local_path"]
-                image_paths.append(local_path)
-
-        parts = []
-        if image_paths:
-            parts.append("The visual inputs are saved as local image files. Use the Read "
-                         "tool to inspect them when answering.")
-            parts.extend(f"Image {i}: {p}" for i, p in enumerate(image_paths, 1))
-        parts.extend(strings)
-        return {"prompt": "\n\n".join(parts), "max_tokens": max_tokens, "workspace": workspace}
-
-    def rough_guess(self, question: Question, max_tokens=1000, max_tries=1,
-                    query_id: int = 0, verbose=False, **kwargs):
-        p = self.prepare_payload(question, max_tokens=max_tokens, verbose=verbose,
-                                 workspace=self.workspace)
-        reattempt = 0
-        while True:
-            response, meta_data = self.ask(p)
-            response = response[0]
-            try:
-                parsed_response = attach_response_metadata(
-                    self.task.answer_type.parser(response["content"]),
-                    response_metadata=meta_data[0] if isinstance(meta_data, list) and meta_data else meta_data,
-                    request_payload=p,
-                )
-            except GPTOutputParseException:
-                reattempt += 1
-                if reattempt > max_tries:
-                    logger.error(f"max tries ({max_tries}) exceeded.")
-                    raise GPTMaxTriesExceededException
-                logger.warning(f"Reattempt #{reattempt} querying agy")
-                continue
-            return parsed_response, response, meta_data, p
-
-    def many_rough_guesses(self, num_threads: int, question: Question, max_tokens=1000,
-                           verbose=False, max_tries=1) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
-        p = self.prepare_payload(question, max_tokens=max_tokens, verbose=verbose,
-                                 workspace=self.workspace)
-        reattempt = 0
-        while True:
-            response, meta_data = self.ask(p, n_choices=num_threads)
-            try:
-                parsed_response = [
-                    attach_response_metadata(
-                        self.task.answer_type.parser(r["content"]),
-                        response_metadata=meta_data[idx] if isinstance(meta_data, list) and len(meta_data) > idx else None,
-                        request_payload=p,
-                    )
-                    for idx, r in enumerate(response)
-                ]
-            except GPTOutputParseException:
-                reattempt += 1
-                if reattempt > max_tries:
-                    logger.error(f"max tries ({max_tries}) exceeded.")
-                    raise GPTMaxTriesExceededException
-                logger.warning(f"Reattempt #{reattempt} querying agy")
-                continue
-            return parsed_response, response, meta_data, p
-
-    def run_once(self, question: Question, max_tokens=1000, **kwargs):
-        q = self.task.first_question(question)
-        return self.rough_guess(q, max_tokens=max_tokens, **kwargs)
+        res["conversation_id"] = self.conversation_id
+        return res
 
     def session(self, **kwargs):
         """A first-class :class:`pyagy.Session` bound to this model — for rich multi-turn

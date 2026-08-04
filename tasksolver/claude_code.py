@@ -7,17 +7,25 @@ import threading
 from glob import glob
 from typing import List, Tuple
 
-from loguru import logger
-
-from .common import ParsedAnswer, Question, TaskSpec, attach_response_metadata
-from .exceptions import GPTMaxTriesExceededException, GPTOutputParseException
+from .cli_backend import CLIBackendModel
+from .common import TaskSpec
 
 
-class ClaudeCodeModel(object):
+class ClaudeCodeModel(CLIBackendModel):
+    backend_label = "LLM"                        # preserves "Reattempt #N querying LLM"
+    command_label = "claude -p"
+    generic_model_aliases = ("claude-code",)
+    no_output_hint = "Ensure the claude CLI is installed and logged in (`claude /login`)."
+    # vision_preamble: the base default IS claude-code's wording (it has a Read tool).
+    # No _client_ask_many / _call_kwargs / _finish — `ask` below is overridden wholesale: this CLI
+    # is driven by threaded `claude -p` subprocesses, not a wirecap ask_many, and its metadata is
+    # the raw CLI JSON rather than a _finish-shaped dict.
+
     def __init__(self, api_key: str, task: TaskSpec, model: str = None):
-        self.claude_key: str = api_key
-        self.task: TaskSpec = task
-        self.model: str = model if model not in (None, "claude-code") else None
+        # api_key/task stay REQUIRED here (the base defaults both to None); the generic-alias
+        # normalization comes from generic_model_aliases above.
+        super().__init__(api_key=api_key, task=task, model=model)
+        self.claude_key: str = api_key          # legacy attribute name, kept
         self.thinking_depth = None
 
     def ask(self, payload: dict, n_choices=1) -> Tuple[List[dict], List[dict]]:
@@ -151,117 +159,3 @@ class ClaudeCodeModel(object):
             capture_output=True,
             text=True,
         )
-
-    @staticmethod
-    def prepare_payload(
-        question: Question,
-        max_tokens=1000,
-        verbose: bool = False,
-        prepend=None,
-        **kwargs,
-    ) -> dict:
-        strings = []
-        image_paths = []
-        for dic in question.get_json(save_local=True):
-            if dic["type"] == "text":
-                strings.append(dic["text"])
-            elif dic["type"] == "image_url":
-                local_path = dic.get("local_path")
-                if local_path is None:
-                    image = dic.get("image")
-                    if image is None:
-                        raise ValueError("ClaudeCodeModel needs local image files for vision inputs.")
-                    saved = Question.get_pil_image_content_savecopy(image)
-                    local_path = saved["local_path"]
-                image_paths.append(local_path)
-
-        prompt_parts = []
-        if image_paths:
-            prompt_parts.append(
-                "The visual inputs are saved as local image files. Use the Read tool "
-                "to inspect them when answering."
-            )
-            prompt_parts.extend(
-                [f"Image {idx}: {path}" for idx, path in enumerate(image_paths, start=1)]
-            )
-        prompt_parts.extend(strings)
-
-        return {
-            "prompt": "\n\n".join(prompt_parts),
-            "max_tokens": max_tokens,
-        }
-
-    def rough_guess(
-        self,
-        question: Question,
-        max_tokens=1000,
-        max_tries=1,
-        query_id: int = 0,
-        verbose=False,
-        **kwargs,
-    ):
-        p = self.prepare_payload(question, max_tokens=max_tokens, verbose=verbose, prepend=None)
-
-        ok = False
-        reattempt = 0
-        while not ok:
-            response, meta_data = self.ask(p)
-            response = response[0]
-            try:
-                parsed_response = attach_response_metadata(
-                    self.task.answer_type.parser(response["content"]),
-                    response_metadata=meta_data[0] if isinstance(meta_data, list) and len(meta_data) > 0 else meta_data,
-                    request_payload=p,
-                )
-            except GPTOutputParseException:
-                reattempt += 1
-                if reattempt > max_tries:
-                    logger.error(f"max tries ({max_tries}) exceeded.")
-                    raise GPTMaxTriesExceededException
-
-                logger.warning(f"Reattempt #{reattempt} querying LLM")
-                continue
-            ok = True
-
-        return parsed_response, response, meta_data, p
-
-    def many_rough_guesses(
-        self,
-        num_threads: int,
-        question: Question,
-        max_tokens=1000,
-        verbose=False,
-        max_tries=1,
-    ) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
-        p = self.prepare_payload(question, max_tokens=max_tokens, verbose=verbose, prepend=None)
-
-        n_choices = num_threads
-        ok = False
-        reattempt = 0
-        while not ok:
-            response, meta_data = self.ask(p, n_choices=n_choices)
-            try:
-                parsed_response = [
-                    attach_response_metadata(
-                        self.task.answer_type.parser(r["content"]),
-                        response_metadata=meta_data[idx] if isinstance(meta_data, list) and len(meta_data) > idx else None,
-                        request_payload=p,
-                    )
-                    for idx, r in enumerate(response)
-                ]
-            except GPTOutputParseException:
-                reattempt += 1
-                if reattempt > max_tries:
-                    logger.error(f"max tries ({max_tries}) exceeded.")
-                    raise GPTMaxTriesExceededException
-
-                logger.warning(f"Reattempt #{reattempt} querying LLM")
-                continue
-            ok = True
-
-        return parsed_response, response, meta_data, p
-
-    def run_once(self, question: Question, max_tokens=1000, **kwargs):
-        q = self.task.first_question(question)
-        p_ans, ans, meta, p = self.rough_guess(q, max_tokens=max_tokens, **kwargs)
-        return p_ans, ans, meta, p

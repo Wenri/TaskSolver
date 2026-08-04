@@ -46,11 +46,13 @@ There is no formal test/lint/CI setup. The `test_scripts/` files are runnable sm
 ### One Agent, many backends — lazy string dispatch
 `tasksolver/agent.py` `Agent.__init__` is a big `if/elif` over the `vision_model` string. The matching branch **lazily imports** that provider's adapter (so you only need the SDK for the backend you use) and stores an instance on `self.visual_interface`. To dispatch by id, construct `Agent(api_key, task, vision_model=...)` and call `agent.visual_interface.run_once(question)`. Model-id → backend map (with alias normalization) lives entirely in this method; e.g. `claude-code-sonnet-4-6` → CLI `claude-sonnet-4-6`, `gemini-3-pro` → `gemini-3-pro-preview`.
 
-### The backend adapter contract (duck-typed — no shared base class)
-Every adapter (`GPTModel`, `ClaudeModel`, `ClaudeCodeModel`, `VLLMModel`, `KimiModel`, `GeminiModel`, and the local HF ones `QwenModel`/`InternModel`/`MiniCPMModel`/`PhiModel`/`LlamaModel`) is a standalone class that independently implements the same surface. There is no ABC enforcing it — match the existing shape exactly when adding one:
+### The backend adapter contract (duck-typed, with one shared base for the CLI backends)
+The HTTP/SDK adapters (`GPTModel`, `ClaudeModel`, `VLLMModel`, `KimiModel`, `GeminiModel`, and the local HF ones `QwenModel`/`InternModel`/`MiniCPMModel`/`PhiModel`/`LlamaModel`) are standalone classes that independently implement the same surface. There is no ABC enforcing it — match the existing shape exactly when adding one.
+
+The three **CLI-subprocess** backends are the exception: `ClaudeCodeModel`, `pyagy.AgyModel` and `pycodex.CodexModel` all subclass `CLIBackendModel` (`tasksolver/cli_backend.py`), which owns `prepare_payload`, the retry loop in `rough_guess`/`many_rough_guesses` (including the `GPTMaxTriesExceededException` context), `run_once`, and a default `ask`/`_finish` for the wirecap clients. `ask` is the one genuinely per-CLI method, so it is overridable, not forced — `ClaudeCodeModel` replaces it entirely (threaded `claude -p` subprocesses, raw CLI JSON as metadata) while agy and codex inherit it and supply only `_client_ask_many` + `_call_kwargs`. Adding a fourth CLI backend = subclass it and set `backend_label` / `command_label` / `generic_model_aliases` / `vision_preamble` / `no_output_hint` / `_client_ask_many`. Adding an HTTP/SDK backend still means copying the closest existing adapter — do **not** retrofit those onto this base; they share no subprocess/workspace machinery. `CLIBackendModel` lives in `tasksolver/` (never `wirecap/`, whose stdlib-import purity is enforced by four `python3 -S` probes) and must be imported only from a provider's `model.py`, which the `pyagy`/`pycodex` PEP-562 lazy `__getattr__` keeps out of the CLIs' embedded interpreters.
 
 - `__init__(api_key, task, model=...)`
-- `prepare_payload(question, max_tokens, ...)` *(staticmethod)* → provider-specific request dict
+- `prepare_payload(question, max_tokens, ...)` *(a staticmethod on the HTTP adapters; a **classmethod** on `CLIBackendModel`, so the vision preamble and error text follow the subclass — callable either on the class or an instance)* → provider-specific request dict
 - `ask(payload, n_choices=1)` → `(messages, metadata)`
 - `rough_guess(question, max_tokens, max_tries=1, ...)` → the **4-tuple** below, wrapping the retry loop
 - `run_once(question, max_tokens)` → calls `self.task.first_question(question)` then `rough_guess`
@@ -82,6 +84,6 @@ Env-var fallbacks resolved inside the adapters (see `vllm.py`, `kimi.py`): vLLM 
 
 ## Adding a new backend
 
-1. Create `tasksolver/<name>.py` with a class implementing the adapter contract above (copy the closest existing adapter — `gpt4v.py` for OpenAI-compatible, `claude.py` for Anthropic-style — and keep the 4-tuple return + retry loop + `attach_response_metadata`).
+1. Create `tasksolver/<name>.py` with a class implementing the adapter contract above (copy the closest existing adapter — `gpt4v.py` for OpenAI-compatible, `claude.py` for Anthropic-style — and keep the 4-tuple return + retry loop + `attach_response_metadata`). For a **CLI-subprocess** backend, subclass `tasksolver/cli_backend.py`'s `CLIBackendModel` instead of copying an adapter — it already supplies the payload assembly, retry loop and 4-tuple.
 2. Add an `elif vision_model in (...)` branch to `Agent.__init__` with a **lazy** `from .<name> import <Class>` inside the branch. The `# TODO: Add your own model here` comments mark the spot.
 3. If it takes a credential, decide its `KeyChain` service name and/or env-var fallback and follow the resolver pattern in `vllm.py`/`kimi.py`.

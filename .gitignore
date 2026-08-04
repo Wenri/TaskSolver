@@ -32,3 +32,4 @@ antigravity/symbols/funcmap.tsv.gz
 # --- Node (pymport bridge) ---
 node_modules/
 package-lock.json
+temporary/          # Question.get_pil_image_content_savecopy scratch (image payloads)
