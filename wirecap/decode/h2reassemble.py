@@ -14,8 +14,9 @@ your .proto downstream) but split out for convenience.
 Because we hook from process start, we see each connection from its HTTP/2
 preface, so the HPACK dynamic table stays in sync.
 """
-import gzip
 import struct
+
+from . import http1sse          # shared content-decoding (inflate); stdlib-pure, no cycle
 
 try:
     import hpack
@@ -106,24 +107,9 @@ class Reassembler:
             v = v.decode("utf-8", "replace") if isinstance(v, bytes) else v
             headers[k] = v
         body = bytes(st["data"])
-        enc = headers.get("content-encoding", "")
-        if "gzip" in enc:
-            try:
-                body = gzip.decompress(body)
-            except Exception:
-                pass
-        elif "br" in enc:                       # brotli (Google's default; brotli-python is a pixi dep)
-            try:
-                import brotli
-                body = brotli.decompress(body)
-            except Exception:
-                pass
-        elif "deflate" in enc:
-            try:
-                import zlib
-                body = zlib.decompress(body)
-            except Exception:
-                pass
+        # Same gzip/br/deflate handling as the HTTP/1.1 path — one implementation, in http1sse.
+        # (brotli is Google's default here; brotli-python is a pixi dep, imported lazily there.)
+        body = http1sse.inflate(body, headers.get("content-encoding", ""))
         msg = {
             "kind": "h2msg", "conn": conn, "dir": direction, "h2sid": sid,
             "headers": headers, "body_len": len(body),

@@ -365,7 +365,6 @@ static void agy_cgo_hook(agy_block *b)
          * stream_id; Python on_exit records {"kind":"exit","code":N}. */
         wire_event_t ev = { .kind = "exit", .stream_id = b->regs.rax, .mode = WIRE_SYNC };
         wire_emit(&ev);        /* SYNC: marker recorded before we stop the worker (below) */
-        wire_free(&ev);
         wire_shutdown();       /* now cooperatively stop + join the worker (deterministic teardown) */
         return;
     }

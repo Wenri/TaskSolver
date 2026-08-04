@@ -91,54 +91,6 @@ def is_generate_content(start_line):
     return "streamGenerateContent" in start_line or "generateContent" in start_line
 
 
-def decode_capture(path):
-    """Offline: reconstruct genai turns from a capture JSONL of raw tls events.
-    Only works when the events carry full bodies (record with a large ``AGY_PROC_PREVIEW``);
-    the live ``capture.Correlator`` doesn't have that limit. Returns a list of turn dicts."""
-    import collections
-    streams = collections.defaultdict(list)     # (dir, stream) -> [(t, bytes)]
-    for line in open(path):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
-        k = r.get("kind")
-        if k not in ("tls_write", "tls_read") or not r.get("head"):
-            continue
-        d = "c2s" if k == "tls_write" else "s2c"
-        streams[(d, r["stream"])].append((r["t"], bytes.fromhex(r["head"])))
-
-    requests, responses = [], []
-    for (d, sid), chunks in streams.items():
-        dec = StreamDecoder()
-        chunks.sort(key=lambda x: x[0])
-        for t, b in chunks:
-            for msg in dec.feed(b):
-                if d == "c2s" and msg.is_request and is_generate_content(msg.start_line):
-                    requests.append((t, sid, msg))
-                elif d == "s2c" and msg.is_event_stream:
-                    responses.append((t, sid, msg))
-    return _pair(requests, responses)
-
-
-def _pair(requests, responses):
-    """Correlate each response to the nearest preceding request (by time)."""
-    requests.sort(key=lambda x: x[0])
-    turns = []
-    for rt, rsid, resp in sorted(responses, key=lambda x: x[0]):
-        req = None
-        for qt, qsid, m in requests:
-            if qt <= rt + 1.0:
-                req = (qt, qsid, m)
-            else:
-                break
-        turns.append(build_turn(req, (rt, rsid, resp)))
-    return turns
-
-
 def build_turn(req, resp):
     """Assemble a ``genai_turn`` dict from a (request, response) message pair.
     ``req`` may be ``None`` if no matching request was captured."""
@@ -181,7 +133,6 @@ class GenaiTurnBuilder(TurnBuilder):
     drives — agy's ``toStreamResponseChunk`` chunks parse via ``parse_sse``, a turn ends at
     the first ``finishReason``, and turns assemble into the ``genai_turn`` dict."""
 
-    kind = "genai_turn"
 
     def is_request(self, msg):
         return is_generate_content(msg.start_line)

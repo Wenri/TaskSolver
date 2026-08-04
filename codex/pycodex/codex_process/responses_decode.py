@@ -167,7 +167,6 @@ class ResponsesTurnBuilder(TurnBuilder):
     (``feed_events`` / ``feed_request``) is used — the HTTP-framing hooks (``is_request`` /
     ``build_from_message``) never fire."""
 
-    kind = "codex_turn"
 
     def parse_events(self, data):
         """One ``codex_event`` fire = one ResponsesStreamEvent JSON object."""

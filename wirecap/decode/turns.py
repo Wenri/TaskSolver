@@ -16,7 +16,6 @@ with its request by time. It defers every provider-*specific* decision to a ``Tu
 
 
 class TurnBuilder:
-    kind = "turn"
 
     def is_request(self, msg):
         """Is this decoded HTTP/1.1 ``Message`` a model request worth tracking? Default: any."""

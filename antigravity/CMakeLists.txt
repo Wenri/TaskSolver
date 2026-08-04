@@ -133,13 +133,8 @@ if(NOT EXISTS "/usr/include/linux/limits.h")
 endif()
 message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 
-# ---- embed conda's libpython3.13 (faithful to the Makefile's python3-config) ------------------
-find_program(PY3CONFIG NAMES python3-config HINTS "${CONDA_PREFIX}/bin" REQUIRED)
-execute_process(COMMAND "${PY3CONFIG}" --includes OUTPUT_VARIABLE _py_inc OUTPUT_STRIP_TRAILING_WHITESPACE)
-execute_process(COMMAND "${PY3CONFIG}" --ldflags --embed OUTPUT_VARIABLE _py_ld OUTPUT_STRIP_TRAILING_WHITESPACE)
-separate_arguments(PY_INCLUDES UNIX_COMMAND "${_py_inc}")
-separate_arguments(PY_LDFLAGS  UNIX_COMMAND "${_py_ld}")
-
+# NOTE: no python3-config probe here. No shim TU includes a Python header — CPython is embedded by
+# the SHARED bridge (wirecap/native), which does its own probe and carries the embed link flags.
 # ---- generate symbols_gen.h from the committed symbols.json (into src/, gitignored) -----------
 add_custom_command(
   OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
@@ -165,12 +160,12 @@ set_target_properties(antigravity PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor")
 
 target_compile_features(antigravity PRIVATE cxx_std_23)
-# All four TUs are C++23. -Wno-deprecated-declarations: one std::auto_ptr warning from Boost.Python.
-# -Wno-missing-field-initializers: the shim uses partial designated initializers pervasively (C's
-# -Wextra exempts them, C++'s doesn't).
+# All the shim's TUs are C++23. -Wno-deprecated-declarations: one std::auto_ptr warning from
+# Boost.Python (via the bridge's propagated includes). -Wno-missing-field-initializers: the shim uses
+# partial designated initializers pervasively (C's -Wextra exempts them, C++'s doesn't).
 target_compile_options(antigravity PRIVATE
   -O2 -g -fPIC -Wall -Wextra -Wno-deprecated-declarations -Wno-missing-field-initializers
-  -fvisibility=hidden -ffunction-sections -fdata-sections ${PY_INCLUDES})
+  -fvisibility=hidden -ffunction-sections -fdata-sections)
 if(UAPI_INC)
   target_compile_options(antigravity PRIVATE -idirafter "${UAPI_INC}")
 endif()

@@ -124,7 +124,6 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         wire_emit(&ev);   /* SYNC: on a rewrite the bridge already replaced ev.data (== ptr) in
                              * place; verdict says so, out_len is the new (equal-or-shorter) length. */
         if (ev.verdict) cpu->rcx = ev.out_len;   /* shrink the slice length the callee sees */
-        wire_free(&ev);
         break;
     }
     case hk("TLS_READ"): {

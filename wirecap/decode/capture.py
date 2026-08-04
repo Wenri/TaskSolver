@@ -63,7 +63,7 @@ class BaseCorrelator:
                 # A new request means the previous response is over: flush it if it never hit
                 # a terminal event (aborted stream), so its events can't bleed into this turn.
                 if self._acc:
-                    self._flush_events(None)
+                    self._flush_events()
                 self._remember(t, msg.headers.get("host"), stream_id, msg)
             elif not msg.is_request and msg.is_event_stream:
                 self._emit_message(stream_id, t, msg)
@@ -72,7 +72,7 @@ class BaseCorrelator:
     def feed_request(self, req_repr, t, host=None, stream_id=None):
         """Track a pre-parsed request (e.g. a serialized request JSON) for pairing."""
         if self._acc:
-            self._flush_events(None)
+            self._flush_events()
         self._remember(t, host, stream_id, req_repr)
 
     def feed_events(self, events, t):
@@ -83,13 +83,15 @@ class BaseCorrelator:
             self._acc_t = t
         self._acc.extend(events)
         if self._builder.is_terminal(self._acc):
-            self._flush_events(None)
+            self._flush_events()
 
     # --- turn emission --------------------------------------------------------
-    def _flush_events(self, resp_stream):
+    def _flush_events(self):
         req = self._match(self._acc_t, None)
         turn = self._builder.build_from_events(
-            self._acc, self._acc_t, resp_stream,
+            # resp_stream is None on this path: the accumulated-event route has no connection id
+            # (resp_chunk's stream_id is a Go string pointer, not a conn — see agy_process).
+            self._acc, self._acc_t, None,
             (req[0], req[2], req[3]) if req else None,
         )
         self._acc = []

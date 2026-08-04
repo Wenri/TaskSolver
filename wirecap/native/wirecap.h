@@ -48,10 +48,6 @@ void wire_emit(wire_event_t *ev);
  * (e.g. from Rust) without constructing a wire_event_t. Never returns a verdict. */
 void wire_emit_async(const char *kind, uint64_t stream_id, const uint8_t *data, size_t len);
 
-/* Reset the SYNC output fields after honoring the verdict. The replacement (if any) was written
- * into ev->data in place by emit — there's no separate buffer to free. */
-void wire_free(wire_event_t *ev);
-
 int  wire_ready(void);
 
 /* Cooperatively stop + join the worker (idempotent). Called from the front-end's teardown

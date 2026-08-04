@@ -305,10 +305,3 @@ extern "C" void wire_emit_async(const char *kind, uint64_t stream_id,
     wire_event_t ev = { kind, stream_id, data, len, WIRE_ASYNC, 0, 0 };
     bridge().emit(&ev);
 }
-
-extern "C" void wire_free(wire_event_t *ev)   /* the SYNC replacement was applied in place in emit();
-                                                * nothing to free — just reset the output fields. */
-{
-    ev->out_len = 0;
-    ev->verdict = 0;
-}
