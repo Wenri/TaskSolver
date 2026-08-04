@@ -123,14 +123,25 @@ def main():
 
 
 def start():
-    """Run the child on a daemon thread (called from the WIRE_MODULE import when the embedded-worker
-    channel is wired). No-op if the boot fd is absent or stale."""
+    """Run the child on a daemon thread — called unconditionally from a WIRE_MODULE's import; it
+    decides for itself whether the embedded-worker channel is actually wired.
+
+    No-ops unless WIRE_MP_BOOT_FD names a live fd AND we are inside a provider's embedded
+    interpreter (``sys._wire_shim``, set by the native bridge). That keeps a bare `agy`/`codex exec`
+    run — which just writes the WIRE_CAPTURE JSONL — from trying to unpickle a spawn payload, and
+    keeps the target off this thread so a blocking recv() can't starve hook dispatch. Never raises:
+    a failure here must not take down the host's import."""
     try:
+        if not getattr(sys, "_wire_shim", False):
+            return
         boot = int(os.environ.get("WIRE_MP_BOOT_FD", "-1"))
         if boot < 0:
             return
         os.fstat(boot)
     except (ValueError, OSError):
+        return
+    except Exception:
+        traceback.print_exc()
         return
     threading.Thread(target=main, name="wire-mp-child", daemon=True).start()
 

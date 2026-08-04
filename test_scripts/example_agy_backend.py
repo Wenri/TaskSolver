@@ -40,7 +40,7 @@ def main():
         followup_func=lambda qs, ans: Question([]),
         completed_func=lambda q, a: True,
     )
-    model = AgyModel(api_key=None, task=task, model=None, print_timeout=180)
+    model = AgyModel(api_key=None, task=task, model=None, timeout=180)
     parsed, raw, meta, payload = model.run_once(
         Question(["What is 2+2? Reply with only the number."])
     )

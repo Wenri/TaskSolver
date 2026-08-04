@@ -22,16 +22,19 @@ from .client import ask_many as _agy_ask_many
 class AgyModel(object):
     def __init__(self, api_key: str = None, task: TaskSpec = None, model: str = None,
                  workspace: str = None, skip_permissions: bool = False,
-                 print_timeout: int = 300, conversation_id: str = None,
+                 timeout: int = 300, conversation_id: str = None,
                  continue_latest: bool = False, multi_turn: bool = False,
-                 data_dir: str = None):
+                 data_dir: str = None, print_timeout: int = None):
         self.api_key = api_key                       # unused (agy is logged in), kept for contract parity
         self.task: TaskSpec = task
         # normalize the generic alias to "let agy pick"
         self.model: str = model if model not in (None, "agy") else None
         self.workspace = workspace
         self.skip_permissions = skip_permissions
-        self.print_timeout = print_timeout
+        # `timeout` matches CodexModel and both clients; print_timeout was the odd name out (it was
+        # translated straight back to timeout= for the client). Kept as a deprecated alias so
+        # external callers constructing AgyModel(print_timeout=...) keep working.
+        self.timeout = print_timeout if print_timeout is not None else timeout
         # Opt-in multi-turn: continue ONE agy conversation across calls (see pyagy.Session).
         # Off by default → each call is an independent one-shot (the classic adapter shape).
         # Enabled implicitly when a conversation is being resumed.
@@ -45,7 +48,7 @@ class AgyModel(object):
         return dict(
             workspace=payload.get("workspace") or self.workspace,
             model=self.model,
-            timeout=self.print_timeout,
+            timeout=self.timeout,
             skip_permissions=self.skip_permissions,
             conversation_id=self.conversation_id,
             continue_latest=(self.continue_latest and self.conversation_id is None),
@@ -164,7 +167,7 @@ class AgyModel(object):
         has latched one. ``**kwargs`` override the Session defaults."""
         from .client import Session
         kw = dict(model=self.model, workspace=self.workspace,
-                  skip_permissions=self.skip_permissions, timeout=self.print_timeout,
+                  skip_permissions=self.skip_permissions, timeout=self.timeout,
                   data_dir=self.data_dir)
         if self.conversation_id:
             kw["conversation_id"] = self.conversation_id

@@ -159,8 +159,12 @@ class WireProcess(SpawnProcess):
 
     @property
     def exit_status(self):
-        """The host's raw waitpid exit status, or None if not yet reaped."""
-        return getattr(self._popen, "status", None)
+        """The host's DECODED exit code — ``os.waitstatus_to_exitcode`` of the raw waitpid status
+        (negative for a signal), or None if not yet reaped. Decoded here so both providers report
+        the same thing: the raw status made an exit(1) read as 256 on one side and 1 on the other,
+        for a value both adapters render into the same user-facing sentence."""
+        st = getattr(self._popen, "status", None)
+        return os.waitstatus_to_exitcode(st) if st is not None else None
 
     def close(self, **popen_kwargs):
         """Stop the host + close the channel. We reap the host ourselves (it owns its lifetime), so

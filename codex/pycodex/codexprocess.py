@@ -1,14 +1,15 @@
 """CodexProcess / CodexPopen — codex driven as a wirecap mp-child, streaming decoded ``codex_turn``s
 home over a caller-owned ``SimpleQueue``.
 
-The codex sibling of pyagy's AgyProcess/PtyPopen, on the shared ``wirecap.runtime.process`` base.
-``codex exec`` is a non-TTY one-shot, so there is NO PTY: CodexPopen forks plainly, points the
-child's stdin at ``/dev/null`` (``codex exec`` blocks reading stdin otherwise) and its stdout/stderr
-at a per-run logfile (the transcript byproduct), and uses ``os.pidfd_open`` as the death sentinel —
-immune to the fd inheritance that makes queue-EOF unreliable once codex spawns tool grandchildren
-(shells/apply_patch). The embedded wirecap bridge inside codex runs ``wirecap.decode.mp_child``,
-whose ``stream_turns`` target ``.put``s ``codex_turn``s over the queue; the durable ``WIRE_CAPTURE``
-JSONL stays authoritative for the returned turns (see client.py).
+The codex sibling of pyagy's AgyProcess/PtyPopen, on the shared ``wirecap.runtime.pty`` bases — so
+``codex exec`` and ``agy --print`` (and the two TUI modes, and the two resumes) run on identical
+machinery. CodexPopen forks under a pty like agy's, with two deliberate deviations: the one-shot
+points the child's stdin at ``/dev/null`` (``codex exec`` blocks reading stdin, and unlike the TUI
+there is nothing to type into it), and the death sentinel stays ``os.pidfd_open`` rather than the
+pty master — codex spawns tool grandchildren (shells/apply_patch) that inherit the slave, so the
+master can outlive codex itself. The embedded wirecap bridge inside codex runs
+``wirecap.decode.mp_child``, whose ``stream_turns`` target ``.put``s ``codex_turn``s over the queue;
+the durable ``WIRE_CAPTURE`` JSONL stays authoritative for the returned turns (see client.py).
 """
 import os
 
@@ -94,10 +95,3 @@ class CodexProcess(WirePtyProcess):
         self._session_id = session_id          # resume a stored session (codex [exec] resume <id>)
         self._continue_latest = continue_latest  # resume the newest (codex [exec] resume --last)
         self._echo = echo                      # mirror codex's PTY output to our stdout (debug)
-
-    @property
-    def exit_status(self):
-        """codex's DECODED exit code (``os.waitstatus_to_exitcode`` of the raw waitpid status), or
-        None if not yet reaped — matches the returncode the old subprocess model exposed."""
-        st = getattr(self._popen, "status", None)
-        return os.waitstatus_to_exitcode(st) if st is not None else None

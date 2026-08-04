@@ -496,6 +496,7 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
 
     cleanup = _inject_config(tools, context)
     q = _new_channel()                              # caller owns the result queue (stock-mp style)
+    p = None
     try:
         p = AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
                        agy_bin=agy_bin, workdir=workspace, capture=cap_path,
@@ -507,11 +508,16 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
         q._writer.close()                           # parent reads only; reader now EOFs on agy death
         objs = _collect(p, q, timeout=timeout)      # decoded answer streamed home over the queue
         transcript = p.transcript                   # raw PTY (fallback / diagnostics)
-        cid, exit_status = p.conversation_id, p.exit_status
-        p.close()
+        cid = p.conversation_id
     finally:
+        # close() in the finally so a KeyboardInterrupt / mid-collect raise never leaves agy running
+        # (it is idempotent). It also SIGTERMs + blocking-reaps, so exit_status is only reliably set
+        # afterwards — on the _collect timeout path nothing had reaped yet.
+        if p is not None:
+            p.close()
         _close_channel(q)
         cleanup()
+    exit_status = p.exit_status if p is not None else None
 
     return AgyResponse.from_objs(
         objs, transcript, exit_status=exit_status, capture_path=cap_path,
@@ -545,6 +551,7 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
             open(c, "w").close()                 # truncate so each reads only its own run
     cleanup = _inject_config(tools, context)     # one shared MCP config for all n
     queues = [_new_channel() for _ in range(n)]   # one caller-owned result queue per proc
+    procs = []
     try:
         procs = [AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
                             agy_bin=agy_bin, workdir=workspace, capture=cap_paths[i],
@@ -561,10 +568,12 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
                          objs, p.transcript, exit_status=p.exit_status, capture_path=cap,
                          workspace=workspace, funcmap=funcmap, conversation_id=p.conversation_id)
                      for p, objs, cap in zip(procs, objs_list, cap_paths)]
-        for p in procs:
-            p.close()
         return responses
     finally:
+        # close in the finally (idempotent) so a raise mid-start/mid-collect never leaves any agy
+        # running — the old placement also skipped every already-started proc if start() raised.
+        for p in procs:
+            p.close()
         for q in queues:
             _close_channel(q)
         cleanup()

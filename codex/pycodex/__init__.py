@@ -23,6 +23,9 @@ _LAZY = {
     "CodexResponse": ".client",
     "Usage": ".client",
     "CodexModel": ".model",
+    # re-exported so callers can seed a workspace before ask() — pycodex.ask's own
+    # docstring tells them to, and pyagy exports it under the same name.
+    "ensure_git_workspace": "wirecap.runtime.workspace",
 }
 
 
@@ -36,3 +39,6 @@ def __getattr__(name):
 
 def __dir__():
     return sorted(_LAZY)
+
+
+__all__ = sorted(_LAZY)   # so `from pycodex import *` binds the lazy names

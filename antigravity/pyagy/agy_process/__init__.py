@@ -219,13 +219,9 @@ def dispatch(kind, stream_id, data):
         return None
 
 
-# AgyProcess: when agy is launched with the embedded-worker channel wired (the boot pipe fd is
-# exported), run the pickled target on a daemon thread — separate from this dispatch worker so a
-# blocking recv() there can't starve hook dispatch. The capture pipeline above stays live, so the
-# target can consume decoded events in-process AND stream results over the Connection.
-if os.environ.get("WIRE_MP_BOOT_FD") and getattr(sys, "_wire_shim", False):
-    try:
-        from wirecap.decode import mp_child
-        mp_child.start()
-    except Exception:
-        traceback.print_exc()
+# AgyProcess embedded-worker channel: run the pickled target on a daemon thread — separate from this
+# dispatch worker so a blocking recv() there can't starve hook dispatch. The capture pipeline above
+# stays live, so the target can consume decoded events in-process AND stream results over the
+# Connection. start() self-gates on the boot fd + sys._wire_shim and never raises.
+from wirecap.decode import mp_child
+mp_child.start()

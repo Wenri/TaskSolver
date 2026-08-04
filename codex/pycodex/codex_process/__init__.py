@@ -84,13 +84,9 @@ def dispatch(kind, stream_id, data):
         return None
 
 
-# CodexProcess embedded-worker channel: when the boot pipe is wired (WIRE_MP_BOOT_FD set + this is
-# the codex-embedded interpreter), run the pickled target on a daemon thread so it can stream decoded
-# turns home over the result queue. mp_child is shared (wirecap.decode); a no-op if the fd is absent
-# (e.g. a bare `codex exec` smoke run, which just writes the WIRE_CAPTURE JSONL).
-if os.environ.get("WIRE_MP_BOOT_FD") and getattr(sys, "_wire_shim", False):
-    try:
-        from wirecap.decode import mp_child
-        mp_child.start()
-    except Exception:
-        traceback.print_exc()
+# CodexProcess embedded-worker channel: run the pickled target on a daemon thread so it can stream
+# decoded turns home over the result queue. start() (shared, wirecap.decode) self-gates on the boot
+# fd + sys._wire_shim, so a bare `codex exec` smoke run — which just writes the WIRE_CAPTURE JSONL —
+# is a no-op.
+from wirecap.decode import mp_child
+mp_child.start()

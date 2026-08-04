@@ -28,6 +28,7 @@ _LAZY = {
     # high-level client (the end-user API); Session is the first-class object
     "Session": ".client",
     "ask": ".client",
+    "ask_many": ".client",
     "resume": ".client",
     "continue_latest": ".client",
     "AgyResponse": ".client",

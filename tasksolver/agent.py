@@ -105,7 +105,7 @@ class Agent(object):
                     f"Empty agy model suffix in {vision_model!r}; use `agy` or "
                     "`agy-<model>` (e.g. `agy-gemini-3-pro`)."
                 )
-            self.visual_interface = AgyModel(None, task, model=model, print_timeout=1800)
+            self.visual_interface = AgyModel(None, task, model=model, timeout=1800)
 
         elif vision_model == "codex" or vision_model.startswith("codex-"):
             from pycodex import CodexModel
