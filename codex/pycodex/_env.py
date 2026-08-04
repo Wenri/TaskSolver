@@ -53,10 +53,40 @@ def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_e
     return env
 
 
-def codex_argv(prompt, workspace, model=None, extra_flags=None, codex_bin=None):
-    """codex's non-interactive one-shot argv: ``codex exec <prompt> --skip-git-repo-check -C <ws>``
-    (+ ``-m <model>`` / extra flags). Run with stdin closed so ``exec`` doesn't block reading it."""
-    argv = [codex_bin or CODEX_BIN, "exec", prompt, "--skip-git-repo-check", "-C", workspace]
+def codex_argv(prompt, workspace, model=None, extra_flags=None, codex_bin=None,
+               persistent=False, session_id=None, continue_latest=False):
+    """codex's argv tail. One-shot is ``codex exec <prompt> --skip-git-repo-check -C <ws>`` (run with
+    stdin on /dev/null so ``exec`` doesn't block reading it) — the direct counterpart of agy's
+    ``--print``. ``persistent=True`` launches the interactive TUI (bare ``codex <prompt>``), the
+    counterpart of agy's ``--prompt-interactive``; ``session_id`` / ``continue_latest`` resume a
+    stored session (``codex resume <id>`` / ``codex resume --last``), mirroring agy's
+    ``--conversation=<id>`` / ``--continue``."""
+    bin_ = codex_bin or CODEX_BIN
+    if persistent:
+        # Interactive TUI: bare `codex`, options forwarded to the TUI CLI. NOTE
+        # --skip-git-repo-check is `global = true` only INSIDE the exec subtree
+        # (exec/src/cli.rs), so it must not be passed here. Top-level `codex resume`
+        # resumes an INTERACTIVE session (cli/src/main.rs) — the TUI counterpart of
+        # agy's --conversation=<id> / --continue.
+        if session_id:
+            argv = [bin_, "resume", session_id]
+        elif continue_latest:
+            argv = [bin_, "resume", "--last"]
+        else:
+            argv = [bin_, *([prompt] if prompt else [])]
+        argv += ["-C", workspace]
+    else:
+        # One-shot, the direct counterpart of `agy --print`. `codex exec resume` is the
+        # non-interactive resume (exec/src/cli.rs Command::Resume); with --last the
+        # positional is reinterpreted as the prompt, not a session id.
+        argv = [bin_, "exec"]
+        if session_id:
+            argv += ["resume", session_id, *([prompt] if prompt else [])]
+        elif continue_latest:
+            argv += ["resume", "--last", *([prompt] if prompt else [])]
+        else:
+            argv += [prompt]
+        argv += ["--skip-git-repo-check", "-C", workspace]
     if model:
         argv += ["-m", model]
     if extra_flags:

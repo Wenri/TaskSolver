@@ -24,9 +24,7 @@ the PTY + the lifecycle + fd inheritance, and runs `mp_child._bootstrap`. `start
 terminate` are inherited and track agy's pid; the answer flows over the caller's SimpleQueue, the
 transcript over the PTY (a byproduct on ``transcript``).
 """
-import time
-
-from wirecap.runtime.process import WireProcess
+from wirecap.runtime.pty import WirePtyProcess
 
 from . import conversations as _conv
 from ._pty import PtyPopen
@@ -52,7 +50,7 @@ def _agy_argv(prompt, persistent, model, skip_permissions, extra_flags,
     return argv
 
 
-class AgyProcess(WireProcess):
+class AgyProcess(WirePtyProcess):
     """`WireProcess` handle for an agy run (always instrumented, always a worker). Like stock
     ``Process`` it does not own the result channel: the caller passes a ``SimpleQueue`` via
     ``args=(q,)`` and drains it (see client.py's collect/ask/collect_many, which use ``service_pty``
@@ -85,24 +83,8 @@ class AgyProcess(WireProcess):
         self._extra_env = extra_env    # caller overlays layered onto instrumented_env (shim knobs)
         self._echo = echo              # mirror agy's PTY output to our stdout (debug)
 
-    # --- PTY service passthroughs (the caller owns the result queue and drains it via these) ---
-    def service_pty(self, timeout, readers):
-        """Drain agy's PTY (+ auto-answer) while waiting up to ``timeout`` s for data on any of
-        ``readers`` (the caller's result-queue read end(s)); True once one is ready. The caller
-        (client.py) owns the queue and passes its reader here — this keeps agy's PTY drained in the
-        same wait the caller uses to read results, so no background pump thread is needed."""
-        return self._popen._service(timeout, readers)
-
-    @property
-    def last_output(self):
-        """Wall-clock of the last PTY write — the turn-boundary idle signal the caller's ask-loop
-        uses to detect a settled turn. Settable so the caller can reset it right after submitting a
-        prompt (so the idle detector measures from the submit, not the prior turn)."""
-        return self._popen._last_output
-
-    @last_output.setter
-    def last_output(self, ts):
-        self._popen._last_output = ts
+    # service_pty / last_output / transcript / write / send_line / send / workspace are inherited
+    # from WirePtyProcess — the PTY-facing surface is identical for every CLI under a pty.
 
     @property
     def conversation_id(self):
@@ -120,30 +102,6 @@ class AgyProcess(WireProcess):
     # The decoded-answer collection helpers (collect / ask-turn / collect_many) live in the caller
     # (client.py), which owns the result queue — this class is a Process, not its consumer. They
     # drain via ``service_pty(timeout, [q._reader])`` + ``q.get()``.
-
-    # --- PTY: raw input + the transcript byproduct ---
-    @property
-    def transcript(self):
-        """The full ANSI-stripped PTY transcript seen so far (diagnostics / fallback answer)."""
-        return self._popen.transcript
-
-    def write(self, data):
-        """Write raw bytes to the PTY."""
-        self._popen.write(data)
-
-    def send_line(self, text):
-        """Type a line + Enter into the PTY."""
-        self._popen.send_line(text)
-
-    def send(self, prompt):
-        """Type + submit a prompt into agy's interactive TUI (fire-and-forget)."""
-        self._popen.send_line(prompt)
-        self._popen._last_output = time.time()
-
-    @property
-    def workspace(self):
-        """The resolved git workspace agy ran in."""
-        return getattr(self._popen, "_workspace", None)
 
     @property
     def home(self):
