@@ -74,13 +74,6 @@ static int bid_cb(struct dl_phdr_info *info, size_t size, void *data)
 /* ---- gum listener --------------------------------------------------------- */
 struct rd_state { uint64_t conn, ptr; };  /* passed enter→leave for TLS_READ */
 
-/* substring scan over a NON-nul-terminated Go string (name.ptr/name.len). The (ptr,len)
- * string_view never reads past n, and find() allocates nothing — safe on a goroutine stack. */
-static bool mem_has(const char *h, size_t n, std::string_view needle)
-{
-    return !needle.empty() && std::string_view(h, n).find(needle) != std::string_view::npos;
-}
-
 static void on_enter(GumInvocationContext *ic, gpointer user_data)
 {
     (void)user_data;
@@ -100,21 +93,8 @@ static void on_enter(GumInvocationContext *ic, gpointer user_data)
         wire_emit(&ev);
         break;
     }
-    case hk("FILE_OPEN"): {
-        /* os.OpenFile(name string, ...): name.ptr=RAX, name.len=RBX. agy's conversation
-         * store lives at .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
-         * so the uuid is IN the path. Filter to those paths HERE (C, cheap) so Python only
-         * sees a conversation open, then it parses the uuid → a conversation_id event. */
-        const char *p = (const char *)cpu->rax;
-        size_t len = (size_t)cpu->rbx;
-        if (p && len > 0 && len < 4096 &&
-            (mem_has(p, len, "conversations/") || mem_has(p, len, "/brain/"))) {
-            wire_event_t ev = { .kind = "file_open", .stream_id = 0,
-                               .data = (const uint8_t *)p, .len = len, .mode = WIRE_ASYNC };
-            wire_emit(&ev);
-        }
-        break;
-    }
+    /* FILE_OPEN's arg read + path filter moved to agy_cgo_hook (cgotrampoline.cpp): the hook is
+     * AGY_FULLCGO, so it never reached this retired gum path. */
     case hk("TLS_WRITE"): {
         /* crypto/tls.(*Conn).Write(c=RAX, b.ptr=RBX, b.len=RCX, b.cap=RDI) */
         uint64_t conn = cpu->rax, ptr = cpu->rbx, len = cpu->rcx;
@@ -236,6 +216,11 @@ static void install_hooks(void)
         if (gh) {
             for (int i = 0; i < HK_COUNT; i++) {
                 if (HOOKS[i].mech != AGY_FULLCGO && HOOKS[i].mech != AGY_ASMCGO) continue;
+                /* FILE_OPEN is an OVERLAY: only install it when the caller asked for
+                 * conversation-id capture, so an ordinary run doesn't pay a cgocall on every
+                 * os.OpenFile. (This gate used to live only in the AGY_GUM loop below, which no
+                 * hook reaches — so the trampoline was installed unconditionally.) */
+                if (i == hk("FILE_OPEN") && !g_conv_id) continue;
                 uint64_t va = HOOKS[i].vaddr;
                 if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
                 int asmcgo = (HOOKS[i].mech == AGY_ASMCGO);

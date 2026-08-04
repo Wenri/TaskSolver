@@ -82,9 +82,9 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
         "WIRE_MODULE": module,
         "AGY_PROC_CAPTURE": os.path.abspath(capture),
         # install the os.OpenFile conversation-id probe (overlay) so instrumented runs learn
-        # the exact conversation id in-process (agy doesn't expose it via env); mtime is the
-        # fallback. The FILE_OPEN gum hook only attaches when this is set, and its C-side
-        # path filter keeps it cheap (Python sees only conversation-store opens).
+        # the exact conversation id in-process (agy doesn't expose it via env); newest-*.db-by-
+        # mtime is the fallback. The FILE_OPEN trampoline is installed only when this is set,
+        # and its C-side path filter keeps it cheap (Python sees only conversation-store opens).
         "AGY_PROC_CONV_ID": "1",
         "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),
         "TERM": env.get("TERM", "xterm-256color"),

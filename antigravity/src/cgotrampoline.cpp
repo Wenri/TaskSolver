@@ -325,6 +325,13 @@ void agy_set_real_exe(const char *p)
     g_real_exe_len = n;
 }
 
+/* Substring scan over a NON-nul-terminated Go string (name.ptr/name.len). The (ptr,len)
+ * string_view never reads past n, and find() allocates nothing — safe on the g0 stack. */
+static bool mem_has(const char *h, size_t n, std::string_view needle)
+{
+    return !needle.empty() && std::string_view(h, n).find(needle) != std::string_view::npos;
+}
+
 static void agy_cgo_hook(agy_block *b)
 {
     if (std::getenv("AGY_PROC_CGT_ARGS")) cgt_diag(b);
@@ -350,6 +357,22 @@ static void agy_cgo_hook(agy_block *b)
         /* crypto/tls.(*Conn).Write(c=rax, b.ptr=rbx, b.len=rcx): the model REQUEST (egress).
          * Entry-arg read on the trampoline — the reliable replacement for the gum on_enter path. */
         cgt_bytes_emit("tls_write", b->regs.rax, b->regs.rbx, b->regs.rcx);
+        return;
+    }
+    if (kind == "file_open") {
+        /* os.OpenFile(name string, ...): name.ptr=rax, name.len=rbx. agy's conversation store
+         * lives at .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl, so the
+         * uuid is IN the path. Filter to those paths HERE (C, cheap) so the worker only ever sees
+         * a conversation open, then Python parses the uuid → a conversation_id event. The hook is
+         * gated at install time on AGY_PROC_CONV_ID, so an ordinary run pays nothing at all. */
+        const char *p = (const char *)b->regs.rax;
+        size_t len = (size_t)b->regs.rbx;
+        if (p && len > 0 && len < 4096 &&
+            (mem_has(p, len, "conversations/") || mem_has(p, len, "/brain/"))) {
+            wire_event_t ev = { .kind = "file_open", .stream_id = 0,
+                               .data = (const uint8_t *)p, .len = len, .mode = WIRE_ASYNC };
+            wire_emit(&ev);
+        }
         return;
     }
     if (kind == "http_rt") {

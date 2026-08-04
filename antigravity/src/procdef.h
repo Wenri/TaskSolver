@@ -101,9 +101,10 @@ inline constexpr agy_hook HOOKS[] = {
 /* conversation-id capture (overlay, gated by AGY_PROC_CONV_ID — skipped unless that is set).
  * os.OpenFile: agy opens .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
  * so the uuid is in the path arg. AGY_FULLCGO — rare (gated) + does an openat syscall (wants the
- * P handoff), so NOT an asmcgo candidate (asmcgo is reserved for HOT non-parking funcs). NOTE:
- * the path filter still lived in the retired gum on_enter case; re-enabling conv-id capture needs
- * a "file_open" arg-read in agy_cgo_hook (a follow-on, like the tls_write read). */
+ * P handoff), so NOT an asmcgo candidate (asmcgo is reserved for HOT non-parking funcs). The
+ * "file_open" branch in agy_cgo_hook does the arg read (name.ptr=rax, name.len=rbx) + the path
+ * filter, and install_hooks gates the trampoline on AGY_PROC_CONV_ID so an ordinary run installs
+ * nothing here at all. */
 { "FILE_OPEN",    "os.OpenFile",                     WIRE_ASYNC, "file_open", AGY_FULLCGO, 0 },
 
 /* /proc/self/exe correction via the trampoline FILTER mode. Under `ld.so --preload`, the kernel's
