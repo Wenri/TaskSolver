@@ -37,6 +37,12 @@ def subscribe(fn):
     _rec.subscribe(fn)
 
 
+def unsubscribe(fn):
+    """Drop a consumer registered with :func:`subscribe` — a finished mp_child target calls this
+    so the recorder stops feeding a queue nobody drains."""
+    _rec.unsubscribe(fn)
+
+
 def on_codex_request(stream_id, data):
     # The model REQUEST (/v1/responses body). Record raw (metadata) + hand the parsed JSON to the
     # correlator so the decoded codex_turn.request reflects what was sent.

@@ -46,6 +46,12 @@ def subscribe(fn):
     AgyProcess targets (e.g. mp_child.stream_turns) to stream decoded turns home live."""
     _rec.subscribe(fn)
 
+
+def unsubscribe(fn):
+    """Drop a consumer registered with :func:`subscribe` — a finished mp_child target calls this
+    so the recorder stops feeding a queue nobody drains."""
+    _rec.unsubscribe(fn)
+
 # SYNC egress rewrite registry (task #8). Lazily bound to keep import cheap and pure.
 _rewrite = None
 

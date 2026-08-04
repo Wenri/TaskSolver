@@ -135,31 +135,52 @@ def start():
     threading.Thread(target=main, name="wire-mp-child", daemon=True).start()
 
 
-def stream_turns(conn, kinds=None, max_wait=300):
+def stream_turns(conn, kinds=None, max_wait=None):
     """Built-in WireProcess target: stream the host's DECODED model turns home over the result queue
     `conn` — arg0, passed by the caller via ``WireProcess(target=stream_turns, args=(q,))`` (stock-mp
-    style) — as they're produced, until the host exits (the parent then sees EOF on get()) or max_wait.
-    `subscribe` is resolved from the live WIRE_MODULE (the provider's in-process module) so this stays
-    provider-neutral. `kinds` None = every decoded dict; else only those kinds — the parent filters
-    again, so a superset here is harmless. Uses a subscribe → in-process queue → single-sender loop,
-    so the put side has no cross-thread race."""
+    style) — as they're produced, until the host exits (the parent then sees EOF on get()), the parent
+    goes away (our writer breaks), or `max_wait` elapses.
+
+    `max_wait=None` (the default) means NO deadline, and that is almost always what you want: this
+    target runs INSIDE the host, so the host's own exit is the real terminator and the parent already
+    observes it as queue EOF. A NUMBER is a belt-and-braces cap only, and it MUST be strictly greater
+    than the parent's own collect budget — when the timer fires, this target returns and _bootstrap's
+    finally puts ``(DONE, exitcode)`` while the host is still alive. That sentinel is indistinguishable
+    on the wire from host death, so every parent-side collector stops: a one-shot silently truncates,
+    and a persistent session loses every later turn.
+
+    `subscribe`/`unsubscribe` are resolved from the live WIRE_MODULE (the provider's in-process module)
+    so this stays provider-neutral; we ALWAYS unsubscribe on the way out, else the host keeps filling a
+    dead in-process queue for the rest of its life. `kinds` None = every decoded dict (including the raw
+    hook records) — else only those kinds; the parent filters again, so a superset is harmless, but
+    passing the parent's exact set keeps tls_write/callstack/… off the pipe entirely. Uses a subscribe →
+    in-process queue → single-sender loop, so the put side has no cross-thread race."""
     import importlib
     import queue as _q
-    subscribe = importlib.import_module(os.environ["WIRE_MODULE"]).subscribe
+    mod = importlib.import_module(os.environ["WIRE_MODULE"])
     want = set(kinds) if kinds else None
     q = _q.Queue()
-    subscribe(lambda obj: q.put(obj) if isinstance(obj, dict) and obj.get("kind")
-              and (want is None or obj["kind"] in want) else None)
-    end = time.time() + max_wait
-    while time.time() < end:
-        try:
-            obj = q.get(timeout=1.0)
-        except _q.Empty:
-            continue
-        try:
-            conn.put(obj)
-        except (BrokenPipeError, OSError):
-            break
+
+    def _sub(obj):
+        if isinstance(obj, dict) and obj.get("kind") and (want is None or obj["kind"] in want):
+            q.put(obj)
+
+    mod.subscribe(_sub)
+    end = None if max_wait is None else time.time() + max_wait
+    try:
+        while end is None or time.time() < end:
+            try:
+                obj = q.get(timeout=1.0)
+            except _q.Empty:
+                continue
+            try:
+                conn.put(obj)
+            except (BrokenPipeError, OSError):
+                break
+    finally:
+        unsub = getattr(mod, "unsubscribe", None)   # tolerate a provider module without it
+        if unsub is not None:
+            unsub(_sub)
 
 
 # --- targets used by test_scripts/test_agyprocess.py (importable by reference in the child) ---

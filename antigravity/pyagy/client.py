@@ -424,7 +424,11 @@ def _ask_turn(proc, q, prompt=None, idle=6.0, pty_idle=15.0, timeout=180.0, read
                 try:
                     o = q.get()
                 except EOFError:
+                    proc.reap()                    # agy exited — nothing more will ever arrive
                     return got
+                if isinstance(o, tuple) and o and o[0] in (_DONE, _EXC):
+                    proc.reap()                    # the in-agy target finished/raised: the stream is
+                    return got                     # over — end the turn, don't wait out pty_idle
                 if isinstance(o, dict) and o.get("kind") in kinds:
                     got.append(o)
                     last = time.time()
@@ -511,7 +515,8 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
     q = _new_channel()                              # caller owns the result queue (stock-mp style)
     try:
         p = AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
-                       agy_bin=agy_bin, workdir=workspace, capture=cap_path, args=(q,),
+                       agy_bin=agy_bin, workdir=workspace, capture=cap_path,
+                       args=(q, _ANSWER_KINDS, timeout + 60),  # max_wait > timeout → death-based done
                        conversation_id=conversation_id, continue_latest=continue_latest,
                        data_dir=data_dir, trust=trust, extra_env=overlays,
                        extra_flags=extra_flags)
@@ -559,7 +564,8 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
     queues = [_new_channel() for _ in range(n)]   # one caller-owned result queue per proc
     try:
         procs = [AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
-                            agy_bin=agy_bin, workdir=workspace, capture=cap_paths[i], args=(queues[i],),
+                            agy_bin=agy_bin, workdir=workspace, capture=cap_paths[i],
+                            args=(queues[i], _ANSWER_KINDS, timeout + 60),  # > timeout → death-based
                             conversation_id=conversation_id, continue_latest=continue_latest,
                             data_dir=data_dir, trust=trust, extra_env=overlays,
                             extra_flags=extra_flags)
@@ -644,7 +650,10 @@ class Session:
         self._q = _new_channel()                     # caller-owned result queue for this session
         self._agy = AgyProcess(persistent=True, prompt=prompt, model=self.model,
                                skip_permissions=self.skip_permissions, agy_bin=self.agy_bin,
-                               workdir=self.workspace, capture=self.cap_path, args=(self._q,),
+                               workdir=self.workspace, capture=self.cap_path,
+                               # No deadline: a Session's life IS agy's life (caller think-time
+                               # between turns is unbounded). close()/GC kill agy, which ends this.
+                               args=(self._q, _ANSWER_KINDS, None),
                                conversation_id=self._conversation_id,
                                continue_latest=self.continue_latest,
                                data_dir=self._data_dir, trust=self._trust, extra_env=overlays,
@@ -657,6 +666,12 @@ class Session:
         """Send ``prompt`` (starting the session on first call) and return the
         :class:`AgyResponse` for the turn it produced (decoded objects streamed home over the
         caller-owned result queue; the PTY transcript is the fallback)."""
+        if self._agy is not None and self._agy.exit_status is not None:
+            # agy died on an earlier turn (_ask_turn reaped it). Every later turn would silently
+            # return the stale transcript, so fail loudly instead — resume in a fresh Session.
+            raise RuntimeError(
+                f"this Session's agy process already exited (exit_status={self._agy.exit_status}); "
+                f"open a new Session (resume with conversation_id={self._conversation_id!r})")
         if self._agy is None:
             self._start(prompt)
             objs = _ask_turn(self._agy, self._q, None, idle=self.idle, timeout=self.timeout)  # prefill
@@ -666,7 +681,7 @@ class Session:
         if self._conversation_id is None:            # first turn of a fresh session
             self._conversation_id = self._agy.conversation_id
         return AgyResponse.from_objs(
-            objs, transcript, exit_status=None, capture_path=self.cap_path,
+            objs, transcript, exit_status=self._agy.exit_status, capture_path=self.cap_path,
             workspace=self.workspace, funcmap=self.funcmap,
             conversation_id=self._conversation_id)
 

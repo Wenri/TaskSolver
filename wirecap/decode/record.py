@@ -24,8 +24,17 @@ class Recorder:
 
     def subscribe(self, fn):
         """Register fn(obj) to receive every recorded event (raw records + decoded turns).
-        Called on the dispatch worker thread — keep it quick and non-throwing (e.g. queue.put)."""
-        self._subs.append(fn)
+        Called on the dispatch worker thread — keep it quick and non-throwing (e.g. queue.put).
+        Copy-on-write under the lock, so `_write`'s iteration always sees a stable list."""
+        with self._lock:
+            self._subs = self._subs + [fn]
+
+    def unsubscribe(self, fn):
+        """Drop a subscriber registered by `subscribe` (no-op if absent). A WireProcess target that
+        stops streaming MUST call this: otherwise its in-process queue keeps growing for the whole
+        remaining life of the host, and every recorded event pays a dead `put`."""
+        with self._lock:
+            self._subs = [f for f in self._subs if f is not fn]
 
     def record(self, kind, stream_id, data):
         rec = {"t": round(time.time(), 6), "kind": kind,
