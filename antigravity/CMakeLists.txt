@@ -46,11 +46,18 @@ set(GUM "${CMAKE_SOURCE_DIR}/vendor/frida-gum")
 # Version history worth keeping: 1.1.6 (2026-07-24) added a client-side eligibility check that
 # hard-exited with "not currently available in your location" before any model call, which forced the
 # pin down to 1.1.5 for a while (bisected 1.1.1→1.1.8). That gate no longer fires as of 1.1.9
-# (2026-07-31), which was re-tested uninstrumented before this bump — so if a future release starts
-# refusing to run, check for that message before assuming the shim broke.
-set(AGY_VERSION "1.1.9")
-set(AGY_URL "https://github.com/google-antigravity/antigravity-cli/releases/download/1.1.9/agy_cli_linux_x64.tar.gz")
-set(AGY_SHA512 "3bebfd6fdaa43fff77d33e12927f3db2b1449b008e4398dbb986ea5ee73c55fce512de22d9a711855464ec4fcfc37ea85113e47248a610e53c0e6d5e5297ed95")
+# (2026-07-31) — so if a future release starts refusing to run, check for that message before
+# assuming the shim broke.
+#
+# NOTE the pin drifts on its own: agy's background self-updater REPLACES vendor/agy in place (it did
+# so mid-session on 2026-08-05, swapping 1.1.9 for 1.1.10 and breaking the build-id match), and
+# AGY_PROC_* setting AGY_CLI_DISABLE_AUTO_UPDATE=true no longer stops it. Symptom is the shim logging
+# "build-id not agy (running=… symbols=…); not hooking this process" and every hook silently not
+# firing. Re-fetch the pin (rm vendor/agy && pixi run build-shim) or `pixi run shim-symbols` to
+# re-resolve against whatever landed; `chmod a-w vendor/agy` blunts the in-place overwrite.
+set(AGY_VERSION "1.1.10")
+set(AGY_URL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.10-6423386432339968/linux-x64/cli_linux_x64.tar.gz")
+set(AGY_SHA512 "e64d4e58ede0f8440f2b3dc021f9d6d36b05f5c2f74d5a9215c1f11b20d536c8c2e020f4ce5257aa67e940e94c94d5a16d3aa6461cda18ee7f3e74d3a20ca1ac")
 set(AGY_BIN "" CACHE STRING "optional: local agy binary to vendor instead of downloading")
 set(FRIDA_VER "17.15.3")
 # WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag; a freshly-fetched agy must be
