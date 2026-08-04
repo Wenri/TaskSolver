@@ -61,7 +61,7 @@ def on_codex_event(stream_id, data):
     # into the in-flight turn; the correlator emits the codex_turn at the terminal (response.completed)
     # event, paired with the pending request.
     if _corr:
-        _corr.feed_events(_corr._builder.parse_events(data), time.time())
+        _corr.feed_chunk(data, time.time())
     return None
 
 

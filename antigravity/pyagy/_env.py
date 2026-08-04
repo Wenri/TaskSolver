@@ -10,30 +10,15 @@ Running agy through its own ``PT_INTERP`` with ``--preload`` (+ ``--library-path
 libpython) scopes the injection to the one agy exec, leaving nothing shim-related in the environment.
 """
 import os
-import sys
+
+from wirecap.runtime.vendor import vendored
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pyagy
 
 
 def _vendored(in_pkg_rel, sibling_rel):
-    """Resolve a native artifact from within the package — never an external path. A
-    self-contained wheel bundles it under the package (``pyagy/vendor/…``); a source/editable
-    checkout keeps it in the sibling ``antigravity/vendor/…``. Prefer the in-package copy, fall
-    back to the sibling. No env override: the artifacts are always shipped with the package."""
-    in_pkg = os.path.join(_PKG_DIR, in_pkg_rel)
-    if os.path.exists(in_pkg):
-        return in_pkg
-    sibling = os.path.join(_PKG_DIR, sibling_rel)
-    if os.path.exists(sibling):
-        return sibling
-    # Development checkouts do not necessarily contain the large native
-    # artifacts. Reuse them from the installed wheel while keeping the Python
-    # adapter itself on the editable source tree.
-    for entry in sys.path:
-        candidate = os.path.join(entry, "pyagy", in_pkg_rel)
-        if os.path.exists(candidate):
-            return candidate
-    return sibling
+    """agy-side binding of the shared resolver (wirecap.runtime.vendor)."""
+    return vendored(_PKG_DIR, "pyagy", in_pkg_rel, sibling_rel)
 
 
 # The bundled pyagy/vendor/antigravity.so (wheel) or the sibling antigravity/vendor/antigravity.so

@@ -32,12 +32,13 @@ import traceback
 
 from wirecap.decode.record import Recorder
 from wirecap.decode import h2reassemble as h2
-from . import capture
+from wirecap.decode.capture import BaseCorrelator
+from .http1sse import GenaiTurnBuilder
 
 _rec = Recorder(path=os.environ.get("AGY_PROC_CAPTURE", "agy-capture.jsonl"),
                 preview=int(os.environ.get("AGY_PROC_PREVIEW", "64")))
 _reasm = h2.Reassembler(_rec) if os.environ.get("AGY_PROC_H2", "1") != "0" else None
-_corr = (capture.Correlator(_rec, _reasm)
+_corr = (BaseCorrelator(_rec, GenaiTurnBuilder(), _reasm)
          if os.environ.get("AGY_PROC_CORRELATE", "1") != "0" else None)
 
 
@@ -90,7 +91,7 @@ def on_resp_chunk(stream_id, data):
     # the terminal event. stream_id is the Go string pointer (not a connection id) — agy
     # runs one model turn at a time, so the correlator keys off arrival order, not id.
     if _corr:
-        _corr.feed_resp_chunk(data, time.time())
+        _corr.feed_chunk(data, time.time())
     return None
 
 

@@ -21,7 +21,7 @@ sys.path.insert(0, _ANTIGRAVITY)
 sys.path.insert(0, _REPO)
 
 from pyagy.agy_process import http1sse as h  # noqa: E402
-from pyagy.agy_process import capture         # noqa: E402
+from wirecap.decode import capture           # noqa: E402  (shared correlator)
 
 _failures = []
 
@@ -142,7 +142,7 @@ def test_correlator_cross_stream():
             self.events.append(obj)
 
     rec = FakeRec()
-    corr = capture.Correlator(rec, reassembler=None)
+    corr = capture.BaseCorrelator(rec, h.GenaiTurnBuilder(), reassembler=None)
     # request on stream 0xAAAA (a *Conn), response on 0xBBBB (a *halfConn)
     corr.feed("c2s", 0xAAAA, REQUEST_BYTES, t=100.0)
     corr.feed("s2c", 0xBBBB, RESPONSE_BYTES, t=100.5)
@@ -183,10 +183,10 @@ def test_correlator_resp_chunk():
     ]
 
     rec = FakeRec()
-    corr = capture.Correlator(rec, reassembler=None)
+    corr = capture.BaseCorrelator(rec, h.GenaiTurnBuilder(), reassembler=None)
     corr.feed("c2s", 0xAAAA, REQUEST_BYTES, t=100.0)     # request off the wire (tls_write)
     for i, ln in enumerate(resp_lines):                  # response, one SSE line per fire
-        corr.feed_resp_chunk(ln, t=100.5 + i * 0.01)
+        corr.feed_chunk(ln, t=100.5 + i * 0.01)
     turns = [e for e in rec.events if e.get("kind") == "genai_turn"]
     check(len(turns) == 1, "resp_chunk: exactly one genai_turn (emitted on finishReason)")
     if turns:

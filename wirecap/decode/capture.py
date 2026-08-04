@@ -8,6 +8,16 @@ stream-event JSON) drive the same machinery:
     (``http1sse.classify``) and routed: HTTP/1.1 → per-stream ``StreamDecoder`` (requests
     tracked, event-stream responses assembled); HTTP/2 → the ``h2reassemble.Reassembler``.
   * ``feed_request(req_repr, t, ...)`` / ``feed_events(events, t)`` — already-parsed dicts.
+  * ``feed_chunk(data, t)`` — a raw response chunk the CLI's own stream parser already decoded.
+
+Why a response often arrives via ``feed_chunk`` rather than as ``feed("s2c", ...)``: HTTP/1.1 SSE
+is pull-based, so the decrypted inbound bytes are a RETURN value with no entry-arg source to hook.
+(agy's retired ``tls_read`` leave hook did feed s2c, and it destabilized agy's GC.) So the request
+side comes off the wire — agy's ``tls_write`` entry-arg hook, framed by ``feed("c2s", ...)`` — while
+the response side comes from the CLI's own SSE parser: agy's ``toStreamResponseChunk`` hands us each
+decoded ``data:`` line, codex's patched HTTP boundary hands us each stream event. ``feed_chunk``
+accumulates them and the turn is emitted at the terminal (``finishReason`` / ``completed``) event,
+paired with the pending request.
 
 Request↔response pairing is by **time** (nearest preceding request within a small window,
 preferring same host) — captures often key the two directions differently, so stream id
@@ -74,6 +84,14 @@ class BaseCorrelator:
         if self._acc:
             self._flush_events()
         self._remember(t, host, stream_id, req_repr)
+
+    def feed_chunk(self, data, t):
+        """Accumulate one raw response chunk: parse it with the builder, then feed the events.
+
+        This is the entry point for a provider whose RESPONSE has no entry-arg byte source — the
+        CLI's own stream parser hands us each decoded chunk instead. agy's SSE ``data:`` lines
+        (``toStreamResponseChunk``) and codex's ``ResponsesStreamEvent``s both arrive this way."""
+        self.feed_events(self._builder.parse_events(data), t)
 
     def feed_events(self, events, t):
         """Accumulate already-parsed stream events; emit the turn at the terminal event."""

@@ -1,27 +1,26 @@
 """Environment + argv wiring for an instrumented codex run.
 
 Unlike pyagy (which LD-preloads a shim into a closed Go binary), codex is built from source with
-the wirecap bridge compiled in, and ``codex exec`` is a non-TTY one-shot — so there is no
-shim/preload and no PTY. It DOES use the same embedded-worker channel as agy: the launcher
-(``codexprocess.CodexPopen``, on the shared ``wirecap.runtime.process`` base) injects
-``WIRE_MP_BOOT_FD`` so the bridge's ``wirecap.decode.mp_child`` streams decoded ``codex_turn``s home
-over a result queue. This module only builds the run env (the neutral ``WIRE_*`` knobs +
-``PYTHONHOME`` + auth passthrough) and the ``codex exec`` argv — ``WIRE_MP_BOOT_FD`` is added by the
+the wirecap bridge compiled in — so there is no shim/preload. Everything else matches agy: the
+launcher (``codexprocess.CodexPopen``, on the shared ``wirecap.runtime.pty`` bases) runs codex under
+a PTY and injects ``WIRE_MP_BOOT_FD`` so the bridge's ``wirecap.decode.mp_child`` streams decoded
+``codex_turn``s home over a result queue. This module only builds the run env (the neutral ``WIRE_*``
+knobs + ``PYTHONHOME`` + auth passthrough) and the argv — ``WIRE_MP_BOOT_FD`` is added by the
 launcher, and the bridge also records every turn to the ``WIRE_CAPTURE`` JSONL (which stays
 authoritative for the returned turns).
 """
 import os
 
+from wirecap.runtime.vendor import vendored
+
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pycodex
 
 
 def _vendored(in_pkg_rel, sibling_rel):
-    """Resolve the codex binary from within the package — never an external path. A self-contained
-    wheel bundles it under the package (``pycodex/vendor/codex``); a source/editable checkout keeps
-    the cargo output at the sibling ``codex/vendor/codex-rs/target/release/codex``. Prefer
-    in-package, fall back to sibling. No env override: codex ships with the package."""
-    in_pkg = os.path.join(_PKG_DIR, in_pkg_rel)
-    return in_pkg if os.path.exists(in_pkg) else os.path.join(_PKG_DIR, sibling_rel)
+    """codex-side binding of the shared resolver (wirecap.runtime.vendor). Now includes the
+    sys.path fallback pyagy always had — a development checkout without the cargo output can
+    reuse an installed wheel's binary."""
+    return vendored(_PKG_DIR, "pycodex", in_pkg_rel, sibling_rel)
 
 
 # The from-source, wirecap-patched codex (gnu-dynamic; embeds the pixi libpython): the bundled
