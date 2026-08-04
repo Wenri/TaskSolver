@@ -8,24 +8,10 @@ here once instead of being copied.
 """
 import re
 
-# OSC/DCS/CSI escapes + stray control chars (keep \t \n \r). This is the union of
-# what agy emits; anything left after .sub() is human-readable transcript text.
-_ANSI = re.compile(
-    r"""\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)   # OSC ... BEL/ST
-      | \x1b[P^_][^\x1b]*\x1b\\             # DCS/PM/APC ... ST
-      | \x1b\[[0-9;?]*[ -/]*[@-~]           # CSI
-      | \x1b[@-Z\\-_]                       # 2-byte escapes
-      | [\x00-\x08\x0b\x0c\x0e-\x1f]        # stray control chars (keep \t \n \r)
-    """,
-    re.VERBOSE,
-)
-
-
-def strip_ansi(b) -> str:
-    """Decode (if bytes) and strip ANSI/control sequences → plain transcript text."""
-    if isinstance(b, (bytes, bytearray)):
-        b = bytes(b).decode("utf-8", "replace")
-    return _ANSI.sub("", b)
+# ANSI stripping is not agy-specific — it lives with the shared PTY driver. Re-exported here
+# because `pyagy.strip_ansi` is a documented public name (and test_scripts imports it from
+# `pyagy._term`); the agy-only pieces below (query/trust auto-reply, answer_text) stay put.
+from wirecap.runtime.pty import strip_ansi  # noqa: F401
 
 
 # Our own shim/log lines that leak onto agy's PTY (the shim logs to stderr, which the pty
