@@ -13,29 +13,31 @@
  * MODE   WIRE_ASYNC (log, non-blocking) or WIRE_SYNC (block for a modify verdict).
  * kind   string tag passed to Python dispatch(kind, stream_id, data).
  * MECH   how the hook is installed (see install_hooks in antigravity.cpp):
- *          AGY_GUM     = frida-gum inline attach. RETIRED — no hook uses it. Its self-modifying-code
- *                        patching intermittently destabilizes agy's Go runtime: gum RETURN hooks trip
- *                        the GC unwinder (see RETCAP), and even ENTRY gum on hot funcs fails the full
- *                        AgyProcess path under worker load (~15%). All-trampoline is 100% (80/80) where
- *                        gum is worse. Kept as an enum only for the on_enter/on_leave register-read
- *                        machinery.
+ *          (There is no gum-attach mech any more. frida-gum inline attach was retired and its
+ *          listener path DELETED: the self-modifying-code patching intermittently destabilized
+ *          agy's Go runtime — gum RETURN hooks trip the GC unwinder (see RETCAP), and even ENTRY
+ *          gum on hot funcs failed the full AgyProcess path under worker load (~15%), where
+ *          all-trampoline is 100% (80/80). gum itself is still linked: the trampoline builder uses
+ *          its x86 code writer and near-page allocator.)
  *          AGY_FULLCGO = cgocall trampoline (cgotrampoline.cpp) via full runtime.cgocall — for PARKING
  *                        funcs (entersyscall + P handoff, GC-safe). The default.
  *          AGY_ASMCGO  = cgocall trampoline via runtime.asmcgocall — the lighter g0-switch variant
  *                        (no syscall transition), for HOT NON-parking funcs (os.Getenv, tls_write):
  *                        same 100% reliability, less per-fire overhead. Falls back to full cgocall if
  *                        runtime.asmcgocall is unresolved. NOT for parking funcs (no P handoff → stall).
- *          AGY_OFF     = NOT installed. Kept here (row + on_enter/on_leave case) as
- *                        documentation of a hook that stalls agy or collides with another.
+ *          AGY_OFF     = NOT installed. The row is kept as documentation of a hook that stalls agy
+ *                        or collides with another.
  *        The shim installs the union of every non-OFF hook on each run (no stage selector).
  *        FULLCGO and ASMCGO hooks share one trampoline region + synthetic moduledata; the
  *        pcsp matches the full-cgo geometry (only those slots are ever GC-unwound).
- * RETCAP how on_leave captures this hook's RETURN value. Also selects the gum listener: any nonzero
- *        RETCAP means the return is intercepted, which costs a return-address rewrite Go's stack
+ * RETCAP how a hook's RETURN value WOULD be captured. Historically this also selected the gum
+ *        listener: any nonzero RETCAP meant intercepting the return, which costs a return-address
+ *        rewrite Go's stack
  *        unwinder trips on — while the return points at gum's trampoline, a GC unwind of that
  *        goroutine hits an unknown PC → throw("unknown pc")/crash (empty turn, exit 2). A 2026-07-05
- *        per-hook bisect (each RETCAP≠0 hook flipped to AGY_GUM alone, N turns via the full worker
- *        path) pinned the rule: crash probability scales with FIRES/TURN × P(GC-unwind in the window)
+ *        per-hook bisect (each RETCAP≠0 hook flipped to a gum attach alone — that mech has since
+ *        been removed — N turns via the full worker path) pinned the rule: crash probability
+ *        scales with FIRES/TURN × P(GC-unwind in the window)
  *        — silent hooks that fire 0× on this agy build (SER_ROOT, MAR_PROMPT, PROTO_MARSHAL,
  *        GET_DELTA_*, RESP_TEXT/THINKING/VIEW — dead 1.0.16 paths; answer flows via gemini_coder →
  *        FH_UPDATE)
@@ -45,12 +47,14 @@
  *        read an ENTRY arg via the trampoline instead (see H2_PIPE_WRITE / the cgt_* app hooks, e.g.
  *        RESP_CHUNK replaced the TLS_DECRYPT response). NEVER hook runtime-special funcs (runtime.main,
  *        goroutine entries) — Go validates their return PC. Values:
- *           0   no on_leave — don't intercept the return.
- *          <0  intercept, but handled specially by ID in on_leave (TLS_READ/TLS_DECRYPT, which also
- *              need on_enter-saved state — a buffer ptr / conn). -1 is the marker; the value is unused.
- *          >0  a "returns []byte/string" leaf getter — on_leave emits the RAX=ptr/RBX=len return
- *              (stream_id 0) when len >= RETCAP (256 skips tiny protos on the hot proto.Marshal;
- *              1 = emit any non-empty). This is the only value on_leave data-drives.
+ *           0   no return capture — don't intercept the return (every installed hook).
+ *          <0  would need special-casing by ID plus entry-saved state (TLS_READ/TLS_DECRYPT: a
+ *              buffer ptr / conn). -1 is the marker; the value is unused.
+ *          >0  a "returns []byte/string" leaf getter: emit the RAX=ptr/RBX=len return (stream_id 0)
+ *              when len >= RETCAP (256 skips tiny protos on the hot proto.Marshal; 1 = emit any
+ *              non-empty).
+ *        Every RETCAP≠0 hook is AGY_OFF, so none of this executes today — it is the recorded
+ *        register contract for anyone re-deriving a return capture on the trampoline.
  */
 #ifndef AGY_PROCDEF_H
 #define AGY_PROCDEF_H
@@ -63,12 +67,14 @@
 /* How each hook is installed. AGY_OFF must be 0 so a hook is only ever installed when explicitly
  * set. AGY_FULLCGO / AGY_ASMCGO are both cgocall-trampoline hooks (the Go→C gateway differs:
  * full runtime.cgocall vs the lighter runtime.asmcgocall); see the MECH doc above. */
-enum agy_mech_t { AGY_OFF = 0, AGY_GUM, AGY_FULLCGO, AGY_ASMCGO };
+enum agy_mech_t { AGY_OFF = 0, AGY_FULLCGO, AGY_ASMCGO };
 
 /* One table row. `vaddr`/`skip` are NOT written per row — the consteval constructor resolves them
  * from `name` at compile time via agy_sym/agy_skip (0 if unresolved → install skips + logs). `retcap`
- * is the return-capture policy (0 none / <0 special / >0 min bytes) — see the RETCAP doc above; it
- * also decides the gum listener (retcap!=0 → the enter+leave listener). */
+ * is the return-capture policy (0 none / <0 special / >0 min bytes) — see the RETCAP doc above.
+ * With the gum listener path deleted, `retcap` no longer selects a listener and nothing outside
+ * this header reads it; it is retained as the DOCUMENTED per-hook return-register contract, which
+ * is what a future leaf-getter would need to re-derive. */
 struct agy_hook {
     std::string_view id;      /* short unique id, for hk() compile-time lookup */
     const char      *name;    /* Go symbol → agy_sym */

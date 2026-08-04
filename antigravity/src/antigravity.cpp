@@ -15,7 +15,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string_view>
 
 #include "frida-gum.h"
 #include "wirecap.h"
@@ -35,7 +34,6 @@ static FILE *g_logf;
     std::fprintf(f, "[antigravity] " __VA_ARGS__); std::fputc('\n', f); std::fflush(f); } while (0)
 
 static int g_tls_write_sync;   /* AGY_PROC_TLS_WRITE_SYNC=1 → allow modifying egress */
-static int g_stack;            /* AGY_PROC_STACK=1 → emit a "callstack" event per hook fire */
 static int g_conv_id;          /* AGY_PROC_CONV_ID=1 → install the os.OpenFile conversation-id probe */
 static uint64_t g_base;        /* main-module base (for PC→link-vaddr reduction) */
 
@@ -71,133 +69,11 @@ static int bid_cb(struct dl_phdr_info *info, size_t size, void *data)
     return 1;
 }
 
-/* ---- gum listener --------------------------------------------------------- */
-struct rd_state { uint64_t conn, ptr; };  /* passed enter→leave for TLS_READ */
-
-static void on_enter(GumInvocationContext *ic, gpointer user_data)
-{
-    (void)user_data;
-    int id = (int)(gsize)gum_invocation_context_get_listener_function_data(ic) - 1;
-    GumCpuContext *cpu = ic->cpu_context;
-    /* AGY_PROC_STACK: dump the call stack leading INTO this hook. gum fires
-     * post-prologue, so cpu->rbp is the target's own frame → complete upward chain
-     * (this is the exact function context around tls_write / decrypt). */
-    if (g_stack) agy_emit_stack(HOOKS[id].kind, cpu->rbp, g_base);
-    switch (id) {
-    case hk("SMOKE_GETENV"): {
-        /* os.Getenv(key string): key.ptr=RAX, key.len=RBX — send the key so we
-         * can confirm real string data flows through to Python. */
-        wire_event_t ev = { .kind = "smoke", .stream_id = 0,
-                           .data = (const uint8_t *)cpu->rax, .len = (size_t)cpu->rbx,
-                           .mode = WIRE_ASYNC };
-        wire_emit(&ev);
-        break;
-    }
-    /* FILE_OPEN's arg read + path filter moved to agy_cgo_hook (cgotrampoline.cpp): the hook is
-     * AGY_FULLCGO, so it never reached this retired gum path. */
-    case hk("TLS_WRITE"): {
-        /* crypto/tls.(*Conn).Write(c=RAX, b.ptr=RBX, b.len=RCX, b.cap=RDI) */
-        uint64_t conn = cpu->rax, ptr = cpu->rbx, len = cpu->rcx;
-        wire_event_t ev = { .kind = "tls_write", .stream_id = conn,
-                           .data = (const uint8_t *)ptr, .len = (size_t)len,
-                           .mode = g_tls_write_sync ? WIRE_SYNC : WIRE_ASYNC };
-        wire_emit(&ev);   /* SYNC: on a rewrite the bridge already replaced ev.data (== ptr) in
-                             * place; verdict says so, out_len is the new (equal-or-shorter) length. */
-        if (ev.verdict) cpu->rcx = ev.out_len;   /* shrink the slice length the callee sees */
-        break;
-    }
-    case hk("TLS_READ"): {
-        /* capture buffer ptr now; data is filled by the time we return */
-        struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
-        s->conn = cpu->rax;
-        s->ptr  = cpu->rbx;
-        break;
-    }
-    case hk("TLS_DECRYPT"): {
-        /* stash *halfConn receiver for stream correlation; plaintext is the return */
-        struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
-        s->conn = cpu->rax;
-        s->ptr = 0;
-        break;
-    }
-    case hk("HTTP_RT"): {
-        /* net/http.(*Transport).RoundTrip(t=RAX, req=RBX): use req ptr as id */
-        wire_event_t ev = { .kind = "http_rt", .stream_id = cpu->rbx, .mode = WIRE_ASYNC };
-        wire_emit(&ev);
-        break;
-    }
-    case hk("H2_PIPE_WRITE"): {
-        /* http2 (*pipe).Write(p []byte): receiver=RAX, p.ptr=RBX, p.len=RCX.
-         * The de-framed response body chunk (ingress) — data is the input arg,
-         * valid at entry. CPU-only func, so hooking is safe (no park). */
-        uint64_t pipe = cpu->rax, ptr = cpu->rbx, len = cpu->rcx;
-        if (ptr && len && len < (16u << 20)) {
-            wire_event_t ev = { .kind = "resp", .stream_id = pipe,
-                               .data = (const uint8_t *)ptr, .len = (size_t)len,
-                               .mode = WIRE_ASYNC };
-            wire_emit(&ev);
-        }
-        break;
-    }
-    default: break;
-    }
-}
-
-static void on_leave(GumInvocationContext *ic, gpointer user_data)
-{
-    (void)user_data;
-    int id = (int)(gsize)gum_invocation_context_get_listener_function_data(ic) - 1;
-    GumCpuContext *cpu = ic->cpu_context;
-    if (id == hk("TLS_READ")) {
-        int64_t n = (int64_t)cpu->rax;   /* return value: bytes read */
-        struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
-        if (n > 0 && s->ptr) {
-            wire_event_t ev = { .kind = "tls_read", .stream_id = s->conn,
-                               .data = (const uint8_t *)s->ptr, .len = (size_t)n,
-                               .mode = WIRE_ASYNC };
-            wire_emit(&ev);
-        }
-    } else if (id == hk("TLS_DECRYPT")) {
-        /* (*halfConn).decrypt returns ([]byte plaintext, recordType, error):
-         * RAX=ptr, RBX=len. This is a decrypted inbound TLS record = HTTP/2 frames
-         * of the response. Safe on_leave: decrypt is CPU-only and doesn't park. */
-        struct rd_state *s = (struct rd_state *)gum_invocation_context_get_listener_invocation_data(ic, sizeof(*s));
-        uint64_t ptr = cpu->rax, len = cpu->rbx;
-        if (ptr && (int64_t)len > 0 && len < (16u << 20)) {
-            wire_event_t ev = { .kind = HOOKS[id].kind, .stream_id = s->conn,
-                               .data = (const uint8_t *)ptr, .len = (size_t)len,
-                               .mode = WIRE_ASYNC };
-            wire_emit(&ev);
-        }
-    } else if (HOOKS[id].retcap > 0) {
-        /* Return-[]byte/string leaf getters (retcap>0 in procdef.h): RAX=ptr, RBX=len (CPU-only
-         * funcs). Gate on len >= retcap — e.g. 256 skips tiny protos on the hot proto.Marshal;
-         * the delta/response getters return the assistant text as a Go string. (TLS_READ/DECRYPT
-         * are retcap<0 — handled by the ID branches above, not here.) */
-        uint64_t ptr = cpu->rax, len = cpu->rbx;
-        if (ptr && len >= (uint32_t)HOOKS[id].retcap && len < (16u << 20)) {
-            wire_event_t ev = { .kind = HOOKS[id].kind, .stream_id = 0,
-                               .data = (const uint8_t *)ptr, .len = (size_t)len,
-                               .mode = WIRE_ASYNC };
-            wire_emit(&ev);
-        }
-    }
-}
-
 static void install_hooks(void)
 {
+    /* Still needed after the gum listener path was retired: the trampoline builder uses gum's
+     * x86 code writer + its near-page allocator, and gum_process_get_main_module below. */
     gum_init_embedded();
-    GumInterceptor *interceptor = gum_interceptor_obtain();
-    /* Two listeners:
-     *  - PROBE (enter-only, leave=0 hooks): a true fire-on-enter listener that installs
-     *    NO return trampoline. gum_make_call_listener(on_enter, NULL) does NOT achieve
-     *    this — it still intercepts the return (restores the clobbered return addr + pops
-     *    its per-thread invocation context), which is what stalled the parking funcs.
-     *    A probe listener leaves the return untouched, so the goroutine can park and
-     *    resume on another OS thread without corrupting gum's bookkeeping.
-     *  - CALL (enter+leave, leave=1 hooks): used only where we need the []byte return. */
-    GumInvocationListener *l_enter = gum_make_probe_listener(on_enter, nullptr, nullptr);
-    GumInvocationListener *l_full  = gum_make_call_listener(on_enter, on_leave, nullptr, nullptr);
     GumModule *mainmod = gum_process_get_main_module();
     GumAddress base = gum_module_get_range(mainmod)->base_address;
     g_base = (uint64_t)base;       /* for agy_emit_stack PC→link-vaddr reduction */
@@ -218,8 +94,7 @@ static void install_hooks(void)
                 if (HOOKS[i].mech != AGY_FULLCGO && HOOKS[i].mech != AGY_ASMCGO) continue;
                 /* FILE_OPEN is an OVERLAY: only install it when the caller asked for
                  * conversation-id capture, so an ordinary run doesn't pay a cgocall on every
-                 * os.OpenFile. (This gate used to live only in the AGY_GUM loop below, which no
-                 * hook reaches — so the trampoline was installed unconditionally.) */
+                 * os.OpenFile. */
                 if (i == hk("FILE_OPEN") && !g_conv_id) continue;
                 uint64_t va = HOOKS[i].vaddr;
                 if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
@@ -233,35 +108,6 @@ static void install_hooks(void)
             made, n_tramp, n_asm, n_tramp - n_asm);
     }   /* gh (unique_ptr) frees here — releases the gum writer; trampolines + moduledata persist */
 
-    /* AGY_GUM hooks: frida-gum inline attach on the non-parking CPU funcs. */
-    gum_interceptor_begin_transaction(interceptor);
-    for (int i = 0; i < HK_COUNT; i++) {
-        if (HOOKS[i].mech != AGY_GUM) continue;
-        /* FILE_OPEN is an OVERLAY: only install it when the caller asked for conversation-id
-         * capture, so an ordinary run isn't burdened by os.OpenFile. */
-        if (i == hk("FILE_OPEN") && !g_conv_id) continue;
-        uint64_t va = HOOKS[i].vaddr;
-        if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
-        GumAttachOptions opt = {};
-        opt.listener_function_data = GSIZE_TO_POINTER((gsize)(i + 1));
-        /* Attach PAST the stack-check prologue (agy_skip): Go's morestack re-runs
-         * the real entry, not our trampoline. Args are still in registers at the
-         * post-prologue point (before they're spilled). NOTE: this only fixes the
-         * morestack hazard — a hooked function that PARKS the goroutine (tls_read,
-         * RoundTrip, pipe.Write) still stalls agy even past-prologue, because gum's
-         * per-thread return tracking breaks when Go resumes it on another OS thread.
-         * Only hook functions that don't park (tls_write, halfConn.decrypt, CPU funcs). */
-        uint64_t skip = HOOKS[i].skip;
-        gpointer addr = GSIZE_TO_POINTER((gsize)base + va + skip);
-        /* retcap != 0 → the return is intercepted, so use the enter+leave listener (a return-address
-         * rewrite); retcap == 0 → the enter-only probe listener (no return trampoline). */
-        GumInvocationListener *lis = HOOKS[i].retcap ? l_full : l_enter;
-        GumAttachReturn r = gum_interceptor_attach(interceptor, addr, lis, &opt);
-        LOG("attach %-34s @ %p  (%s%s)  ret=%d", HOOKS[i].name, addr,
-            HOOKS[i].mode == WIRE_SYNC ? "sync" : "async",
-            HOOKS[i].retcap ? ",leave" : "", (int)r);
-    }
-    gum_interceptor_end_transaction(interceptor);
 }
 
 /* ---- libc interposer: cgo DNS (fires when Go uses the cgo resolver) --------
@@ -296,7 +142,6 @@ static void agy_init(void)
     const char *logpath = std::getenv("AGY_PROC_LOG");
     if (logpath && *logpath) g_logf = std::fopen(logpath, "ae");
     g_tls_write_sync = std::getenv("AGY_PROC_TLS_WRITE_SYNC") != nullptr;
-    g_stack = std::getenv("AGY_PROC_STACK") != nullptr;
     g_conv_id = std::getenv("AGY_PROC_CONV_ID") != nullptr;
     agy_set_real_exe(std::getenv("AGY_PROC_REAL_EXE"));   /* the path READLINK_FILTER returns for /proc/self/exe */
 
