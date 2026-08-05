@@ -23,12 +23,19 @@ at package load. The in-process decode side is ``pycodex.codex_process``.
 _LAZY = {
     "ask": ".client",
     "ask_many": ".client",
+    # Session is the first-class multi-turn object, mirroring pyagy's
+    "Session": ".client",
+    "resume": ".client",
+    "continue_latest": ".client",
     "CodexResponse": ".client",
     "Usage": ".client",
     "CodexModel": ".model",
     # re-exported so callers can seed a workspace before ask() — pycodex.ask's own
     # docstring tells them to, and pyagy exports it under the same name.
     "ensure_git_workspace": "wirecap.runtime.workspace",
+    # codex's native session store (read-only), the pyagy.conversations counterpart
+    "read_transcript": ".sessions",
+    "latest_session_id": ".sessions",
 }
 
 

@@ -12,10 +12,18 @@ master can outlive codex itself. The embedded wirecap bridge inside codex runs
 the durable ``WIRE_CAPTURE`` JSONL stays authoritative for the returned turns (see client.py).
 """
 import os
+import re
 
-from wirecap.runtime.pty import WirePtyPopen, WirePtyProcess
+from wirecap.runtime.pty import WirePtyPopen, WirePtyProcess, strip_ansi
 
 from ._env import codex_argv, instrumented_env
+
+#: codex's TUI onboarding folder-trust question (tui/src/onboarding/trust_directory.rs), matched
+#: WHITESPACE-INSENSITIVELY on the ANSI-stripped tail: the TUI positions the cursor between glyphs,
+#: so the raw stream interleaves escapes and the stripped text loses its spaces
+#: ("Doyoutrustthecontentsofthisdirectory?"). A contiguous literal match on raw bytes never fires.
+_TRUST_PROMPT = re.compile(r"trustthecontentsofthis", re.IGNORECASE)
+_ANSWER_SCAN_TAIL = 8192          # the prompt is at startup; bound the rescan on a growing buffer
 
 
 class CodexPopen(WirePtyPopen):
@@ -40,6 +48,7 @@ class CodexPopen(WirePtyPopen):
         persistent = getattr(process_obj, "_persistent", False)
         # exec blocks on stdin; the TUI needs the slave there to be typed into (write/send_line).
         self._stdin_devnull = not persistent
+        self._trust_answered = not persistent   # only the TUI shows the trust prompt
         # instrumented_env sets WIRE_ENABLE/WIRE_MODULE/WIRE_CAPTURE/PYTHONHOME (+ extra_env, e.g.
         # OPENAI_API_KEY); the base (WirePopen._launch) adds WIRE_MP_BOOT_FD — the worker channel.
         env = instrumented_env(capture, extra_env=process_obj._extra_env)
@@ -49,6 +58,28 @@ class CodexPopen(WirePtyPopen):
                           session_id=getattr(process_obj, "_session_id", None),
                           continue_latest=getattr(process_obj, "_continue_latest", False))
         return argv, env, workdir
+
+    def _answer(self):
+        """Answer codex's TUI onboarding prompt. The interactive path opens with a folder-trust
+        question ("Do you trust the contents of this directory?",
+        tui/src/onboarding/trust_directory.rs) whose FIRST choice is "Yes, continue" — so Enter
+        selects it, exactly like agy's folder-trust menu. Without this the TUI blocks forever and
+        no turn is ever decoded. One-shot `codex exec` never shows it, and answering twice is
+        harmless, so the flag just avoids re-sending on every read.
+
+        Deliberately NOT auto-answered: the rate-limit dialog codex raises on a usage limit
+        ("Switch to <cheaper model> / Keep current model / Press enter to confirm"). Which model
+        a run uses is the caller's decision, so silently picking one would be wrong — a Session
+        that hits a usage limit stalls there visibly instead."""
+        if self._trust_answered:
+            return
+        tail = strip_ansi(bytes(self.raw[-_ANSWER_SCAN_TAIL:]))
+        if _TRUST_PROMPT.search(re.sub(r"\s+", "", tail)):
+            try:
+                os.write(self.fd, b"\r")
+                self._trust_answered = True
+            except OSError:
+                pass
 
     def _make_sentinel(self):
         """codex spawns tool grandchildren that inherit the pty slave, so the master can stay open

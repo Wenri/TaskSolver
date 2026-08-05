@@ -44,3 +44,15 @@ class CodexModel(CLIBackendModel):
         if self.api_key:
             kw["extra_env"] = {"OPENAI_API_KEY": self.api_key}
         return kw
+
+    def session(self, **kwargs):
+        """A first-class :class:`pycodex.Session` bound to this model — for multi-turn use
+        (``.session_id``, ``.history()``, decoded ``.turns``), mirroring
+        ``AgyModel.session()``. Inherits the model, workspace and timeout. ``**kwargs``
+        override the Session defaults."""
+        from .client import Session
+        kw = dict(model=self.model, workspace=self.workspace, timeout=self.timeout)
+        if self.api_key:
+            kw["extra_env"] = {"OPENAI_API_KEY": self.api_key}
+        kw.update(kwargs)
+        return Session(**kw)

@@ -34,7 +34,7 @@ from .process import WirePopen, WireProcess
 _ANSI = re.compile(
     r"""\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)   # OSC ... BEL/ST
       | \x1b[P^_][^\x1b]*\x1b\\             # DCS/PM/APC ... ST
-      | \x1b\[[0-9;?]*[ -/]*[@-~]           # CSI
+      | \x1b\[[0-?]*[ -/]*[@-~]             # CSI (params 0x30-0x3F: 0-9 : ; < = > ?)
       | \x1b[@-Z\\-_]                       # 2-byte escapes
       | [\x00-\x08\x0b\x0c\x0e-\x1f]        # stray control chars (keep \t \n \r)
     """,

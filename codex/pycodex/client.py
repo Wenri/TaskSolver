@@ -22,6 +22,7 @@ from wirecap.decode.turns import Usage, primary_turn, sum_usage   # noqa: F401 (
 from wirecap.runtime.pty import answer_text as _clean_transcript
 from wirecap.runtime.workspace import ensure_git_workspace
 
+from . import sessions as _sessions
 from .codexprocess import CodexProcess
 
 _SPAWN = _get_context("spawn")    # context for the caller-owned result SimpleQueue
@@ -164,6 +165,157 @@ def ask(prompt, *, model=None, workspace=None, timeout=300, extra_flags=None,
     return CodexResponse(text=_answer_text(turns, transcript), transcript=transcript,
                          turns=turns, exit_status=proc.exit_status,
                          capture_path=capture, workspace=ws, n_streamed=len(streamed))
+
+
+def _ask_turn(proc, q, prompt=None, idle=8.0, pty_idle=25.0, timeout=180.0, ready=2.5):
+    """One turn against a LIVE interactive codex: submit `prompt`, then drain decoded
+    ``codex_turn``s until the turn settles.
+
+    Unlike agy's equivalent this does not have to guess from PTY quiet alone: the bridge emits a
+    decoded turn at the response's terminal event, so a turn ARRIVING is the real boundary and the
+    idle timers are only the fallback for a turn that never decodes (auth/spend-cap/tool-only
+    reply). `ready` waits for the TUI to settle before typing, so the prompt is not swallowed."""
+    reader = q._reader
+    rstart = time.time()
+    while time.time() - rstart < 30 and time.time() - proc.last_output < ready:
+        proc.service_pty(0.2, [reader])
+    if prompt is None:
+        proc.write(b"\r")                     # prefill already on the argv: just submit
+    else:
+        proc.send_line(prompt)
+    proc.last_output = time.time()
+    got, last, start = [], None, time.time()
+    while time.time() - start < timeout:
+        if proc.service_pty(0.2, [reader]):
+            while reader.poll(0):
+                try:
+                    o = q.get()
+                except EOFError:
+                    proc.reap()                # codex exited — nothing more will arrive
+                    return got
+                if isinstance(o, tuple) and o and o[0] in (_DONE, _EXC):
+                    proc.reap()                # the in-codex target finished/raised
+                    return got
+                if isinstance(o, dict) and o.get("kind") == "codex_turn":
+                    got.append(o)
+                    last = time.time()
+        now = time.time()
+        if last is not None and now - last >= idle:
+            break                              # a turn decoded and the stream went quiet
+        if last is None and now - proc.last_output >= pty_idle:
+            break                              # codex went idle without producing a turn
+    return got
+
+
+class Session:
+    """A multi-turn codex session — the codex counterpart of :class:`pyagy.Session`.
+
+    In-run turns ride ONE live interactive codex process (bare ``codex``, the TUI);
+    ``ask(prompt)`` starts it on the first call and continues it thereafter. Across a restart,
+    codex's own rollout store keeps context: pass ``session_id=`` (resume a specific stored
+    session) or ``continue_latest=True`` (resume the newest), or use the module helpers
+    :func:`resume` / :func:`continue_latest`. After the first turn :attr:`session_id` holds this
+    session's id — persist it to resume later, and read :meth:`history` for the stored transcript.
+
+    Use as a context manager to guarantee cleanup. (There is no ``set_rewrite`` here: the SYNC
+    egress rewrite is a property of agy's LD_PRELOAD shim, and codex has no such hook.)"""
+
+    def __init__(self, *, model=None, workspace=None, timeout=180, idle=8.0,
+                 codex_bin=None, extra_env=None, session_id=None, continue_latest=False,
+                 extra_flags=None):
+        self.workspace = ensure_git_workspace(workspace)
+        self.model = model
+        self.timeout = timeout
+        self.idle = idle
+        self.codex_bin = codex_bin
+        self.extra_env = extra_env
+        self.extra_flags = extra_flags
+        self.continue_latest = continue_latest
+        self.cap_path = os.path.join(self.workspace, "codex-capture.jsonl")
+        self._session_id = session_id
+        self._codex = None
+        self._q = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _start(self, prompt):
+        open(self.cap_path, "w").close()      # fresh capture for this session
+        self._q = _SPAWN.SimpleQueue()
+        self._codex = CodexProcess(
+            prompt, persistent=True, workdir=self.workspace, capture=self.cap_path,
+            model=self.model, codex_bin=self.codex_bin, extra_env=self.extra_env,
+            extra_flags=self.extra_flags, session_id=self._session_id,
+            continue_latest=self.continue_latest,
+            # no deadline: a Session's life IS codex's life (caller think-time between turns
+            # is unbounded). close()/GC kill codex, which ends the in-codex target.
+            args=(self._q, ("codex_turn",), None))
+        self._codex.start()
+        self._q._writer.close()               # parent reads only; reader EOFs on codex death
+
+    def ask(self, prompt):
+        """Send ``prompt`` (starting the session on first call) and return the
+        :class:`CodexResponse` for the turn it produced."""
+        if self._codex is not None and self._codex.exit_status is not None:
+            raise RuntimeError(
+                f"this Session's codex process already exited "
+                f"(exit_status={self._codex.exit_status}); open a new Session "
+                f"(resume with session_id={self._session_id!r})")
+        if self._codex is None:
+            self._start(prompt)
+            turns = _ask_turn(self._codex, self._q, None, idle=self.idle, timeout=self.timeout)
+        else:
+            turns = _ask_turn(self._codex, self._q, prompt, idle=self.idle, timeout=self.timeout)
+        transcript = self._codex.transcript
+        if self._session_id is None:          # first turn of a fresh session
+            self._session_id = _sessions.latest_session_id(cwd=self.workspace)
+        return CodexResponse(
+            text=_answer_text(turns, transcript), transcript=transcript, turns=turns,
+            exit_status=self._codex.exit_status, capture_path=self.cap_path,
+            workspace=self.workspace, n_streamed=len(turns))
+
+    @property
+    def session_id(self):
+        """codex's native session id — the resumed id, or the one captured after the first turn.
+        Persist it and pass to :func:`resume` to continue this session in a later process."""
+        return self._session_id
+
+    #: pyagy spells this ``conversation_id``; alias it so cross-provider code can read one name.
+    conversation_id = session_id
+
+    def history(self):
+        """The stored transcript for this session, read from codex's own rollout store — a list
+        of ``{step_index, role, type, created_at, content}`` (see
+        :func:`pycodex.sessions.read_transcript`). Empty until an id is known."""
+        if not self._session_id:
+            return []
+        return _sessions.read_transcript(self._session_id)
+
+    def close(self):
+        try:
+            if self._codex is not None:
+                self._codex.close(interrupt=True)
+        finally:
+            if self._q is not None:
+                for c in (self._q._reader, self._q._writer):
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+
+
+# --- session entry points (mirrors pyagy.resume / pyagy.continue_latest) -----
+def resume(session_id, **kwargs):
+    """A :class:`Session` continuing the stored codex session ``session_id``."""
+    return Session(session_id=session_id, **kwargs)
+
+
+def continue_latest(**kwargs):
+    """A :class:`Session` continuing the most recent stored codex session."""
+    return Session(continue_latest=True, **kwargs)
 
 
 def ask_many(prompt, n, **kwargs):
