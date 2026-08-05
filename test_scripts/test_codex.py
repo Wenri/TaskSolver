@@ -2,7 +2,7 @@
 """Live end-to-end test for pycodex: a real ``codex exec`` turn, instrumented by the compiled-in
 wirecap bridge, decoded to a ``codex_turn``.
 
-Gated: skips cleanly (exit 0) if the built codex binary is missing (run ``pixi run build-codex``)
+Gated: skips cleanly (exit 0) if the built codex binary is missing (run ``pixi install`` — there is no build-codex task by design)
 or codex isn't authenticated. Needs codex auth (``OPENAI_API_KEY`` or ``codex login``).
 
     python3 test_scripts/test_codex.py
@@ -38,7 +38,8 @@ def skip(msg):
 def main():
     print("[live] pycodex.ask() end-to-end")
     if not os.path.exists(CODEX_BIN):
-        skip(f"codex binary missing ({CODEX_BIN}) — run `pixi run build-codex`")
+        skip(f"codex binary missing ({CODEX_BIN}) — run `pixi install` (codex is built by the\n"
+             f"       install's build_py hook; there is deliberately no build-codex task)")
     if not os.environ.get("CONDA_PREFIX"):
         skip("CONDA_PREFIX unset — run under the pixi env (PYTHONHOME for the embedded interpreter)")
 

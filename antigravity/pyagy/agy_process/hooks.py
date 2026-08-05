@@ -1,192 +1,125 @@
-"""Machine-readable mirror of the native hook table (src/procdef.h).
+"""Machine-readable mirror of the C hook table (src/procdef.h).
 
-`procdef.h` is the source of truth (it feeds the C X-macro); this is the Python-side
-copy so tooling and the client can reason about mechanisms, kinds, and which hook is the
-rewrite surface without parsing C. Keep the two in sync when you add/remove a hook.
+GENERATED — do not edit by hand. Regenerate with::
 
-Fields per entry: ``id`` (C enum tag), ``symbol`` (Go symbol hooked), ``mode``
-(``async`` log-only / ``sync`` blocks for a modify verdict), ``kind`` (the string
-passed to ``dispatch``), ``mech`` (how it's installed: ``"gum"`` = frida-gum inline attach —
-RETIRED, no hook uses it; ``"fullcgo"`` / ``"asmcgo"`` = cgocall trampoline via full
-``runtime.cgocall`` (parking funcs) vs the lighter ``runtime.asmcgocall`` (hot non-parking funcs);
-``"off"`` = NOT installed — documentation of a hook that stalls agy or collides), ``leave``
-(intercepts the return value), ``note``.
+    pixi run shim-hooks
 
-The shim installs the union of every non-``"off"`` hook on each run (no stage selector).
-GUM IS FULLY RETIRED: a 2026-07 bisect showed frida-gum's self-modifying-code patching
-intermittently corrupts agy's Go runtime — ``leave=1`` gum trips the GC unwinder (~40% turn
-failure) and even entry gum on hot funcs fails the full worker path (~15%), while both trampoline
-variants are 100%. So every hook is now a cgocall trampoline (asmcgo for hot non-parking:
-os.Getenv/os.OpenFile/tls_write; fullcgo for parking) and capture is done via entry-arg trampoline
-reads. ``"off"`` hooks: the retired gum ``leave=1`` set (their return values now read entry-arg
-where possible), the os.Getenv trampoline duplicate, and the parking Conn.Read.
+`pyagy.HOOKS` is a public introspection surface, so this file is checked in and ships in the
+wheel. Stdlib-pure: agy_process imports it inside the instrumented CLI's embedded interpreter.
+
+Each row mirrors one C row:
+  id      short tag, the `hk("ID")` key at the C call sites
+  symbol  the Go symbol the hook patches
+  mode    "async" (log) | "sync" (block for a modify verdict)
+  kind    the tag passed to dispatch(kind, stream_id, data)
+  mech    "off" (not installed) | "fullcgo" | "asmcgo" — the cgocall trampoline flavour
+  retcap  return-capture policy: 0 none, <0 special-cased, >0 min bytes. Every retcap != 0 hook
+          is mech="off": the gum return-hook path it needed was retired and deleted, so this is
+          the recorded register contract, not live behaviour.
 """
 
 HOOKS = [
-    {"id": "SMOKE_GETENV", "symbol": "os.Getenv", "mode": "async", "kind": "smoke",
-     "mech": "asmcgo", "leave": False, "note": "liveness smoke; fires often, no network"},
-    {"id": "FILE_OPEN", "symbol": "os.OpenFile", "mode": "async", "kind": "file_open",
-     "mech": "fullcgo", "leave": False,
-     "note": "OVERLAY (AGY_PROC_CONV_ID): reads OpenFile's path arg, C-filtered to "
-             "conversations/·/brain/ paths → conversation_id event. fullcgo (rare + openat "
-             "syscall → not an asmcgo candidate). Only attaches when AGY_PROC_CONV_ID is set. "
-             "NOTE: the path filter still lives in the gum on_enter case; a trampoline arg-read "
-             "in agy_cgo_hook is the follow-on to re-enable conv-id capture."},
-    {"id": "READLINK_FILTER", "symbol": "os.readlink", "mode": "async", "kind": "readlink_filter",
-     "mech": "fullcgo", "leave": False,
-     "note": "FILTER mode: for os.readlink(\"/proc/self/exe\") — misresolved to the loader under "
-             "`ld.so --preload` — RETURNs the real agy path (AGY_PROC_REAL_EXE) via block.action, "
-             "skipping the body; all other readlinks PASS. Hooks the inner os.readlink, not the "
-             "inlined os.Readlink wrapper. Fires ~once/turn at os-init (deterministic liveness)."},
-    {"id": "TLS_WRITE", "symbol": "crypto/tls.(*Conn).Write", "mode": "async",
-     "kind": "tls_write", "mech": "asmcgo", "leave": False,
-     "note": "egress c2s; the ONLY rewrite surface (AGY_PROC_TLS_WRITE_SYNC); "
-             "carries the full HTTP/1.1 model request"},
-    {"id": "H2_PIPE_WRITE", "symbol": "net/http/internal/http2.(*pipe).Write",
-     "mode": "async", "kind": "resp", "mech": "fullcgo", "leave": False,
-     "note": "de-framed HTTP/2 response chunk ([]byte entry arg); parks → cgocall trampoline"},
-    {"id": "TLS_DECRYPT", "symbol": "crypto/tls.(*halfConn).decrypt", "mode": "async",
-     "kind": "tls_read", "mech": "off", "leave": True,
-     "note": "ingress s2c (decrypted inbound records); carries the SSE response"},
-    {"id": "TLS_READ", "symbol": "crypto/tls.(*Conn).Read", "mode": "async",
-     "kind": "tls_read", "mech": "off", "leave": True,
-     "note": "OFF: trampoline-hookable only via full cgocall (asmcgo stalls the turn 0/3 vs 2/2 "
-             "baseline; full cgocall completes 4/6 — inverts the 'asmcgo for hot funcs' rule). "
-             "Kept off anyway: no data (plaintext is the return value; response is on TLS_DECRYPT) "
-             "and ~135 cgocalls/turn. Parks under gum."},
-    {"id": "HTTP_RT", "symbol": "net/http.(*Transport).RoundTrip", "mode": "async",
-     "kind": "http_rt", "mech": "fullcgo", "leave": False,
-     "note": "RoundTrip marker (req ptr = rbx); parks → trampoline. Hot + about to syscall → asmcgo"},
-    {"id": "SER_ROOT",
-     "symbol": "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",
-     "mode": "async", "kind": "serialize", "mech": "off", "leave": True,
-     "note": "app-layer R&D; empirically does not fire for the model request"},
-    {"id": "MAR_PROMPT",
-     "symbol": "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON",
-     "mode": "async", "kind": "marshal", "mech": "off", "leave": True, "note": "app-layer R&D"},
-    {"id": "PROTO_MARSHAL",
-     "symbol": "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",
-     "mode": "async", "kind": "proto_marshal", "mech": "off", "leave": True,
-     "note": "app-layer R&D; hot path (fires on every proto marshal ≥256B)"},
-    {"id": "CGT_SEND_USER_MSG",
-     "symbol": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage",
-     "mode": "async", "kind": "send_user_msg", "mech": "fullcgo", "leave": False,
-     "note": "cgocall-trampoline app-boundary hook (observe)"},
-    {"id": "CGT_STREAM_SEND",
-     "symbol": "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",
-     "mode": "async", "kind": "stream_send", "mech": "fullcgo", "leave": False,
-     "note": "app-boundary hook (observe); hot + syscall-at-entry-sensitive → asmcgo"},
-    {"id": "CGT_GETENV", "symbol": "os.Getenv", "mode": "async", "kind": "cgt_getenv",
-     "mech": "off", "leave": False,
-     "note": "OFF: os.Getenv is already gum-hooked by SMOKE_GETENV; installing both would "
-             "double-patch one entry (overlapping SMC → crash). Trampoline validator, redundant."},
-    # model-text pipeline probe (diagnostic/RE only — the response data path stays on the
-    # wire via http1sse; see README "App-boundary text probe"). Installed (park-safe) but
-    # empirically inert on 1.0.16.
-    {"id": "GET_DELTA_CCPA",
-     "symbol": "…api_server_go_proto.(*GetChatMessageResponse).GetDeltaText",
-     "mode": "async", "kind": "delta_ccpa", "mech": "off", "leave": True,
-     "note": "leaf getter, returns delta text (on_leave); inactive ccpa provider — doesn't fire on 1.0.16"},
-    {"id": "GET_DELTA_CMPL",
-     "symbol": "…codeium_common_go_proto.(*CompletionDelta).GetDeltaText",
-     "mode": "async", "kind": "delta_completion", "mech": "off", "leave": True,
-     "note": "leaf getter, returns delta text (on_leave); inactive provider — doesn't fire"},
-    # RESPONSE getters (return the assembled text as a plain string on_leave). Tried for
-    # the return-value problem; DON'T fire on 1.0.16 (framework reads the field directly).
-    {"id": "RESP_TEXT", "symbol": "…cortex_go_proto.(*CortexStepPlannerResponse).GetResponse",
-     "mode": "async", "kind": "resp_text", "mech": "off", "leave": True, "note": "response getter — doesn't fire (direct field access)"},
-    {"id": "RESP_THINKING", "symbol": "…cortex_go_proto.(*CortexStepPlannerResponse).GetThinking",
-     "mode": "async", "kind": "resp_thinking", "mech": "off", "leave": True, "note": "thinking getter — doesn't fire"},
-    {"id": "RESP_VIEW", "symbol": "…trajectory.(*PlannerResponseStepView).Response",
-     "mode": "async", "kind": "resp_view", "mech": "off", "leave": True, "note": "response view — doesn't fire"},
-    {"id": "FH_FINALIZE",
-     "symbol": "…generator.(*streamResponseHandler).finalizePlannerResponse",
-     "mode": "async", "kind": "fh_finalize", "mech": "fullcgo", "leave": False,
-     "note": "framework choke point (trampoline); fires, but output text is built during the call → not in entry args"},
-    {"id": "FH_UPDATE",
-     "symbol": "…generator.(*streamResponseHandler).updateWithStep",
-     "mode": "async", "kind": "fh_update", "mech": "fullcgo", "leave": False,
-     "note": "THE shallow response consumer: RSI→planner response, answer text at "
-             "+0x8/+0x10 (one deref) → decoded to `app_response` in agy_cgo_hook"},
-    {"id": "FH_PROCESS",
-     "symbol": "…generator.(*streamResponseHandler).processStream",
-     "mode": "async", "kind": "fh_process", "mech": "fullcgo", "leave": False,
-     "note": "framework stream consumer (trampoline)"},
-    {"id": "CORE_PLANSTEP",
-     "symbol": "…core.createPlannerResponseStep",
-     "mode": "async", "kind": "core_planstep", "mech": "fullcgo", "leave": False,
-     "note": "builds assistant Step (trampoline); inlined/off-path — fired 0× in probe"},
-    # consumer-entry hooks for the RESPONSE (return-value problem). OnStepsChanged FIRES
-    # and its entry-reachable graph holds the full assembled answer (via AGY_PROC_CGT_ARGS);
-    # the AppendStep/AddStep variants don't fire (different concrete type / --print path).
-    {"id": "TRAJ_APPENDSTEP", "symbol": "…integration.(*ToolContextTrajectory).AppendStep",
-     "mode": "async", "kind": "traj_appendstep", "mech": "fullcgo", "leave": False, "note": "doesn't fire in --print/interactive"},
-    {"id": "TRAJ_ADDSTEP", "symbol": "…cortex/traj/traj.(*Trajectory).AddStep",
-     "mode": "async", "kind": "traj_addstep", "mech": "fullcgo", "leave": False, "note": "doesn't fire"},
-    {"id": "TRAJ_ONSTEPS", "symbol": "…agent_state_component.(*AgentState).OnStepsChanged",
-     "mode": "async", "kind": "traj_onsteps", "mech": "fullcgo", "leave": False,
-     "note": "FIRES; entry graph holds the full assembled response (deep offset; extraction fragile → superseded by fh_update)"},
-    {"id": "TRAJ_APPENDSTEP_EXEC", "symbol": "…framework/executor/executor.(*ExecutionTrajectory).AppendStep",
-     "mode": "async", "kind": "traj_appendstep_exec", "mech": "fullcgo", "leave": False,
-     "note": "FIRES on the --print path; the commit point one frame above OnStepsChanged "
-             "(chain endpoint + stack anchor). *Step text is 6 hops deep → decode lives on fh_update"},
-    # CodeAssistClient RPC trace (trampoline; kind = RPC label). The app-semantic backend
-    # boundary — request via AGY_PROC_CGT_ARGS, stack via AGY_PROC_STACK.
-    # StreamGenerateContent is the model turn. See rpctrace.py.
-    {"id": "RPC_STREAM_GEN", "symbol": "…codeassistclient.(*CodeAssistClient).StreamGenerateContent",
-     "mode": "async", "kind": "rpc_stream_generate", "mech": "fullcgo", "leave": False,
-     "note": "the model turn (streaming); request proto at entry"},
-    {"id": "RPC_GEN", "symbol": "…(*CodeAssistClient).GenerateContent",
-     "mode": "async", "kind": "rpc_generate", "mech": "fullcgo", "leave": False, "note": "non-streaming generate"},
-    {"id": "RPC_LOAD_CA", "symbol": "…(*CodeAssistClient).FetchLoadCodeAssistResponse",
-     "mode": "async", "kind": "rpc_load_code_assist", "mech": "fullcgo", "leave": False, "note": "startup"},
-    {"id": "RPC_USERINFO", "symbol": "…(*CodeAssistClient).FetchUserInfo",
-     "mode": "async", "kind": "rpc_fetch_userinfo", "mech": "fullcgo", "leave": False, "note": "startup"},
-    {"id": "RPC_MODELS", "symbol": "…(*CodeAssistClient).FetchAvailableModels",
-     "mode": "async", "kind": "rpc_fetch_models", "mech": "fullcgo", "leave": False, "note": "MendelStateCache pollLoop"},
-    {"id": "RPC_EXPERIMENTS", "symbol": "…(*CodeAssistClient).ListExperiments",
-     "mode": "async", "kind": "rpc_list_experiments", "mech": "fullcgo", "leave": False, "note": "MendelStateCache pollLoop"},
-    {"id": "RPC_QUOTA", "symbol": "…(*CodeAssistClient).RetrieveUserQuotaSummary",
-     "mode": "async", "kind": "rpc_quota", "mech": "fullcgo", "leave": False, "note": "store quotaRefreshLoop"},
-    {"id": "RPC_REC_OFFERED", "symbol": "…(*CodeAssistClient).RecordConversationOffered",
-     "mode": "async", "kind": "rpc_record_offered", "mech": "fullcgo", "leave": False, "note": "telemetry"},
-    {"id": "RPC_REC_TRAJ", "symbol": "…(*CodeAssistClient).RecordTrajectorySegmentAnalytics",
-     "mode": "async", "kind": "rpc_record_trajectory", "mech": "fullcgo", "leave": False,
-     "note": "post-turn telemetry (AgentExecutor.recordTelemetryAfterExecution)"},
-    {"id": "RPC_WRITE_ACLS", "symbol": "…(*CodeAssistClient).WriteTrajectoryACLs",
-     "mode": "async", "kind": "rpc_write_acls", "mech": "fullcgo", "leave": False, "note": "trajectory ACLs"},
+    {"id": 'SMOKE_GETENV', "symbol": 'os.Getenv',
+     "mode": 'async', "kind": 'smoke', "mech": 'asmcgo', "retcap": 0},
+    {"id": 'EXIT', "symbol": 'os.Exit',
+     "mode": 'sync', "kind": 'exit', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'FILE_OPEN', "symbol": 'os.OpenFile',
+     "mode": 'async', "kind": 'file_open', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'READLINK_FILTER', "symbol": 'os.readlink',
+     "mode": 'async', "kind": 'readlink_filter', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'TLS_WRITE', "symbol": 'crypto/tls.(*Conn).Write',
+     "mode": 'async', "kind": 'tls_write', "mech": 'asmcgo', "retcap": 0},
+    {"id": 'H2_PIPE_WRITE', "symbol": 'net/http/internal/http2.(*pipe).Write',
+     "mode": 'async', "kind": 'resp', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'TLS_DECRYPT', "symbol": 'crypto/tls.(*halfConn).decrypt',
+     "mode": 'async', "kind": 'tls_read', "mech": 'off', "retcap": -1},
+    {"id": 'TLS_READ', "symbol": 'crypto/tls.(*Conn).Read',
+     "mode": 'async', "kind": 'tls_read', "mech": 'off', "retcap": -1},
+    {"id": 'HTTP_RT', "symbol": 'net/http.(*Transport).RoundTrip',
+     "mode": 'async', "kind": 'http_rt', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'SER_ROOT', "symbol": 'google3/third_party/jetski/cli/model/model.(*RootModel).Serialize',
+     "mode": 'async', "kind": 'serialize', "mech": 'off', "retcap": 1},
+    {"id": 'MAR_PROMPT', "symbol": 'google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON',
+     "mode": 'async', "kind": 'marshal', "mech": 'off', "retcap": 1},
+    {"id": 'PROTO_MARSHAL', "symbol": 'google3/third_party/golang/gogo/protobuf/proto/proto.Marshal',
+     "mode": 'async', "kind": 'proto_marshal', "mech": 'off', "retcap": 256},
+    {"id": 'CGT_SEND_USER_MSG', "symbol": 'google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage',
+     "mode": 'async', "kind": 'send_user_msg', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'CGT_STREAM_SEND', "symbol": 'google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send',
+     "mode": 'async', "kind": 'stream_send', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'CGT_GETENV', "symbol": 'os.Getenv',
+     "mode": 'async', "kind": 'cgt_getenv', "mech": 'off', "retcap": 0},
+    {"id": 'GET_DELTA_CCPA', "symbol": 'google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText',
+     "mode": 'async', "kind": 'delta_ccpa', "mech": 'off', "retcap": 1},
+    {"id": 'GET_DELTA_CMPL', "symbol": 'google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText',
+     "mode": 'async', "kind": 'delta_completion', "mech": 'off', "retcap": 1},
+    {"id": 'RESP_TEXT', "symbol": 'google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse',
+     "mode": 'async', "kind": 'resp_text', "mech": 'off', "retcap": 1},
+    {"id": 'RESP_THINKING', "symbol": 'google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking',
+     "mode": 'async', "kind": 'resp_thinking', "mech": 'off', "retcap": 1},
+    {"id": 'RESP_VIEW', "symbol": 'google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response',
+     "mode": 'async', "kind": 'resp_view', "mech": 'off', "retcap": 1},
+    {"id": 'FH_FINALIZE', "symbol": 'google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse',
+     "mode": 'async', "kind": 'fh_finalize', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'FH_UPDATE', "symbol": 'google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep',
+     "mode": 'async', "kind": 'fh_update', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'FH_PROCESS', "symbol": 'google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream',
+     "mode": 'async', "kind": 'fh_process', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'CORE_PLANSTEP', "symbol": 'google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep',
+     "mode": 'async', "kind": 'core_planstep', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'TRAJ_APPENDSTEP', "symbol": 'google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep',
+     "mode": 'async', "kind": 'traj_appendstep', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'TRAJ_ADDSTEP', "symbol": 'google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep',
+     "mode": 'async', "kind": 'traj_addstep', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'TRAJ_ONSTEPS', "symbol": 'google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged',
+     "mode": 'async', "kind": 'traj_onsteps', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'TRAJ_APPENDSTEP_EXEC', "symbol": 'google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep',
+     "mode": 'async', "kind": 'traj_appendstep_exec', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_STREAM_GEN', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).StreamGenerateContent',
+     "mode": 'async', "kind": 'rpc_stream_generate', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_GEN', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).GenerateContent',
+     "mode": 'async', "kind": 'rpc_generate', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_LOAD_CA', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchLoadCodeAssistResponse',
+     "mode": 'async', "kind": 'rpc_load_code_assist', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_USERINFO', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchUserInfo',
+     "mode": 'async', "kind": 'rpc_fetch_userinfo', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_MODELS', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchAvailableModels',
+     "mode": 'async', "kind": 'rpc_fetch_models', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_EXPERIMENTS', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).ListExperiments',
+     "mode": 'async', "kind": 'rpc_list_experiments', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_QUOTA', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RetrieveUserQuotaSummary',
+     "mode": 'async', "kind": 'rpc_quota', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_REC_OFFERED', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordConversationOffered',
+     "mode": 'async', "kind": 'rpc_record_offered', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_REC_TRAJ', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordTrajectorySegmentAnalytics',
+     "mode": 'async', "kind": 'rpc_record_trajectory', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RPC_WRITE_ACLS', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).WriteTrajectoryACLs',
+     "mode": 'async', "kind": 'rpc_write_acls', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'RESP_CHUNK', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.toStreamResponseChunk',
+     "mode": 'async', "kind": 'resp_chunk', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'USAGE_DELTA', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*streamResponseHandler).sendUsageDelta',
+     "mode": 'async', "kind": 'usage_delta', "mech": 'fullcgo', "retcap": 0},
 ]
 
-# Kinds the correlator/decoder synthesize (not raw hooks) — emitted into the capture.
-DERIVED_KINDS = {
-    "genai_turn": "merged model request+response (capture.Correlator)",
-    "h2msg": "reassembled HTTP/2 message (h2reassemble)",
-    "rewrite_applied": "a SYNC egress rewrite was applied",
-    "rewrite_skip": "a rewrite was skipped (length would change)",
-    "rewrite_error": "a rewrite rule/func raised",
-    "cgt_args": "AGY_PROC_CGT_ARGS diagnostic: a trampoline hook's arg-graph report",
-    "callstack": "AGY_PROC_STACK diagnostic: symbolizable Go call stack at a hook fire",
-    "app_response": "assembled assistant answer decoded at updateWithStep (rsi+0x8) — the app-boundary RESPONSE",
-}
-
-
-def by_kind(kind):
-    for h in HOOKS:
-        if h["kind"] == kind:
-            return h
-    return None
+#: kinds the Python layer DERIVES rather than receiving straight from a hook.
+DERIVED_KINDS = ("genai_turn", "h2msg", "conversation_id", "callstack", "app_response")
 
 
 def by_mech(mech):
-    """Hooks by mechanism: ``"gum"``, ``"fullcgo"``, ``"asmcgo"``, or ``"off"``."""
+    """Rows whose install mechanism is `mech` ("off" / "fullcgo" / "asmcgo")."""
     return [h for h in HOOKS if h["mech"] == mech]
 
 
+def by_kind(kind):
+    """Rows emitting `kind` (several hooks can share one kind)."""
+    return [h for h in HOOKS if h["kind"] == kind]
+
+
 def enabled_hooks():
-    """The hooks actually installed on each run (the full working union)."""
+    """Rows actually installed at runtime (everything not mech="off")."""
     return [h for h in HOOKS if h["mech"] != "off"]
 
 
 def sync_capable():
-    """Kinds that can rewrite egress (today: only tls_write)."""
-    return [h["kind"] for h in HOOKS if h["kind"] == "tls_write"]
+    """Rows whose dispatch can return replacement bytes (mode="sync")."""
+    return [h for h in HOOKS if h["mode"] == "sync"]

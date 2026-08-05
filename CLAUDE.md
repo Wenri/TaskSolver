@@ -82,6 +82,35 @@ Env-var fallbacks resolved inside the adapters (see `vllm.py`, `kimi.py`): vLLM 
 ### TAORI agent loop (scaffolding — mostly unused today)
 `Agent` also exposes a higher-level **think / act / observe / reflect / interject** loop backed by an `EventCollection` of typed `Event`s (`event.py`: `ThinkEvent`, `ActEvent`, `EvaluateEvent`, …). `act`, `observe`, and `run` are `@abstractmethod` — intended to be subclassed per environment/task. Current real usage drives `visual_interface.run_once()` / `rough_guess()` directly and does not exercise this loop; treat it as an extension point, not load-bearing code.
 
+## Subsystems: the two instrumented-CLI backends
+
+Two of the backends are whole subsystems in their own package roots, not single adapter files, and
+`tasksolver/agent.py` dispatches into both. They share a layer:
+
+- **`wirecap/`** — the shared capture layer, consumed by BOTH.
+  - `wirecap/decode/` is **stdlib-import-pure** (it is imported by the CPython interpreter embedded
+    inside the instrumented CLI): the JSONL `Recorder`, HTTP/1.1+SSE framing, `BaseCorrelator`,
+    HTTP/2 reassembly, the `TurnBuilder`/`Usage` contract, and `mp_child` (the in-host
+    multiprocessing child). Never import `wirecap.runtime` or `tasksolver` from here — four
+    `python3 -S` probes in `test_scripts/` enforce it, and they are the tripwire for any move.
+  - `wirecap/runtime/` is parent-side: `WirePopen`/`WireProcess`, the PTY flavours
+    `WirePtyPopen`/`WirePtyProcess`, git-workspace scoping, the vendored-artifact resolver.
+  - `wirecap/native/` is the C ABI bridge (`libwirecap_bridge.a`) that embeds CPython on a
+    16 MB-stack worker thread; linked into BOTH the agy shim and the codex binary.
+- **`antigravity/`** → the `pyagy` package: Google's Go `agy` CLI, instrumented by an LD_PRELOAD
+  C++23 shim (`antigravity/src/`) that patches cgocall trampolines over recovered Go addresses.
+  See `antigravity/README.md`.
+- **`codex/`** → the `pycodex` package: OpenAI's Rust codex, built from a vendored source tree with
+  the bridge compiled in (no preload needed). See `codex/README.md`.
+
+The two are kept deliberately symmetric — `agy --print` ≡ `codex exec`, `agy --prompt-interactive`
+≡ bare `codex`, and both run under the same PTY machinery and stream turns home over the same
+mp-child channel — so a change to one usually belongs in `wirecap/` rather than duplicated.
+
+Note the test surface is wider than the two smoke scripts named under Commands: `test_scripts/`
+holds ~12 offline tests (decode, correlator, config injection, client accessors, the purity probes)
+plus the live agy/codex ones. They are plain `python3 test_scripts/<f>.py`; there is still no pytest.
+
 ## Adding a new backend
 
 1. Create `tasksolver/<name>.py` with a class implementing the adapter contract above (copy the closest existing adapter — `gpt4v.py` for OpenAI-compatible, `claude.py` for Anthropic-style — and keep the 4-tuple return + retry loop + `attach_response_metadata`). For a **CLI-subprocess** backend, subclass `tasksolver/cli_backend.py`'s `CLIBackendModel` instead of copying an adapter — it already supplies the payload assembly, retry loop and 4-tuple.

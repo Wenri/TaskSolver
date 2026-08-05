@@ -2,9 +2,12 @@
 
 Runs the (patched, from-source) codex binary — which has the wirecap bridge compiled in — and
 reads the decoded ``codex_turn``s it writes to a capture JSONL. Unlike pyagy/agy this needs no
-LD_PRELOAD shim and no PTY: codex is open source (the capture hooks are patched into the vendored
-build, Phase 6), and ``codex exec`` is a non-TTY one-shot, so a plain subprocess + a read of the
-capture file replaces agy's PTY + embedded-worker streaming.
+LD_PRELOAD shim — codex is open source, so the capture hooks are patched into the vendored build
+(Phase 6). Everything else matches agy: codex runs under a PTY on the shared
+``wirecap.runtime.pty`` bases and streams decoded turns home over the same embedded-worker
+mp-child channel. The capture JSONL stays AUTHORITATIVE for the returned turns (``codex exec``
+can exit abruptly enough to drop the last streamed one); the live stream is parity + a liveness
+probe (``n_streamed``).
 
 Public API:
     pycodex.ask("What is 2+2?")   -> CodexResponse (.text / .model / .usage / .request / .turns)

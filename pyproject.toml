@@ -149,6 +149,7 @@ htop = ">=3.5.1,<4"
 #   pixi run build-shim         # configure (fetch deps) + compile the shim
 #   pixi run shim-symbols       # after an agy update: re-resolve symbols.json + rebuild
 #   pixi run shim-agy-update    # fetch the latest agy + print new pin values
+#   pixi run shim-hooks         # after editing procdef.h: regen pyagy's HOOKS mirror
 [tool.pixi.package]
 name = "tasksolver"
 version = "0.0.1"
@@ -208,6 +209,7 @@ pymport-test = { cmd = "node -e \"const {pymport,proxify}=require('pymport'); co
 build-shim = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build"
 shim-symbols = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target symbols && cmake --build antigravity/build"   # regen symbols.json after an agy update
 shim-agy-update = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target agy-update"   # fetch the latest agy + print new pin values
+shim-hooks = "python3 antigravity/symbols/gen_hooks_py.py"   # regen pyagy's HOOKS mirror from procdef.h (after editing the C table)
 
 # --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---
 # The `local` and `app` features auto-map to the same-named

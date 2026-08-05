@@ -11,9 +11,13 @@ shared object:
 1. **`LD_PRELOAD` interposition** for the few things that actually cross libc in
    this binary (cgo DNS via `getaddrinfo`, `getenv` config injection, and — most
    importantly — being present in-process so we can bootstrap the next part).
-2. **frida-gum inline hooks** on recovered Go function addresses, for everything
+2. **cgocall trampolines** patched over recovered Go function addresses, for everything
    Go does *not* route through libc (its own TLS/HTTP stack, MCP manager, tool
-   registry, prompt assembly).
+   registry, prompt assembly). Each patched prologue jumps to a generated trampoline that
+   marshals the Go-ABI arg registers and calls `runtime.cgocall`/`asmcgocall` into our C
+   hook. frida-gum is still linked and used for its x86 code writer + near-page allocator,
+   but its *inline-attach listener* path was retired and deleted: gum return hooks trip
+   Go's GC unwinder, and even entry-only attaches destabilized agy under load.
 
 Hook events are delivered to an **embedded CPython interpreter** running on a
 dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/`).
@@ -33,7 +37,7 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | Runs on **WSL1** (syscall-translation layer, not a real kernel) | Frida's ptrace/`frida-server` injection is unreliable here. We use **frida-gum *embedded*** (loaded in-process by our `LD_PRELOAD` constructor, `gum_init_embedded()`), which needs no ptrace — only `mprotect`. |
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
-`dee6de740c3883dd05450228aeec8a75`, agy **1.0.16**). The shim refuses to install hooks if
+`3fa576e2fba87bc80869bbbe7d2d3261`, agy **1.1.10**). The shim refuses to install hooks if
 the running binary's BuildID doesn't match `symbols.json`, so offsets can never be
 silently applied to a different build. Re-run the extractor after any `agy` update
 (`pixi run shim-symbols`).
@@ -122,7 +126,7 @@ our callback, so reading is safe.
 
 The TLS layer gives us HTTP/2 frames (HPACK-compressed headers, possibly gzipped
 bodies, likely gRPC/protobuf). Reassembly to LLM request/response JSON happens
-**in Python** (`pyagy/agy_process/h2reassemble.py`) — decoupled from agy internals, so it
+**in Python** (`wirecap/decode/h2reassemble.py`) — decoupled from agy internals, so it
 survives agy updates.
 
 ---
@@ -145,7 +149,8 @@ address, which the GC stack-unwinder trips on — **~40% turn failure**; (2) eve
 on hot funcs (`tls_write` ~55×/turn, `os.Getenv` ~116×/turn) fail the full AgyProcess path under
 worker load (~15%). Both cgocall-trampoline variants are **100% across 55+ turns** where gum is
 ~60–85%. So **every hook is now a cgocall trampoline** — `AGY_ASMCGO` for hot non-parking funcs
-(the lighter g0-switch: `os.Getenv`/`os.OpenFile`/`tls_write`) and `AGY_FULLCGO` for parking funcs
+(the lighter g0-switch: `os.Getenv`/`tls_write`) and `AGY_FULLCGO` for parking funcs (and for
+`os.OpenFile`, which does an openat syscall and wants the P handoff)
 — and capture is done via **entry-arg trampoline reads** (`agy_cgo_hook` reads args off the g0
 stack: the `tls_write` request, the h2 `resp` chunk, the app boundary). The gum `leave=1` hooks
 that read *return* values are `AGY_OFF` (`TLS_DECRYPT`, the leaf getters, the R&D marshalers); the
@@ -153,10 +158,10 @@ decoded answer still arrives via the `FH_UPDATE` trampoline as `app_response`. T
 was return-only — the wire `genai_turn` **response** (`TLS_DECRYPT`) — is recaptured entry-arg on
 the trampoline: `codeassistclient.toStreamResponseChunk(line string)` gets each raw SSE line
 (`data: {"response": {...}}`) in `rax`/`rbx`, emitted as `resp_chunk` (and `sendUsageDelta` carries
-model/usage). Reassembling those chunks into `genai_turn` in the capture correlator is the remaining
-Python step; the shim-side capture is in place (validated 10/10, no reliability cost).
+model/usage). Reassembling those chunks into `genai_turn` is DONE — `BaseCorrelator.feed_chunk`
+(`wirecap/decode/capture.py`) accumulates them and emits the turn at the terminal event.
 
-**Approach A (`src/cgotrampoline.c` + `src/gomod.c`)** avoids gum's return-tracking
+**Approach A (`src/cgotrampoline.cpp` + `src/gomod.cpp`)** avoids gum's return-tracking
 entirely. It redirects the target — **past its stack-check prologue** — into a generated
 trampoline that:
 1. snapshots the Go-ABI arg registers into a stack **block**,
@@ -174,7 +179,7 @@ variant (just the g0 stack switch, no `entersyscall`/`_Gsyscall`) for hot or
 syscall-at-entry-sensitive funcs. Both share one region + synthetic moduledata; the pcsp
 matches the full-cgo geometry, since only those slots are ever GC-unwound.
 
-**Synthetic moduledata (`gomod.c`).** `cgocall`'s `entersyscall()` opens a GC-scannable window
+**Synthetic moduledata (`gomod.cpp`).** `cgocall`'s `entersyscall()` opens a GC-scannable window
 over our trampoline frame; if Go's unwinder can't `findfunc` the trampoline PCs it
 `throw("unknown pc")`s. `agy_gomod_register()` installs a **synthetic moduledata** whose
 pclntab/pcsp cover the trampoline, so GC unwinds it cleanly — and the pcsp must report **one
@@ -207,7 +212,7 @@ it never intercepts the return.)
 
 We evaluated hooking agy's **app boundary** to get the model response as pre-decoded Go
 values instead of parsing HTTP/1.1+SSE. The `AGY_PROC_CGT_ARGS` diagnostic (a fault-safe
-`process_vm_readv` recursive object-graph string-finder in `cgotrampoline.c`, gated on that env; the
+`process_vm_readv` recursive object-graph string-finder in `cgotrampoline.cpp`, gated on that env; the
 report lands as a `cgt_args` capture event) let us dump any trampoline hook's argument graph
 and reverse-engineer where text lives. Fanning out over the **whole** enumerated model-text
 pipeline (`gemini_coder/framework/{generator,core}` + `jetski/language_server/modelapi*`, not
@@ -279,7 +284,7 @@ falls back to the wire turn and then the PTY transcript (`.source` `"wire"`/`"tr
 ### Call-stack probe (`AGY_PROC_STACK=1`) — mapping HOW agy assembles a turn
 
 To understand the pipeline (not just the bytes), the shim can dump the **Go call stack** at
-every hook fire. `agy_backtrace` (cgotrampoline.c) walks the frame-pointer chain (`[rbp]`=saved rbp,
+every hook fire. `agy_backtrace` (cgotrampoline.cpp) walks the frame-pointer chain (`[rbp]`=saved rbp,
 `[rbp+8]`=return addr — Go keeps frame pointers) with **fault-safe `process_vm_readv`** reads,
 emitting each return PC as a link vaddr (`pc - base`). `build_symbols.py` writes a full sorted
 `symbols/funcmap.tsv.gz` (addr→name over all ~132k funcs; gitignored, regenerated by `make
@@ -398,12 +403,11 @@ antigravity/
     agy_process/__init__.py ← dispatch() → on_tls_write/on_tls_read/on_http/on_dns/on_smoke
     agy_process/http1sse.py ← HTTP/1.1 + SSE decoder for the MODEL endpoint (the right
                               one — the model turn is not HTTP/2)
-    agy_process/capture.py  ← live correlator: pairs request↔response across the
-                              *Conn/*halfConn stream-id split → genai_turn events
     agy_process/rewrite.py  ← SYNC egress rewrite registry (equal-length, mtime reload)
     agy_process/hooks.py    ← machine-readable mirror of procdef.h
-    agy_process/record.py   ← JSONL recorder for plotting
-    agy_process/h2reassemble.py ← HTTP/2 + HPACK + gzip reassembly (agy's OTHER conns)
+    (the correlator, the JSONL recorder, the HTTP/2+HPACK reassembler, the mp-child runner
+     and the HTTP/1.1+SSE framing all live in the SHARED ../../wirecap/decode/ — pycodex
+     consumes the same ones; agy_process/http1sse.py is the genai-specific layer on top)
     agy_mcp_server.py       ← stdio MCP server (built-in stub or AGY_MCP_SPEC-driven)
   config/
     mcp.json  agents.json  README.md  ← native custom MCP server / agent (hybrid path)
@@ -723,7 +727,7 @@ rides the process pickle. It always runs an in-agy worker `target`:
 ```python
 from multiprocessing import get_context
 from pyagy.agyprocess import AgyProcess
-from pyagy.agy_process.mp_child import stream_turns, get_result_conn
+from wirecap.decode.mp_child import stream_turns, get_result_conn
 
 # the caller owns the queue and drains it (client.py's _collect/_ask_turn wrap this)
 q = get_context("spawn").SimpleQueue()
@@ -739,11 +743,11 @@ q = get_context("spawn").SimpleQueue()
 p = AgyProcess(target=work, args=(q, 41)); p.start(); q._writer.close(); print(q.get())
 ```
 
-**How it works** (`pyagy/agyprocess.py` + `pyagy/_pty.py` + `pyagy/agy_process/mp_child.py`):
+**How it works** (`pyagy/agyprocess.py` + `pyagy/_pty.py` + `wirecap/runtime/{process,pty}.py` + `wirecap/decode/mp_child.py`):
 - `AgyProcess(SpawnProcess)` + a custom `_pty.PtyPopen` shaped like `popen_spawn_posix.Popen`:
   `_launch` execs agy under a PTY with the instrumented env — PtyPopen owns the PTY
   (fork/read/answer), the process lifecycle, and child fd inheritance (`resource_tracker` fd +
-  `duplicate_for_child`), but **not** the result queue. The boot payload (one `AGY_MP_BOOT_FD`
+  `duplicate_for_child`), but **not** the result queue. The boot payload (one `WIRE_MP_BOOT_FD`
   pipe) is `tracker_fd` then `(prep, process_obj)` pickled under `set_spawning_popen`; the caller's
   `SimpleQueue` rides `process_obj`'s args, so `duplicate_for_child` makes its pipe fds inheritable
   and its SemLocks pickle by name. There is no pump thread — the caller drains the PTY via
@@ -753,7 +757,7 @@ p = AgyProcess(target=work, args=(q, 41)); p.start(); q._writer.close(); print(q
   is signalled on the channel via `("_agy_done", code)`, not by process death), and the
   ANSI-stripped PTY transcript is kept on `transcript` as a diagnostic byproduct.
 - Inside agy (the shim's worker imports `agy_process`, which starts a daemon thread when
-  `AGY_MP_BOOT_FD` is set), the child reads `tracker_fd` and re-attaches to the parent's
+  `WIRE_MP_BOOT_FD` is set), the child reads `tracker_fd` and re-attaches to the parent's
   `resource_tracker` (so the queue's SemLocks share it) **before** unpickling `process_obj`, pulls
   the queue out of `proc._args[0]` (dropping the inherited reader), then runs the **real**
   `proc._bootstrap()` with three surgical neutralizations so it can't tear agy down:
