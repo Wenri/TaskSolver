@@ -541,7 +541,7 @@ after the I/O) — never the **I/O** step (which parks). So:
 
 Both are gum-attach hooks in the union. `Read`/`net/http.RoundTrip`/`http2.(*pipe).Write` all **park**
 (netpoll / mutex / cond) and stall agy even on-enter-only past-prologue — that's
-why we hook decrypt, not read. `AGY_PROC_PREVIEW` sets capture bytes/event.
+why we hook decrypt, not read. `WIRE_PREVIEW` (legacy `AGY_PROC_PREVIEW`) sets capture bytes/event.
 
 **The model endpoint is HTTP/1.1 + SSE, not HTTP/2** (a load-bearing finding):
 `POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1` to
@@ -626,7 +626,7 @@ capture that kind (e.g. no `rpc_*` events):
   | `AGY_PROC_STACK` | `stack=True` | emit deduped `callstack` events |
   | `AGY_PROC_CGT_ARGS` | `arg_probe=True` | emit `cgt_args` arg-graph reports |
   | `AGY_PROC_CONV_ID` | (auto, instrumented) | install the `os.OpenFile` probe → `conversation_id` event (exact id) |
-  | `AGY_PROC_H2` / `AGY_PROC_CORRELATE` | — | `=0` disables HTTP/2 reassembly / the genai-turn correlator |
+  | `AGY_PROC_H2` / `WIRE_CORRELATE` | — | `=0` disables HTTP/2 reassembly / the genai-turn correlator. The correlator + capture + preview knobs configure SHARED `wirecap.decode` objects, so they take the neutral `WIRE_*` names pycodex also uses (legacy `AGY_PROC_*` still accepted); H2 reassembly is agy-only and keeps its name |
 
 - **Always instrumented:** every launch goes through `AgyProcess` and loads the shim on the
   pinned `vendor/agy` (build-id-matched) — there is no clean/degrade path. The shim is injected

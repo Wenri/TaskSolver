@@ -80,7 +80,9 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
         # pyagy.agy_process (+ wirecap) from its own env's site-packages — the same install the parent
         # runs, pinned to that env by PYTHONHOME below. No PYTHONPATH is exported into agy's children.
         "WIRE_MODULE": module,
-        "AGY_PROC_CAPTURE": os.path.abspath(capture),
+        # WIRE_CAPTURE is the shared decode-layer name (pycodex uses it too); agy_process
+        # still accepts the legacy AGY_PROC_CAPTURE as a fallback.
+        "WIRE_CAPTURE": os.path.abspath(capture),
         # install the os.OpenFile conversation-id probe (overlay) so instrumented runs learn
         # the exact conversation id in-process (agy doesn't expose it via env); newest-*.db-by-
         # mtime is the fallback. The FILE_OPEN trampoline is installed only when this is set,

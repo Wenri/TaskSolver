@@ -5,7 +5,8 @@
 #
 # Env knobs (all optional):
 #   AGY_BIN                 path to agy            (default: the pinned antigravity/vendor/agy)
-#   AGY_PROC_CAPTURE        JSONL output           (default ./agy-capture.jsonl)
+#   WIRE_CAPTURE            JSONL output           (default ./agy-capture.jsonl)
+#                           (legacy AGY_PROC_CAPTURE still accepted)
 #   AGY_PROC_LOG            native shim log        (default ./antigravity.log)
 #   AGY_PROC_TLS_WRITE_SYNC set to enable synchronous egress rewrite
 #   AGY_PROC_H2             0 to disable HTTP/2 reassembly
@@ -25,7 +26,9 @@ sys.path.insert(0, ${ANTIGRAVITY@Q})
 from pyagy._env import instrumented_env, preload_argv
 agy, *args = sys.argv[1:]
 env = instrumented_env(
-    capture=os.environ.get("AGY_PROC_CAPTURE", os.path.join(os.getcwd(), "agy-capture.jsonl")),
+    capture=os.environ.get("WIRE_CAPTURE",
+                           os.environ.get("AGY_PROC_CAPTURE",
+                                          os.path.join(os.getcwd(), "agy-capture.jsonl"))),
     log=os.environ.get("AGY_PROC_LOG", os.path.join(os.getcwd(), "antigravity.log")),
     module=os.environ.get("WIRE_MODULE", "pyagy.agy_process"),
 )

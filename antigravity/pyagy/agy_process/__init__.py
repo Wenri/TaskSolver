@@ -21,7 +21,8 @@ shim emits — "dns", "http_rt", "resp", "serialize", "marshal", "proto_marshal"
 trampoline "send_user_msg"/"stream_send", or a new one — is recorded by the default path
 (never silently dropped).
 
-Knobs: AGY_PROC_H2=0 disables HTTP/2 reassembly; AGY_PROC_CORRELATE=0 disables the
+Knobs: AGY_PROC_H2=0 disables HTTP/2 reassembly; WIRE_CORRELATE=0 (legacy
+AGY_PROC_CORRELATE) disables the
 genai-turn correlator (raw capture only).
 """
 import os
@@ -35,11 +36,23 @@ from wirecap.decode import h2reassemble as h2
 from wirecap.decode.capture import BaseCorrelator
 from .http1sse import GenaiTurnBuilder
 
-_rec = Recorder(path=os.environ.get("AGY_PROC_CAPTURE", "agy-capture.jsonl"),
-                preview=int(os.environ.get("AGY_PROC_PREVIEW", "64")))
+def _knob(name, default=None):
+    """Read a SHARED decode-layer knob: WIRE_<name>, falling back to the legacy AGY_PROC_<name>.
+
+    These three (CAPTURE / PREVIEW / CORRELATE) configure wirecap.decode objects — the Recorder and
+    BaseCorrelator — which pycodex spells WIRE_*, so agy now accepts the same names. They are
+    Python-only: the C shim reads AGY_PROC_{ENABLE,LOG,STACK,CONV_ID,TLS_WRITE_SYNC,REAL_EXE,FORCE,
+    CGT_*} and the bridge reads only WIRE_MODULE/WIRE_MAXCOPY, so that split stays as it is."""
+    return os.environ.get("WIRE_" + name, os.environ.get("AGY_PROC_" + name, default))
+
+
+_rec = Recorder(path=_knob("CAPTURE", "agy-capture.jsonl"),
+                preview=int(_knob("PREVIEW", "64")))
+# AGY_PROC_H2 keeps its name: HTTP/2 reassembly is an agy-only tap (codex hands the bridge
+# pre-parsed JSON and never builds a Reassembler), so there is no codex spelling to converge on.
 _reasm = h2.Reassembler(_rec) if os.environ.get("AGY_PROC_H2", "1") != "0" else None
 _corr = (BaseCorrelator(_rec, GenaiTurnBuilder(), _reasm)
-         if os.environ.get("AGY_PROC_CORRELATE", "1") != "0" else None)
+         if _knob("CORRELATE", "1") != "0" else None)
 
 
 def subscribe(fn):
