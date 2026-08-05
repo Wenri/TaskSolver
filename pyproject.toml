@@ -77,9 +77,9 @@ include = ["tasksolver*", "wirecap*", "pyagy*", "pycodex*"]
 # an editable PyPI dependency, pixi builds it as a conda package via the
 # pixi-build-python backend, and the workspace depends on it by path. The
 # package's runtime deps are read from [project.dependencies] above. The heavy
-# `local` extra stays out of the default environment (its ML stack may lag new
-# Python releases); add a separate environment for it once those wheels
-# support 3.13.
+# `local` extra stays out of the DEFAULT environment (its ML stack may lag new Python
+# releases, and it needs a CUDA 13 GPU); it has its own `cuda` environment — see
+# [tool.pixi.environments] at the bottom.
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = [{ platform = "linux-64", cuda = "13.0" }]
@@ -213,8 +213,9 @@ shim-hooks = "python3 antigravity/symbols/gen_hooks_py.py"   # regen pyagy's HOO
 
 # --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---
 # The `local` and `app` features auto-map to the same-named
-# [project.optional-dependencies] extras above, and are merged into the single
-# default environment below. The PyTorch cu130 wheel index and the flash-attn
+# [project.optional-dependencies] extras above. They are NOT merged into one environment:
+# [tool.pixi.environments] below defines `default` (= app only, GPU-free) and `cuda`
+# (= local + app). The PyTorch cu130 wheel index and the flash-attn
 # build toolchain all live in the `local` feature; the CUDA 13 requirement is a
 # virtual package on the workspace `platforms` above. Consumers never see any of it.
 #
