@@ -960,10 +960,15 @@ fn main() -> anyhow::Result<()> {
     // pycodex) BEFORE the tokio runtime, so CPython initializes on the bridge's own worker thread.
     codex_wirecap::start();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
-    arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
+    let result = arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         cli_main(arg0_paths, remote_control_disabled).await?;
         Ok(())
-    })
+    });
+    // Deterministic teardown of the bridge worker, mirroring start() above — otherwise it is only
+    // torn down by ~PyBridge at libc exit, which the bridge documents as a fallback with a
+    // use-after-destruction hazard while other threads may still be emitting.
+    codex_wirecap::shutdown();
+    result
 }
 
 async fn cli_main(

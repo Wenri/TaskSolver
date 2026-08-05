@@ -19,6 +19,7 @@ unsafe extern "C" {
     fn wire_start() -> c_int;
     fn wire_ready() -> c_int;
     fn wire_emit_async(kind: *const c_char, stream_id: u64, data: *const u8, len: usize);
+    fn wire_shutdown();
 }
 
 static STARTED: Once = Once::new();
@@ -33,6 +34,25 @@ pub fn start() {
     STARTED.call_once(|| unsafe {
         let _ = wire_start();
     });
+}
+
+/// Cooperatively stop + join the bridge worker. Call once at the very end of `main()`, mirroring
+/// [`start`] — this is the deterministic teardown the bridge documents (agy reaches it from its
+/// os.Exit hook, since Go's os.Exit bypasses libc exit entirely).
+///
+/// Without it the bridge is only torn down by `~PyBridge` at libc exit, which its own comments call
+/// a fallback and warn is a use-after-destruction hazard if another thread is still inside
+/// `bridge()` — a live risk for codex, which is the more threaded of the two consumers (tokio).
+///
+/// No-op unless [`start`] actually ran, so a plain `codex` run (no WIRE_ENABLE) never touches
+/// libpython. NOTE this does not cover the paths that call `std::process::exit` (the interactive
+/// TUI's fatal-error exit, and `codex debug`'s handle_exit_status); `codex exec` — the path pycodex
+/// drives — returns from main normally and does reach here.
+pub fn shutdown() {
+    if !STARTED.is_completed() {
+        return;
+    }
+    unsafe { wire_shutdown() };
 }
 
 /// Emit a capture event (ASYNC). No-op until the bridge is ready.

@@ -66,9 +66,10 @@ public:
     bool ready() const { return ready_ == 1; }
     void shutdown();            /* cooperatively stop + join the worker; idempotent */
     ~PyBridge() { shutdown(); } /* fallback: join the worker BEFORE members destruct, so a dtor on
-                                 * the rare libc-exit path can't terminate on a joinable thread or
-                                 * tear down an in-use mutex. Dormant on the normal Go-os.Exit path
-                                 * (that dtor never runs; the os.Exit hook already called shutdown). */
+                                 * a libc-exit path can't terminate on a joinable thread or tear
+                                 * down an in-use mutex. Normally a no-op: agy's os.Exit never runs
+                                 * it at all, and codex has already called shutdown() from main().
+                                 * shutdown() is idempotent, so the double call is free. */
 
 private:
     void   worker_main();       /* boost::thread body: init the interpreter, then drain the queue */
@@ -90,12 +91,18 @@ private:
 };
 
 /* The one instance — a Meyers singleton (thread-safe first-call init, no raw `new` to leak).
- * Cleanup is DETERMINISTIC via shutdown(), invoked from the os.Exit hook (the "exit" branch in
- * cgotrampoline.cpp) — the one teardown callback that fires under agy's Go os.Exit, which bypasses
- * libc exit / __cxa_atexit (verified), so ~PyBridge does NOT run on the normal path. ~PyBridge is
- * only a fallback for a libc-exit() path, where it join-then-destructs safely. Note the residual
- * corner: if that fallback dtor ever ran while another goroutine was still calling bridge(), it
- * would be a use-after-destruction — but agy never takes that path (it always os.Exits). */
+ * Cleanup is DETERMINISTIC via wire_shutdown() in BOTH consumers, and each reaches it differently:
+ *   - agy calls it from the os.Exit hook (the "exit" branch in cgotrampoline.cpp) — the one
+ *     teardown callback that fires under Go's os.Exit, which bypasses libc exit / __cxa_atexit
+ *     (verified), so ~PyBridge does NOT run on agy's normal path.
+ *   - codex calls codex_wirecap::shutdown() at the end of main() (cli/src/main.rs), after which
+ *     libc exit runs ~PyBridge on an already-stopped bridge.
+ * ~PyBridge remains the fallback for any path that skips both, where it join-then-destructs
+ * safely. The residual corner: if that fallback dtor ran while another thread was still inside
+ * bridge(), it would be a use-after-destruction. That is why codex — the more threaded consumer
+ * (tokio) — calls shutdown() explicitly rather than relying on the dtor. Still uncovered on the
+ * codex side: paths that std::process::exit (the interactive TUI's fatal-error exit, and
+ * `codex debug`); `codex exec`, the path pycodex drives, returns from main normally. */
 PyBridge &bridge() { static PyBridge b; return b; }
 
 bool PyBridge::enqueue(job &&j)

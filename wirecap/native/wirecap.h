@@ -50,8 +50,10 @@ void wire_emit_async(const char *kind, uint64_t stream_id, const uint8_t *data, 
 
 int  wire_ready(void);
 
-/* Cooperatively stop + join the worker (idempotent). Called from the front-end's teardown
- * (e.g. the shim's os.Exit hook) after the end-of-capture marker is emitted. */
+/* Cooperatively stop + join the worker (idempotent). REQUIRED of every front-end at teardown —
+ * relying on the ~PyBridge fallback risks destructing while another thread is still inside
+ * bridge(). agy calls it from its os.Exit hook (after the end-of-capture marker is emitted, since
+ * Go's os.Exit bypasses libc exit); codex calls it at the end of main(). */
 void wire_shutdown(void);
 
 #ifdef __cplusplus
