@@ -19,6 +19,7 @@ from multiprocessing import get_context as _get_context
 
 from wirecap.decode.mp_child import DONE as _DONE, EXC as _EXC   # result-queue completion sentinels
 from wirecap.decode.turns import Usage, primary_turn, sum_usage   # noqa: F401 (Usage re-exported)
+from wirecap.runtime.pty import answer_text as _clean_transcript
 from wirecap.runtime.workspace import ensure_git_workspace
 
 from .codexprocess import CodexProcess
@@ -86,10 +87,15 @@ def _load_capture(path):
 
 
 def _answer_text(turns, transcript):
-    """The answer: the longest decoded turn text, else the stdout transcript (fallback)."""
+    """The answer: the longest decoded turn text, else the PTY transcript (fallback).
+
+    The transcript is FILTERED (wirecap.runtime.pty.answer_text) because codex's stderr — which
+    carries our own bridge banner, e.g. "[wirecap/py] worker ready (… maxcopy=1048576)" — merges
+    into it over the pty. Unfiltered, that banner is a plausible-looking answer: it satisfied a
+    "reply with only the number" parse with 1048576."""
     texts = [t.get("text") or "" for t in turns]
     best = max(texts, key=len) if texts else ""
-    return best or transcript.strip()
+    return best or _clean_transcript(transcript)
 
 
 def _drain_stream(proc, q, timeout):

@@ -8,24 +8,11 @@ here once instead of being copied.
 """
 import re
 
-# ANSI stripping is not agy-specific — it lives with the shared PTY driver. Re-exported here
-# because `pyagy.strip_ansi` is a documented public name (and test_scripts imports it from
-# `pyagy._term`); the agy-only pieces below (query/trust auto-reply, answer_text) stay put.
-from wirecap.runtime.pty import strip_ansi  # noqa: F401
-
-
-# Our own shim/log lines that leak onto agy's PTY (the shim logs to stderr, which the pty
-# merges with stdout); an instrumented run's transcript carries them, so drop them to
-# recover the clean answer text.
-_LOG_MARKERS = ("[antigravity", "[wirecap", "[agy_process]", "gohook", "gomod")
-
-
-def answer_text(transcript) -> str:
-    """The clean answer from a (possibly instrumented) PTY transcript: drop our shim log
-    lines and blank lines, keep the rest."""
-    lines = [ln for ln in transcript.splitlines()
-             if ln.strip() and not any(m in ln for m in _LOG_MARKERS)]
-    return "\n".join(lines).strip()
+# strip_ansi and answer_text are not agy-specific — both operate on any instrumented CLI's PTY
+# transcript, so they live with the shared PTY driver. Re-exported here because `pyagy.strip_ansi`
+# is a documented public name and test_scripts imports both from `pyagy._term`. What stays below is
+# genuinely agy-only: the terminal-capability query and folder-trust auto-replies.
+from wirecap.runtime.pty import answer_text, strip_ansi  # noqa: F401
 
 
 # Terminal-capability queries agy sends and blocks on; reply like a real terminal.

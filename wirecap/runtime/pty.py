@@ -49,6 +49,21 @@ def strip_ansi(b) -> str:
     return _ANSI.sub("", b)
 
 
+#: Lines OUR instrumentation writes onto the CLI's stderr, which the pty merges into the transcript.
+#: Both providers need them gone before the transcript can serve as a fallback answer — the bridge's
+#: own "[wirecap/py] worker ready (… maxcopy=1048576)" banner is otherwise indistinguishable from
+#: model output (it will happily satisfy a "reply with a number" parse).
+_LOG_MARKERS = ("[antigravity", "[wirecap", "[agy_process]", "[cgt_args]", "gohook", "gomod")
+
+
+def answer_text(transcript) -> str:
+    """The clean answer from a (possibly instrumented) PTY transcript: drop our shim/bridge log
+    lines and blank lines, keep the rest."""
+    lines = [ln for ln in transcript.splitlines()
+             if ln.strip() and not any(m in ln for m in _LOG_MARKERS)]
+    return "\n".join(lines).strip()
+
+
 class WirePtyPopen(WirePopen):
     """A ``WirePopen`` that execs its CLI under a pty and owns that pty (fork/read/answer/drain).
 
