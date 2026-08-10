@@ -131,8 +131,17 @@ def _drain_stream(proc, q, timeout):
     return turns
 
 
+def _mcp_flags(mcp_servers, extra_flags):
+    """Prepend rendered ``-c mcp_servers.<name>=...`` flags for the given servers
+    (see wirecap.runtime.mcp.codex_config_flags) to the caller's extra_flags."""
+    if not mcp_servers:
+        return extra_flags
+    from wirecap.runtime.mcp import codex_config_flags
+    return [*codex_config_flags(mcp_servers), *(extra_flags or [])]
+
+
 def ask(prompt, *, model=None, workspace=None, timeout=300, extra_flags=None,
-        codex_bin=None, extra_env=None):
+        codex_bin=None, extra_env=None, mcp_servers=None):
     """Run one instrumented ``codex exec`` turn and return a :class:`CodexResponse`. The returned
     ``turns`` come from the authoritative capture JSONL; the live stream is drained for parity and
     probed via ``n_streamed``. Requires the built, wirecap-patched codex and codex auth
@@ -146,6 +155,7 @@ def ask(prompt, *, model=None, workspace=None, timeout=300, extra_flags=None,
     open(capture, "w").close()   # fresh capture per run: the bridge Recorder appends + the scratch ws
     #                              is reused across calls, so start clean (also the no-stream fallback)
     q = _SPAWN.SimpleQueue()
+    extra_flags = _mcp_flags(mcp_servers, extra_flags)
     proc = CodexProcess(prompt, workdir=ws, capture=capture, model=model,
                         extra_flags=extra_flags, codex_bin=codex_bin, extra_env=extra_env,
                         args=(q, ("codex_turn",), timeout + 60))  # max_wait > timeout → death-based done
@@ -222,14 +232,14 @@ class Session:
 
     def __init__(self, *, model=None, workspace=None, timeout=180, idle=8.0,
                  codex_bin=None, extra_env=None, session_id=None, continue_latest=False,
-                 extra_flags=None):
+                 extra_flags=None, mcp_servers=None):
         self.workspace = ensure_git_workspace(workspace)
         self.model = model
         self.timeout = timeout
         self.idle = idle
         self.codex_bin = codex_bin
         self.extra_env = extra_env
-        self.extra_flags = extra_flags
+        self.extra_flags = _mcp_flags(mcp_servers, extra_flags)
         self.continue_latest = continue_latest
         self.cap_path = os.path.join(self.workspace, "codex-capture.jsonl")
         self._session_id = session_id

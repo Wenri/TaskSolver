@@ -17,7 +17,9 @@ class Agent(object):
     def __init__(self, api_key:Union[str, KeyChain], task:TaskSpec,
                  vision_model:str="gpt-4-vision-preview",
                  followup_func=None,
-                 session_token=None): 
+                 session_token=None, *,
+                 mcp_servers:dict=None,
+                 workspace:str=None): 
         """
         Args:
             api_key: openAI/Claude api key
@@ -28,6 +30,11 @@ class Agent(object):
         self.api_key = api_key # if this is a string, then 
         self.vision_model = vision_model
         self.task = task
+        # MCP servers ({name: {command, args, env}}) and a working directory for
+        # the CLI-subprocess backends (claude-code, agy, codex). Other backends
+        # cannot honor them, so passing either with one raises below.
+        self.mcp_servers = mcp_servers
+        self.workspace = workspace
 
         '''
         # # TODO: Add your own model here
@@ -89,7 +96,9 @@ class Agent(object):
                         "or `claude-code-fable-5`; "
                         f"supported built-in aliases: {supported}."
                     )
-            self.visual_interface = ClaudeCodeModel(None, task, model=model)
+            self.visual_interface = ClaudeCodeModel(None, task, model=model,
+                                                    mcp_servers=mcp_servers,
+                                                    workspace=workspace)
 
         elif vision_model in ("agy", "antigravity") or vision_model.startswith("agy-"):
             from pyagy import AgyModel
@@ -105,7 +114,9 @@ class Agent(object):
                     f"Empty agy model suffix in {vision_model!r}; use `agy` or "
                     "`agy-<model>` (e.g. `agy-gemini-3-pro`)."
                 )
-            self.visual_interface = AgyModel(None, task, model=model, timeout=1800)
+            self.visual_interface = AgyModel(None, task, model=model, timeout=1800,
+                                             workspace=workspace,
+                                             mcp_servers=mcp_servers)
 
         elif vision_model == "codex" or vision_model.startswith("codex-"):
             from pycodex import CodexModel
@@ -129,7 +140,9 @@ class Agent(object):
                 api_key = None
             if not api_key:
                 api_key = os.environ.get("OPENAI_API_KEY") or None
-            self.visual_interface = CodexModel(api_key, task, model=model, timeout=1800)
+            self.visual_interface = CodexModel(api_key, task, model=model, timeout=1800,
+                                               workspace=workspace,
+                                               mcp_servers=mcp_servers)
 
         elif vision_model in ('qwen3', 'qwen3-5', 'qwen3-6'):
             from .vllm import VLLMModel, resolve_qwen3_api_key, resolve_qwen3_base_url, resolve_qwen3_model_name, resolve_qwen3_builtin_endpoint
@@ -258,6 +271,13 @@ class Agent(object):
             self.visual_interface = InternModel(task=task, model='OpenGVLab/InternVL2-8B')
         else:
             raise ValueError(f'{vision_model} not matched with any avalable choices.')
+
+        from .cli_backend import CLIBackendModel
+        if ((mcp_servers or workspace)
+                and not isinstance(self.visual_interface, CLIBackendModel)):
+            raise ValueError(
+                "mcp_servers/workspace are only supported by the CLI backends "
+                f"(claude-code, agy, codex); {vision_model!r} cannot honor them")
 
             
 

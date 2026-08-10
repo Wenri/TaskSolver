@@ -32,15 +32,20 @@ class CodexModel(CLIBackendModel):
     _client_ask_many = staticmethod(_codex_ask_many)
 
     def __init__(self, api_key: str = None, task: TaskSpec = None, model: str = None,
-                 workspace: str = None, timeout: int = 300):
+                 workspace: str = None, timeout: int = 300, mcp_servers: dict = None):
         # api_key = OPENAI_API_KEY for API-key auth (or None → codex login)
         super().__init__(api_key=api_key, task=task, model=model)
         self.workspace = workspace
         self.timeout = timeout
+        # Arbitrary {name: {command, args, env}} MCP servers registered for every
+        # run of this model (rendered to `-c mcp_servers.<name>=...` flags).
+        self.mcp_servers = mcp_servers
 
     def _call_kwargs(self, payload: dict) -> dict:
         kw = dict(workspace=payload.get("workspace") or self.workspace,
                   model=self.model, timeout=self.timeout)
+        if self.mcp_servers:
+            kw["mcp_servers"] = self.mcp_servers
         if self.api_key:
             kw["extra_env"] = {"OPENAI_API_KEY": self.api_key}
         return kw
@@ -51,7 +56,8 @@ class CodexModel(CLIBackendModel):
         ``AgyModel.session()``. Inherits the model, workspace and timeout. ``**kwargs``
         override the Session defaults."""
         from .client import Session
-        kw = dict(model=self.model, workspace=self.workspace, timeout=self.timeout)
+        kw = dict(model=self.model, workspace=self.workspace, timeout=self.timeout,
+                  mcp_servers=self.mcp_servers)
         if self.api_key:
             kw["extra_env"] = {"OPENAI_API_KEY": self.api_key}
         kw.update(kwargs)

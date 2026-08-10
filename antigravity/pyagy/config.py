@@ -140,6 +140,47 @@ def remove_mcp_config(server_name=DEFAULT_SERVER_NAME, path=None):
     return False
 
 
+# --- arbitrary third-party servers (Blender MCP and friends) ------------------
+def normalize_server_spec(spec, unset_pythonhome=True):
+    """Normalize one arbitrary ``{command, args, env}`` server spec for agy.
+
+    Policy lives here: agy inherits pyagy's child environment — including the
+    ``PYTHONHOME`` the launcher sets for its embedded interpreter — and hands it
+    to every MCP server it spawns, which silently breaks servers that start a
+    different Python (``uv run``'s venv interpreter). So by default the command
+    is wrapped in ``/usr/bin/env -u PYTHONHOME`` (idempotent; pre-wrapped specs
+    pass through unchanged).
+    """
+    from wirecap.runtime import mcp as _mcp
+    if unset_pythonhome:
+        return _mcp.env_wrapped(spec)
+    return _mcp.normalize_server_spec(spec)
+
+
+def write_mcp_servers(servers, *, path=None, merge=True, unset_pythonhome=True):
+    """Register arbitrary MCP servers (``{name: {command, args, env}}``) with agy.
+
+    Unlike :func:`write_mcp_config` — which renders TaskSolver's own
+    tools/context server — this writes caller-supplied specs verbatim (after
+    :func:`normalize_server_spec`). ``merge=True`` preserves other entries in an
+    existing config; ``path`` defaults to :func:`detect_config_path` (the GLOBAL
+    store — concurrent sessions with colliding names race there, so scope the
+    store via a ``data_dir`` home and pass its config path for parallel runs).
+    Returns the config path.
+    """
+    from wirecap.runtime import mcp as _mcp
+    path = path or detect_config_path()
+    normalized = {name: normalize_server_spec(spec, unset_pythonhome)
+                  for name, spec in servers.items()}
+    return _mcp.write_mcp_servers_json(normalized, path, merge=merge)
+
+
+def remove_mcp_servers(names, path=None):
+    """Bulk :func:`remove_mcp_config` for caller-registered servers. Returns the
+    number of entries actually removed."""
+    return sum(1 for name in names if remove_mcp_config(name, path=path))
+
+
 def validate_server(spec_path=None, tools=None, context=None, timeout=15):
     """Spawn ``agy_mcp_server.py`` and run the MCP handshake (initialize, tools/list,
     resources/list) directly, without agy — a fast pre-flight that the server starts

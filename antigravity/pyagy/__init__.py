@@ -43,12 +43,16 @@ _LAZY = {
     "ConversationInfo": ".conversations",
     "trust_workspace": ".conversations",
     "prepare_scoped_home": ".conversations",
+    "seed_onboarding": ".conversations",
     # TaskSolver backend + lower-level drivers
     "AgyModel": ".model",
     "ensure_git_workspace": ".conversations",
     "strip_ansi": "._term",
     # config injection
     "write_mcp_config": ".config",
+    "remove_mcp_config": ".config",
+    "write_mcp_servers": ".config",
+    "remove_mcp_servers": ".config",
     "detect_config_path": ".config",
     # hook catalog (stdlib-pure; safe under the embedded interpreter)
     "HOOKS": ".agy_process.hooks",

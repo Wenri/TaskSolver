@@ -333,13 +333,43 @@ def _server_name():
     return f"pyagy-{os.getpid()}-{_UNIQ[0]}"
 
 
-def _inject_config(tools, context):
-    """Write an MCP server entry for tools/context. Returns a cleanup callable."""
-    if not (tools or context):
-        return lambda: None
-    name = _server_name()
-    _config.write_mcp_config(tools=tools, context=context, server_name=name)
-    return lambda: _config.remove_mcp_config(name)
+def _inject_config(tools, context, mcp_servers=None, data_dir=None):
+    """Provision agy's MCP config for one run/session. Returns a cleanup callable.
+
+    ``tools``/``context`` register TaskSolver's own spec-backed server under a
+    generated name (removed by the cleanup) — unchanged behavior.
+
+    ``mcp_servers`` registers arbitrary ``{name: {command, args, env}}`` servers
+    (see :func:`pyagy.config.write_mcp_servers`; every command gets the
+    PYTHONHOME unwrap). With ``data_dir`` the servers go into that scoped home's
+    own ``config/mcp_config.json`` — the store is created first with
+    ``link_global_config=False`` so the run neither observes nor mutates the
+    user's global servers, and the config persists for resume/inspection (no
+    cleanup). Without ``data_dir`` they merge into the GLOBAL store and the
+    cleanup removes exactly those names — note concurrent global-store sessions
+    with colliding names race; scope with ``data_dir`` for parallel runs.
+    """
+    cleanups = []
+    if tools or context:
+        name = _server_name()
+        _config.write_mcp_config(tools=tools, context=context, server_name=name)
+        cleanups.append(lambda: _config.remove_mcp_config(name))
+    if mcp_servers:
+        if data_dir:
+            from .conversations import prepare_scoped_home
+            prepare_scoped_home(data_dir, link_global_config=False)
+            path = os.path.join(os.path.abspath(data_dir), ".gemini", "config",
+                                "mcp_config.json")
+            _config.write_mcp_servers(mcp_servers, path=path, merge=True)
+        else:
+            _config.write_mcp_servers(mcp_servers, merge=True)
+            names = list(mcp_servers)
+            cleanups.append(lambda: _config.remove_mcp_servers(names))
+
+    def cleanup():
+        for fn in reversed(cleanups):
+            fn()
+    return cleanup
 
 
 # --- caller-owned result channel (the queue + drain helpers) -----------------
@@ -458,7 +488,8 @@ def _collect_many(procs, queues, timeout=300.0, kinds=_ANSWER_KINDS):
 
 
 # --- one-shot ----------------------------------------------------------------
-def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
+def ask(prompt, *, model=None, workspace=None, tools=None, context=None, mcp_servers=None,
+        rewrite=None,
         capture=True, timeout=300, skip_permissions=False, agy_bin=None, extra_env=None,
         stack=False, arg_probe=False, funcmap=None, conversation_id=None,
         continue_latest=False, data_dir=None, trust=True, extra_flags=None):
@@ -494,7 +525,7 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
     overlays, _ = _shim_overlays(rewrite, workspace, stack, arg_probe, extra_env)
     overlays["AGY_PROC_LOG"] = os.path.join(workspace, "pyagy-shim.log")  # shim logs off the PTY
 
-    cleanup = _inject_config(tools, context)
+    cleanup = _inject_config(tools, context, mcp_servers, data_dir)
     q = _new_channel()                              # caller owns the result queue (stock-mp style)
     p = None
     try:
@@ -524,7 +555,8 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, rewrite
         workspace=workspace, funcmap=funcmap, conversation_id=cid)
 
 
-def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None, rewrite=None,
+def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
+             mcp_servers=None, rewrite=None,
              capture=True, timeout=300, skip_permissions=False, agy_bin=None, extra_env=None,
              stack=False, arg_probe=False, funcmap=None, conversation_id=None,
              continue_latest=False, data_dir=None, trust=True, extra_flags=None):
@@ -549,7 +581,7 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
     for c in cap_paths:
         if c:
             open(c, "w").close()                 # truncate so each reads only its own run
-    cleanup = _inject_config(tools, context)     # one shared MCP config for all n
+    cleanup = _inject_config(tools, context, mcp_servers, data_dir)  # one shared MCP config for all n
     queues = [_new_channel() for _ in range(n)]   # one caller-owned result queue per proc
     procs = []
     try:
@@ -595,6 +627,7 @@ class Session:
     as a context manager to guarantee cleanup."""
 
     def __init__(self, *, model=None, workspace=None, tools=None, context=None,
+                 mcp_servers=None,
                  rewrite=None, capture=True, timeout=180, idle=25.0, agy_bin=None,
                  extra_env=None, stack=False, arg_probe=False, funcmap=None,
                  conversation_id=None, continue_latest=False, skip_permissions=False,
@@ -613,6 +646,7 @@ class Session:
         self.rewrite = rewrite
         self._tools = tools
         self._context = context
+        self._mcp_servers = mcp_servers
         self.continue_latest = continue_latest      # start with --continue (most recent)
         self.skip_permissions = skip_permissions
         self._data_dir = data_dir                    # scope the conversation store to a repo
@@ -638,7 +672,8 @@ class Session:
         overlays, self.rules_path = _shim_overlays(self.rewrite, self.workspace,
                                                    self.stack, self.arg_probe, self.extra_env)
         overlays["AGY_PROC_LOG"] = os.path.join(self.workspace, "pyagy-session.log")
-        self._cleanup = _inject_config(self._tools, self._context)
+        self._cleanup = _inject_config(self._tools, self._context,
+                                       self._mcp_servers, self._data_dir)
         self._q = _new_channel()                     # caller-owned result queue for this session
         self._agy = AgyProcess(persistent=True, prompt=prompt, model=self.model,
                                skip_permissions=self.skip_permissions, agy_bin=self.agy_bin,

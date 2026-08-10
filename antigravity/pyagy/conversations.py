@@ -369,7 +369,25 @@ def trust_workspace(workspace, home=None, app_data_dir=None):
         return False
 
 
-def prepare_scoped_home(data_dir, app_data_dir=None):
+def seed_onboarding(store_root_path):
+    """Mark a (scoped) agy store as already onboarded. Idempotent.
+
+    agy's first-run wizard is not one of the prompts the PTY layer auto-answers
+    (it answers terminal-capability and folder-trust queries only), so a fresh
+    scoped home would hang there. Writing the onboarding cache up front makes
+    the store look already-onboarded before agy starts."""
+    cache = os.path.join(store_root_path, "cache")
+    marker = os.path.join(cache, "onboarding.json")
+    if not os.path.exists(marker):
+        os.makedirs(cache, exist_ok=True)
+        with open(marker, "w") as f:
+            json.dump({"consumerOnboardingComplete": True,
+                       "enterpriseOnboardingComplete": False,
+                       "onboardingComplete": True}, f, indent=2)
+    return marker
+
+
+def prepare_scoped_home(data_dir, app_data_dir=None, link_global_config=True):
     """Scope agy's data dir to ``data_dir`` (a project repo): a run launched with
     ``HOME=data_dir`` keeps its whole conversation store under ``data_dir/.gemini/`` instead
     of the global ``~/.gemini``. agy reads GeminiDir as ``$HOME/.gemini`` and looks for its
@@ -377,7 +395,14 @@ def prepare_scoped_home(data_dir, app_data_dir=None):
     ``antigravity-oauth-token`` + ``installation_id`` (login stays valid, and token refresh in
     the real store still applies) and the shared ``config/`` dir, and drop a project-local
     ``settings.json`` (carrying the model, empty trust list). Idempotent. Returns the scoped
-    store root (``data_dir/.gemini/<app_data_dir>``). See [[agy-native-sessions]]."""
+    store root (``data_dir/.gemini/<app_data_dir>``). See [[agy-native-sessions]].
+
+    ``link_global_config=False`` creates a REAL ``config/`` directory instead of
+    symlinking the global one — for sessions that get their own MCP config
+    (``mcp_config.json`` written into the scoped store) and must not observe or
+    mutate the user's global servers. Because the symlink seeding is
+    lexists-guarded, a later default-``True`` call (the launch-time
+    ``scope_for_run``) leaves the real directory alone."""
     real_gem = os.path.expanduser("~/.gemini")
     real_app = os.path.join(real_gem, "antigravity-cli")
     gem = _gemini_dir(data_dir)                          # <data_dir>/.gemini
@@ -393,7 +418,11 @@ def prepare_scoped_home(data_dir, app_data_dir=None):
 
     for name in ("antigravity-oauth-token", "installation_id"):
         _link(os.path.join(real_app, name), os.path.join(root, name))
-    _link(os.path.join(real_gem, "config"), os.path.join(gem, "config"))
+    if link_global_config:
+        _link(os.path.join(real_gem, "config"), os.path.join(gem, "config"))
+    else:
+        os.makedirs(os.path.join(gem, "config"), exist_ok=True)
+    seed_onboarding(root)
 
     # project-local settings.json (carry model/telemetry; trust starts empty and is filled by
     # trust_workspace) — only if absent, so we never clobber a scoped store agy already owns.

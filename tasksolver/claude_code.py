@@ -21,12 +21,24 @@ class ClaudeCodeModel(CLIBackendModel):
     # is driven by threaded `claude -p` subprocesses, not a wirecap ask_many, and its metadata is
     # the raw CLI JSON rather than a _finish-shaped dict.
 
-    def __init__(self, api_key: str, task: TaskSpec, model: str = None):
+    def __init__(self, api_key: str, task: TaskSpec, model: str = None, *,
+                 mcp_servers: dict = None, workspace: str = None,
+                 allowed_tools: str = "Read", permission_mode: str = "acceptEdits"):
         # api_key/task stay REQUIRED here (the base defaults both to None); the generic-alias
         # normalization comes from generic_model_aliases above.
         super().__init__(api_key=api_key, task=task, model=model)
         self.claude_key: str = api_key          # legacy attribute name, kept
         self.thinking_depth = None
+        # Arbitrary {name: {command, args, env}} MCP servers, loaded per call via
+        # --mcp-config + --strict-mcp-config (the config file is written once per
+        # instance). With MCP servers the default `--tools Read` restriction would
+        # hide them — pass allowed_tools=None to lift the restriction, or an
+        # explicit list matching your CLI's tool-name syntax.
+        self.mcp_servers = mcp_servers
+        self.workspace = workspace              # cwd for the CLI (None = inherit)
+        self.allowed_tools = allowed_tools
+        self.permission_mode = permission_mode
+        self._mcp_config_path = None            # written lazily on first use
 
     def ask(self, payload: dict, n_choices=1) -> Tuple[List[dict], List[dict]]:
         """
@@ -72,9 +84,9 @@ class ClaudeCodeModel(CLIBackendModel):
             legacy_cmd.extend(["--effort", self.thinking_depth])
 
         try:
-            completed = self._run_cli_command(cmd)
+            completed = self._run_cli_command(cmd, cwd=self.workspace)
             if completed.returncode != 0 and "unknown option" in completed.stderr.lower():
-                completed = self._run_cli_command(legacy_cmd)
+                completed = self._run_cli_command(legacy_cmd, cwd=self.workspace)
         except FileNotFoundError as e:
             raise RuntimeError(
                 "Claude Code CLI was not found. Install it with "
@@ -129,19 +141,37 @@ class ClaudeCodeModel(CLIBackendModel):
 
         return f"Claude Code CLI call failed.\nCLI output:\n{combined_output}"
 
-    @staticmethod
-    def _build_cli_command(prompt: str, tool_flag: str) -> List[str]:
-        return [
-            ClaudeCodeModel._claude_command(),
+    def _mcp_args(self) -> List[str]:
+        """``--mcp-config``/``--strict-mcp-config`` for this instance's servers.
+        The config file is written once, into the workspace (or a private temp
+        dir when no workspace is set) so parallel instances never collide."""
+        if not self.mcp_servers:
+            return []
+        if self._mcp_config_path is None:
+            from wirecap.runtime.mcp import claude_mcp_args
+            base = self.workspace
+            if not base:
+                import tempfile
+                base = tempfile.mkdtemp(prefix="claude-code-mcp-")
+            path = os.path.join(base, "mcp-servers.json")
+            args = claude_mcp_args(self.mcp_servers, path)
+            self._mcp_config_path = path
+            self._mcp_cli_args = args
+        return list(self._mcp_cli_args)
+
+    def _build_cli_command(self, prompt: str, tool_flag: str) -> List[str]:
+        cmd = [
+            self._claude_command(),
             "-p",
             prompt,
             "--output-format",
             "json",
-            tool_flag,
-            "Read",
-            "--permission-mode",
-            "acceptEdits",
         ]
+        if self.allowed_tools is not None:
+            cmd += [tool_flag, self.allowed_tools]
+        cmd += ["--permission-mode", self.permission_mode]
+        cmd += self._mcp_args()
+        return cmd
 
     @staticmethod
     def _claude_command() -> str:
@@ -152,10 +182,11 @@ class ClaudeCodeModel(CLIBackendModel):
         return "claude"
 
     @staticmethod
-    def _run_cli_command(cmd: List[str]) -> subprocess.CompletedProcess:
+    def _run_cli_command(cmd: List[str], cwd: str = None) -> subprocess.CompletedProcess:
         return subprocess.run(
             cmd,
             check=False,
             capture_output=True,
             text=True,
+            cwd=cwd,
         )

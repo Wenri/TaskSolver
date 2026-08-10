@@ -82,6 +82,22 @@ Env-var fallbacks resolved inside the adapters (see `vllm.py`, `kimi.py`): vLLM 
 ### TAORI agent loop (scaffolding — mostly unused today)
 `Agent` also exposes a higher-level **think / act / observe / reflect / interject** loop backed by an `EventCollection` of typed `Event`s (`event.py`: `ThinkEvent`, `ActEvent`, `EvaluateEvent`, …). `act`, `observe`, and `run` are `@abstractmethod` — intended to be subclassed per environment/task. Current real usage drives `visual_interface.run_once()` / `rough_guess()` directly and does not exercise this loop; treat it as an extension point, not load-bearing code.
 
+### MCP provisioning at session start (`wirecap/runtime/mcp.py`)
+
+The canonical MCP server spec is a plain dict `{"command", "args", "env"}`; `wirecap/runtime/mcp.py`
+owns normalization (`normalize_server_spec`, the idempotent `env_wrapped`) and the per-CLI
+serializations (`codex_config_flags` — bare-TOML-key names enforced, `claude_mcp_args`,
+`qwen_mcp_servers`, `kimi_mcp_json`/`kimi_mcp_toml_lines`, `write_mcp_servers_json` with merge
+semantics). It is parent-side runtime code (never imported from `wirecap.decode`). The backends
+thread `mcp_servers=` through: `Agent(mcp_servers=, workspace=)` → `ClaudeCodeModel` (config file +
+`--mcp-config --strict-mcp-config`, workspace honored as cwd), `AgyModel`/`pyagy.ask/Session`
+(`pyagy.write_mcp_servers` into the scoped or global store; `prepare_scoped_home(...,
+link_global_config=False)` + `seed_onboarding` make a scoped home self-contained and
+already-onboarded; commands get the `/usr/bin/env -u PYTHONHOME` wrap so agy-spawned servers can
+start their own interpreters), `CodexModel`/`pycodex.ask/Session` (rendered `-c` flags prepended to
+`extra_flags`). Non-CLI backends raise on `mcp_servers`/`workspace`. Offline tests:
+`test_scripts/test_mcp_serializers.py`.
+
 ## Subsystems: the two instrumented-CLI backends
 
 Two of the backends are whole subsystems in their own package roots, not single adapter files, and

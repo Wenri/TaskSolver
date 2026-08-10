@@ -93,6 +93,38 @@ pycodex.ask("Reconstruct the GT model.", workspace=ws)     # or pyagy.ask(...)
 See [`.agents/skills/README.md`](.agents/skills/README.md) for the layout, how the progressive
 disclosure is split, how to verify a skill reached the model, and how to add one.
 
+## MCP servers at session start
+
+The CLI backends can register arbitrary MCP servers (`{name: {command, args,
+env}}`) when a session starts. `wirecap/runtime/mcp.py` owns the canonical
+spec normalization and the per-CLI config serializations (claude
+`--mcp-config`/`--strict-mcp-config`, codex `-c mcp_servers.<name>=<TOML>`,
+qwen/kimi config fragments, the shared `mcpServers` JSON writer), so harnesses
+that drive the CLIs directly can render the exact same configs.
+
+Through the backends:
+
+```python
+servers = {"blender": {"command": "uv",
+                       "args": ["run", "--directory", "path/to/mcp", "blender-mcp"],
+                       "env": {"BLENDER_MCP_PORT": "9999"}}}
+Agent(key, task, vision_model="claude-code-sonnet-4-6",
+      mcp_servers=servers, workspace=str(task_dir))        # also agy-*/codex*
+pyagy.Session(mcp_servers=servers, data_dir=str(private_home))   # scoped store
+pycodex.ask("...", mcp_servers=servers)                     # rendered -c flags
+```
+
+agy specifics (`pyagy.write_mcp_servers` / `Session(mcp_servers=…)`): every
+server command is wrapped `/usr/bin/env -u PYTHONHOME …` (agy hands its own
+environment — including the launcher's `PYTHONHOME` — to the servers it
+spawns, which breaks `uv run` interpreters); with `data_dir` the config goes
+into that scoped home's own `config/mcp_config.json` (created real, not
+symlinked to `~/.gemini/config`, so the run neither sees nor mutates the
+user's global servers) and the scoped store is pre-onboarded
+(`seed_onboarding`) so a fresh home doesn't hang in agy's first-run wizard.
+Without `data_dir` the servers merge into the global store and are removed on
+cleanup — don't run parallel sessions that way.
+
 ## Antigravity (`agy`) instrumentation
 
 [`antigravity/`](antigravity/) is a research subsystem that instruments Google's Antigravity CLI (`agy`) in-process via an `LD_PRELOAD` shim (frida-gum inline hooks + an embedded CPython), and also exposes `agy` as a TaskSolver-style backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the cgocall-trampoline hook mechanism for parking Go functions, and build/validation notes — validated on both WSL1 and a real cloud kernel (6.18.5, agy 1.0.15), including a gdb instruction-level root-cause proof.
