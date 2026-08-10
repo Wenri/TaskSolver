@@ -37,7 +37,7 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | Runs on **WSL1** (syscall-translation layer, not a real kernel) | Frida's ptrace/`frida-server` injection is unreliable here. We use **frida-gum *embedded*** (loaded in-process by our `LD_PRELOAD` constructor, `gum_init_embedded()`), which needs no ptrace — only `mprotect`. |
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
-`3fa576e2fba87bc80869bbbe7d2d3261`, agy **1.1.10**). The shim refuses to install hooks if
+`514b5e79445e0cbba3d65adf318d075e`, agy **1.1.11**). The shim refuses to install hooks if
 the running binary's BuildID doesn't match `symbols.json`, so offsets can never be
 silently applied to a different build. Re-run the extractor after any `agy` update
 (`pixi run shim-symbols`).
