@@ -28,7 +28,8 @@ def _vendored(in_pkg_rel, sibling_rel):
 CODEX_BIN = _vendored("vendor/codex", "../vendor/codex-rs/target/release/codex")
 
 
-def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_env=None):
+def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_env=None,
+                     codex_home=None):
     """Environment that enables the wirecap bridge in codex and points it at ``capture``.
 
     Sets the neutral bridge contract (``WIRE_ENABLE`` gates the bridge on; ``WIRE_MODULE`` is the
@@ -49,18 +50,27 @@ def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_e
     env.setdefault("CODEX_DISABLE_UPDATE_CHECK", "1")
     if extra_env:
         env.update(extra_env)
+    if codex_home:
+        # First-class store scoping (auth/sessions/rollouts). The explicit kwarg
+        # wins over anything extra_env carried, so callers cannot half-scope.
+        env["CODEX_HOME"] = os.path.abspath(codex_home)
     return env
 
 
 def codex_argv(prompt, workspace, model=None, extra_flags=None, codex_bin=None,
-               persistent=False, session_id=None, continue_latest=False):
+               persistent=False, session_id=None, continue_latest=False,
+               prompt_via_stdin=False):
     """codex's argv tail. One-shot is ``codex exec <prompt> --skip-git-repo-check -C <ws>`` (run with
     stdin on /dev/null so ``exec`` doesn't block reading it) — the direct counterpart of agy's
     ``--print``. ``persistent=True`` launches the interactive TUI (bare ``codex <prompt>``), the
     counterpart of agy's ``--prompt-interactive``; ``session_id`` / ``continue_latest`` resume a
     stored session (``codex resume <id>`` / ``codex resume --last``), mirroring agy's
-    ``--conversation=<id>`` / ``--continue``."""
+    ``--conversation=<id>`` / ``--continue``. ``prompt_via_stdin`` replaces the
+    positional prompt with ``-`` (codex reads stdin to EOF) — one-shot only; the
+    launcher supplies fd 0."""
     bin_ = codex_bin or CODEX_BIN
+    if prompt_via_stdin and not persistent:
+        prompt = "-"
     if persistent:
         # Interactive TUI: bare `codex`, options forwarded to the TUI CLI. NOTE
         # --skip-git-repo-check is `global = true` only INSIDE the exec subtree
@@ -85,7 +95,13 @@ def codex_argv(prompt, workspace, model=None, extra_flags=None, codex_bin=None,
             argv += ["resume", "--last", *([prompt] if prompt else [])]
         else:
             argv += [prompt]
-        argv += ["--skip-git-repo-check", "-C", workspace]
+        # -C/--cd is NOT marked global in exec's clap tree (mark_exec_global_args
+        # covers only model/danger-bypass/bypass_hook_trust), so after the
+        # `resume` subcommand token it is rejected — the resumed run's cwd is the
+        # launcher's chdir(workdir) instead, matching `codex exec resume` usage.
+        argv += ["--skip-git-repo-check"]
+        if not (session_id or continue_latest):
+            argv += ["-C", workspace]
     if model:
         argv += ["-m", model]
     if extra_flags:

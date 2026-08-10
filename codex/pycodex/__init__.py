@@ -36,6 +36,9 @@ _LAZY = {
     # codex's native session store (read-only), the pyagy.conversations counterpart
     "read_transcript": ".sessions",
     "latest_session_id": ".sessions",
+    # MCP server registration (the pyagy.config counterpart): -c flag rendering
+    # with the PYTHONHOME unwrap codex-spawned servers need
+    "mcp_flags": ".config",
 }
 
 

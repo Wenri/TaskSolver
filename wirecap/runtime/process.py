@@ -17,6 +17,7 @@ creates the ``SimpleQueue``, passes it as a target arg, and drains it.
 import io
 import os
 import signal
+import time
 
 from multiprocessing import (reduction, resource_tracker as _rtracker,
                              spawn as mp_spawn, util)
@@ -25,12 +26,13 @@ from multiprocessing.popen_fork import Popen as _ForkPopen
 from multiprocessing.popen_spawn_posix import _DupFd
 
 
-def _close_wire(sentinel_fd, boot_w):
-    """Finalizer: close the subclass teardown fd (agy: the PTY master, whose close SIGHUPs agy;
-    codex: the pidfd) + the boot pipe's write end (its EOF is the in-host worker's parent-death
-    sentinel). Module-level, closing over only fds (never the Popen) so weakref GC still fires.
-    Idempotent + one-shot; the caller's result queue is torn down by the caller, not here."""
-    for fd in (sentinel_fd, boot_w):
+def _close_wire(*fds):
+    """Finalizer: close the subclass teardown fds (agy: the PTY master, whose close SIGHUPs agy;
+    codex: the pidfd AND the master — see ``_teardown_fds``) + the boot pipe's write end (its EOF
+    is the in-host worker's parent-death sentinel). Module-level, closing over only fds (never the
+    Popen) so weakref GC still fires. Idempotent + one-shot; the caller's result queue is torn down
+    by the caller, not here."""
+    for fd in fds:
         if fd is None:
             continue
         try:
@@ -99,7 +101,7 @@ class WirePopen(_ForkPopen):
         self._spawn_child(argv, workdir, env, process_obj)
         # Safety-net finalizer (mirrors popen_fork): via close() or GC of self — closes the teardown
         # fd + boot_w (the parent-death sentinel). exitpriority None → NOT at the atexit sweep.
-        self.finalizer = util.Finalize(self, _close_wire, (self.sentinel, boot_w))
+        self.finalizer = util.Finalize(self, _close_wire, tuple(self._teardown_fds(boot_w)))
         # Ship the payload to the host over the boot pipe, then keep boot_w open as the sentinel.
         with os.fdopen(boot_w, "wb", closefd=False) as f:
             f.write(buf.getvalue())
@@ -120,9 +122,20 @@ class WirePopen(_ForkPopen):
     def _interrupt(self):
         """Optional graceful nudge before SIGTERM (agy: Ctrl-C its TUI). Default no-op."""
 
-    def close(self, interrupt=False):
-        """Tear down: optional ``_interrupt()``, SIGTERM, blocking reap (capturing ``self.status``),
-        then the finalizer (closes the teardown fd + boot_w). Safe if the host was already reaped."""
+    def _teardown_fds(self, boot_w):
+        """Hook: the fds the finalizer closes. Base = (sentinel, boot_w); a PTY flavour whose
+        sentinel is NOT the master (codex's pidfd) adds the master so it cannot leak."""
+        return (self.sentinel, boot_w)
+
+    def close(self, interrupt=False, grace=5.0):
+        """Tear down: optional ``_interrupt()``, leader SIGTERM, a BOUNDED reap (``grace`` seconds,
+        then SIGKILL + blocking reap — capturing ``self.status``), then a process-GROUP sweep, then
+        the finalizer (closes the teardown fds + boot_w). Safe if the host was already reaped.
+
+        The group sweep runs on success paths too: PTY children are session leaders (pty.fork does
+        setsid), so ``killpg(pid)`` targets exactly the CLI's own tree — the MCP stdio servers and
+        shell/apply_patch grandchildren it spawned — and can never be the parent's group. Without
+        it, a CLI that exits (or is killed) leaves its MCP servers running."""
         if getattr(self, "pid", None):
             if interrupt:
                 self._interrupt()
@@ -130,13 +143,53 @@ class WirePopen(_ForkPopen):
                 os.kill(self.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-            try:
-                _, st = os.waitpid(self.pid, 0)
-                self.status = st
-            except ChildProcessError:
-                pass
+            reaped = False
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline:
+                try:
+                    pid, st = os.waitpid(self.pid, os.WNOHANG)
+                except ChildProcessError:
+                    reaped = True
+                    break
+                if pid:
+                    self.status = st
+                    reaped = True
+                    break
+                time.sleep(0.05)
+            if not reaped:
+                try:
+                    os.kill(self.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    _, st = os.waitpid(self.pid, 0)
+                    self.status = st
+                except ChildProcessError:
+                    pass
+            self._sweep_group(grace)
         if getattr(self, "finalizer", None) is not None:
             self.finalizer()
+
+    def _sweep_group(self, grace=5.0):
+        """TERM → bounded wait → KILL the CLI's whole process group (see ``close``)."""
+        pid = getattr(self, "pid", None)
+        if not pid or pid == os.getpgrp():
+            return
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 class WireProcess(SpawnProcess):

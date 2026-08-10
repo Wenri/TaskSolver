@@ -94,9 +94,21 @@ thread `mcp_servers=` through: `Agent(mcp_servers=, workspace=)` → `ClaudeCode
 (`pyagy.write_mcp_servers` into the scoped or global store; `prepare_scoped_home(...,
 link_global_config=False)` + `seed_onboarding` make a scoped home self-contained and
 already-onboarded; commands get the `/usr/bin/env -u PYTHONHOME` wrap so agy-spawned servers can
-start their own interpreters), `CodexModel`/`pycodex.ask/Session` (rendered `-c` flags prepended to
-`extra_flags`). Non-CLI backends raise on `mcp_servers`/`workspace`. Offline tests:
-`test_scripts/test_mcp_serializers.py`.
+start their own interpreters), `CodexModel`/`pycodex.ask/Session` (rendered `-c` flags via
+`pycodex.mcp_flags` — same PYTHONHOME unwrap as pyagy, for the same reason). Non-CLI backends raise
+on `mcp_servers`/`workspace`. Offline tests: `test_scripts/test_mcp_serializers.py`.
+
+pycodex additionally carries the harness-shaped one-shot controls on `ask()` — `codex_home=`
+(store scoping, honored by the session readers too), `session_id=`/`continue_latest=`
+(non-interactive `codex exec resume`; the returned `CodexResponse.session_id` is store-read so a
+silently-forked new thread is visible), `prompt_via_stdin=` (fd 0 = an unlinked temp file,
+`codex exec -`), `capture=` (path override), and `CodexResponse.timed_out`. `WirePopen.close` is
+group-aware for BOTH providers: leader SIGTERM → bounded reap → `killpg` sweep (PTY children are
+session leaders, so the sweep hits exactly the CLI's own MCP/tool children — on success paths
+too), and pidfd-sentinel popens close their PTY master via `_teardown_fds`. Offline tests:
+`test_scripts/test_codex_argv.py` (argv/env/sessions/mcp_flags) and
+`test_scripts/test_codex_process.py` (stub-binary end-to-end: stdin round-trip, timeout, group
+sweep, fd stability).
 
 ## Subsystems: the two instrumented-CLI backends
 

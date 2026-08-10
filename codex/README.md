@@ -6,8 +6,9 @@ from source, the capture hooks are a small **source patch** at its HTTP boundary
 binary hooking. Both share the `wirecap` package (decode + the embedded-CPython native bridge).
 
 ## Layout
-- `vendor/` — the Codex repo, git-subtree'd at **`rust-v0.143.0-alpha.38`** (Apache-2.0; `LICENSE`
-  preserved). Kept pristine except our patch (below); `codex-rs/target/` is gitignored.
+- `vendor/` — the Codex repo, git-subtree'd (originally `rust-v0.143.0-alpha.38`, since bumped to
+  **0.146.0** — see `codex-rs/Cargo.toml`; Apache-2.0; `LICENSE` preserved). Kept pristine except
+  our patch (below); `codex-rs/target/` is gitignored.
 - `pycodex/` — the Python wrapper: `ask()`/`CodexResponse`/`CodexModel` + the in-process decode
   side `codex_process` (the `WIRE_MODULE` the embedded interpreter loads) + the OpenAI-Responses
   turn decoder `responses_decode`.
@@ -43,8 +44,22 @@ Auth: `OPENAI_API_KEY` or `codex login`. Then:
 `pycodex` drives codex through the **same wirecap mp-child machinery as agy** (the shared
 `wirecap.runtime.process.WirePopen`/`WireProcess` base + `wirecap.decode.mp_child`): `ask()` launches
 `codex exec` as a `multiprocessing.spawn` child over a boot pipe, and the compiled-in bridge's
-`mp_child` streams decoded `codex_turn`s home over a result `SimpleQueue`. codex is a non-TTY
-one-shot (no PTY; unlike agy) with **no terminal signal to Python**, so completion is death-based
-(`os.pidfd_open`, or EOF+reap where pidfd is unavailable) and the durable `WIRE_CAPTURE` JSONL stays
-**authoritative** for the returned turns — the live stream is a parity bonus surfaced as
-`CodexResponse.n_streamed`.
+`mp_child` streams decoded `codex_turn`s home over a result `SimpleQueue`. codex runs under the
+same PTY flavour as agy (`CodexPopen` on `wirecap.runtime.pty`), but its death sentinel is
+`os.pidfd_open` rather than the master — codex spawns tool grandchildren that inherit the pty
+slave, so the master can outlive codex itself (EOF+reap where pidfd is unavailable). The durable
+`WIRE_CAPTURE` JSONL stays **authoritative** for the returned turns — the live stream is a parity
+bonus surfaced as `CodexResponse.n_streamed`.
+
+`ask()` also supports the harness-shaped controls: `codex_home=` scopes codex's whole store
+(auth/sessions/rollouts — the env is set for the run AND the post-run store reads use it);
+`session_id=`/`continue_latest=` are the non-interactive resume (`codex exec resume` — codex
+silently starts a NEW thread when an id does not resolve, so check the store-read
+`CodexResponse.session_id`); `prompt_via_stdin=True` delivers the prompt on fd 0 (`codex exec -`,
+an unlinked temp file — no quoting/ARG_MAX limits, nothing echoed into the transcript);
+`capture=` accepts a path to keep the capture JSONL out of the workspace; `mcp_servers=` renders
+`-c mcp_servers.<name>=…` flags via `pycodex.mcp_flags`, wrapping every server command
+`/usr/bin/env -u PYTHONHOME` (codex inherits the launcher's `PYTHONHOME` and hands it to the MCP
+servers it spawns, which breaks `uv run` venv interpreters — the same policy as
+`pyagy.write_mcp_servers`). A run that hits the drain deadline returns with
+`CodexResponse.timed_out=True` (codex and its whole process group are reaped by `close()`).

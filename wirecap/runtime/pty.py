@@ -78,6 +78,7 @@ class WirePtyPopen(WirePopen):
     #: on stdout/stderr, so it sees a TTY and we get its output. An interactive/TUI launch leaves
     #: this False — the slave on stdin is what ``write``/``send_line`` type into.
     _stdin_devnull = False
+    _stdin_fd = None                     # caller-supplied child stdin (see _spawn_pty)
 
     # --- launch hooks ---------------------------------------------------------
     def _spawn_child(self, argv, workdir, env, process_obj):
@@ -105,6 +106,14 @@ class WirePtyPopen(WirePopen):
         """Hook: reply to the CLI's terminal-capability queries / trust prompts. Called after every
         read, with the accumulated bytes on ``self.raw``. Default: nothing to answer."""
 
+    def _teardown_fds(self, boot_w):
+        """The PTY master joins the finalizer set when it is NOT the sentinel (a pidfd-sentinel
+        flavour like codex would otherwise leak one master + pty device per run)."""
+        fds = super()._teardown_fds(boot_w)
+        if getattr(self, "fd", None) is not None and self.fd != self.sentinel:
+            fds = (*fds, self.fd)
+        return fds
+
     # --- PTY mechanics --------------------------------------------------------
     def _spawn_pty(self, argv, workdir, env):
         """`pty.fork()` + `execve(argv[0])` in `workdir`; set the winsize; record pid + master fd."""
@@ -112,15 +121,23 @@ class WirePtyPopen(WirePopen):
         if pid == 0:                          # child
             try:
                 os.chdir(workdir)
-                if self._stdin_devnull:       # one-shot: keep the slave on 1/2, close stdin off it
+                if self._stdin_fd is not None:  # caller-supplied stdin (e.g. a prompt file)
+                    os.dup2(self._stdin_fd, 0)  # dup2 clears CLOEXEC on 0 → survives execve
+                elif self._stdin_devnull:     # one-shot: keep the slave on 1/2, close stdin off it
                     devnull = os.open(os.devnull, os.O_RDONLY)
-                    os.dup2(devnull, 0)       # dup2 clears CLOEXEC on 0 → survives execve
+                    os.dup2(devnull, 0)
                     os.close(devnull)
                 os.execve(argv[0], argv, env)
             except Exception as e:            # pragma: no cover
                 os.write(2, f"exec failed: {e}\n".encode())
             os._exit(127)
         self.pid, self.fd = pid, fd
+        if self._stdin_fd is not None:        # parent keeps no copy; the child owns fd 0 now
+            try:
+                os.close(self._stdin_fd)
+            except OSError:
+                pass
+            self._stdin_fd = None
         try:
             import fcntl
             import struct

@@ -41,6 +41,9 @@ class CodexResponse:
     workspace: str
     n_streamed: int = 0   # codex_turns that arrived over the LIVE queue (fd-inheritance probe; the
     #                       returned `turns` come from the authoritative capture JSONL, not this)
+    timed_out: bool = False   # the drain deadline fired before codex exited (close() then reaped it)
+    session_id: str = None    # store-read after the run — never an echo of a requested resume id,
+    #                           so a resume that silently forked a new thread is visible here
 
     @property
     def primary(self):
@@ -128,53 +131,74 @@ def _drain_stream(proc, q, timeout):
             done = True                     # codex exited (the drain above caught any buffered turns)
         elif sentinel is None and not ready and proc.reap():
             done = True                     # no pidfd: poll for death
-    return turns
+    return turns, not done                  # not done = the deadline fired, codex was still alive
 
 
 def _mcp_flags(mcp_servers, extra_flags):
     """Prepend rendered ``-c mcp_servers.<name>=...`` flags for the given servers
-    (see wirecap.runtime.mcp.codex_config_flags) to the caller's extra_flags."""
+    (see :func:`pycodex.config.mcp_flags` — every command gets the PYTHONHOME
+    unwrap, because codex inherits this launcher's ``PYTHONHOME`` and hands it to
+    the MCP servers it spawns) to the caller's extra_flags."""
     if not mcp_servers:
         return extra_flags
-    from wirecap.runtime.mcp import codex_config_flags
-    return [*codex_config_flags(mcp_servers), *(extra_flags or [])]
+    from .config import mcp_flags
+    return [*mcp_flags(mcp_servers), *(extra_flags or [])]
 
 
 def ask(prompt, *, model=None, workspace=None, timeout=300, extra_flags=None,
-        codex_bin=None, extra_env=None, mcp_servers=None):
+        codex_bin=None, extra_env=None, mcp_servers=None, codex_home=None,
+        session_id=None, continue_latest=False, prompt_via_stdin=False,
+        capture=True):
     """Run one instrumented ``codex exec`` turn and return a :class:`CodexResponse`. The returned
     ``turns`` come from the authoritative capture JSONL; the live stream is drained for parity and
     probed via ``n_streamed``. Requires the built, wirecap-patched codex and codex auth
     (``OPENAI_API_KEY`` or ``codex login``).
 
+    ``session_id``/``continue_latest`` are the NON-interactive resume (``codex exec resume``) —
+    beware codex silently starts a NEW thread when the id does not resolve in the store, so check
+    the returned ``CodexResponse.session_id`` (store-read, not an echo). ``codex_home`` scopes the
+    whole store (auth/sessions/rollouts) for the run and the post-run session-id read.
+    ``prompt_via_stdin`` delivers the prompt on fd 0 (``codex exec -``) — no quoting or ARG_MAX
+    limits, nothing echoed into the transcript. ``capture`` mirrors pyagy: ``True`` writes
+    ``<workspace>/codex-capture.jsonl``; a path string keeps the capture out of the workspace.
+
     To run with seeded ``AGENTS.md`` instructions or skills, seed a workspace with
     ``ensure_git_workspace(...)`` and pass it as ``workspace=`` — omitting it resolves the shared
-    scratch repo with no seeds, which *clears* any a previous call left there."""
+    scratch repo with no seeds, which *clears* any a previous call left there (seeding never
+    writes into a caller-supplied workspace unless instructions/skills are given)."""
+    if session_id and continue_latest:
+        raise ValueError("session_id and continue_latest are mutually exclusive")
     ws = ensure_git_workspace(workspace)
-    capture = os.path.join(ws, "codex-capture.jsonl")
-    open(capture, "w").close()   # fresh capture per run: the bridge Recorder appends + the scratch ws
+    cap_path = capture if isinstance(capture, str) else os.path.join(ws, "codex-capture.jsonl")
+    os.makedirs(os.path.dirname(os.path.abspath(cap_path)), exist_ok=True)
+    open(cap_path, "w").close()  # fresh capture per run: the bridge Recorder appends + the scratch ws
     #                              is reused across calls, so start clean (also the no-stream fallback)
     q = _SPAWN.SimpleQueue()
     extra_flags = _mcp_flags(mcp_servers, extra_flags)
-    proc = CodexProcess(prompt, workdir=ws, capture=capture, model=model,
+    proc = CodexProcess(prompt, workdir=ws, capture=cap_path, model=model,
                         extra_flags=extra_flags, codex_bin=codex_bin, extra_env=extra_env,
+                        session_id=session_id, continue_latest=continue_latest,
+                        codex_home=codex_home, prompt_via_stdin=prompt_via_stdin,
                         args=(q, ("codex_turn",), timeout + 60))  # max_wait > timeout → death-based done
     proc.start()
     q._writer.close()            # parent only reads; the reader EOFs once codex (the writer holder) dies
     try:
-        streamed = _drain_stream(proc, q, timeout)
+        streamed, timed_out = _drain_stream(proc, q, timeout)
     finally:
-        proc.close()             # SIGTERM + blocking reap: codex is never left running, exit_status set
+        proc.close()             # leader TERM + bounded reap + GROUP sweep: codex and its MCP/tool
+        #                          children are never left running, exit_status set
         for c in (q._reader, q._writer):
             try:
                 c.close()
             except Exception:
                 pass
-    turns = _load_capture(capture) or streamed   # JSONL authoritative; the stream is the fallback
+    turns = _load_capture(cap_path) or streamed  # JSONL authoritative; the stream is the fallback
     transcript = proc.transcript
+    sid = _sessions.latest_session_id(home=codex_home, cwd=ws) or session_id
     return CodexResponse(text=_answer_text(turns, transcript), transcript=transcript,
                          turns=turns, exit_status=proc.exit_status,
-                         capture_path=capture, workspace=ws, n_streamed=len(streamed))
+                         capture_path=cap_path, workspace=ws, n_streamed=len(streamed),
+                         timed_out=timed_out, session_id=sid)
 
 
 def _ask_turn(proc, q, prompt=None, idle=8.0, pty_idle=25.0, timeout=180.0, ready=2.5):
@@ -232,13 +256,14 @@ class Session:
 
     def __init__(self, *, model=None, workspace=None, timeout=180, idle=8.0,
                  codex_bin=None, extra_env=None, session_id=None, continue_latest=False,
-                 extra_flags=None, mcp_servers=None):
+                 extra_flags=None, mcp_servers=None, codex_home=None):
         self.workspace = ensure_git_workspace(workspace)
         self.model = model
         self.timeout = timeout
         self.idle = idle
         self.codex_bin = codex_bin
         self.extra_env = extra_env
+        self.codex_home = codex_home          # scope the store; also used for the id/history reads
         self.extra_flags = _mcp_flags(mcp_servers, extra_flags)
         self.continue_latest = continue_latest
         self.cap_path = os.path.join(self.workspace, "codex-capture.jsonl")
@@ -259,7 +284,7 @@ class Session:
             prompt, persistent=True, workdir=self.workspace, capture=self.cap_path,
             model=self.model, codex_bin=self.codex_bin, extra_env=self.extra_env,
             extra_flags=self.extra_flags, session_id=self._session_id,
-            continue_latest=self.continue_latest,
+            continue_latest=self.continue_latest, codex_home=self.codex_home,
             # no deadline: a Session's life IS codex's life (caller think-time between turns
             # is unbounded). close()/GC kill codex, which ends the in-codex target.
             args=(self._q, ("codex_turn",), None))
@@ -281,7 +306,8 @@ class Session:
             turns = _ask_turn(self._codex, self._q, prompt, idle=self.idle, timeout=self.timeout)
         transcript = self._codex.transcript
         if self._session_id is None:          # first turn of a fresh session
-            self._session_id = _sessions.latest_session_id(cwd=self.workspace)
+            self._session_id = _sessions.latest_session_id(home=self.codex_home,
+                                                           cwd=self.workspace)
         return CodexResponse(
             text=_answer_text(turns, transcript), transcript=transcript, turns=turns,
             exit_status=self._codex.exit_status, capture_path=self.cap_path,
@@ -302,7 +328,7 @@ class Session:
         :func:`pycodex.sessions.read_transcript`). Empty until an id is known."""
         if not self._session_id:
             return []
-        return _sessions.read_transcript(self._session_id)
+        return _sessions.read_transcript(self._session_id, home=self.codex_home)
 
     def close(self):
         try:

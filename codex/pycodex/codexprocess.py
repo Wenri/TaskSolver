@@ -13,10 +13,28 @@ the durable ``WIRE_CAPTURE`` JSONL stays authoritative for the returned turns (s
 """
 import os
 import re
+import tempfile
 
 from wirecap.runtime.pty import WirePtyPopen, WirePtyProcess, strip_ansi
 
 from ._env import codex_argv, instrumented_env
+
+
+def _prompt_stdin_fd(prompt):
+    """An fd 0 for ``codex exec -``: an UNLINKED temp file holding the prompt.
+
+    A file (not a pipe) so any prompt size works without a writer thread or the
+    64KB pipe-capacity deadlock; unlinked so the last close reclaims it; not the
+    pty slave so nothing is echoed into the transcript and canonical-mode line
+    limits never apply. codex reads it to EOF (exec/src/lib.rs read_to_end)."""
+    fd, path = tempfile.mkstemp(prefix="pycodex-prompt-")
+    try:
+        os.write(fd, (prompt or "").encode())
+    finally:
+        os.close(fd)
+    rfd = os.open(path, os.O_RDONLY)
+    os.unlink(path)
+    return rfd
 
 #: codex's TUI onboarding folder-trust question (tui/src/onboarding/trust_directory.rs), matched
 #: WHITESPACE-INSENSITIVELY on the ANSI-stripped tail: the TUI positions the cursor between glyphs,
@@ -46,17 +64,25 @@ class CodexPopen(WirePtyPopen):
         capture = process_obj._capture
         self._capture_path = capture
         persistent = getattr(process_obj, "_persistent", False)
+        via_stdin = bool(getattr(process_obj, "_prompt_via_stdin", False)) and not persistent
         # exec blocks on stdin; the TUI needs the slave there to be typed into (write/send_line).
-        self._stdin_devnull = not persistent
+        # With a stdin prompt, fd 0 is the unlinked prompt file instead of /dev/null.
+        if via_stdin:
+            self._stdin_fd = _prompt_stdin_fd(process_obj._prompt)
+            self._stdin_devnull = False
+        else:
+            self._stdin_devnull = not persistent
         self._trust_answered = not persistent   # only the TUI shows the trust prompt
-        # instrumented_env sets WIRE_ENABLE/WIRE_MODULE/WIRE_CAPTURE/PYTHONHOME (+ extra_env, e.g.
-        # OPENAI_API_KEY); the base (WirePopen._launch) adds WIRE_MP_BOOT_FD — the worker channel.
-        env = instrumented_env(capture, extra_env=process_obj._extra_env)
+        # instrumented_env sets WIRE_ENABLE/WIRE_MODULE/WIRE_CAPTURE/PYTHONHOME/CODEX_HOME
+        # (+ extra_env, e.g. OPENAI_API_KEY); the base (WirePopen._launch) adds WIRE_MP_BOOT_FD.
+        env = instrumented_env(capture, extra_env=process_obj._extra_env,
+                               codex_home=getattr(process_obj, "_codex_home", None))
         argv = codex_argv(process_obj._prompt, workdir, model=process_obj._model,
                           extra_flags=process_obj._extra_flags, codex_bin=process_obj._codex_bin,
                           persistent=persistent,
                           session_id=getattr(process_obj, "_session_id", None),
-                          continue_latest=getattr(process_obj, "_continue_latest", False))
+                          continue_latest=getattr(process_obj, "_continue_latest", False),
+                          prompt_via_stdin=via_stdin)
         return argv, env, workdir
 
     def _answer(self):
@@ -113,7 +139,8 @@ class CodexProcess(WirePtyProcess):
     def __init__(self, prompt=None, target=None, name=None, args=(), kwargs=None, *,
                  workdir=None, capture=None, model=None, extra_flags=None,
                  codex_bin=None, extra_env=None, persistent=False, session_id=None,
-                 continue_latest=False, echo=False, daemon=None):
+                 continue_latest=False, codex_home=None, prompt_via_stdin=False,
+                 echo=False, daemon=None):
         super().__init__(target=target, name=name, args=args, kwargs=kwargs, daemon=daemon)
         self._prompt = prompt
         self._workdir = workdir
@@ -125,4 +152,6 @@ class CodexProcess(WirePtyProcess):
         self._persistent = persistent          # interactive TUI (drive via .send()); else codex exec
         self._session_id = session_id          # resume a stored session (codex [exec] resume <id>)
         self._continue_latest = continue_latest  # resume the newest (codex [exec] resume --last)
+        self._codex_home = codex_home          # first-class CODEX_HOME scoping (auth/sessions)
+        self._prompt_via_stdin = prompt_via_stdin  # deliver the prompt on fd 0 (`codex exec -`)
         self._echo = echo                      # mirror codex's PTY output to our stdout (debug)
