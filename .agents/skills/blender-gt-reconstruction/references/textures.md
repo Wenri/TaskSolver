@@ -83,7 +83,7 @@ Check:
 Then:
 
 1. identify the largest material or texture discrepancy;
-2. modify `reconstruct_gt.py`;
+2. modify the self-contained reconstruction script;
 3. rerun the complete script;
 4. compare again using your mode's comparison method;
 5. repeat until no major visible surface discrepancy remains.

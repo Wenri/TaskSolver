@@ -31,11 +31,11 @@ Take these alongside the multi-viewpoint visual inspection in SKILL.md.
 
 ## Placement — origin-authored reconstruction and temporary comparison offset
 
-Construct the model in the GT-aligned frame and make the stored `reconstruct_gt.py` leave
+Construct the model in the GT-aligned frame and make the complete reconstruction script leave
 `recon__root.location` at `(0, 0, 0)`. Do not encode a side-by-side offset in the reconstruction
 script.
 
-For visual comparison only, after executing the stored script, translate **only `recon__root`**
+For visual comparison only, after executing the complete script, translate **only `recon__root`**
 with a separate MCP code execution. Compute the temporary distance from the GT world-space
 bounding box:
 
@@ -45,7 +45,7 @@ comparison_distance = 1.25 * max(gt_bbox_dimensions)
 
 Prefer translation along world X. Use another axis only when X causes overlap or poor visibility.
 
-This is viewport/comparison state, not model data. Each rerun of `reconstruct_gt.py` must recreate
+This is viewport/comparison state, not model data. Each rerun of the complete script must recreate
 the reconstruction at the origin. Apply the temporary offset again separately when another
 side-by-side comparison is needed. Before the final save or export, restore:
 
@@ -82,7 +82,7 @@ viewpoint. Restore the reconstruction to the origin after the final comparison.
 In addition to the SKILL.md checklist:
 
 * the GT model is present and unchanged;
-* the stored `reconstruct_gt.py` contains no comparison offset;
+* the complete reconstruction script contains no comparison offset;
 * `recon__root` is restored to location `(0, 0, 0)` before the final save or export.
 
 ## Also report

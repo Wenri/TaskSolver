@@ -43,8 +43,9 @@ beside, so no comparison offset is needed — and it could not be computed anywa
 the GT bounding box, which is unmeasurable from here. The two models live in separate Blender
 instances and are compared by matching viewpoints across the two servers.
 
-Execute the script in the workspace server via its `execute_blender_code` tool, and store
-`reconstruct_gt.py` as a text block there.
+Execute the complete script in the workspace server via its `execute_blender_code` tool. Do not
+copy the script source into a Blender text block or write an output `.py` file yourself; the graded
+runner captures and publishes the executed source.
 
 ## Independence — satisfied by construction
 
@@ -63,8 +64,8 @@ viewpoints. Re-screenshot both instances after every revision.
 In addition to the SKILL.md checklist:
 
 * the read-only server's GT model remains completely unchanged;
-* the workspace server contains the `VLM_RECONSTRUCTION` collection, the reconstructed objects, the
-  `recon__root` Empty, and the `reconstruct_gt.py` text block;
+* the workspace server contains the `VLM_RECONSTRUCTION` collection, the reconstructed objects, and
+  the `recon__root` Empty;
 * no major geometric or proportional discrepancy remains when comparing the two instances'
   screenshots.
 

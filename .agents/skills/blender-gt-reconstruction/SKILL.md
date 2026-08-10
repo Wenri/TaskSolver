@@ -9,7 +9,7 @@ description: >-
   behind a separate read-only viewport-only Blender MCP server and is matched screenshot-to-
   screenshot from matching viewpoints. Covers GT inspection, geometry-first then optional
   texture/material stages, GT preservation, independence rules, the VLM_RECONSTRUCTION/recon__
-  output contract, the rerun-safe reconstruct_gt.py text block, and the final report. Not for
+  output contract, a rerun-safe self-contained script, and the final report. Not for
   general Blender modeling, creating scenes from text prompts, or importing assets when no
   existing GT model is present.
 ---
@@ -123,7 +123,7 @@ image, and node group. Examples:
 * `recon__antenna_right`
 
 Construct the model in a coordinate frame aligned with the GT, and keep all part coordinates in
-that GT-aligned frame. The stored `reconstruct_gt.py` script must finish with `recon__root` at the
+that GT-aligned frame. The self-contained reconstruction script must finish with `recon__root` at the
 GT-aligned origin: location `(0, 0, 0)`, with no comparison offset encoded in the script. A mode
 reference may allow a temporary display transform for comparison, but that transform is not part
 of the reconstruction and must be removed before the final save or export.
@@ -139,10 +139,6 @@ procedural parts are allowed.
 Your mode reference states which specific dependencies are possible and therefore banned.
 
 ## Safe reruns
-
-Store the complete final script in a Blender Text Editor text block named:
-
-`reconstruct_gt.py`
 
 The script must be safe to rerun. At the beginning, remove only the previous generated collection:
 
@@ -162,6 +158,10 @@ begin with `recon__`, once they are no longer used.
 Never clear the full Blender scene, and never remove objects, materials, textures, images, node
 groups, or collections outside reconstruction-owned data.
 
+Do not embed the script in a `SCRIPT_SOURCE` string, copy its source into `bpy.data.texts`, or write
+an instance-named `.py` artifact yourself. The graded runner captures the latest complete script
+executed in Blender and publishes it under the instance name.
+
 ## Iterative reconstruction
 
 After every script execution, compare the GT and the reconstruction from multiple viewpoints, using
@@ -180,7 +180,7 @@ Check:
 Then:
 
 1. identify the largest geometric discrepancy;
-2. modify `reconstruct_gt.py`;
+2. modify the self-contained reconstruction script;
 3. rerun the complete script;
 4. compare the GT and the reconstruction again, using your mode's comparison method;
 5. repeat until no major visible geometric discrepancy remains.
@@ -207,8 +207,7 @@ At completion there must be:
 
 * the unchanged GT model;
 * the `VLM_RECONSTRUCTION` collection containing the reconstructed objects;
-* the `recon__root` root Empty;
-* the `reconstruct_gt.py` text block.
+* the `recon__root` root Empty.
 
 Verify that:
 
@@ -217,7 +216,7 @@ Verify that:
 * only generated reconstruction data is removed during reruns;
 * no major geometric or proportional discrepancy remains;
 * the generated geometry does not depend on GT datablocks.
-* `recon__root` is at location `(0, 0, 0)`, and rerunning `reconstruct_gt.py` leaves it there.
+* `recon__root` is at location `(0, 0, 0)`, and rerunning the complete script leaves it there.
 
 Additionally complete the final-state checklist in the reference(s) you used.
 
@@ -226,7 +225,6 @@ Additionally complete the final-state checklist in the reference(s) you used.
 Report:
 
 * reconstruction collection name;
-* Blender text-block name;
 * generated object count;
 * main geometry construction techniques;
 * inspected viewpoints;
