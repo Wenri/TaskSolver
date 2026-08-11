@@ -30,6 +30,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { wiretapEmitEvent, wiretapEmitRequest } from '#/wiretap/wiretap';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
@@ -381,6 +382,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       };
       this.logRequest(logInput);
       this.recordRequest(logInput);
+      wiretapEmitRequest(logInput);
 
       let message: Message | undefined;
       let usage: TokenUsage | undefined;
@@ -396,6 +398,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         ...request.params,
         onTraceId: setTraceId,
       })) {
+        wiretapEmitEvent(event);
         switch (event.type) {
           case 'part':
             await onPart(event.part);

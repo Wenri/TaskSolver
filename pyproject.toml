@@ -63,14 +63,15 @@ app = [
 ]
 
 # Package roots: tasksolver + the shared `wirecap` (capture/decode/native bridge, reused by
-# both wrappers) at the repo root; the antigravity `pyagy` package under antigravity/; the
-# codex `pycodex` package under codex/. List all three roots so they ship in the (editable)
-# package instead of relying on the PYTHONPATH activation. The nested shim-runtime subpackages
-# (pyagy.agy_process, pycodex.codex_process, wirecap.decode/runtime) are found automatically;
-# the test/experiment scripts live in test_scripts/, not the package.
+# all wrappers) at the repo root; the antigravity `pyagy` package under antigravity/; the
+# codex `pycodex` package under codex/; the kimi-code `pykimi` package under kimi/. List all
+# roots so they ship in the (editable) package instead of relying on the PYTHONPATH activation.
+# The nested shim-runtime subpackages (pyagy.agy_process, pycodex.codex_process,
+# pykimi.kimi_process, wirecap.decode/runtime) are found automatically; the test/experiment
+# scripts live in test_scripts/, not the package.
 [tool.setuptools.packages.find]
-where = [".", "antigravity", "codex"]
-include = ["tasksolver*", "wirecap*", "pyagy*", "pycodex*"]
+where = [".", "antigravity", "codex", "kimi"]
+include = ["tasksolver*", "wirecap*", "pyagy*", "pycodex*", "pykimi*"]
 
 # --- pixi workspace + buildable package -----------------------------------
 # Uses the `pixi-build` preview feature: rather than installing this project as
@@ -187,6 +188,12 @@ clang = ">=22.1.8,<23"
 libclang = ">=22.1.8,<23"
 openssl = "*"
 libcap = ">=2.78,<3"
+# kimi build (build_py also bundles the vendored kimi-code CLI with tsdown and compiles the
+# wirecap_node N-API addon): nodejs supplies node + npm/npx (pnpm rides `npx -y pnpm@<pin>`,
+# honoring the vendored packageManager field — conda-forge carries no pnpm 10) and the N-API
+# headers ($CONDA_PREFIX/include/node) the addon compiles against. The vendored monorepo's
+# engine-strict floor is Node >=24.15.
+nodejs = ">=25,<26"
 
 # No [tool.pixi.activation.env]: nothing needs a global env var. The agy/codex embedded
 # interpreters get PYTHONHOME per-child from their launchers (pyagy/pycodex `_env.py`), the codex

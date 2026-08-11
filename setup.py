@@ -23,6 +23,7 @@ a source/editable checkout, in the sibling `vendor/`). The artifacts are ALWAYS 
 supplied externally — there is no env-var override. `BinaryDistribution` forces the platform+ABI
 wheel tag.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -48,7 +49,8 @@ class BuildPyNative(build_py):
         root = os.path.dirname(os.path.abspath(__file__))
         self._build_antigravity_shim(root)   # builds wirecap_bridge + antigravity.so
         self._build_codex(root)              # links the bridge from the shim step → must follow it
-        self._bundle_artifacts(root)         # copy (+strip codex) into the wheel under pyagy/pycodex
+        self._build_kimi(root)               # independent: kimi/native builds its own bridge copy
+        self._bundle_artifacts(root)         # copy (+strip codex) into the wheel under py* pkgs
 
     def _build_antigravity_shim(self, root):
         if not os.path.isdir(os.path.join(root, "antigravity")):
@@ -78,6 +80,38 @@ class BuildPyNative(build_py):
                        cwd=codex_rs, env=env, check=True)
         sys.stderr.write("[setup] codex built (gnu-dynamic, wirecap-patched)\n")
 
+    def _build_kimi(self, root):
+        vendor = os.path.join(root, "kimi", "vendor", "kimi-code")
+        if not os.path.isdir(vendor):
+            return  # kimi-code absent (degenerate checkout with the source tree missing)
+        # 1) The CLI bundle. pnpm is pinned by the vendored packageManager field and run via
+        #    `npx -y pnpm@<pin>` (npm/npx ship with the conda nodejs host-dep; conda-forge has no
+        #    pnpm 10). The vis-web asset is stubbed — it only feeds `kimi vis` — so the
+        #    vite/tailwind prebuild is skipped; invoking tsdown directly (not `pnpm run build`)
+        #    also skips the darwin/win32 native-asset copy and the dist-web check, neither of
+        #    which the instrumented Linux CLI needs. tsdown produces a single self-sufficient
+        #    dist/main.mjs (the minidb/search workers are SEA-only — no-ops in the ESM bundle).
+        #    Idempotent: pnpm/tsdown no-op when nothing changed.
+        stub = os.path.join(vendor, "apps", "kimi-code", "src", "generated", "vis-web-asset.ts")
+        if not os.path.exists(stub):
+            os.makedirs(os.path.dirname(stub), exist_ok=True)
+            with open(stub, "w") as f:
+                f.write("export const VIS_WEB_GZIP_B64 = '';\n")
+        with open(os.path.join(vendor, "package.json")) as f:
+            pin = json.load(f).get("packageManager", "pnpm@10").split("+")[0]
+        pnpm = ["npx", "-y", pin]
+        app = os.path.join(vendor, "apps", "kimi-code")
+        subprocess.run([*pnpm, "install", "--frozen-lockfile"], cwd=vendor, check=True)
+        subprocess.run([*pnpm, "exec", "tsdown"], cwd=app, check=True)
+        # 2) The N-API addon hosting the wirecap bridge (embedded CPython). Builds its own copy
+        #    of libwirecap_bridge.a (kimi/native adds ../../wirecap/native as a subdirectory), so
+        #    it does not depend on the antigravity build tree.
+        build = os.path.join("kimi", "native", "build")
+        subprocess.run(["cmake", "-S", os.path.join("kimi", "native"), "-B", build, "-G", "Ninja"],
+                       cwd=root, check=True)
+        subprocess.run(["cmake", "--build", build], cwd=root, check=True)
+        sys.stderr.write("[setup] kimi-code bundle + wirecap_node.node built\n")
+
     def _bundle_artifacts(self, root):
         # Make the wheel self-contained: copy the native artifacts from their sibling vendor/
         # build dirs into the package tree under build_lib, so bdist_wheel zips them in and the
@@ -88,6 +122,8 @@ class BuildPyNative(build_py):
             (os.path.join(root, "antigravity", "vendor", "antigravity.so"), "pyagy", "antigravity.so", False),
             (os.path.join(root, "antigravity", "vendor", "agy"),            "pyagy", "agy",            False),  # build-id coupled to the shim — never strip
             (os.path.join(root, "codex", "vendor", "codex-rs", "target", "release", "codex"), "pycodex", "codex", True),  # ~72% debuginfo — strip for the wheel
+            (os.path.join(root, "kimi", "vendor", "kimi-code", "apps", "kimi-code", "dist", "main.mjs"), "pykimi", "main.mjs", False),
+            (os.path.join(root, "kimi", "native", "build", "wirecap_node.node"), "pykimi", "wirecap_node.node", False),
         ]
         for src, pkg, name, do_strip in jobs:
             if not os.path.isfile(src):

@@ -15,12 +15,13 @@ One `Agent`, many backends — selected by the `vision_model` id. Provider adapt
 | Claude Code CLI | `claude-code-sonnet-4-6`, `claude-code-opus-4-7`, `claude-code-fable-5` | local `claude` CLI subprocess |
 | Antigravity CLI | `agy`, `antigravity`, `agy-gemini-3-pro` | local `agy` CLI under a PTY (`pyagy`); wheel installs set `AGY_BIN`+`AGY_SHIM` |
 | Codex CLI | `codex`, `codex-gpt-5-codex` | local `codex exec` subprocess (`pycodex`); wheel installs set `CODEX_BIN` |
+| Kimi Code CLI | `kimi-code`, `kimi-code-k3` | vendored Node CLI under a PTY (`pykimi`), wirecap bridge via an N-API addon; built from source by `pixi install` |
 | vLLM (OpenAI-compatible) | `qwen3`, `qwen3-5`, `qwen3-6` | OpenAI client with a custom `base_url` |
-| Moonshot / Kimi | `kimi2-6`, `kimi-k2.7-code` | Anthropic-compatible endpoint |
+| Moonshot / Kimi (HTTP) | `kimi2-6`, `kimi-k2.7-code` | Anthropic-compatible endpoint (the HTTP `KimiModel`, distinct from the `kimi-code` CLI) |
 | Gemini | `gemini-3-pro`, `gemini-3-flash`, `gemini-2.0-flash` | Google GenAI SDK |
 | Local HuggingFace | `qwen`, `intern`, `minicpm`, `phi`, `llama` | in-process via `transformers` (needs the `local` extra) |
 
-The agy/codex native artifacts embed CPython (the shim's interpreter, codex's libpython): a consuming environment must run the **same Python minor version** as the env they were built in (this repo pins 3.13) — a version-mismatched consumer is an unsupported configuration.
+The agy/codex/kimi-code native artifacts embed CPython (the shim's interpreter, codex's libpython, the `wirecap_node` addon's libpython): a consuming environment must run the **same Python minor version** as the env they were built in (this repo pins 3.13) — a version-mismatched consumer is an unsupported configuration.
 
 ## Install
 
@@ -99,8 +100,9 @@ The CLI backends can register arbitrary MCP servers (`{name: {command, args,
 env}}`) when a session starts. `wirecap/runtime/mcp.py` owns the canonical
 spec normalization and the per-CLI config serializations (claude
 `--mcp-config`/`--strict-mcp-config`, codex `-c mcp_servers.<name>=<TOML>`,
-qwen/kimi config fragments, the shared `mcpServers` JSON writer), so harnesses
-that drive the CLIs directly can render the exact same configs.
+kimi-code's discovered `mcpServers` JSON, qwen config fragments, the shared
+`mcpServers` JSON writer), so harnesses that drive the CLIs directly can render
+the exact same configs.
 
 Through the backends:
 
@@ -109,9 +111,10 @@ servers = {"blender": {"command": "uv",
                        "args": ["run", "--directory", "path/to/mcp", "blender-mcp"],
                        "env": {"BLENDER_MCP_PORT": "9999"}}}
 Agent(key, task, vision_model="claude-code-sonnet-4-6",
-      mcp_servers=servers, workspace=str(task_dir))        # also agy-*/codex*
+      mcp_servers=servers, workspace=str(task_dir))   # also agy-*/codex*/kimi-code*
 pyagy.Session(mcp_servers=servers, data_dir=str(private_home))   # scoped store
 pycodex.ask("...", mcp_servers=servers)                     # rendered -c flags
+pykimi.ask("...", mcp_servers=servers)                      # discovered mcp.json
 ```
 
 agy specifics (`pyagy.write_mcp_servers` / `Session(mcp_servers=…)`): every

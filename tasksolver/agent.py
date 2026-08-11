@@ -144,6 +144,33 @@ class Agent(object):
                                                workspace=workspace,
                                                mcp_servers=mcp_servers)
 
+        elif vision_model == "kimi-code" or vision_model.startswith("kimi-code-"):
+            from pykimi import KimiCodeModel
+
+            logger.info(f"creating Kimi Code CLI-based agent of type: {vision_model}")
+            # `kimi-code` -> the CLI's default model; `kimi-code-<model>` -> the env-family
+            # model definition KIMI_MODEL_NAME=<model> (e.g. `kimi-code-k3`). Distinct from the
+            # HTTP adapter ids (`kimi2-6`/`kimi-k2.7-code`/...), which stay on KimiModel.
+            model = None if vision_model == "kimi-code" else vision_model[len("kimi-code-"):]
+            if model == "":
+                raise ValueError(
+                    f"Empty kimi-code model suffix in {vision_model!r}; use `kimi-code` or "
+                    "`kimi-code-<model>` (e.g. `kimi-code-k3`)."
+                )
+            # An explicit key (or KeyChain["moonshot"]) feeds the env-family model definition
+            # (KIMI_MODEL_API_KEY); otherwise fall back to MOONSHOT_API_KEY, else the CLI's own
+            # login/config in $KIMI_CODE_HOME. Path-shaped KeyChain values count as absent,
+            # like the codex branch above.
+            if isinstance(api_key, KeyChain):
+                api_key = api_key.keys.get("moonshot")
+            if isinstance(api_key, str) and (os.sep in api_key or api_key.endswith(".txt")):
+                api_key = None
+            if not api_key:
+                api_key = os.environ.get("MOONSHOT_API_KEY") or None
+            self.visual_interface = KimiCodeModel(api_key, task, model=model, timeout=1800,
+                                                  workspace=workspace,
+                                                  mcp_servers=mcp_servers)
+
         elif vision_model in ('qwen3', 'qwen3-5', 'qwen3-6'):
             from .vllm import VLLMModel, resolve_qwen3_api_key, resolve_qwen3_base_url, resolve_qwen3_model_name, resolve_qwen3_builtin_endpoint
 
@@ -277,7 +304,7 @@ class Agent(object):
                 and not isinstance(self.visual_interface, CLIBackendModel)):
             raise ValueError(
                 "mcp_servers/workspace are only supported by the CLI backends "
-                f"(claude-code, agy, codex); {vision_model!r} cannot honor them")
+                f"(claude-code, agy, codex, kimi-code); {vision_model!r} cannot honor them")
 
             
 

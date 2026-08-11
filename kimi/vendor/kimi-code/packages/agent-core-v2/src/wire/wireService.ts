@@ -22,6 +22,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { BugIndicatingError } from '#/_base/errors/errors';
+import { wiretapEmitWireRecord } from '#/wiretap/wiretap';
 import { onUnexpectedError } from '#/_base/errors/unexpectedError';
 import { Service } from '#/_base/di/service';
 import { type CollectionView } from '#/_base/di/collection';
@@ -281,6 +282,7 @@ export class WireService extends Service implements IWireService {
         if (op.descriptor.persist !== false) {
           const record = opToWireRecord(op);
           this.appendToJournal(record, op.descriptor.model);
+          wiretapEmitWireRecord(record, this.wireScope);
         }
         const event = op.descriptor.toEvent?.(op.payload, inst.state);
         if (event !== undefined) {

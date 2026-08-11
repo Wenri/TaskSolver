@@ -49,7 +49,9 @@ There is no formal test/lint/CI setup. The `test_scripts/` files are runnable sm
 ### The backend adapter contract (duck-typed, with one shared base for the CLI backends)
 The HTTP/SDK adapters (`GPTModel`, `ClaudeModel`, `VLLMModel`, `KimiModel`, `GeminiModel`, and the local HF ones `QwenModel`/`InternModel`/`MiniCPMModel`/`PhiModel`/`LlamaModel`) are standalone classes that independently implement the same surface. There is no ABC enforcing it — match the existing shape exactly when adding one.
 
-The three **CLI-subprocess** backends are the exception: `ClaudeCodeModel`, `pyagy.AgyModel` and `pycodex.CodexModel` all subclass `CLIBackendModel` (`tasksolver/cli_backend.py`), which owns `prepare_payload`, the retry loop in `rough_guess`/`many_rough_guesses` (including the `GPTMaxTriesExceededException` context), `run_once`, and a default `ask`/`_finish` for the wirecap clients. `ask` is the one genuinely per-CLI method, so it is overridable, not forced — `ClaudeCodeModel` replaces it entirely (threaded `claude -p` subprocesses, raw CLI JSON as metadata) while agy and codex inherit it and supply only `_client_ask_many` + `_call_kwargs`. Adding a fourth CLI backend = subclass it and set `backend_label` / `command_label` / `generic_model_aliases` / `vision_preamble` / `no_output_hint` / `_client_ask_many`. Adding an HTTP/SDK backend still means copying the closest existing adapter — do **not** retrofit those onto this base; they share no subprocess/workspace machinery. `CLIBackendModel` lives in `tasksolver/` (never `wirecap/`, whose stdlib-import purity is enforced by four `python3 -S` probes) and must be imported only from a provider's `model.py`, which the `pyagy`/`pycodex` PEP-562 lazy `__getattr__` keeps out of the CLIs' embedded interpreters.
+The four **CLI-subprocess** backends are the exception: `ClaudeCodeModel`, `pyagy.AgyModel`, `pycodex.CodexModel` and `pykimi.KimiCodeModel` all subclass `CLIBackendModel` (`tasksolver/cli_backend.py`), which owns `prepare_payload`, the retry loop in `rough_guess`/`many_rough_guesses` (including the `GPTMaxTriesExceededException` context), `run_once`, and a default `ask`/`_finish` for the wirecap clients. `ask` is the one genuinely per-CLI method, so it is overridable, not forced — `ClaudeCodeModel` replaces it entirely (threaded `claude -p` subprocesses, raw CLI JSON as metadata) while agy, codex and kimi-code inherit it and supply only `_client_ask_many` + `_call_kwargs`. Adding another CLI backend = subclass it and set `backend_label` / `command_label` / `generic_model_aliases` / `vision_preamble` / `no_output_hint` / `_client_ask_many`. Adding an HTTP/SDK backend still means copying the closest existing adapter — do **not** retrofit those onto this base; they share no subprocess/workspace machinery. `CLIBackendModel` lives in `tasksolver/` (never `wirecap/`, whose stdlib-import purity is enforced by the `python3 -S` probes in `test_scripts/`) and must be imported only from a provider's `model.py`, which the `pyagy`/`pycodex`/`pykimi` PEP-562 lazy `__getattr__` keeps out of the CLIs' embedded interpreters.
+
+The three instrumented CLIs share `wirecap` but differ in how the bridge is hosted: agy LD-preloads a C++ shim into a closed Go binary; codex compiles the bridge into a from-source Rust binary; **kimi-code** (`kimi/`) is a from-source Node CLI that loads the bridge as an N-API addon (`kimi/native/wirecap_node.node`) via a three-line source patch in the vendored tree (`packages/agent-core-v2/src/wiretap/wiretap.ts` + two emit sites). All three then run identically: `WirePtyPopen` + `mp_child` streaming decoded turns home, capture JSONL authoritative. The kimi-only wrinkle is that node `dlopen`s the addon `RTLD_LOCAL`, so the addon promotes libpython to the global namespace (`dlopen(RTLD_GLOBAL|RTLD_NOLOAD)`) before `wire_start()` or the interpreter's stdlib C extensions can't resolve the Python C-API.
 
 - `__init__(api_key, task, model=...)`
 - `prepare_payload(question, max_tokens, ...)` *(a staticmethod on the HTTP adapters; a **classmethod** on `CLIBackendModel`, so the vision preamble and error text follow the subclass — callable either on the class or an instance)* → provider-specific request dict
@@ -95,8 +97,11 @@ thread `mcp_servers=` through: `Agent(mcp_servers=, workspace=)` → `ClaudeCode
 link_global_config=False)` + `seed_onboarding` make a scoped home self-contained and
 already-onboarded; commands get the `/usr/bin/env -u PYTHONHOME` wrap so agy-spawned servers can
 start their own interpreters), `CodexModel`/`pycodex.ask/Session` (rendered `-c` flags via
-`pycodex.mcp_flags` — same PYTHONHOME unwrap as pyagy, for the same reason). Non-CLI backends raise
-on `mcp_servers`/`workspace`. Offline tests: `test_scripts/test_mcp_serializers.py`.
+`pycodex.mcp_flags` — same PYTHONHOME unwrap as pyagy, for the same reason), and
+`KimiCodeModel`/`pykimi.ask` (kimi-code has no MCP flag — `pykimi.config.mcp_json` writes the
+`mcpServers` document to the workspace-local `.kimi-code/mcp.json` the CLI auto-discovers, same
+PYTHONHOME unwrap). Non-CLI backends raise on `mcp_servers`/`workspace`. Offline tests:
+`test_scripts/test_mcp_serializers.py`, `test_scripts/test_kimi_argv.py`.
 
 pycodex additionally carries the harness-shaped one-shot controls on `ask()` — `codex_home=`
 (store scoping, honored by the session readers too), `session_id=`/`continue_latest=`
@@ -112,28 +117,32 @@ sweep, fd stability).
 
 ## Subsystems: the two instrumented-CLI backends
 
-Two of the backends are whole subsystems in their own package roots, not single adapter files, and
-`tasksolver/agent.py` dispatches into both. They share a layer:
+Three of the backends are whole subsystems in their own package roots, not single adapter files,
+and `tasksolver/agent.py` dispatches into all three. They share a layer:
 
 - **`wirecap/`** — the shared capture layer, consumed by BOTH.
   - `wirecap/decode/` is **stdlib-import-pure** (it is imported by the CPython interpreter embedded
     inside the instrumented CLI): the JSONL `Recorder`, HTTP/1.1+SSE framing, `BaseCorrelator`,
     HTTP/2 reassembly, the `TurnBuilder`/`Usage` contract, and `mp_child` (the in-host
-    multiprocessing child). Never import `wirecap.runtime` or `tasksolver` from here — four
-    `python3 -S` probes in `test_scripts/` enforce it, and they are the tripwire for any move.
+    multiprocessing child). Never import `wirecap.runtime` or `tasksolver` from here — the
+    `python3 -S` probes in `test_scripts/` (one per instrumented CLI's dispatch module, plus the
+    decode-layer probe) enforce it, and they are the tripwire for any move.
   - `wirecap/runtime/` is parent-side: `WirePopen`/`WireProcess`, the PTY flavours
     `WirePtyPopen`/`WirePtyProcess`, git-workspace scoping, the vendored-artifact resolver.
   - `wirecap/native/` is the C ABI bridge (`libwirecap_bridge.a`) that embeds CPython on a
-    16 MB-stack worker thread; linked into BOTH the agy shim and the codex binary.
+    16 MB-stack worker thread; linked into the agy shim, the codex binary, and the kimi-code addon.
 - **`antigravity/`** → the `pyagy` package: Google's Go `agy` CLI, instrumented by an LD_PRELOAD
   C++23 shim (`antigravity/src/`) that patches cgocall trampolines over recovered Go addresses.
   See `antigravity/README.md`.
 - **`codex/`** → the `pycodex` package: OpenAI's Rust codex, built from a vendored source tree with
   the bridge compiled in (no preload needed). See `codex/README.md`.
+- **`kimi/`** → the `pykimi` package: Moonshot's Node kimi-code, built from a vendored source tree
+  with a three-line wiretap patch that loads the bridge as an N-API addon (`kimi/native/`). See
+  `kimi/README.md`.
 
-The two are kept deliberately symmetric — `agy --print` ≡ `codex exec`, `agy --prompt-interactive`
-≡ bare `codex`, and both run under the same PTY machinery and stream turns home over the same
-mp-child channel — so a change to one usually belongs in `wirecap/` rather than duplicated.
+The three are kept deliberately symmetric — `agy --print` ≡ `codex exec` ≡ `kimi -p`, and all run
+under the same PTY machinery and stream turns home over the same mp-child channel — so a change to
+one usually belongs in `wirecap/` rather than duplicated.
 
 Note the test surface is wider than the two smoke scripts named under Commands: `test_scripts/`
 holds ~12 offline tests (decode, correlator, config injection, client accessors, the purity probes)
