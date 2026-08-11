@@ -158,9 +158,11 @@ begin with `recon__`, once they are no longer used.
 Never clear the full Blender scene, and never remove objects, materials, textures, images, node
 groups, or collections outside reconstruction-owned data.
 
-Do not embed the script in a `SCRIPT_SOURCE` string, copy its source into `bpy.data.texts`, or write
-an instance-named `.py` artifact yourself. The graded runner captures the latest complete script
-executed in Blender and publishes it under the instance name.
+Keep the exact latest complete script in a non-empty Blender Text datablock named
+`reconstruction_gt.py`. Before finishing, update that datablock and execute the code stored in it,
+so the visible reconstruction and the saved script agree. Do not write an instance-named `.py`
+artifact yourself; the graded runner exports the exact contents of `reconstruction_gt.py` under
+the instance name without modifying the Blender Text datablock.
 
 ## Iterative reconstruction
 
@@ -217,6 +219,7 @@ Verify that:
 * no major geometric or proportional discrepancy remains;
 * the generated geometry does not depend on GT datablocks.
 * `recon__root` is at location `(0, 0, 0)`, and rerunning the complete script leaves it there.
+* the non-empty `reconstruction_gt.py` Text datablock contains that exact complete script.
 
 Additionally complete the final-state checklist in the reference(s) you used.
 
