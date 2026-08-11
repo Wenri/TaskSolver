@@ -79,6 +79,16 @@ def instrumented_env(capture, module="pykimi.kimi_process", base=None, extra_env
     return env
 
 
+#: Flags kimi-code rejects in print mode. `cli/options.ts` raises
+#: `Cannot combine --prompt with <flag>` for each of these and the CLI exits 1
+#: with nothing on stdout, which surfaces here as an empty-output failure a long
+#: way from the cause. Print mode needs none of them: it already forces
+#: `setPermission('auto')` and installs an auto-approving handler for the turn
+#: (`cli/run-prompt.ts`). They are legal — and meaningful — in shell mode, so
+#: the guard only fires on the print-mode branch.
+PRINT_MODE_REJECTS = ("--yolo", "-y", "--auto", "--plan")
+
+
 def kimi_argv(prompt, extra_flags=None, kimi_bin=None, session_id=None,
               continue_latest=False):
     """kimi-code's argv tail. One-shot print mode is ``kimi -p <prompt>`` — the counterpart of
@@ -87,7 +97,10 @@ def kimi_argv(prompt, extra_flags=None, kimi_bin=None, session_id=None,
     ``exec resume <id>`` / ``resume --last``. There is no ``--work-dir``-style flag worth using:
     the run's cwd comes from the launcher's chdir(workdir), which is also what scopes the store's
     session index. ``kimi_bin`` substitutes a single executable for ``node main.mjs`` (tests use
-    ``#!/bin/sh`` stubs; there is deliberately no env override for the real bundle)."""
+    ``#!/bin/sh`` stubs; there is deliberately no env override for the real bundle).
+
+    Raises ``ValueError`` for a flag print mode rejects (:data:`PRINT_MODE_REJECTS`) rather than
+    letting the CLI exit 1 with no output."""
     argv = [kimi_bin] if kimi_bin else [node_bin(), KIMI_MAIN]
     if session_id:
         argv += ["-S", session_id]
@@ -95,5 +108,12 @@ def kimi_argv(prompt, extra_flags=None, kimi_bin=None, session_id=None,
         argv += ["--continue"]
     argv += ["-p", prompt or ""]
     if extra_flags:
+        for flag in extra_flags:
+            if flag in PRINT_MODE_REJECTS:
+                raise ValueError(
+                    f"kimi-code rejects {flag} in print mode "
+                    f"(`Cannot combine --prompt with {flag}`) and exits 1 with no output. "
+                    f"Print mode already auto-approves every tool call, so the flag is "
+                    f"redundant here; drop it.")
         argv += list(extra_flags)
     return argv

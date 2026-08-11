@@ -84,6 +84,31 @@ def test_mcp_json_written(td):
           "written + PYTHONHOME-wrapped")
 
 
+def test_print_mode_reject_is_not_silent(td):
+    """The regression that shipped: `kimi -p --yolo` is rejected by the CLI, which
+    exits 1 printing only to stderr — so a caller saw an empty answer with no clue
+    why. This stub mimics that validator; the guard must stop the call before it
+    ever launches."""
+    print("[offline] print-mode-rejected flags never reach the CLI")
+    ws = os.path.join(td, "ws-reject"); os.makedirs(ws)
+    stub = _stub(td, "validator-stub",
+                 'for a in "$@"; do\n'
+                 '  case "$a" in --yolo|-y|--auto|--plan)\n'
+                 '    echo "error: Cannot combine --prompt with $a" >&2; exit 1;; esac\n'
+                 'done\n'
+                 'echo ok')
+    try:
+        ask("p", kimi_bin=stub, workspace=ws, timeout=10, extra_flags=["--yolo"],
+            capture=os.path.join(td, "cap-reject.jsonl"))
+        check(False, "--yolo raises before launch")
+    except ValueError as exc:
+        check("--yolo" in str(exc), "--yolo raises before launch")
+    # and the stub really would have failed the run, proving the guard is load-bearing
+    r = ask("p", kimi_bin=stub, workspace=ws, timeout=10,
+            capture=os.path.join(td, "cap-ok.jsonl"))
+    check(r.exit_status == 0, "same stub succeeds without the rejected flag")
+
+
 def test_timeout(td):
     print("[offline] drain deadline -> timed_out")
     ws = os.path.join(td, "ws2"); os.makedirs(ws)
@@ -140,6 +165,7 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         test_argv_prompt_roundtrip(td)
         test_mcp_json_written(td)
+        test_print_mode_reject_is_not_silent(td)
         test_timeout(td)
         test_group_sweep(td)
         test_no_fd_leak(td)

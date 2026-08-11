@@ -51,6 +51,25 @@ def test_argv_fresh():
           "default = node + vendored main.mjs")
 
 
+def test_argv_print_mode_rejects():
+    """kimi-code refuses --yolo/-y/--auto/--plan alongside -p and exits 1 with an
+    EMPTY stdout, which would surface as an unexplained no-output failure. The
+    argv builder raises instead, naming the flag."""
+    print("[offline] kimi_argv: flags print mode rejects")
+    from pykimi._env import PRINT_MODE_REJECTS
+    for flag in PRINT_MODE_REJECTS:
+        try:
+            kimi_argv("hi", kimi_bin=BIN, extra_flags=[flag])
+            check(False, f"{flag} rejected in print mode")
+        except ValueError as exc:
+            check(flag in str(exc), f"{flag} rejected in print mode")
+    # the flags a print-mode run legitimately uses still pass through
+    argv = kimi_argv("hi", kimi_bin=BIN,
+                     extra_flags=["--output-format", "stream-json", "--skills-dir", "/tmp/s"])
+    check(argv[-4:] == ["--output-format", "stream-json", "--skills-dir", "/tmp/s"],
+          "legitimate flags unaffected")
+
+
 def test_argv_resume():
     print("[offline] kimi_argv: resume flags precede -p")
     sid = "session_0123456789abcdef"
@@ -168,6 +187,7 @@ def test_sessions_store():
 
 def main():
     test_argv_fresh()
+    test_argv_print_mode_rejects()
     test_argv_resume()
     test_env_contract()
     test_env_home_model_precedence()

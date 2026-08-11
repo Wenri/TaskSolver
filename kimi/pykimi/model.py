@@ -34,9 +34,16 @@ class KimiCodeModel(CLIBackendModel):
     def __init__(self, api_key: str = None, task: TaskSpec = None, model: str = None,
                  workspace: str = None, timeout: int = 300, mcp_servers: dict = None,
                  kimi_home: str = None, base_url: str = KIMI_CODE_BASE_URL,
-                 provider_type: str = "anthropic", yolo: bool = True):
+                 provider_type: str = "anthropic", yolo: bool = False):
         # api_key feeds KIMI_MODEL_API_KEY (the env-family model definition); None relies on the
         # CLI's own login/config in $KIMI_CODE_HOME.
+        if yolo:
+            # `kimi -p --yolo` is rejected by the CLI (`Cannot combine --prompt with --yolo`) and
+            # exits 1 with no output. Print mode already auto-approves every tool call, so there
+            # is nothing to opt into here; the flag belongs to shell-mode sessions.
+            raise ValueError(
+                "yolo=True is not usable with this backend: kimi-code rejects --yolo in print "
+                "mode, and print mode already auto-approves every tool call.")
         super().__init__(api_key=api_key, task=task, model=model)
         self.workspace = workspace
         self.timeout = timeout
@@ -46,7 +53,7 @@ class KimiCodeModel(CLIBackendModel):
         self.kimi_home = kimi_home            # scope the CLI's store (config/sessions) per model
         self.base_url = base_url
         self.provider_type = provider_type
-        self.yolo = yolo                      # print mode cannot prompt: auto-approve tool calls
+        self.yolo = False                     # retained for signature compat; see __init__
 
     def _call_kwargs(self, payload: dict) -> dict:
         kw = dict(workspace=payload.get("workspace") or self.workspace,
@@ -55,8 +62,6 @@ class KimiCodeModel(CLIBackendModel):
             kw["mcp_servers"] = self.mcp_servers
         if self.kimi_home:
             kw["kimi_home"] = self.kimi_home
-        if self.yolo:
-            kw["extra_flags"] = ["--yolo"]
         if self.api_key:
             # The env-family model definition — the same contract the harness drives; the CLI
             # builds an ad-hoc model from these without touching config.toml.

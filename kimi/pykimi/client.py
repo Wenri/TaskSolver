@@ -153,8 +153,11 @@ def ask(prompt, *, model=None, workspace=None, timeout=300, extra_flags=None,
     ``mcp_servers=None``. ``capture`` mirrors pyagy/pycodex: ``True`` writes
     ``<workspace>/kimi-capture.jsonl``; a path string keeps the capture out of the workspace.
 
-    Approvals: print mode has no interactive prompt — pass ``extra_flags=["--yolo"]`` or provide
-    permission rules in the run's config for tool-using tasks."""
+    Approvals: print mode needs none. It forces ``auto`` permission and installs an
+    auto-approving handler for the turn, and it *rejects* ``--yolo``/``--auto``/``--plan``
+    (`Cannot combine --prompt with …`, exit 1, no output) — :func:`pykimi._env.kimi_argv`
+    raises on those rather than letting the CLI fail silently. Those flags belong to
+    shell-mode sessions."""
     if session_id and continue_latest:
         raise ValueError("session_id and continue_latest are mutually exclusive")
     ws = ensure_git_workspace(workspace)

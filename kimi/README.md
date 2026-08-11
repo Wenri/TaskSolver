@@ -92,8 +92,11 @@ same policy as `pycodex.mcp_flags` / `pyagy.write_mcp_servers`); `capture=` acce
 the capture JSONL out of the workspace. A run that hits the drain deadline returns with
 `KimiResponse.timed_out=True` (and a negative `exit_status`) after the group teardown.
 
-Print mode has no interactive approval prompt, so tool-using tasks need `extra_flags=["--yolo"]`
-(or permission rules in the run's config) — `KimiCodeModel` sets `--yolo` by default.
+Print mode needs no approval flag: it forces `auto` permission and auto-approves every tool
+call for the turn. It also **rejects** `--yolo`/`-y`/`--auto`/`--plan` (`Cannot combine
+--prompt with …`), and the CLI then exits 1 with nothing on stdout — which would surface
+here as an empty-output failure far from the cause, so `kimi_argv` raises on them instead.
+Those flags are meaningful only in shell mode.
 
 ## Tests
 Offline, no node/bundle needed (`python3 test_scripts/<f>.py`):
