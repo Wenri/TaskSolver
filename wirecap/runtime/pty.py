@@ -234,10 +234,17 @@ class WirePtyProcess(WireProcess):
         """Type a line + Enter into the PTY."""
         self._popen.send_line(text)
 
-    def send(self, prompt):
-        """Type + submit a prompt into the CLI's interactive TUI (fire-and-forget)."""
+    def submit(self, prompt):
+        """Type + submit a prompt into the CLI's interactive TUI.
+
+        The one primitive `wirecap.runtime.session.ask_turn` submits through:
+        it types the line AND resets ``last_output``, so the idle clock starts
+        at the submit and the reset can never be forgotten by a caller."""
         self._popen.send_line(prompt)
         self._popen._last_output = time.time()
+
+    #: Historical name for :meth:`submit`.
+    send = submit
 
     @property
     def workspace(self):
