@@ -44,6 +44,8 @@ from .agyprocess import AgyProcess
 from .conversations import ensure_git_workspace
 from wirecap.decode.mp_child import DONE as _DONE, EXC as _EXC   # result-queue completion sentinels
 from wirecap.decode.turns import Usage, primary_turn, sum_usage   # noqa: F401 (Usage re-exported)
+from wirecap.runtime import session as _wire_session
+from wirecap.runtime.session import WireSession as _WireSession
 
 _UNIQ = [0]
 _ANSWER_KINDS = ("genai_turn", "app_response")   # decoded objects the default target streams home
@@ -377,20 +379,15 @@ def _inject_config(tools, context, mcp_servers=None, data_dir=None):
 # the process pickle), and drain it here — AgyProcess is just the Process. ``proc.service_pty`` keeps
 # agy's PTY drained in the same wait we use to read the queue, so no background thread is needed.
 def _new_channel():
-    """A spawn-context result SimpleQueue for one agy run. The caller keeps the reader; the child
-    (agy) inherits both ends across execve and drops the reader. Close the parent's writer right
-    after ``proc.start()`` so the reader EOFs when agy dies (crash detection)."""
-    return _SPAWN.SimpleQueue()
+    """A spawn-context result SimpleQueue for one agy run (hoisted to
+    :func:`wirecap.runtime.session.new_channel`; kept as the historical name)."""
+    return _wire_session.new_channel()
 
 
 def _close_channel(q):
-    """Tear down the queue's pipe ends (idempotent). Its named SemLocks unlink via their own
-    resource_tracker Finalize when ``q`` is GC'd; this just makes the fd close prompt."""
-    for c in (q._reader, q._writer):
-        try:
-            c.close()
-        except Exception:
-            pass
+    """Tear down the queue's pipe ends (idempotent; hoisted to
+    :func:`wirecap.runtime.session.close_channel`)."""
+    _wire_session.close_channel(q)
 
 
 def _collect(proc, q, timeout=300.0, kinds=_ANSWER_KINDS):
@@ -418,38 +415,12 @@ def _collect(proc, q, timeout=300.0, kinds=_ANSWER_KINDS):
 def _ask_turn(proc, q, prompt=None, idle=6.0, pty_idle=15.0, timeout=180.0, ready=2.5,
               kinds=_ANSWER_KINDS):
     """Persistent multi-turn: submit ``prompt`` (or the ``--prompt-interactive`` prefill if None),
-    then collect the decoded objects (of ``kinds``) for that turn from ``q`` until it settles (no new
-    object for ``idle`` s, or agy stays quiet ``pty_idle`` s with none), or ``timeout``. Drains the
-    PTY meanwhile."""
-    reader = q._reader
-    rstart = time.time()                 # wait until agy is ready (TUI drawn / prior turn done)
-    while time.time() - rstart < 30 and time.time() - proc.last_output < ready:
-        proc.service_pty(0.2, [reader])  # drain the PTY while waiting for agy to settle
-    if prompt is None:
-        proc.write(b"\r")                # submit the prefilled initial prompt
-    else:
-        proc.send_line(prompt)           # type + submit a follow-up
-    proc.last_output = time.time()       # measure idle from the submit, not the prior turn
-    got, last, start = [], None, time.time()
-    while time.time() - start < timeout:
-        if proc.service_pty(0.2, [reader]):        # drains the PTY; True once a result is ready
-            while reader.poll(0):
-                try:
-                    o = q.get()
-                except EOFError:
-                    proc.reap()                    # agy exited — nothing more will ever arrive
-                    return got
-                if isinstance(o, tuple) and o and o[0] in (_DONE, _EXC):
-                    proc.reap()                    # the in-agy target finished/raised: the stream is
-                    return got                     # over — end the turn, don't wait out pty_idle
-                if isinstance(o, dict) and o.get("kind") in kinds:
-                    got.append(o)
-                    last = time.time()
-        now = time.time()
-        if last is not None and now - last >= idle:
-            break                        # turn(s) settled
-        if last is None and now - proc.last_output >= pty_idle:
-            break                        # agy went idle without producing a turn
+    then collect the decoded objects (of ``kinds``) for that turn from ``q`` until it settles.
+
+    Compat shim over :func:`wirecap.runtime.session.ask_turn`, keeping this module's historical
+    defaults and objs-only return (the hoisted version also reports *why* the turn ended)."""
+    got, _reason = _wire_session.ask_turn(proc, q, prompt, kinds=kinds, idle=idle,
+                                          pty_idle=pty_idle, timeout=timeout, ready=ready)
     return got
 
 
@@ -612,7 +583,7 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
 
 
 # --- multi-turn --------------------------------------------------------------
-class Session:
+class Session(_WireSession):
     """A multi-turn agy session — **the first-class object of pyagy**. Same kwargs as
     :func:`ask`; ``ask(prompt)`` starts it on first call and continues it thereafter.
 
@@ -624,20 +595,28 @@ class Session:
     and read :meth:`history` for the stored transcript.
 
     ``set_rewrite(spec)`` updates the live rewrite rules (picked up in-agy on mtime). Use
-    as a context manager to guarantee cleanup."""
+    as a context manager to guarantee cleanup. Lifecycle (lazy start, dead-process guard,
+    channel plumbing, turn loop) lives on :class:`wirecap.runtime.session.WireSession`;
+    this class supplies agy's process construction and response shape."""
+
+    _KINDS = _ANSWER_KINDS
+    _IDLE = 25.0
+    _PTY_IDLE = 15.0
+    _ID_KW = "conversation_id"
 
     def __init__(self, *, model=None, workspace=None, tools=None, context=None,
                  mcp_servers=None,
                  rewrite=None, capture=True, timeout=180, idle=25.0, agy_bin=None,
                  extra_env=None, stack=False, arg_probe=False, funcmap=None,
                  conversation_id=None, continue_latest=False, skip_permissions=False,
-                 data_dir=None, trust=True, extra_flags=None):
+                 data_dir=None, trust=True, extra_flags=None, capture_tail=False):
         self.workspace = ensure_git_workspace(workspace)
         self.agy_bin = agy_bin
         self.model = model
         self.timeout = timeout
         self.idle = idle
         self.capture = capture
+        self.capture_tail = capture_tail
         self.stack = stack
         self.arg_probe = arg_probe
         self.funcmap = funcmap
@@ -652,80 +631,59 @@ class Session:
         self._data_dir = data_dir                    # scope the conversation store to a repo
         self._trust = trust                          # pre-trust the workspace (no folder prompt)
         self._home = None                            # resolved scoped home (None = global store)
-        self._conversation_id = conversation_id      # resume this id; else captured after turn 1
+        self._id = conversation_id                   # resume this id; else captured after turn 1
         self.cap_path = None
         self.rules_path = None
+        self._cap_cursor = 0                         # capture_tail line cursor (one per session)
         self._cleanup = lambda: None
-        self._agy = None                             # the AgyProcess (persistent), set on first ask
-        self._q = None                               # caller-owned result queue, beside self._agy
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-
-    def _start(self, prompt):
+    def _pre_start(self):
         if self.capture:
             self.cap_path = os.path.join(self.workspace, "pyagy-session.jsonl")
             open(self.cap_path, "w").close()
-        overlays, self.rules_path = _shim_overlays(self.rewrite, self.workspace,
-                                                   self.stack, self.arg_probe, self.extra_env)
-        overlays["AGY_PROC_LOG"] = os.path.join(self.workspace, "pyagy-session.log")
+        self._overlays, self.rules_path = _shim_overlays(
+            self.rewrite, self.workspace, self.stack, self.arg_probe, self.extra_env)
+        self._overlays["AGY_PROC_LOG"] = os.path.join(self.workspace, "pyagy-session.log")
         self._cleanup = _inject_config(self._tools, self._context,
                                        self._mcp_servers, self._data_dir)
-        self._q = _new_channel()                     # caller-owned result queue for this session
-        self._agy = AgyProcess(persistent=True, prompt=prompt, model=self.model,
-                               skip_permissions=self.skip_permissions, agy_bin=self.agy_bin,
-                               workdir=self.workspace, capture=self.cap_path,
-                               # No deadline: a Session's life IS agy's life (caller think-time
-                               # between turns is unbounded). close()/GC kill agy, which ends this.
-                               args=(self._q, _ANSWER_KINDS, None),
-                               conversation_id=self._conversation_id,
-                               continue_latest=self.continue_latest,
-                               data_dir=self._data_dir, trust=self._trust, extra_env=overlays,
-                               extra_flags=self.extra_flags)
-        self._agy.start()
-        self._q._writer.close()                      # parent reads only; reader EOFs on agy death
-        self._home = self._agy.home                  # scoped store home (for .history())
 
-    def ask(self, prompt):
-        """Send ``prompt`` (starting the session on first call) and return the
-        :class:`AgyResponse` for the turn it produced (decoded objects streamed home over the
-        caller-owned result queue; the PTY transcript is the fallback)."""
-        if self._agy is not None and self._agy.exit_status is not None:
-            # agy died on an earlier turn (_ask_turn reaped it). Every later turn would silently
-            # return the stale transcript, so fail loudly instead — resume in a fresh Session.
-            raise RuntimeError(
-                f"this Session's agy process already exited (exit_status={self._agy.exit_status}); "
-                f"open a new Session (resume with conversation_id={self._conversation_id!r})")
-        if self._agy is None:
-            self._start(prompt)
-            objs = _ask_turn(self._agy, self._q, None, idle=self.idle, timeout=self.timeout)  # prefill
-        else:
-            objs = _ask_turn(self._agy, self._q, prompt, idle=self.idle, timeout=self.timeout)
-        transcript = self._agy.transcript
-        if self._conversation_id is None:            # first turn of a fresh session
-            self._conversation_id = self._agy.conversation_id
+    def _make_process(self, prompt):
+        return AgyProcess(persistent=True, prompt=prompt, model=self.model,
+                          skip_permissions=self.skip_permissions, agy_bin=self.agy_bin,
+                          workdir=self.workspace, capture=self.cap_path,
+                          args=(self._q, _ANSWER_KINDS, None),  # max_wait=None: base asserts
+                          conversation_id=self._id,
+                          continue_latest=self.continue_latest,
+                          data_dir=self._data_dir, trust=self._trust,
+                          extra_env=self._overlays, extra_flags=self.extra_flags)
+
+    def _post_start(self):
+        self._home = self._proc.home                 # scoped store home (for .history())
+
+    def _latch_id(self):
+        return self._proc.conversation_id
+
+    def _build_response(self, objs, reason):
         return AgyResponse.from_objs(
-            objs, transcript, exit_status=self._agy.exit_status, capture_path=self.cap_path,
-            workspace=self.workspace, funcmap=self.funcmap,
-            conversation_id=self._conversation_id)
+            objs, self._proc.transcript, exit_status=self._proc.exit_status,
+            capture_path=self.cap_path, workspace=self.workspace, funcmap=self.funcmap,
+            conversation_id=self._id)
 
-    @property
-    def conversation_id(self):
-        """agy's native conversation id for this session — the resumed id, or the one
-        captured after the first turn. Persist it and pass to :func:`resume` to continue
-        this conversation in a later process."""
-        return self._conversation_id
-
-    def history(self):
+    def _read_history(self):
         """The stored transcript for this conversation, read from agy's own store — a list
         of ``{step_index, role, type, status, created_at, content}`` (see
-        :func:`pyagy.conversations.read_transcript`). Empty until an id is known."""
-        if not self._conversation_id:
-            return []
-        return _conv.read_transcript(self._conversation_id, home=self._home)
+        :func:`pyagy.conversations.read_transcript`)."""
+        return _conv.read_transcript(self._id, home=self._home)
+
+    def _load_capture_tail(self):
+        """This turn's records from the cumulative session capture: the lines appended
+        since the previous turn's cursor, re-shaped into stream-object dicts."""
+        turns, app_texts, self._cap_cursor = _load_capture(self.cap_path,
+                                                           since=self._cap_cursor)
+        return list(turns) + [{"kind": "app_response", "text": t} for t in app_texts]
+
+    def _teardown(self):
+        self._cleanup()
 
     def set_rewrite(self, spec):
         """Replace the live rewrite spec. For a RewriteRule list this rewrites the
@@ -737,15 +695,6 @@ class Session:
             with open(self.rules_path, "w") as f:
                 json.dump({"rules": rules}, f)
         return self
-
-    def close(self):
-        try:
-            if self._agy is not None:
-                self._agy.close(interrupt=True)
-        finally:
-            if self._q is not None:
-                _close_channel(self._q)
-            self._cleanup()
 
 
 # --- session entry points (Session is the first-class object of pyagy) -------
