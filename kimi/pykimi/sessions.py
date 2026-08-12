@@ -86,6 +86,46 @@ def find_session_dir(session_id, home=None):
     return None
 
 
+def _flatten(content):
+    """kimi message content is a list of typed parts; join their text so a caller
+    gets a plain string (the same contract as pycodex.sessions._flatten)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for c in content:
+        if isinstance(c, str):
+            parts.append(c)
+        elif isinstance(c, dict):
+            text = c.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+    return "".join(parts)
+
+
+def read_transcript(session_id, home=None, agent=None):
+    """The stored transcript for ``session_id`` — a list of
+    ``{step_index, role, type, created_at, content}`` in journal order, the same
+    shape :func:`pycodex.sessions.read_transcript` returns, projected from the
+    wire journal's conversation records (``context.append_message`` carries every
+    message appended to the model context: user turns, assistant replies, tool
+    results). Empty when the session is unknown."""
+    out = []
+    for rec in read_wire(session_id, home=home, agent=agent):
+        if rec.get("type") != "context.append_message":
+            continue
+        message = rec.get("message") or {}
+        out.append({
+            "step_index": len(out),
+            "role": message.get("role"),
+            "type": "message",
+            "created_at": rec.get("time"),
+            "content": _flatten(message.get("content")),
+        })
+    return out
+
+
 def read_wire(session_id, home=None, agent=None):
     """The parsed ``wire.jsonl`` records for ``session_id`` — a list of dicts in file order,
     across every agent journal (``agents/<id>/wire.jsonl``), or just ``agent``'s when given.

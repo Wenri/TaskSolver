@@ -41,6 +41,11 @@ Auth: `OPENAI_API_KEY` or `codex login`. Then:
     r = ask("What is 2+2?")            # -> CodexResponse(.text, .model, .usage, .request, .turns)
 
 ## Transport
+> Multi-turn `pycodex.Session` rides the shared `wirecap.runtime.session`
+> base (`ask_turn` + `WireSession`) — see `wirecap/runtime/session.py` and
+> `test_scripts/test_wire_session.py`; only process construction and the
+> `CodexResponse` shape live here.
+
 `pycodex` drives codex through the **same wirecap mp-child machinery as agy** (the shared
 `wirecap.runtime.process.WirePopen`/`WireProcess` base + `wirecap.decode.mp_child`): `ask()` launches
 `codex exec` as a `multiprocessing.spawn` child over a boot pipe, and the compiled-in bridge's

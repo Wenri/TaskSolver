@@ -650,6 +650,11 @@ capture that kind (e.g. no `rpc_*` events):
 
 ## Sessions: resume, list, and scope agy's native conversation store
 
+> The Session lifecycle (lazy start, dead-process guard, the persistent turn
+> loop) lives on the shared `wirecap.runtime.session.WireSession` base since
+> the pykimi port — `pyagy.Session` keeps its full kwargs surface and supplies
+> only agy's process construction and `AgyResponse` shape.
+
 agy persists every conversation to disk (`~/.gemini/antigravity-cli/conversations/<uuid>.db`
 + a readable `brain/<uuid>/…/transcript.jsonl`) and can resume one on a fresh launch. `pyagy`
 surfaces that: **`Session` is the first-class object**, `ask()` is one-shot sugar over a

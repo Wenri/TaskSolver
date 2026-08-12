@@ -11,6 +11,9 @@ channel agy and codex use.
 Public API:
     pykimi.ask("What is 2+2?")   -> KimiResponse (.text / .model / .usage / .request / .turns)
     pykimi.ask_many(prompt, n)   -> [KimiResponse, ...]
+    pykimi.Session(...)          -> multi-turn shell-mode session (WireSession base)
+    pykimi.resume(session_id)    -> Session resuming a stored session (kimi -S <id>)
+    pykimi.continue_latest()     -> Session resuming the workdir's newest (kimi --continue)
     pykimi.KimiCodeModel(...)    -> a TaskSolver-contract backend (pulls tasksolver — lazy)
 
 Exports are LAZY (PEP 562): importing ``pykimi.kimi_process`` (the WIRE_MODULE the embedded
@@ -24,6 +27,10 @@ _LAZY = {
     "ask_many": ".client",
     "KimiResponse": ".client",
     "Usage": ".client",
+    # multi-turn shell-mode sessions on the shared WireSession base
+    "Session": ".client",
+    "resume": ".client",
+    "continue_latest": ".client",
     "KimiCodeModel": ".model",
     # re-exported so callers can seed a workspace before ask() — same name as pyagy/pycodex.
     "ensure_git_workspace": "wirecap.runtime.workspace",
@@ -31,10 +38,12 @@ _LAZY = {
     "latest_session_id": ".sessions",
     "find_session_dir": ".sessions",
     "read_wire": ".sessions",
-    # MCP server registration (the pycodex.config counterpart): the mcpServers JSON
-    # document with the PYTHONHOME unwrap kimi-spawned servers need
+    "read_transcript": ".sessions",
+    # MCP server registration + workspace-trust seeding (the pycodex.config counterpart)
     "mcp_json": ".config",
     "kimi_mcp_toml_lines": ".config",
+    "trust_workspace": ".config",
+    "encode_workdir_key": ".config",
 }
 
 

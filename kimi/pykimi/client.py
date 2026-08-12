@@ -20,6 +20,7 @@ from multiprocessing import get_context as _get_context
 from wirecap.decode.mp_child import DONE as _DONE, EXC as _EXC   # result-queue completion sentinels
 from wirecap.decode.turns import Usage, primary_turn, sum_usage   # noqa: F401 (Usage re-exported)
 from wirecap.runtime.pty import answer_text as _clean_transcript
+from wirecap.runtime.session import WireSession as _WireSession
 from wirecap.runtime.workspace import ensure_git_workspace
 
 from . import sessions as _sessions
@@ -212,3 +213,105 @@ def _write_mcp_json(ws, mcp_servers):
 def ask_many(prompt, n, **kwargs):
     """Run ``n`` independent one-shot turns (sequentially). Same kwargs as :func:`ask`."""
     return [ask(prompt, **kwargs) for _ in range(n)]
+
+
+class Session(_WireSession):
+    """A multi-turn kimi-code session — the kimi counterpart of :class:`pyagy.Session` /
+    :class:`pycodex.Session`, on the same :class:`wirecap.runtime.session.WireSession` base.
+
+    In-run turns ride ONE live kimi-code shell UI (``kimi`` with no ``-p``); ``ask(prompt)``
+    starts it on the first call and continues it thereafter. Shell mode takes no positional
+    prompt, so the first turn is *typed* like every follow-up (``_PREFILL_FIRST = False``),
+    multi-line prompts arriving as one bracketed paste (:meth:`KimiProcess.submit`). Across a
+    restart, kimi's native store keeps context: pass ``session_id=`` (``-S <id>``) or
+    ``continue_latest=True`` (``--continue``), or use :func:`resume` / :func:`continue_latest`.
+    After the first turn :attr:`session_id` holds this session's id (store-read, never an echo)
+    — persist it to resume later, and read :meth:`history` for the stored transcript.
+
+    Before launch the workspace is pre-trusted in the session's store
+    (:func:`pykimi.config.trust_workspace`) so the TUI's folder-trust gate never blocks;
+    ``KimiPopen._answer`` accepts the dialog as the fallback. The turn boundary uses codex's
+    idle numbers — kimi's bridge also emits the decoded turn at the response's terminal event,
+    so an arriving turn is the real boundary and the timers are only the fallback.
+
+    Use as a context manager to guarantee cleanup."""
+
+    _KINDS = ("kimi_turn",)
+    _IDLE = 8.0
+    _PTY_IDLE = 25.0
+    _PREFILL_FIRST = False    # shell mode: no argv prompt; turn 1 is typed
+
+    def __init__(self, *, model=None, workspace=None, timeout=300, idle=8.0,
+                 kimi_bin=None, extra_env=None, session_id=None, continue_latest=False,
+                 extra_flags=None, mcp_servers=None, kimi_home=None, capture_tail=False):
+        if session_id and continue_latest:
+            raise ValueError("session_id and continue_latest are mutually exclusive")
+        self.workspace = ensure_git_workspace(workspace)
+        self.model = model
+        self.timeout = timeout
+        self.idle = idle
+        self.capture_tail = capture_tail
+        self.kimi_bin = kimi_bin
+        self.extra_env = extra_env
+        self.kimi_home = kimi_home            # scope the store; also the id/history read root
+        self.extra_flags = extra_flags
+        self.continue_latest = continue_latest
+        self._mcp_servers = mcp_servers
+        # NOT ask()'s "kimi-capture.jsonl": a Session sharing a workspace with
+        # one-shot calls must not interleave two writers into one capture file.
+        self.cap_path = os.path.join(self.workspace, "kimi-session.jsonl")
+        self._id = session_id
+        self._cap_seen = 0                    # capture_tail turn-count cursor
+
+    def _pre_start(self):
+        open(self.cap_path, "w").close()      # fresh capture for this session
+        _write_mcp_json(self.workspace, self._mcp_servers)
+        from .config import trust_workspace
+        trust_workspace(self.workspace, home=self.kimi_home)
+
+    def _make_process(self, prompt):
+        return KimiProcess(prompt, persistent=True, workdir=self.workspace,
+                           capture=self.cap_path, model=self.model,
+                           kimi_bin=self.kimi_bin, extra_env=self.extra_env,
+                           extra_flags=self.extra_flags, session_id=self._id,
+                           continue_latest=self.continue_latest,
+                           kimi_home=self.kimi_home,
+                           args=(self._q, ("kimi_turn",), None))  # max_wait=None: base asserts
+
+    def _latch_id(self):
+        return _sessions.latest_session_id(home=self.kimi_home, cwd=self.workspace)
+
+    def _build_response(self, objs, reason):
+        transcript = self._proc.transcript
+        return KimiResponse(
+            text=_answer_text(objs, transcript), transcript=transcript, turns=objs,
+            exit_status=self._proc.exit_status, capture_path=self.cap_path,
+            workspace=self.workspace, n_streamed=len(objs),
+            timed_out=(reason == "deadline"), session_id=self._id)
+
+    def _read_history(self):
+        """The stored transcript, projected from the session's wire journals — a list of
+        ``{step_index, role, type, created_at, content}`` (see
+        :func:`pykimi.sessions.read_transcript`)."""
+        return _sessions.read_transcript(self._id, home=self.kimi_home)
+
+    def _load_capture_tail(self):
+        """This turn's ``kimi_turn`` records from the cumulative session capture:
+        everything decoded past the previous turn's cursor."""
+        turns = _load_capture(self.cap_path)
+        fresh = turns[self._cap_seen:]
+        self._cap_seen = len(turns)
+        return fresh
+
+
+def resume(session_id, **kwargs):
+    """A :class:`Session` that resumes the stored session ``session_id`` (``kimi -S <id>``).
+    Its first ``.ask()`` continues that session with full prior context — even in a brand-new
+    process. ``**kwargs`` are :class:`Session`'s."""
+    return Session(session_id=session_id, **kwargs)
+
+
+def continue_latest(**kwargs):
+    """A :class:`Session` resuming the working directory's most recent stored session
+    (``kimi --continue``)."""
+    return Session(continue_latest=True, **kwargs)

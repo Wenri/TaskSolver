@@ -98,6 +98,45 @@ call for the turn. It also **rejects** `--yolo`/`-y`/`--auto`/`--plan` (`Cannot 
 here as an empty-output failure far from the cause, so `kimi_argv` raises on them instead.
 Those flags are meaningful only in shell mode.
 
+## Sessions
+
+`pykimi.Session` is the multi-turn counterpart of `pyagy.Session`/`pycodex.Session`, on the
+shared `wirecap.runtime.session.WireSession` base: in-run turns ride ONE live kimi-code
+**shell UI** (`kimi` with no `-p` — shell mode is selected by the absence of the flag), and
+across restarts the native store resumes via `session_id=` (`-S <id>`) /
+`continue_latest=True` (`--continue`), or the module helpers `pykimi.resume` /
+`pykimi.continue_latest`.
+
+```python
+import pykimi
+with pykimi.Session(workspace="/w", model="k3") as s:
+    a = s.ask("Create cube.py that makes a 2m cube.")
+    b = s.ask("Now double its size.")          # same CLI process, full context
+    sid = s.session_id                          # store-read after turn 1
+r = pykimi.resume(sid, workspace="/w").ask("And rename it big_cube.py.")
+```
+
+Shell-mode specifics, each with its own machinery here:
+- **No positional prompt**: turn 1 is *typed* like every follow-up
+  (`WireSession._PREFILL_FIRST = False`); `kimi_argv(persistent=True)` rejects one.
+- **Bracketed paste**: kimi's editor submits on every typed newline, so
+  `KimiProcess.submit` wraps multi-line prompts in `ESC[200~ … ESC[201~` with the CR sent
+  separately — one insertion, one turn.
+- **Trust gate**: the TUI opens with a folder-trust dialog for an unknown workspace.
+  `Session._pre_start` seeds `<home>/workspace-trust/<encodeWorkDirKey(cwd)>` with the CLI's
+  exact record shape (`pykimi.config.trust_workspace`, key port verified against a
+  production-minted key), so the dialog never renders; `KimiPopen._answer` accepts it as the
+  fallback. Print-mode-rejected flags (`--yolo`, …) are legal session `extra_flags`.
+- **History**: `Session.history()` / `pykimi.sessions.read_transcript` project the store's
+  wire journals (`context.append_message` records) into the same
+  `{step_index, role, type, created_at, content}` shape `pycodex.sessions.read_transcript`
+  returns.
+
+Transport note: `kimi acp` (a JSON-RPC agent protocol) would be architecturally cleaner — no
+PTY, no idle heuristics — but it is a fourth transport shape that bypasses
+`ask_turn`/`WirePtyProcess` entirely, defeating the shared-base symmetry with agy/codex. It is
+the documented fallback if PTY shell mode proves unreliable, not the default.
+
 ## Tests
 Offline, no node/bundle needed (`python3 test_scripts/<f>.py`):
 - `test_kimi_argv.py` — argv/env assembly, `KIMI_CODE_HOME`/`KIMI_MODEL_NAME` precedence, the
@@ -108,6 +147,12 @@ Offline, no node/bundle needed (`python3 test_scripts/<f>.py`):
   `pykimi.kimi_process`.
 - `test_kimi_process.py` — stub `#!/bin/sh` binaries through the real launch machinery (prompt
   delivery, timeout → `timed_out`, group sweep, no fd leak).
+- `test_kimi_session.py` — shell-mode plumbing: persistent argv (no `-p`), the
+  production-golden `encode_workdir_key`, the trust record's shape/placement/idempotence,
+  the wire→transcript projection, and a stub-backed `Session` (typed turn 1, bracketed-paste
+  framing on the raw PTY bytes, close sweep).
+- `test_wire_session.py` (repo root `test_scripts/`) — the shared `WireSession`/`ask_turn`
+  base all three providers' Sessions ride.
 
 Live (needs the built bundle + addon; skips cleanly = exit 0 otherwise):
 - `test_kimi.py` — the addon smoke inside a real node process (synthetic emits → `kimi_turn`),

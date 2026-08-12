@@ -142,7 +142,16 @@ and `tasksolver/agent.py` dispatches into all three. They share a layer:
 
 The three are kept deliberately symmetric — `agy --print` ≡ `codex exec` ≡ `kimi -p`, and all run
 under the same PTY machinery and stream turns home over the same mp-child channel — so a change to
-one usually belongs in `wirecap/` rather than duplicated.
+one usually belongs in `wirecap/` rather than duplicated. The multi-turn side is symmetric too:
+`pyagy.Session` ≡ `pycodex.Session` ≡ `pykimi.Session` all ride
+`wirecap/runtime/session.py` — `ask_turn` (the persistent turn loop, returning *why* the turn
+settled: turn/idle/deadline/exit) plus the `WireSession` base (lazy start, dead-process guard,
+id latching, `session_id`/`conversation_id` aliasing, opt-in `capture_tail`); providers supply
+only process construction and response shape. Session processes must be built with
+`max_wait=None` (asserted in `_start`): a Session's life IS the CLI's life, and a numeric
+deadline would kill the bridge mid-session on wall time. Offline coverage:
+`test_scripts/test_wire_session.py` (the base), `test_scripts/test_kimi_session.py` (kimi shell
+mode: no `-p`, bracketed-paste submits, the pre-seeded workspace-trust record).
 
 Note the test surface is wider than the two smoke scripts named under Commands: `test_scripts/`
 holds ~12 offline tests (decode, correlator, config injection, client accessors, the purity probes)

@@ -90,22 +90,34 @@ PRINT_MODE_REJECTS = ("--yolo", "-y", "--auto", "--plan")
 
 
 def kimi_argv(prompt, extra_flags=None, kimi_bin=None, session_id=None,
-              continue_latest=False):
+              continue_latest=False, persistent=False):
     """kimi-code's argv tail. One-shot print mode is ``kimi -p <prompt>`` — the counterpart of
-    ``codex exec`` / ``agy --print``. ``session_id`` / ``continue_latest`` resume a stored session
-    for the working directory (``-S <id>`` / ``--continue``), mirroring codex's
-    ``exec resume <id>`` / ``resume --last``. There is no ``--work-dir``-style flag worth using:
-    the run's cwd comes from the launcher's chdir(workdir), which is also what scopes the store's
-    session index. ``kimi_bin`` substitutes a single executable for ``node main.mjs`` (tests use
-    ``#!/bin/sh`` stubs; there is deliberately no env override for the real bundle).
+    ``codex exec`` / ``agy --print``. ``persistent=True`` is shell mode, selected by the *absence*
+    of ``-p``: the CLI opens its interactive TUI, takes no positional prompt (the caller types
+    turns via ``KimiProcess.submit``), and accepts the flags print mode rejects. ``session_id`` /
+    ``continue_latest`` resume a stored session for the working directory (``-S <id>`` /
+    ``--continue``) in either mode, mirroring codex's ``exec resume <id>`` / ``resume --last``.
+    There is no ``--work-dir``-style flag worth using: the run's cwd comes from the launcher's
+    chdir(workdir), which is also what scopes the store's session index. ``kimi_bin`` substitutes
+    a single executable for ``node main.mjs`` (tests use ``#!/bin/sh`` stubs; there is
+    deliberately no env override for the real bundle).
 
     Raises ``ValueError`` for a flag print mode rejects (:data:`PRINT_MODE_REJECTS`) rather than
-    letting the CLI exit 1 with no output."""
+    letting the CLI exit 1 with no output, and for a positional prompt in shell mode (which has
+    nowhere to put one)."""
     argv = [kimi_bin] if kimi_bin else [node_bin(), KIMI_MAIN]
     if session_id:
         argv += ["-S", session_id]
     elif continue_latest:
         argv += ["--continue"]
+    if persistent:
+        if prompt:
+            raise ValueError(
+                "shell mode takes no positional prompt — the first turn is typed "
+                "into the TUI (KimiProcess.submit), not passed on the argv")
+        if extra_flags:
+            argv += list(extra_flags)   # --yolo & friends are legal (and meaningful) here
+        return argv
     argv += ["-p", prompt or ""]
     if extra_flags:
         for flag in extra_flags:
@@ -114,6 +126,6 @@ def kimi_argv(prompt, extra_flags=None, kimi_bin=None, session_id=None,
                     f"kimi-code rejects {flag} in print mode "
                     f"(`Cannot combine --prompt with {flag}`) and exits 1 with no output. "
                     f"Print mode already auto-approves every tool call, so the flag is "
-                    f"redundant here; drop it.")
+                    f"redundant here; drop it (shell-mode sessions may pass it).")
         argv += list(extra_flags)
     return argv
