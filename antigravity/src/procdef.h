@@ -237,7 +237,7 @@ inline constexpr agy_hook HOOKS[] = {
 { "RPC_MODELS",       CAC "FetchAvailableModels",             WIRE_ASYNC, "rpc_fetch_models",      AGY_FULLCGO, 0 },
 { "RPC_EXPERIMENTS",  CAC "ListExperiments",                  WIRE_ASYNC, "rpc_list_experiments",  AGY_FULLCGO, 0 },
 { "RPC_QUOTA",        CAC "RetrieveUserQuotaSummary",         WIRE_ASYNC, "rpc_quota",             AGY_FULLCGO, 0 },
-{ "RPC_REC_OFFERED",  CAC "RecordConversationOffered",        WIRE_ASYNC, "rpc_record_offered",    AGY_FULLCGO, 0 },
+/* RecordConversationOffered was removed upstream by agy 1.2.11. */
 { "RPC_REC_TRAJ",     CAC "RecordTrajectorySegmentAnalytics", WIRE_ASYNC, "rpc_record_trajectory", AGY_FULLCGO, 0 },
 { "RPC_WRITE_ACLS",   CAC "WriteTrajectoryACLs",              WIRE_ASYNC, "rpc_write_acls",        AGY_FULLCGO, 0 },
 #undef CAC

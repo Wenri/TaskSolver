@@ -5,19 +5,22 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_rollout::RolloutItem;
 use codex_rollout::persisted_rollout_items;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
@@ -26,6 +29,7 @@ use crate::DeleteThreadParams;
 use crate::ListThreadsParams;
 use crate::LoadThreadHistoryParams;
 use crate::MoveThreadToSectionParams;
+use crate::PersistContext;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
@@ -62,6 +66,42 @@ mod tests {
     use crate::ThreadSortKey;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::SessionSource;
+
+    #[tokio::test]
+    async fn deletion_cleans_associated_sqlite_and_shared_memory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use codex_utils_absolute_path::test_support::PathExt;
+        use pretty_assertions::assert_eq;
+
+        let home = tempfile::TempDir::new()?;
+        let state_db = codex_state::StateRuntime::init(
+            codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+            "test".to_string(),
+        )
+        .await?;
+        let shared = InMemoryThreadStore::default();
+        let store = shared.with_state_db(Some(state_db.clone()));
+        let thread_id = ThreadId::new();
+        shared
+            .create_thread(create_thread_params(thread_id, ThreadHistoryMode::Legacy))
+            .await?;
+        let metadata = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            home.path().join("thread.jsonl"),
+            Utc::now(),
+            SessionSource::Cli,
+        )
+        .build("test");
+        state_db.upsert_thread(&metadata).await?;
+
+        store
+            .delete_thread(DeleteThreadParams { thread_id })
+            .await?;
+
+        assert_eq!(state_db.get_thread(thread_id).await?, None);
+        assert!(!shared.state.lock().await.histories.contains_key(&thread_id));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn default_turn_pagination_methods_return_unsupported() {
@@ -125,6 +165,8 @@ mod tests {
         ] {
             store
                 .create_thread(CreateThreadParams {
+                    creator_user_id: None,
+                    creator_account_id: None,
                     session_id: thread_id.into(),
                     thread_id,
                     extra_config: None,
@@ -141,6 +183,7 @@ mod tests {
                     history_base: None,
                     subagent_history_start_ordinal: None,
                     initial_window_id: uuid::Uuid::now_v7().to_string(),
+                    runtime_workspace_roots: None,
                     metadata: ThreadPersistenceMetadata {
                         cwd: None,
                         model_provider: "test-provider".to_string(),
@@ -171,6 +214,7 @@ mod tests {
                 model_providers: None,
                 cwd_filters: None,
                 section: None,
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: Some(ThreadRelationFilter::DirectChildrenOf(parent_thread_id)),
@@ -199,6 +243,7 @@ mod tests {
                 model_providers: None,
                 cwd_filters: None,
                 section: None,
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: Some(ThreadRelationFilter::DescendantsOf(parent_thread_id)),
@@ -227,6 +272,7 @@ mod tests {
                 model_providers: None,
                 cwd_filters: None,
                 section: Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string())),
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: Some(ThreadRelationFilter::DescendantsOf(parent_thread_id)),
@@ -255,6 +301,7 @@ mod tests {
                 model_providers: None,
                 cwd_filters: None,
                 section: Some(None),
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: Some(ThreadRelationFilter::DescendantsOf(parent_thread_id)),
@@ -382,11 +429,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn metadata_update_returns_the_materialized_thread() {
+        let store = InMemoryThreadStore::default();
+        let thread_id = ThreadId::default();
+        store
+            .create_thread(create_thread_params(thread_id, ThreadHistoryMode::Legacy))
+            .await
+            .expect("create thread");
+
+        let updated = ThreadStore::update_thread_metadata(
+            &store,
+            UpdateThreadMetadataParams {
+                thread_id,
+                patch: ThreadMetadataPatch {
+                    name: Some(Some("renamed".to_string())),
+                    ..Default::default()
+                },
+                include_archived: false,
+            },
+        )
+        .await
+        .expect("update metadata");
+        let updated = updated.expect("in-memory store returns updated thread");
+        assert_eq!(updated.thread_id, thread_id);
+        assert_eq!(updated.name.as_deref(), Some("renamed"));
+    }
+
     fn create_thread_params(
         thread_id: ThreadId,
         history_mode: ThreadHistoryMode,
     ) -> CreateThreadParams {
         CreateThreadParams {
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
@@ -403,6 +479,7 @@ mod tests {
             history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
+            runtime_workspace_roots: None,
             metadata: thread_metadata(),
         }
     }
@@ -461,7 +538,9 @@ pub struct InMemoryThreadStoreCalls {
 /// service.
 #[derive(Default)]
 pub struct InMemoryThreadStore {
-    state: tokio::sync::Mutex<InMemoryThreadStoreState>,
+    state: Arc<tokio::sync::Mutex<InMemoryThreadStoreState>>,
+    omit_metadata_update_result: Arc<AtomicBool>,
+    state_db: Option<codex_rollout::StateDbHandle>,
 }
 
 #[derive(Default)]
@@ -488,6 +567,15 @@ impl InMemoryThreadStore {
             .clone()
     }
 
+    /// Shares this debug store's thread data while owning cleanup of the caller's SQLite state.
+    pub fn with_state_db(&self, state_db: Option<codex_rollout::StateDbHandle>) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            omit_metadata_update_result: Arc::clone(&self.omit_metadata_update_result),
+            state_db,
+        }
+    }
+
     /// Removes a shared in-memory store for `id`.
     pub fn remove_id(id: &str) -> Option<Arc<Self>> {
         stores_guard().remove(id)
@@ -496,6 +584,12 @@ impl InMemoryThreadStore {
     /// Returns the calls observed by this store.
     pub async fn calls(&self) -> InMemoryThreadStoreCalls {
         self.state.lock().await.calls.clone()
+    }
+
+    /// Makes metadata updates apply normally while returning no materialized thread.
+    pub fn omit_metadata_update_result_for_testing(&self) {
+        self.omit_metadata_update_result
+            .store(true, Ordering::Relaxed);
     }
 
     async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
@@ -508,10 +602,16 @@ impl InMemoryThreadStore {
             forked_from_id: params.forked_from_id,
             parent_thread_id: params.parent_thread_id,
             cwd: params.metadata.cwd.clone().unwrap_or_default(),
+            runtime_workspace_roots: params
+                .runtime_workspace_roots
+                .as_ref()
+                .map(|roots| roots.iter().map(AbsolutePathBuf::to_path_buf).collect()),
             agent_nickname: params.source.get_nickname(),
             agent_role: params.source.get_agent_role(),
             agent_path: params.source.get_agent_path().map(Into::into),
             originator: params.originator.clone(),
+            creator_user_id: params.creator_user_id.clone(),
+            creator_account_id: params.creator_account_id.clone(),
             source: params.source.clone(),
             thread_source: params.thread_source.clone(),
             model_provider: Some(params.metadata.model_provider.clone()),
@@ -667,6 +767,11 @@ impl InMemoryThreadStore {
         &self,
         params: UpdateThreadMetadataParams,
     ) -> ThreadStoreResult<StoredThread> {
+        if params.patch.project_id.is_some() {
+            return Err(ThreadStoreError::Unsupported {
+                operation: "projects",
+            });
+        }
         let mut state = self.state.lock().await;
         state.calls.update_thread_metadata += 1;
         if !state.created_threads.contains_key(&params.thread_id) {
@@ -777,8 +882,18 @@ impl InMemoryThreadStore {
     }
 
     async fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreResult<()> {
+        self.state.lock().await.calls.delete_thread += 1;
+        let deleted_state_rows = if let Some(state_db) = &self.state_db {
+            state_db
+                .delete_threads_strict(&[params.thread_id])
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("failed to delete thread state: {error}"),
+                })?
+        } else {
+            0
+        };
         let mut state = self.state.lock().await;
-        state.calls.delete_thread += 1;
         let existed = state.histories.remove(&params.thread_id).is_some();
         state.created_threads.remove(&params.thread_id);
         state.names.remove(&params.thread_id);
@@ -789,7 +904,7 @@ impl InMemoryThreadStore {
         state
             .rollout_paths
             .retain(|_, thread_id| *thread_id != params.thread_id);
-        if existed {
+        if existed || deleted_state_rows > 0 {
             Ok(())
         } else {
             Err(ThreadStoreError::ThreadNotFound {
@@ -816,7 +931,11 @@ impl ThreadStore for InMemoryThreadStore {
         Box::pin(InMemoryThreadStore::append_items(self, params))
     }
 
-    fn persist_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+    fn persist_thread(
+        &self,
+        _thread_id: ThreadId,
+        _context: PersistContext,
+    ) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             self.state.lock().await.calls.persist_thread += 1;
             Ok(())
@@ -925,8 +1044,11 @@ impl ThreadStore for InMemoryThreadStore {
     fn update_thread_metadata(
         &self,
         params: UpdateThreadMetadataParams,
-    ) -> ThreadStoreFuture<'_, StoredThread> {
-        Box::pin(InMemoryThreadStore::update_thread_metadata(self, params))
+    ) -> ThreadStoreFuture<'_, Option<StoredThread>> {
+        Box::pin(async move {
+            let updated = InMemoryThreadStore::update_thread_metadata(self, params).await?;
+            Ok((!self.omit_metadata_update_result.load(Ordering::Relaxed)).then_some(updated))
+        })
     }
 
     fn move_thread_to_section(
@@ -980,6 +1102,7 @@ fn stored_thread_from_state(
         });
 
     Ok(StoredThread {
+        originator: (!created.originator.is_empty()).then(|| created.originator.clone()),
         thread_id,
         extra_config: created.extra_config.clone(),
         rollout_path: metadata
@@ -1019,9 +1142,12 @@ fn stored_thread_from_state(
                     id.clone()
                 },
                 id,
+                appearance: None,
             }),
         section_position: state.section_positions.get(&thread_id).copied(),
         section_entered_at: state.section_entered_at.get(&thread_id).copied(),
+        project_id: None,
+        daybreak_enabled: metadata.and_then(|metadata| metadata.daybreak_enabled),
         cwd: metadata
             .and_then(|metadata| metadata.cwd.clone())
             .unwrap_or_default(),

@@ -89,8 +89,6 @@ HOOKS = [
      "mode": 'async', "kind": 'rpc_list_experiments', "mech": 'fullcgo', "retcap": 0},
     {"id": 'RPC_QUOTA', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RetrieveUserQuotaSummary',
      "mode": 'async', "kind": 'rpc_quota', "mech": 'fullcgo', "retcap": 0},
-    {"id": 'RPC_REC_OFFERED', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordConversationOffered',
-     "mode": 'async', "kind": 'rpc_record_offered', "mech": 'fullcgo', "retcap": 0},
     {"id": 'RPC_REC_TRAJ', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordTrajectorySegmentAnalytics',
      "mode": 'async', "kind": 'rpc_record_trajectory', "mech": 'fullcgo', "retcap": 0},
     {"id": 'RPC_WRITE_ACLS', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).WriteTrajectoryACLs',

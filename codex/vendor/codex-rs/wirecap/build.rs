@@ -29,7 +29,10 @@ fn main() {
         .output()
         .expect("failed to run $CONDA_PREFIX/bin/python3 to derive the python version");
     let py_ver = String::from_utf8(out.stdout).unwrap().trim().to_string();
-    assert!(!py_ver.is_empty(), "empty python version from $CONDA_PREFIX/bin/python3");
+    assert!(
+        !py_ver.is_empty(),
+        "empty python version from $CONDA_PREFIX/bin/python3"
+    );
     let py_tag = py_ver.replace('.', "");
 
     // The static bridge FIRST, then the dylibs that satisfy its undefined Py*/boost/C++ symbols.
@@ -43,7 +46,10 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", conda_lib.display());
 
     // Rebuild if the bridge lib is regenerated.
-    println!("cargo:rerun-if-changed={}", bridge_dir.join("libwirecap_bridge.a").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        bridge_dir.join("libwirecap_bridge.a").display()
+    );
     println!("cargo:rerun-if-env-changed=WIRECAP_BRIDGE_DIR");
     println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
 }

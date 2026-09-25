@@ -1,11 +1,14 @@
 //! Errors returned by the shared Codex HTTP transport.
 
+use crate::client::HttpError;
 use http::HeaderMap;
 use http::StatusCode;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error(transparent)]
+    Policy(#[from] crate::NetworkPolicyDenied),
     #[error("http {status}: {body:?}")]
     Http {
         status: StatusCode,
@@ -17,10 +20,14 @@ pub enum TransportError {
     RetryLimit,
     #[error("timeout")]
     Timeout,
+    #[error("connection failed: {0}")]
+    Connection(#[source] HttpError),
     #[error("network error: {0}")]
     Network(String),
     #[error("request build error: {0}")]
     Build(String),
+    #[error("response body exceeds the {max_bytes} byte limit")]
+    ResponseTooLarge { max_bytes: usize },
 }
 
 #[derive(Debug, Error)]

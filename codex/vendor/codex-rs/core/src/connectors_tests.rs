@@ -1,12 +1,14 @@
 use super::*;
 use crate::config::CONFIG_TOML_FILE;
 use crate::config::ConfigBuilder;
+use crate::plugins::plugins_manager_for_config;
 use codex_config::test_support::CloudConfigBundleFixture;
 use codex_config::types::ApprovalsReviewer;
 use codex_connectors::merge::plugin_connector_to_app_info;
 use codex_connectors::metadata::connector_install_url;
 use codex_connectors::metadata::sanitize_name;
 use codex_features::Feature;
+use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::ToolInfo;
@@ -302,7 +304,7 @@ fn accessible_connectors_from_mcp_tools_preserves_description() {
 }
 
 #[tokio::test]
-async fn app_approvals_reviewer_uses_app_then_default_then_global() {
+async fn app_approvals_reviewer_uses_link_then_app_then_default_then_global() {
     for (global, app_default, app, expected_global, expected_default, expected_app) in [
         (
             "user",
@@ -333,6 +335,22 @@ approvals_reviewer = "{app_default}"
 
 [apps.calendar]
 approvals_reviewer = "{app}"
+
+[apps.calendar.links.link_calendar]
+approvals_reviewer = "{app_default}"
+
+[apps.calendar.links.link_without_privacy]
+
+[apps.drive.links.link_drive]
+approvals_reviewer = "{app_default}"
+
+[apps.without_links]
+approvals_reviewer = "{app}"
+
+[apps.empty_links]
+approvals_reviewer = "{app}"
+
+[apps.empty_links.links]
 "#
             ),
         )
@@ -343,24 +361,68 @@ approvals_reviewer = "{app}"
             .await
             .expect("config should build");
 
+        for (link_id, expected) in [
+            (Some("link_calendar"), expected_default),
+            (Some("link_without_privacy"), expected_app),
+            (Some("link_drive"), expected_app),
+            (None, expected_app),
+        ] {
+            assert_eq!(
+                mcp_approvals_reviewer_from_layers(
+                    &config.config_layer_stack,
+                    config.approvals_reviewer,
+                    config.model.as_deref(),
+                    CODEX_APPS_MCP_SERVER_NAME,
+                    Some("calendar"),
+                    link_id,
+                ),
+                expected
+            );
+        }
+        for connector_id in ["without_links", "empty_links"] {
+            assert_eq!(
+                mcp_approvals_reviewer_from_layers(
+                    &config.config_layer_stack,
+                    config.approvals_reviewer,
+                    config.model.as_deref(),
+                    CODEX_APPS_MCP_SERVER_NAME,
+                    Some(connector_id),
+                    Some("link_calendar"),
+                ),
+                expected_app
+            );
+        }
         assert_eq!(
-            mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("calendar")),
-            expected_app
-        );
-        assert_eq!(
-            mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("drive")),
-            expected_default
-        );
-        assert_eq!(
-            mcp_approvals_reviewer(
-                &config,
+            mcp_approvals_reviewer_from_layers(
+                &config.config_layer_stack,
+                config.approvals_reviewer,
+                config.model.as_deref(),
                 CODEX_APPS_MCP_SERVER_NAME,
-                /*connector_id*/ None
+                Some("drive"),
+                /*link_id*/ None,
             ),
             expected_default
         );
         assert_eq!(
-            mcp_approvals_reviewer(&config, "custom_server", Some("calendar")),
+            mcp_approvals_reviewer_from_layers(
+                &config.config_layer_stack,
+                config.approvals_reviewer,
+                config.model.as_deref(),
+                CODEX_APPS_MCP_SERVER_NAME,
+                /*connector_id*/ None,
+                /*link_id*/ None,
+            ),
+            expected_default
+        );
+        assert_eq!(
+            mcp_approvals_reviewer_from_layers(
+                &config.config_layer_stack,
+                config.approvals_reviewer,
+                config.model.as_deref(),
+                "custom_server",
+                Some("calendar"),
+                Some("link_calendar"),
+            ),
             expected_global
         );
     }
@@ -391,7 +453,14 @@ approvals_reviewer = "user"
         .expect("config should build");
 
     assert_eq!(
-        mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("calendar")),
+        mcp_approvals_reviewer_from_layers(
+            &config.config_layer_stack,
+            config.approvals_reviewer,
+            config.model.as_deref(),
+            CODEX_APPS_MCP_SERVER_NAME,
+            Some("calendar"),
+            /*link_id*/ None,
+        ),
         ApprovalsReviewer::AutoReview
     );
 }
@@ -405,6 +474,9 @@ async fn app_approvals_reviewer_respects_global_reviewer_requirements() {
 approvals_reviewer = "auto_review"
 
 [apps.calendar]
+approvals_reviewer = "user"
+
+[apps.calendar.links.link_calendar]
 approvals_reviewer = "user"
 "#,
     )
@@ -420,10 +492,19 @@ approvals_reviewer = "user"
         .await
         .expect("config should build");
 
-    assert_eq!(
-        mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("calendar")),
-        ApprovalsReviewer::AutoReview
-    );
+    for link_id in [None, Some("link_calendar")] {
+        assert_eq!(
+            mcp_approvals_reviewer_from_layers(
+                &config.config_layer_stack,
+                config.approvals_reviewer,
+                config.model.as_deref(),
+                CODEX_APPS_MCP_SERVER_NAME,
+                Some("calendar"),
+                link_id,
+            ),
+            ApprovalsReviewer::AutoReview
+        );
+    }
 }
 
 #[tokio::test]
@@ -504,7 +585,8 @@ discoverables = [
         .await
         .expect("config should load");
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
-    let plugins_manager = PluginsManager::new(config.codex_home.to_path_buf());
+    let plugins_manager =
+        plugins_manager_for_config(&config, AuthManager::from_auth_for_testing(auth.clone()));
 
     let discoverable_tools = list_tool_suggest_discoverable_tools_with_auth(
         &config,
@@ -542,7 +624,8 @@ apps = true
         .expect("config should load");
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let loaded_plugin_app_connector_ids = vec!["asdk_app_databricks_workspace".to_string()];
-    let plugins_manager = PluginsManager::new(config.codex_home.to_path_buf());
+    let plugins_manager =
+        plugins_manager_for_config(&config, AuthManager::from_auth_for_testing(auth.clone()));
 
     let discoverable_tools = list_tool_suggest_discoverable_tools_with_auth(
         &config,

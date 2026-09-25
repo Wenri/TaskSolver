@@ -92,7 +92,7 @@ tasksolver = { path = "." }
 # jiter (anthropic/openai's Rust JSON core): take the conda build, not the pypi wheel the SDKs
 # would pull, so it matches the 3D-CoT consumer's conda jiter.
 jiter = "*"
-nodejs = ">=25,<26"
+nodejs = ">=26,<27"
 # NOTE: bun was removed — it pins icu 75, which conflicts with boost 1.91 (icu 78, pulled in
 # for Boost.Thread); nodejs (what pymport uses) is icu-78 and coexists fine. Re-add bun in a
 # separate environment if needed so its icu pin doesn't clash with the default env's boost.
@@ -193,7 +193,7 @@ libcap = ">=2.78,<3"
 # honoring the vendored packageManager field — conda-forge carries no pnpm 10) and the N-API
 # headers ($CONDA_PREFIX/include/node) the addon compiles against. The vendored monorepo's
 # engine-strict floor is Node >=24.15.
-nodejs = ">=25,<26"
+nodejs = ">=26,<27"
 
 # No [tool.pixi.activation.env]: nothing needs a global env var. The agy/codex embedded
 # interpreters get PYTHONHOME per-child from their launchers (pyagy/pycodex `_env.py`), the codex

@@ -2,10 +2,10 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import type { Session } from '@moonshot-ai/kimi-code-sdk';
-
 import { detectInstallSource } from '#/cli/update/source';
+import { copyTextToClipboard } from '#/utils/clipboard/clipboard-text';
 import { detectShellEnvironment } from '#/utils/process/shell-env';
+import { quoteShellArg } from '#/utils/shell-quote';
 import { toTerminalHyperlink } from '#/utils/terminal-hyperlink';
 import { LLM_NOT_SET_MESSAGE, NO_ACTIVE_SESSION_MESSAGE } from '../constant/kimi-tui';
 import { isAbortError } from '../utils/errors';
@@ -31,10 +31,6 @@ export async function handleTitleCommand(host: SlashCommandHost, args: string): 
 
   let session = host.session;
   if (session === undefined) {
-    if (!host.engineV2) {
-      host.showError(NO_ACTIVE_SESSION_MESSAGE);
-      return;
-    }
     // Setting a title needs a live session; lazy-create it on first use (the
     // bare read-only form above works session-less).
     session = await host.ensureSession();
@@ -60,12 +56,8 @@ export async function handleForkCommand(host: SlashCommandHost, args: string): P
     return;
   }
 
-  const sourceTitle = forkSourceTitle(host, session);
   try {
-    const forked = await host.harness.forkSession({
-      id: session.id,
-      title: `Fork: ${sourceTitle}`,
-    });
+    const forked = await host.harness.forkSession({ id: session.id });
     const forkId = forked.id;
     try {
       await forked.close();
@@ -76,9 +68,26 @@ export async function handleForkCommand(host: SlashCommandHost, args: string): P
     }
     // Stay in the source session: switching to the fork would close the
     // source, killing its in-flight turn and background tasks. The fork is
-    // an independent copy the user can switch to explicitly via /sessions.
+    // an independent copy the user can switch to explicitly via /sessions,
+    // or enter from a new CLI process with the printed resume command.
+    const command = forkResumeCommand(host.state.appState.workDir, forkId);
+    let clipboardNote: string;
+    try {
+      const method = await copyTextToClipboard(command);
+      // OSC 52 delivery is fire-and-forget: terminals without OSC 52 support
+      // silently drop the sequence, so only native delivery may claim success
+      // (same wording convention as /copy).
+      clipboardNote =
+        method === 'native'
+          ? 'Command copied to clipboard'
+          : 'Command copied via terminal escape sequence (unverified)';
+    } catch {
+      clipboardNote = 'Failed to copy command to clipboard';
+    }
     host.showStatus(
-      `Session forked (${forkId}). Still in the original session; switch to the fork via /sessions.`,
+      `Session forked (${forkId}). Still in the original session; switch to the fork via /sessions.\n` +
+        `  To enter the fork in a new process, run: ${command}\n` +
+        `  ${clipboardNote}`,
     );
   } catch (error) {
     const msg = formatErrorMessage(error);
@@ -86,13 +95,14 @@ export async function handleForkCommand(host: SlashCommandHost, args: string): P
   }
 }
 
-function forkSourceTitle(host: SlashCommandHost, session: Session): string {
-  const currentTitle = host.state.appState.sessionTitle?.trim();
-  if (currentTitle !== undefined && currentTitle.length > 0) return currentTitle;
-
-  const summaryTitle =
-    typeof session.summary?.title === 'string' ? session.summary.title.trim() : '';
-  return summaryTitle.length > 0 ? summaryTitle : session.id;
+function forkResumeCommand(workDir: string, forkId: string): string {
+  const dir = quoteShellArg(workDir);
+  // cmd.exe's `cd` only updates the given drive's remembered directory — a
+  // terminal on a different drive stays put, and the resume then runs in the
+  // wrong working directory. `pushd` switches drive + directory in both
+  // cmd.exe and PowerShell (`cd /d` would break PowerShell).
+  const changeDir = process.platform === 'win32' ? `pushd ${dir}` : `cd ${dir}`;
+  return `${changeDir} && kimi --resume ${quoteShellArg(forkId)}`;
 }
 
 export async function handleExportMdCommand(host: SlashCommandHost, args: string): Promise<void> {

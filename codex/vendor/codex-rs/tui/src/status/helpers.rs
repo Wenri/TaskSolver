@@ -1,3 +1,4 @@
+use crate::clock_format::ClockFormat;
 use crate::exec_command::relativize_to_home;
 use crate::legacy_core::config::Config;
 use crate::status::StatusAccountDisplay;
@@ -11,7 +12,7 @@ use codex_utils_path_uri::PathUri;
 use std::path::Path;
 
 fn normalize_agents_display_path(path: &Path) -> String {
-    dunce::simplified(path).display().to_string()
+    format_directory_display(dunce::simplified(path), /*max_width*/ None)
 }
 
 pub(crate) fn compose_model_display(
@@ -99,12 +100,18 @@ pub(crate) fn compose_account_display(
 pub(crate) fn plan_type_display_name(plan_type: PlanType) -> String {
     if plan_type == PlanType::EnterpriseCbpAutomation {
         "Enterprise (Automation)".to_string()
+    } else if plan_type == PlanType::SelfServeBusinessProLite {
+        "Business Premium".to_string()
     } else if plan_type.is_team_like() {
         "Business".to_string()
     } else if plan_type.is_business_like() {
         "Enterprise".to_string()
     } else if plan_type == PlanType::ProLite {
         "Pro Lite".to_string()
+    } else if plan_type == PlanType::EduPlus {
+        "Edu Plus".to_string()
+    } else if plan_type == PlanType::EduPro {
+        "Edu Pro".to_string()
     } else {
         title_case(format!("{plan_type:?}").as_str())
     }
@@ -174,8 +181,12 @@ pub(crate) fn format_directory_display(directory: &Path, max_width: Option<usize
     formatted
 }
 
-pub(crate) fn format_reset_timestamp(dt: DateTime<Local>, captured_at: DateTime<Local>) -> String {
-    let time = dt.format("%H:%M").to_string();
+pub(crate) fn format_reset_timestamp(
+    dt: DateTime<Local>,
+    captured_at: DateTime<Local>,
+    clock_format: ClockFormat,
+) -> String {
+    let time = dt.format(clock_format.time_format()).to_string();
     if dt.date_naive() == captured_at.date_naive() {
         time
     } else {
@@ -221,7 +232,6 @@ mod tests {
             (PlanType::Pro, "Pro"),
             (PlanType::ProLite, "Pro Lite"),
             (PlanType::Team, "Business"),
-            (PlanType::SelfServeBusinessProLite, "Business"),
             (PlanType::SelfServeBusinessUsageBased, "Business"),
             (PlanType::Business, "Enterprise"),
             (PlanType::EnterpriseCbpAutomation, "Enterprise (Automation)"),
@@ -234,6 +244,16 @@ mod tests {
         for (plan_type, expected) in cases {
             assert_eq!(plan_type_display_name(plan_type), expected);
         }
+        insta::assert_snapshot!(
+            plan_type_display_name(PlanType::SelfServeBusinessProLite),
+            @"Business Premium"
+        );
+        insta::assert_snapshot!(
+            "education_plan_display_names",
+            [PlanType::Edu, PlanType::EduPlus, PlanType::EduPro]
+                .map(plan_type_display_name)
+                .join("\n")
+        );
     }
 
     #[test]
@@ -258,6 +278,32 @@ mod tests {
                 &[PathUri::from_abs_path(&global_agents_path.abs())]
             ),
             format_directory_display(&global_agents_path, /*max_width*/ None)
+        );
+    }
+
+    #[tokio::test]
+    async fn compose_agents_summary_collapses_home_and_preserves_project_relative_paths() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let codex_home = TempDir::new().expect("temp codex home");
+        let cwd = TempDir::new().expect("temp cwd");
+        let mut config = test_config(&codex_home, &cwd).await;
+        config.cwd = home.join("workspace").join("project").abs();
+
+        let paths = [
+            home.join(".codex").join("AGENTS.md"),
+            home.join("workspace").join("AGENTS.md"),
+            config.cwd.join("AGENTS.md").to_path_buf(),
+            config.cwd.join("nested").join("AGENTS.md").to_path_buf(),
+        ]
+        .map(|path| PathUri::from_abs_path(&path.abs()));
+
+        let summary = compose_agents_summary(&config, &paths);
+
+        insta::assert_snapshot!(
+            summary.replace('\\', "/"),
+            @"~/.codex/AGENTS.md, ../AGENTS.md, AGENTS.md, nested/AGENTS.md"
         );
     }
 

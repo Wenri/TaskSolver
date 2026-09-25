@@ -33,7 +33,10 @@ impl ToolExecutor<ToolInvocation> for ReadMcpResourceHandler {
         true
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -74,7 +77,7 @@ impl ReadMcpResourceHandler {
             arguments: arguments.clone(),
         };
 
-        run_resource_operation(&session, turn.as_ref(), &call_id, invocation, async {
+        run_resource_operation(&session, &step_context, &call_id, invocation, async {
             ensure_model_can_access_mcp_server(turn.as_ref(), &server)?;
             let result = mcp
                 .read_resource(&server, ReadResourceRequestParams::new(uri.clone()))

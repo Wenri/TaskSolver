@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import tempfile
+from typing import Final
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
@@ -131,6 +132,95 @@ def test_read_transcript(td):
           "string content passes through; step_index increments")
 
 
+def test_read_transcript_v2(td):
+    print("[offline] sessions.read_transcript: Kimi 2.x assistant/tool journals")
+    home: Final = os.path.join(td, "kimi_v2_home")
+    sid: Final = "session_v2"
+    sdir: Final = os.path.join(home, "sessions", "wd_v2_000000000000", sid)
+
+    def loop(time, kind, **fields):
+        return {"type": "context.append_loop_event", "time": time,
+                "event": {"type": kind, **fields}}
+
+    def message(time, role, text):
+        return {"type": "context.append_message", "time": time,
+                "message": {"role": role, "content": [{"type": "text", "text": text}]}}
+
+    def write_agent(aid, records):
+        directory: Final = os.path.join(sdir, "agents", aid)
+        os.makedirs(directory)
+        with open(os.path.join(directory, "wire.jsonl"), "w") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+            f.write('{"incomplete":')  # a read during the next append is safe
+
+    # Same field names as v2.1.1's LoopRecordedEvent. Mix legacy records with
+    # streamed steps, a tool result and a user injection arriving while it runs.
+    write_agent("main", [
+        {"type": "metadata", "protocol_version": "1.5"},
+        message(1, "user", "Read the file, then explain it."),
+        message(2, "assistant", "A legacy reply."),
+        loop(3, "step.begin", uuid="step-1"),
+        loop(4, "content.part", stepUuid="step-1", part={"type": "think", "think": "Read first"}),
+        loop(5, "content.part", stepUuid="step-1", part={"type": "text", "text": "Reading "}),
+        loop(6, "content.part", stepUuid="step-1", part={"type": "text", "text": "the file."}),
+        loop(7, "tool.call", stepUuid="step-1", toolCallId="read-1", name="Read", args={}),
+        message(8, "user", "Keep it short."),
+        loop(9, "tool.result", toolCallId="read-1",
+             result={"output": [{"type": "text", "text": "file "},
+                                {"type": "text", "text": "contents"}]}),
+        loop(10, "step.end", uuid="step-1", finishReason="tool_use"),
+        loop(11, "step.begin", uuid="step-2"),
+        loop(12, "content.part", stepUuid="step-2", part={"type": "text", "text": "Done."}),
+        loop(13, "step.end", uuid="step-2", finishReason="stop"),
+        loop(14, "step.begin", uuid="empty-step"),
+        loop(15, "content.part", stepUuid="empty-step", part={"type": "text", "text": "  "}),
+        loop(16, "step.end", uuid="empty-step", finishReason="stop"),
+        loop(17, "step.begin", uuid="partial-step"),
+        loop(18, "content.part", stepUuid="partial-step", part={"type": "text", "text": "Partial"}),
+        loop(19, "step.end", uuid="partial-step", finishReason="interrupted"),
+        loop(20, "content.part", stepUuid="partial-step", part={"type": "text", "text": " reply"}),
+    ])
+    # The main agent ended mid-step. Another journal cannot append to its open
+    # assistant even when its first record happens to reference the same UUID.
+    write_agent("sub", [
+        loop(21, "content.part", stepUuid="partial-step", part={"type": "text", "text": "wrong agent"}),
+        message(22, "user", "Subagent task"),
+        loop(23, "step.begin", uuid="sub-step"),
+        loop(24, "tool.call", stepUuid="sub-step", toolCallId="shell-1", name="Shell", args={}),
+        loop(25, "step.end", uuid="sub-step", finishReason="interrupted"),
+        loop(26, "step.begin", uuid="next-step"),
+        loop(27, "content.part", stepUuid="next-step", part={"type": "text", "text": "Recovered"}),
+        loop(28, "step.end", uuid="next-step", finishReason="stop"),
+    ])
+
+    main: Final = sessions.read_transcript(sid, home=home, agent="main")
+    check([(entry["role"], entry["content"]) for entry in main] == [
+        ("user", "Read the file, then explain it."),
+        ("assistant", "A legacy reply."),
+        ("assistant", "Reading the file."),
+        ("tool", "file contents"),
+        ("user", "Keep it short."),
+        ("assistant", "Done."),
+        ("assistant", "Partial reply"),
+    ], "mixed legacy/v2 replies, tool output and deferred user message preserve conversation order")
+    check(main[2]["created_at"] == 3 and main[3]["created_at"] == 9,
+          "assistant timestamp is step.begin; tool timestamp is tool.result")
+    check(main[-1]["content"] == "Partial reply" and len(main) == 7,
+          "interrupted content survives; completed whitespace-only steps disappear")
+
+    all_agents: Final = sessions.read_transcript(sid, home=home)
+    check(all_agents[:len(main)] == main and all_agents[-1]["content"] == "Recovered",
+          "agent journals fold independently without leaking an unfinished assistant")
+    check(all_agents[-2]["role"] == "tool" and all_agents[-2]["content"] == (
+        "Tool execution was interrupted before its result was recorded. "
+        "Do not assume the tool completed successfully."
+    ), "resuming an unfinished tool uses the upstream interrupted-tool transcript entry")
+    check([entry["step_index"] for entry in all_agents] == list(range(len(all_agents))),
+          "step indexes stay contiguous across filtered empty steps and multiple agents")
+    check(sessions.read_transcript("missing", home=home) == [], "unknown session stays empty")
+
+
 def _stub(td, name, body):
     """A kimi stand-in that drains the mp boot fd (see test_kimi_process)."""
     path = os.path.join(td, name)
@@ -184,6 +274,7 @@ def main():
         test_workdir_key_golden()
         test_trust_workspace(td)
         test_read_transcript(td)
+        test_read_transcript_v2(td)
         test_session_stub(td)
     print()
     if _failures:

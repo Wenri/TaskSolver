@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
 codex-app-server-protocol = { workspace = true }
+codex-extension-items = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-install-context = { workspace = true }
 codex-otel = { workspace = true }
@@ -29,6 +30,7 @@ pulldown-cmark = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+sqlx-macros = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

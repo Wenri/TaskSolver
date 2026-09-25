@@ -16,6 +16,7 @@ Read-only and stdlib-only: this is how :func:`pykimi.ask` reports the store-read
 """
 import json
 import os
+from typing import Final
 
 INDEX_NAME = "session_index.jsonl"
 
@@ -108,46 +109,144 @@ def read_transcript(session_id, home=None, agent=None):
     """The stored transcript for ``session_id`` — a list of
     ``{step_index, role, type, created_at, content}`` in journal order, the same
     shape :func:`pycodex.sessions.read_transcript` returns, projected from the
-    wire journal's conversation records (``context.append_message`` carries every
-    message appended to the model context: user turns, assistant replies, tool
-    results). Empty when the session is unknown."""
-    out = []
-    for rec in read_wire(session_id, home=home, agent=agent):
-        if rec.get("type") != "context.append_message":
-            continue
-        message = rec.get("message") or {}
-        out.append({
-            "step_index": len(out),
-            "role": message.get("role"),
-            "type": "message",
-            "created_at": rec.get("time"),
-            "content": _flatten(message.get("content")),
-        })
+    wire journal's conversation records. Older journals store complete messages in
+    ``context.append_message``; Kimi 2.x also stores assistant steps and tool results
+    in ``context.append_loop_event``. Each agent journal is folded independently.
+    Empty when the session is unknown."""
+    out: Final = []
+    for path in _agent_wire_paths(session_id, home, agent):
+        out.extend(_fold_transcript(_read_wire_path(path)))
+    for index, entry in enumerate(out):
+        entry["step_index"] = index
     return out
+
+
+_INTERRUPTED_TOOL_OUTPUT: Final = (
+    "Tool execution was interrupted before its result was recorded. "
+    "Do not assume the tool completed successfully."
+)
+
+
+def _fold_transcript(records):
+    """Project the v2 loopEventFold contract onto our plain-text transcript rows.
+
+    Pending tools defer injected messages until their results arrive. Interrupted
+    steps stay open for resumed content, while empty completed steps disappear.
+    Like the upstream transcript reducer, EOF leaves an in-progress step visible.
+    """
+    out: Final = []
+    pending: Final = set()
+    deferred: Final = []
+    open_entry = None
+    open_uuid = None
+    open_has_tools = False
+    open_vacuous = True
+
+    def row(role, content, time):
+        return {"role": role, "type": "message", "created_at": time,
+                "content": _flatten(content)}
+
+    def flush_deferred():
+        if not pending:
+            out.extend(deferred)
+            deferred.clear()
+
+    def settle(time):
+        nonlocal open_entry, open_uuid
+        if open_entry is None:
+            return
+        for _ in pending:
+            out.append(row("tool", _INTERRUPTED_TOOL_OUTPUT, time))
+        pending.clear()
+        flush_deferred()
+        if not open_has_tools and open_vacuous:
+            # Identity matters: two empty steps can have identical row values.
+            out[:] = [entry for entry in out if entry is not open_entry]
+        open_entry = None
+        open_uuid = None
+
+    for rec in records:
+        if rec.get("type") == "context.append_message":
+            message = rec.get("message") or {}
+            entry = row(message.get("role"), message.get("content"), rec.get("time"))
+            (deferred if pending else out).append(entry)
+        elif rec.get("type") in ("context.clear", "context.apply_compaction"):
+            # These records end the live fold; history remains a journal projection.
+            if rec.get("keptUserMessageCount") is not None:
+                settle(rec.get("time"))
+            open_entry = None
+            open_uuid = None
+            pending.clear()
+            deferred.clear()
+        elif rec.get("type") == "context.append_loop_event":
+            event = rec.get("event") or {}
+            kind = event.get("type")
+            if kind == "step.begin":
+                settle(rec.get("time"))
+                open_entry = row("assistant", "", rec.get("time"))
+                out.append(open_entry)
+                open_uuid = event.get("uuid")
+                open_has_tools = False
+                open_vacuous = True
+            elif kind == "step.end":
+                if event.get("finishReason") not in ("interrupted", "error"):
+                    settle(rec.get("time"))
+                    flush_deferred()
+            elif kind in ("content.part", "tool.call"):
+                if open_entry is None or event.get("stepUuid") != open_uuid:
+                    continue
+                if kind == "tool.call":
+                    pending.add(event.get("toolCallId"))
+                    open_has_tools = True
+                else:
+                    part = event.get("part") or {}
+                    open_entry["content"] += _flatten([part])
+                    if part.get("type") == "text":
+                        vacuous = not (part.get("text") or "").strip()
+                    elif part.get("type") == "think":
+                        vacuous = ("encrypted" not in part
+                                   and not (part.get("think") or "").strip())
+                    else:
+                        vacuous = False
+                    open_vacuous = open_vacuous and vacuous
+            elif kind == "tool.result" and event.get("toolCallId") in pending:
+                pending.remove(event.get("toolCallId"))
+                out.append(row("tool", (event.get("result") or {}).get("output"),
+                               rec.get("time")))
+                flush_deferred()
+    return out
+
+
+def _agent_wire_paths(session_id, home, agent):
+    sdir: Final = find_session_dir(session_id, home)
+    if not sdir:
+        return
+    agents_dir: Final = os.path.join(sdir, "agents")
+    try:
+        agent_ids: Final = [agent] if agent else sorted(os.listdir(agents_dir))
+    except OSError:
+        return
+    for aid in agent_ids:
+        yield os.path.join(agents_dir, aid, "wire.jsonl")
+
+
+def _read_wire_path(path):
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(record, dict):
+                    yield record
+    except OSError:
+        return
 
 
 def read_wire(session_id, home=None, agent=None):
     """The parsed ``wire.jsonl`` records for ``session_id`` — a list of dicts in file order,
     across every agent journal (``agents/<id>/wire.jsonl``), or just ``agent``'s when given.
     Empty when the session is unknown."""
-    sdir = find_session_dir(session_id, home)
-    if not sdir:
-        return []
-    agents_dir = os.path.join(sdir, "agents")
-    try:
-        agent_ids = [agent] if agent else sorted(os.listdir(agents_dir))
-    except OSError:
-        return []
-    out = []
-    for aid in agent_ids:
-        path = os.path.join(agents_dir, aid, "wire.jsonl")
-        try:
-            with open(path, errors="replace") as f:
-                for line in f:
-                    try:
-                        out.append(json.loads(line))
-                    except ValueError:
-                        continue
-        except OSError:
-            continue
-    return out
+    return [record for path in _agent_wire_paths(session_id, home, agent)
+            for record in _read_wire_path(path)]

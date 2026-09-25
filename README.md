@@ -23,6 +23,15 @@ One `Agent`, many backends — selected by the `vision_model` id. Provider adapt
 
 The agy/codex/kimi-code native artifacts embed CPython (the shim's interpreter, codex's libpython, the `wirecap_node` addon's libpython): a consuming environment must run the **same Python minor version** as the env they were built in (this repo pins 3.13) — a version-mismatched consumer is an unsupported configuration.
 
+The instrumented CLI sources and binaries are pinned separately from TaskSolver's Python
+dependencies:
+
+| CLI | Pinned version | Integration and build notes |
+| --- | --- | --- |
+| Antigravity (`agy`) | **1.2.11** | [BuildID-matched shim and symbol map](antigravity/README.md) |
+| Codex | **0.157.0** (`rust-v0.157.0`) | [Rust source hooks and session-store compatibility](codex/README.md) |
+| Kimi Code | **2.1.1** (`@moonshot-ai/kimi-code@2.1.1`) | [Node bundle, search worker, and native addon](kimi/README.md) |
+
 ## Install
 
 TaskSolver uses [pixi](https://pixi.sh) for a managed Python 3.13 environment:
@@ -33,11 +42,33 @@ pixi run python test_scripts/text_only.py --model claude-code
 pixi shell                                                # drop into the environment
 ```
 
-The pixi workspace is configured in `pyproject.toml`: it pins Python 3.13 and builds TaskSolver itself as an **editable** package via the `pixi-build` backend (so source edits are live). It defines **two** environments: the **default** env (`pixi install`) carries the core API / Claude Code / Gemini backends plus the UI/plotting tools and builds the `antigravity` shim — **no GPU required**; the **`cuda`** env (`pixi install -e cuda`) adds the local HuggingFace + torch (cu130) adapters and **flash-attn**, so it needs a CUDA 13 GPU and builds flash-attn from source on first run (uv caches the wheel afterward).
+The pixi workspace is configured in `pyproject.toml`: it pins Python 3.13 and Node.js 26 and builds TaskSolver itself as an **editable** package via the `pixi-build` backend (so source edits are live). The package build compiles all three instrumented CLIs: the Antigravity shim, the Rust Codex binary, and the Kimi Code bundle plus native addon. It defines **two** environments: the **default** env (`pixi install`) carries the core API / CLI backends plus the UI/plotting tools — **no GPU required**; the **`cuda`** env (`pixi install -e cuda`) adds the local HuggingFace + torch (cu130) adapters and **flash-attn**, so it needs a CUDA 13 GPU and builds flash-attn from source on first run (uv caches the wheel afterward). Node.js 26 is also pinned in the package's build environment because Kimi's frozen dependency graph excludes Node.js 25.
 
 For à-la-carte use, the same groups are portable `[project.optional-dependencies]` extras — `tasksolver[local]` (torch + HuggingFace adapters, **including flash-attn**) and `tasksolver[app]` (UI/plotting) — so the package stays installable as a dependency by uv and pixi (a consumer points at its own torch index). Core dependencies are unpinned so the consuming workspace owns version resolution; `flash-attn` has no prebuilt wheels for new Pythons and builds from source, so `tasksolver[local]` needs CUDA.
 
 Credentials are supplied via a `KeyChain` (loading files like `system/credentials/openai_api.txt`) or environment variables (`OPENAI_API_KEY`, the `claude` key, `GEMINI_API_KEY`, `VLLM_API_KEY`, `MOONSHOT_API_KEY`).
+
+## Verify the CLI integrations
+
+From the TaskSolver checkout, these checks run without provider credentials or model calls:
+
+```bash
+pixi run python test_scripts/test_codex_argv.py
+pixi run python test_scripts/test_codex_process.py
+pixi run python test_scripts/test_responses_decode.py
+pixi run python test_scripts/test_kimi_argv.py
+pixi run python test_scripts/test_kimi_decode.py
+pixi run python test_scripts/test_kimi_process.py
+pixi run python test_scripts/test_kimi_session.py
+pixi run python test_scripts/test_wire_session.py
+pixi run python test_scripts/test_kimi_bundle.py
+```
+
+The last check needs the built Kimi artifacts and Node; it verifies artifact resolution, the
+packaged CLI version, and search worker outside the source tree. A skipped test does not verify an
+unbuilt artifact. See the backend READMEs for native-build checks and live smoke tests, which
+require provider access. The current upgrade was checked with builds and offline tests;
+authenticated model turns were not revalidated.
 
 ## Usage
 
@@ -130,7 +161,7 @@ cleanup — don't run parallel sessions that way.
 
 ## Antigravity (`agy`) instrumentation
 
-[`antigravity/`](antigravity/) is a research subsystem that instruments Google's Antigravity CLI (`agy`) in-process via an `LD_PRELOAD` shim (frida-gum inline hooks + an embedded CPython), and also exposes `agy` as a TaskSolver-style backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the cgocall-trampoline hook mechanism for parking Go functions, and build/validation notes — validated on both WSL1 and a real cloud kernel (6.18.5, agy 1.0.15), including a gdb instruction-level root-cause proof.
+[`antigravity/`](antigravity/) is a research subsystem that instruments Google's Antigravity CLI (`agy`) in-process via an `LD_PRELOAD` shim (cgocall trampolines generated with frida-gum plus an embedded CPython), and also exposes `agy` as a TaskSolver-style backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the cgocall-trampoline hook mechanism for parking Go functions, current build/validation notes, and the historical WSL1/cloud-kernel investigations.
 
 ## License
 

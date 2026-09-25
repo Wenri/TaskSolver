@@ -55,9 +55,9 @@ set(GUM "${CMAKE_SOURCE_DIR}/vendor/frida-gum")
 # "build-id not agy (running=… symbols=…); not hooking this process" and every hook silently not
 # firing. Re-fetch the pin (rm vendor/agy && pixi run build-shim) or `pixi run shim-symbols` to
 # re-resolve against whatever landed; `chmod a-w vendor/agy` blunts the in-place overwrite.
-set(AGY_VERSION "1.1.11")
-set(AGY_URL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/linux-x64/cli_linux_x64.tar.gz")
-set(AGY_SHA512 "32d64529cf035ab9790352069dd0df4525d7c920b42872de1775e65455e77fd983b37a6dee81a6345b060c98d5f350729bb5e2ae881bbda80f46b7487af4588d")
+set(AGY_VERSION "1.2.11")
+set(AGY_URL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.11-6016716732497920/linux-x64/cli_linux_x64.tar.gz")
+set(AGY_SHA512 "ca12c262343f29a2b87423d1ff1e4244989e936e37fe1f8e56056b0f91cd02f93f133321229ce35c86c2d84b977e919937a3fd9430cfd769a16d6b03ede25081")
 set(AGY_BIN "" CACHE STRING "optional: local agy binary to vendor instead of downloading")
 set(FRIDA_VER "17.15.3")
 # WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag; a freshly-fetched agy must be

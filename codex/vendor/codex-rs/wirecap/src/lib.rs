@@ -11,9 +11,12 @@
 //! All calls are ASYNC (the bridge copies + enqueues), so they are safe to call from tokio
 //! worker threads: they never take the Python GIL on the caller's thread.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::CStr;
+use std::ffi::c_char;
+use std::ffi::c_int;
 use std::sync::Once;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 unsafe extern "C" {
     fn wire_start() -> c_int;

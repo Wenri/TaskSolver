@@ -4,6 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::MAX_PROMPT_AUDIO_INPUT_BYTES;
 use codex_protocol::models::ResponseItem;
 use codex_utils_cache::BlockingLruCache;
 use codex_utils_cache::sha1_digest;
@@ -25,10 +26,6 @@ const AUDIO_TOO_LARGE_PLACEHOLDER: &str =
 const UNSUPPORTED_AUDIO_FORMAT_PLACEHOLDER: &str =
     "audio content omitted because its format is not supported; use wav, mp3, m4a, webm, or ogg";
 
-/// Maximum accepted decoded byte length for prompt audio inputs.
-///
-/// This matches the Responses API audio input limit.
-const MAX_PROMPT_AUDIO_INPUT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_PROMPT_AUDIO_BASE64_BYTES: usize = MAX_PROMPT_AUDIO_INPUT_BYTES.div_ceil(3) * 4;
 const AUDIO_TOKEN_ESTIMATE_CACHE_SIZE: usize = 32;
 const AUDIO_TOKENS_PER_SECOND: f64 = 10.0;
@@ -82,6 +79,7 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. }
             | ResponseItem::Compaction { .. }
+            | ResponseItem::ConfigurationUpdate { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
             | ResponseItem::Other => {}
@@ -248,6 +246,11 @@ fn prepare_audio(audio_url: &mut String) -> Result<(), AudioPreparationError> {
             .map_err(|_| AudioPreparationError::InvalidDataUrl {
                 reason: "invalid base64 payload",
             })?;
+    if bytes.is_empty() {
+        return Err(AudioPreparationError::InvalidDataUrl {
+            reason: "audio payload is empty",
+        });
+    }
     if bytes.len() > MAX_PROMPT_AUDIO_INPUT_BYTES {
         return Err(AudioPreparationError::AudioTooLarge { size: bytes.len() });
     }

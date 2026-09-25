@@ -7,7 +7,8 @@ binary hooking. Both share the `wirecap` package (decode + the embedded-CPython 
 
 ## Layout
 - `vendor/` — the Codex repo, git-subtree'd (originally `rust-v0.143.0-alpha.38`, since bumped to
-  **0.147.0** — see `codex-rs/Cargo.toml`; Apache-2.0; `LICENSE` preserved). Kept pristine except
+  **0.157.0** (`rust-v0.157.0`, upstream commit
+  `00c972e`) — see `codex-rs/Cargo.toml`; Apache-2.0; `LICENSE` preserved). Kept pristine except
   our patch (below); `codex-rs/target/` is gitignored.
 - `pycodex/` — the Python wrapper: `ask()`/`CodexResponse`/`CodexModel` + the in-process decode
   side `codex_process` (the `WIRE_MODULE` the embedded interpreter loads) + the OpenAI-Responses
@@ -68,3 +69,29 @@ an unlinked temp file — no quoting/ARG_MAX limits, nothing echoed into the tra
 servers it spawns, which breaks `uv run` venv interpreters — the same policy as
 `pyagy.write_mcp_servers`). A run that hits the drain deadline returns with
 `CodexResponse.timed_out=True` (codex and its whole process group are reaped by `close()`).
+
+The session readers support both ordinary rollout filenames and the replacement rollouts
+created by reverting a thread in Codex 0.157.0:
+`rollout-<timestamp>-<thread_id>[_<rollout_id>].jsonl`. Resume always uses the stable
+**thread ID**; the replacement rollout ID and a fork's root `session_id` are not aliases for
+that thread. History selects its newest rollout, with `session_meta.payload.id` as the
+metadata fallback for renamed files. Legacy metadata containing only `session_id` still works.
+
+## Verification
+
+Run the wrapper's offline checks from the TaskSolver root:
+
+```bash
+pixi run python test_scripts/test_codex_argv.py
+pixi run python test_scripts/test_codex_process.py
+pixi run python test_scripts/test_responses_decode.py
+pixi run python test_scripts/test_wire_session.py
+```
+
+These cover request arguments, MCP configuration, scoped and reverted session stores,
+response decoding, timeout/process cleanup, and the shared persistent-session loop.
+The 0.157.0 upgrade also passed the native build, 196 `codex-api` Rust tests, and a local
+mock-endpoint smoke that exercised native request/response capture and session readback.
+These checks do not establish authenticated service compatibility. To check that separately
+after building and authenticating, run `pixi run python test_scripts/test_codex.py`; inspect
+its output because missing artifacts or authentication cause it to skip.

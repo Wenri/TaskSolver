@@ -89,8 +89,9 @@ class BuildPyNative(build_py):
         #    pnpm 10). The vis-web asset is stubbed — it only feeds `kimi vis` — so the
         #    vite/tailwind prebuild is skipped; invoking tsdown directly (not `pnpm run build`)
         #    also skips the darwin/win32 native-asset copy and the dist-web check, neither of
-        #    which the instrumented Linux CLI needs. tsdown produces a single self-sufficient
-        #    dist/main.mjs (the minidb/search workers are SEA-only — no-ops in the ESM bundle).
+        #    which the instrumented Linux CLI needs. tsdown produces
+        #    dist/main.mjs plus its sibling search-worker.mjs, which the ESM runtime resolves
+        #    beside the main bundle. The minidb worker remains SEA-only.
         #    Idempotent: pnpm/tsdown no-op when nothing changed.
         stub = os.path.join(vendor, "apps", "kimi-code", "src", "generated", "vis-web-asset.ts")
         if not os.path.exists(stub):
@@ -103,6 +104,8 @@ class BuildPyNative(build_py):
         app = os.path.join(vendor, "apps", "kimi-code")
         subprocess.run([*pnpm, "install", "--frozen-lockfile"], cwd=vendor, check=True)
         subprocess.run([*pnpm, "exec", "tsdown"], cwd=app, check=True)
+        subprocess.run([*pnpm, "exec", "tsdown", "--config", "tsdown.dist-worker.config.ts"],
+                       cwd=app, check=True)
         # 2) The N-API addon hosting the wirecap bridge (embedded CPython). Builds its own copy
         #    of libwirecap_bridge.a (kimi/native adds ../../wirecap/native as a subdirectory), so
         #    it does not depend on the antigravity build tree.
@@ -123,6 +126,7 @@ class BuildPyNative(build_py):
             (os.path.join(root, "antigravity", "vendor", "agy"),            "pyagy", "agy",            False),  # build-id coupled to the shim — never strip
             (os.path.join(root, "codex", "vendor", "codex-rs", "target", "release", "codex"), "pycodex", "codex", True),  # ~72% debuginfo — strip for the wheel
             (os.path.join(root, "kimi", "vendor", "kimi-code", "apps", "kimi-code", "dist", "main.mjs"), "pykimi", "main.mjs", False),
+            (os.path.join(root, "kimi", "vendor", "kimi-code", "apps", "kimi-code", "dist", "search-worker.mjs"), "pykimi", "search-worker.mjs", False),
             (os.path.join(root, "kimi", "native", "build", "wirecap_node.node"), "pykimi", "wirecap_node.node", False),
         ]
         for src, pkg, name, do_strip in jobs:

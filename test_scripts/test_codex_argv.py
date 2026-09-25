@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+from typing import Final
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
@@ -153,6 +154,59 @@ def test_sessions_home_aware():
               "empty store -> None")
 
 
+def test_sessions_reverted_rollout():
+    print("[offline] sessions: reverted rollouts keep the stable thread ID")
+    # Current upstream's rollout_file_name_tests.rs uses these exact UUIDs.
+    thread_id: Final = "019ff1a2-b3c4-7d5e-8f60-112233445566"
+    rollout_id: Final = "019ff1a2-b3c4-7d5e-8f60-667788990011"
+    root_id: Final = "11111111-1111-1111-1111-111111111111"
+    with tempfile.TemporaryDirectory() as td:
+        old: Final = _rollout(td, "2026/08/11", "2026-08-11T18-42-06", thread_id, td, 1000)
+        replacement: Final = os.path.join(
+            os.path.dirname(old),
+            f"rollout-2026-08-11T18-42-07-{thread_id}_{rollout_id}.jsonl")
+        records: Final = [
+            {"type": "session_meta", "payload": {
+                "id": thread_id, "session_id": root_id, "cwd": td}},
+            {"type": "response_item", "payload": {
+                "role": "assistant", "type": "message",
+                "content": [{"type": "output_text", "text": "after revert"}]}},
+        ]
+        with open(replacement, "w") as f:
+            f.write("\n".join(json.dumps(row) for row in records) + "\n")
+        os.utime(replacement, (2000, 2000))
+        check(sessions._session_id_of(old) == thread_id,
+              "ordinary rollout filename still yields its thread ID")
+        check(sessions._session_id_of(replacement) == thread_id,
+              "replacement filename yields thread ID, not rollout ID")
+        check(sessions.latest_session_id(home=td) == thread_id,
+              "latest replacement resumes the stable thread")
+        check(sessions.latest_session_id(home=td, cwd=td) == thread_id,
+              "cwd-filtered latest preserves the stable thread")
+        check(sessions.find_rollout(thread_id, home=td) == replacement,
+              "lookup prefers the newest replacement over the old rollout")
+        check(sessions.read_transcript(thread_id, home=td)[0]["content"] == "after revert",
+              "history reads the replacement transcript")
+        check(sessions.find_rollout(rollout_id, home=td) is None,
+              "replacement rollout ID is not a resumable thread alias")
+        check(sessions.find_rollout(root_id, home=td) is None,
+              "root session ID does not alias this fork's thread")
+
+        renamed: Final = os.path.join(os.path.dirname(old), "rollout-renamed.jsonl")
+        os.rename(replacement, renamed)
+        os.unlink(old)
+        check(sessions._session_id_of(renamed) is None,
+              "renamed file does not invent a thread ID")
+        check(sessions.find_rollout(thread_id, home=td) == renamed,
+              "renamed fork lookup uses metadata.id")
+        check(sessions.latest_session_id(home=td) == thread_id,
+              "renamed latest falls back to metadata.id")
+        check(sessions.latest_session_id(home=td, cwd=td) == thread_id,
+              "renamed cwd-filtered latest uses metadata.id")
+        check(sessions.find_rollout(root_id, home=td) is None,
+              "renamed fork's root session is not mistaken for its thread")
+
+
 def main():
     test_argv_fresh()
     test_argv_stdin()
@@ -161,6 +215,7 @@ def main():
     test_mcp_flags_wrap()
     test_ask_mutual_exclusion()
     test_sessions_home_aware()
+    test_sessions_reverted_rollout()
     print()
     if _failures:
         print(f"FAILED: {len(_failures)} check(s): {_failures}")

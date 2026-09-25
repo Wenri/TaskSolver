@@ -1,6 +1,6 @@
 # antigravity — bind custom network / MCP context / tools into `agy`
 
-`antigravity` instruments the **Antigravity CLI** (`~/.local/bin/agy`, Google's agentic
+`antigravity` instruments the **Antigravity CLI** (`antigravity/vendor/agy`, Google's agentic
 coding tool, internal codename *jetski*) so we can observe and modify its
 behaviour from our own **Python** code, in-process — without the source and
 without a supported plugin API for what we need.
@@ -37,10 +37,16 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | Runs on **WSL1** (syscall-translation layer, not a real kernel) | Frida's ptrace/`frida-server` injection is unreliable here. We use **frida-gum *embedded*** (loaded in-process by our `LD_PRELOAD` constructor, `gum_init_embedded()`), which needs no ptrace — only `mprotect`. |
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
-`514b5e79445e0cbba3d65adf318d075e`, agy **1.1.11**). The shim refuses to install hooks if
+`257bedb917787ceb25bbe0d36687c663`, agy **1.2.11**). The shim refuses to install hooks if
 the running binary's BuildID doesn't match `symbols.json`, so offsets can never be
 silently applied to a different build. Re-run the extractor after any `agy` update
 (`pixi run shim-symbols`).
+
+The 1.2.11 upgrade removes the retired `RecordConversationOffered` telemetry hook;
+all 41 remaining symbol targets resolve and pass prologue verification. Older captures
+containing that RPC can still be decoded. The rebuilt shim passes an instrumented
+`agy --version` startup check: 28/28 hooks install and Python receives smoke events.
+Live model turns have not been revalidated for this release.
 
 ---
 
@@ -454,9 +460,16 @@ chosen per the `procdef.h` `MECH` column) in one pass; the GC-safe synthetic mod
 always on:
 
 ```bash
+pixi run test_scripts/run-agy.sh --version  # instrumented startup; no model call
 test_scripts/run-agy.sh <normal agy args...>   # capture request+response+app+rpc (authenticated agy)
 python3 test_scripts/analyze_capture.py agy-capture.jsonl --plot traffic.png
 ```
+
+The startup check writes `antigravity.log` and `agy-capture.jsonl` in the current
+directory (override with `AGY_PROC_LOG` and `WIRE_CAPTURE`). Check the native log for
+the matching BuildID and installed hooks; a successful `--version` alone does not
+test model traffic. The status investigations below describe older releases; the
+current 1.2.11 validation scope is recorded under **Build pinning** above.
 
 ## Status (originally WSL1; re-validated on cloud Linux real kernel — agy 1.0.15 build 1d164dd9…, then re-pinned + re-verified on 1.0.16 build dee6de74…)
 

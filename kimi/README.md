@@ -9,10 +9,9 @@ startup. All three share the `wirecap` package (decode + the embedded-CPython na
 
 ## Layout
 - `vendor/kimi-code/` — the Kimi Code monorepo, git-subtree'd at tag
-  **`@moonshot-ai/kimi-code@0.34.0`** (`f0614c5`; MIT; `LICENSE` preserved). Kept pristine except
+  **`@moonshot-ai/kimi-code@2.1.1`** (`f67e6398`; MIT; `LICENSE` preserved). Kept pristine except
   our wiretap patch (below); `node_modules/`, `dist/`, and the build-time `vis-web-asset.ts` stub
-  are gitignored. The default engine is `packages/agent-core-v2` (the v1 `packages/agent-core`
-  and standalone `packages/kosong` are unused).
+  are gitignored. The engine is `packages/agent-core-v2`; upstream removed the old v1 engine.
 - `native/` — `wirecap_node.cc` + `CMakeLists.txt`: the N-API addon that links
   `libwirecap_bridge.a` (its own copy — `CMakeLists.txt` adds `../../wirecap/native`) and exposes
   `start`/`ready`/`emitRequest`/`emitEvent`/`emitWire`/`shutdown` to JS. Port of codex's Rust
@@ -29,11 +28,14 @@ no-op-safe) plus **three one-line emit sites**:
   `kimi_request` (the full normalized systemPrompt + tools + messages); inside the
   `for await (… request.requester.request(…))` loop → `kimi_event` per `ModelRequestEvent`
   (`part`/`usage`/`finish`/`timing`).
-- `wire/wireService.ts` `execute()` inside `if (!group.silent)` → `kimi_wire` (every persisted
-  wire-journal record + its agent scope; `silent` excludes restore-replay).
+- `wire/wireService.ts` `appendRecordLow()` → `kimi_wire` (every appended wire-journal record
+  + its agent scope; reading/restoring the journal does not emit records).
 
-New file is conflict-free on `subtree pull`; the two existing-file edits are one line each,
-anchored on stable names, so bumping the pin stays cheap:
+The ESM build config also bundles `ws` and `qrcode` and embeds the CLI version so the
+wheel runs without the source tree's `node_modules` or `package.json`.
+
+The wiretap helper is separate from upstream code. Preserve the three emit sites and the
+ESM packaging config when updating the source:
 
     git fetch --depth 1 https://github.com/MoonshotAI/kimi-code '+refs/tags/@moonshot-ai/kimi-code@<X.Y.Z>'
     git subtree pull --prefix kimi/vendor/kimi-code FETCH_HEAD --squash
@@ -47,15 +49,17 @@ Built by **`pixi install`** (setup.py's `_build_kimi`, after the shim so the bri
    `npx -y pnpm@<pin> …`, honoring the vendored `packageManager` field; conda-forge has no pnpm
    10). A stub `vis-web-asset.ts` is written so the vite/tailwind prebuild is skipped (breaks only
    `kimi vis`); invoking tsdown directly (not `pnpm run build`) also skips the darwin/win32
-   native-asset copy and the dist-web check. → a single self-sufficient
-   `vendor/kimi-code/apps/kimi-code/dist/main.mjs` (the minidb/search workers are SEA-only and
-   no-op in the ESM bundle, so there is no sibling worker file to ship).
+   native-asset copy and the dist-web check. This emits
+   `vendor/kimi-code/apps/kimi-code/dist/main.mjs`. A second tsdown invocation with
+   `tsdown.dist-worker.config.ts` builds the required sibling `dist/search-worker.mjs`;
+   the minidb worker remains SEA-only.
 2. the addon — `cmake … kimi/native` → `native/build/wirecap_node.node`.
 
-Both are bundled into the wheel at `pykimi/vendor/{main.mjs,wirecap_node.node}` and resolved
+All are bundled into the wheel at `pykimi/vendor/{main.mjs,search-worker.mjs,wirecap_node.node}` and resolved
 package-only (`wirecap.runtime.vendor.vendored`). The build is **required, with no skip/opt-out**.
-Needs `nodejs` ≥24.15 (supplies node + npm/npx for pnpm, and the N-API headers at
-`$CONDA_PREFIX/include/node`); the addon links the pixi libpython + Boost like the codex build.
+The workspace pins Node.js 26 to satisfy the frozen dependency graph (which excludes Node.js 25).
+Node supplies node + npm/npx for pnpm and the N-API headers at
+`$CONDA_PREFIX/include/node`; the addon links the pixi libpython + Boost like the codex build.
 Model: `MOONSHOT_API_KEY`/`KIMI_MODEL_API_KEY` (the env-family definition — no login needed) or
 `kimi login`. Then:
 
@@ -128,9 +132,12 @@ Shell-mode specifics, each with its own machinery here:
   production-minted key), so the dialog never renders; `KimiPopen._answer` accepts it as the
   fallback. Print-mode-rejected flags (`--yolo`, …) are legal session `extra_flags`.
 - **History**: `Session.history()` / `pykimi.sessions.read_transcript` project the store's
-  wire journals (`context.append_message` records) into the same
+  wire journals into the same
   `{step_index, role, type, created_at, content}` shape `pycodex.sessions.read_transcript`
-  returns.
+  returns. Older `context.append_message` records and Kimi 2.x
+  `context.append_loop_event` records are supported together. Assistant steps and tool
+  results are folded per agent, including interrupted/resumed steps and messages injected
+  while tools are pending; journals from separate agents do not share fold state.
 
 Transport note: `kimi acp` (a JSON-RPC agent protocol) would be architecturally cleaner — no
 PTY, no idle heuristics — but it is a fourth transport shape that bypasses
@@ -149,10 +156,25 @@ Offline, no node/bundle needed (`python3 test_scripts/<f>.py`):
   delivery, timeout → `timed_out`, group sweep, no fd leak).
 - `test_kimi_session.py` — shell-mode plumbing: persistent argv (no `-p`), the
   production-golden `encode_workdir_key`, the trust record's shape/placement/idempotence,
-  the wire→transcript projection, and a stub-backed `Session` (typed turn 1, bracketed-paste
-  framing on the raw PTY bytes, close sweep).
+  legacy and v2 wire→transcript projection (tools, interrupted/resumed steps, compaction,
+  and multiple agents), and a stub-backed `Session` (typed turn 1, bracketed-paste framing
+  on the raw PTY bytes, close sweep).
 - `test_wire_session.py` (repo root `test_scripts/`) — the shared `WireSession`/`ask_turn`
   base all three providers' Sessions ride.
+
+Offline, with Node and the built artifacts:
+
+```bash
+pixi run python test_scripts/test_kimi_bundle.py
+```
+
+This stages the artifacts through the package's bundling hook, then runs outside the
+checkout with no `node_modules`: Python artifact resolution, CLI `--version`, and the sibling
+search worker opening an empty index. It catches missing npm dependencies or workers that a
+source-tree launch can hide. It skips when the build/runtime is absent and fails on a partial
+artifact set. The 2.1.1 upgrade passed this check and the wrapper's offline suites;
+authenticated model turns were not revalidated. `kimi vis` remains unavailable in this
+instrumented build because the web asset is stubbed.
 
 Live (needs the built bundle + addon; skips cleanly = exit 0 otherwise):
 - `test_kimi.py` — the addon smoke inside a real node process (synthetic emits → `kimi_turn`),

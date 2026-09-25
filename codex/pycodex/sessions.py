@@ -2,10 +2,11 @@
 ``pyagy.conversations``.
 
 codex records every session as JSONL under ``~/.codex/sessions/YYYY/MM/DD/
-rollout-<timestamp>-<session_id>.jsonl`` (override the root with ``CODEX_HOME``). Lines are
+rollout-<timestamp>-<thread_id>[_<rollout_id>].jsonl`` (override the root with ``CODEX_HOME``).
+Reverting a thread creates a new rollout ID while keeping the thread ID used for resume. Lines are
 ``{"timestamp", "type", "payload"}``; the types we read are:
 
-  ``session_meta``   once, first line — carries ``payload.session_id`` and ``cwd``
+  ``session_meta``   once, first line — carries the thread's ``payload.id`` and ``cwd``
   ``response_item``  the conversation items — ``payload.role`` / ``payload.content``
 
 Read-only and stdlib-only: this is how a :class:`pycodex.Session` answers ``history()`` and how
@@ -13,6 +14,8 @@ Read-only and stdlib-only: this is how a :class:`pycodex.Session` answers ``hist
 """
 import json
 import os
+from typing import Final
+from uuid import UUID
 
 _ROLLOUT_PREFIX = "rollout-"
 
@@ -40,10 +43,18 @@ def list_rollouts(home=None):
 
 
 def _session_id_of(path):
-    """The uuid tail of a rollout filename (``rollout-<ts>-<uuid>.jsonl``)."""
-    stem = os.path.basename(path)[len(_ROLLOUT_PREFIX):].removesuffix(".jsonl")
-    parts = stem.split("-")
-    return "-".join(parts[-5:]) if len(parts) >= 5 else stem
+    """The stable thread UUID, before any replacement-rollout suffix, or None."""
+    stem: Final = os.path.basename(path)[len(_ROLLOUT_PREFIX):].removesuffix(".jsonl")
+    parts: Final = stem.partition("_")[0].split("-")
+    try:
+        return str(UUID("-".join(parts[-5:])))
+    except ValueError:
+        return None
+
+
+def _meta_session_id(meta):
+    """Resume uses the thread ID; session_id may instead identify its root ancestor."""
+    return meta.get("id") or meta.get("session_id")
 
 
 def find_rollout(session_id, home=None):
@@ -57,7 +68,7 @@ def find_rollout(session_id, home=None):
             return p
     for p in paths:
         meta = read_meta(p)
-        if meta and (meta.get("session_id") or meta.get("id")) == session_id:
+        if meta and _meta_session_id(meta) == session_id:
             return p
     return None
 
@@ -83,11 +94,17 @@ def latest_session_id(home=None, cwd=None):
     """The newest session's id, optionally restricted to sessions started in ``cwd``.
     None when the store is empty — the caller then starts a fresh session."""
     for p in list_rollouts(home):
+        meta = None
         if cwd:
             meta = read_meta(p) or {}
             if os.path.realpath(meta.get("cwd") or "") != os.path.realpath(cwd):
                 continue
-        return _session_id_of(p)
+        session_id = _session_id_of(p)
+        if session_id:
+            return session_id
+        session_id = _meta_session_id(meta if meta is not None else read_meta(p) or {})
+        if session_id:
+            return session_id
     return None
 
 

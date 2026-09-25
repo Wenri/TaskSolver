@@ -1,16 +1,3 @@
-/**
- * `toolPolicy` domain — Agent-scope tool authorization service.
- *
- * Intersects the workspace os-level veto (the seeded `sessionToolPolicyGate`,
- * which outranks everything below it), the bound profile policy, global
- * `[tools]` configuration, and Session denylist (composed by
- * `isToolActiveComposed`), and installs the resulting
- * authorization check into the L3 executor preflight so direct tool calls
- * cannot bypass schema filtering. Disclosure entries retain their implicit
- * availability when a profile allowlist omits them, while explicit deny
- * layers still apply.
- */
-
 import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
@@ -26,9 +13,9 @@ import type { ToolSource } from '#/tool/toolContract';
 import { isToolActiveComposed, type ToolActivationPolicy } from './evaluate';
 import { IAgentToolPolicyService } from './toolPolicy';
 
-// NOTE: stays Disposable — its own 'config' collides with the Fiber
 export class AgentToolPolicyService extends Disposable implements IAgentToolPolicyService {
   declare readonly _serviceBrand: undefined;
+  private globalPolicy: ToolsConfig | undefined;
 
   constructor(
     @IAgentProfileService private readonly profile: IAgentProfileService,
@@ -38,6 +25,13 @@ export class AgentToolPolicyService extends Disposable implements IAgentToolPoli
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
   ) {
     super();
+    this.globalPolicy = this.config.get<ToolsConfig | undefined>(TOOLS_SECTION);
+    this._register(
+      this.config.onDidSectionChange((event) => {
+        if (event.domain !== TOOLS_SECTION) return;
+        this.globalPolicy = this.config.get<ToolsConfig | undefined>(TOOLS_SECTION);
+      }),
+    );
     this._register(
       toolExecutor.registerToolCallGuard(({ name, source }) => {
         const active =
@@ -69,7 +63,7 @@ export class AgentToolPolicyService extends Disposable implements IAgentToolPoli
       {
         workspaceDisabledTools: this.toolPolicyGate.disabledTools,
         profile: { disallowedTools: profile.disallowedTools },
-        global: this.config.get<ToolsConfig>(TOOLS_SECTION),
+        global: this.globalPolicy,
         sessionDisabledTools: this.sessionToolPolicy.disabledTools(),
       },
       name,
@@ -86,7 +80,7 @@ export class AgentToolPolicyService extends Disposable implements IAgentToolPoli
       {
         workspaceDisabledTools: this.toolPolicyGate.disabledTools,
         profile,
-        global: this.config.get<ToolsConfig>(TOOLS_SECTION),
+        global: this.globalPolicy,
         sessionDisabledTools: this.sessionToolPolicy.disabledTools(),
       },
       name,

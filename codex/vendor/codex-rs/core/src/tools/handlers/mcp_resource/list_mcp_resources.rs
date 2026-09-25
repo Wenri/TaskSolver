@@ -30,7 +30,10 @@ impl ToolExecutor<ToolInvocation> for ListMcpResourcesHandler {
         true
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -69,7 +72,7 @@ impl ListMcpResourcesHandler {
             arguments: arguments.clone(),
         };
 
-        run_resource_operation(&session, turn.as_ref(), &call_id, invocation, async {
+        run_resource_operation(&session, &step_context, &call_id, invocation, async {
             if let Some((server_name, params)) = args.target(turn.as_ref())? {
                 let result = mcp
                     .list_resources(&server_name, params)

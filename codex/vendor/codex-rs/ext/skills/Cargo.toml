@@ -13,8 +13,8 @@ doctest = false
 workspace = true
 
 [dependencies]
+codex-analytics = { workspace = true }
 codex-config = { workspace = true }
-codex-core-skills = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-mcp = { workspace = true }
@@ -35,9 +35,9 @@ serde_yaml = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
-url = { workspace = true }
 
 [dev-dependencies]
+assert_matches = { workspace = true }
 codex-models-manager = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 dunce = { workspace = true }

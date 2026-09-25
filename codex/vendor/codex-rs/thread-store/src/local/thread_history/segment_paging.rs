@@ -7,7 +7,7 @@ use super::super::rollout_lineage::RolloutLineage;
 use super::super::rollout_lineage::RolloutLineageSegment;
 use super::read::CursorScope;
 use super::read::HistoryCursor;
-use super::read::PhysicalHistoryPosition;
+use super::read::RolloutHistoryPosition;
 use super::read::StoredSummaryColumns;
 use super::read::StoredThreadItemRow;
 use super::read::StoredTurnRow;
@@ -92,12 +92,12 @@ FROM thread_turns
 WHERE thread_id =
             "#
             });
-        query.push_bind(segment.thread_id().to_string());
+        query.push_bind(segment.rollout_id().to_string());
         push_segment_range(&mut query, segment)?;
         for newer_segment in &lineage.segments()[segment_index + 1..] {
             query
                 .push(" AND NOT EXISTS (SELECT 1 FROM thread_turns AS newer_turn WHERE newer_turn.thread_id = ")
-                .push_bind(newer_segment.thread_id().to_string())
+                .push_bind(newer_segment.rollout_id().to_string())
                 .push(" AND newer_turn.turn_id = thread_turns.turn_id AND newer_turn.rollout_ordinal >= ")
                 .push_bind(sqlite_integer(newer_segment.start_ordinal())?);
             if let Some(end_ordinal) = newer_segment.end_ordinal() {
@@ -120,12 +120,16 @@ SELECT
     first_user.rollout_ordinal AS summary_first_user_rollout_ordinal,
     first_user.updated_at_ordinal AS summary_first_user_updated_at_ordinal,
     first_user.created_at_ms AS summary_first_user_created_at_ms,
+    first_user.started_at_ms AS summary_first_user_started_at_ms,
+    first_user.completed_at_ms AS summary_first_user_completed_at_ms,
     first_user.item_json AS summary_first_user_item_json,
     final_agent.turn_id AS summary_final_agent_turn_id,
     final_agent.item_id AS summary_final_agent_item_id,
     final_agent.rollout_ordinal AS summary_final_agent_rollout_ordinal,
     final_agent.updated_at_ordinal AS summary_final_agent_updated_at_ordinal,
     final_agent.created_at_ms AS summary_final_agent_created_at_ms,
+    final_agent.started_at_ms AS summary_final_agent_started_at_ms,
+    final_agent.completed_at_ms AS summary_final_agent_completed_at_ms,
     final_agent.item_json AS summary_final_agent_item_json
 FROM page_turns
 LEFT JOIN thread_items AS first_user
@@ -178,7 +182,7 @@ fn push_summary_item_join(
     item_id_column: &str,
 ) -> ThreadStoreResult<()> {
     query
-        .push_bind(segment.thread_id().to_string())
+        .push_bind(segment.rollout_id().to_string())
         .push(" AND ")
         .push(alias)
         .push(".turn_id = page_turns.turn_id AND ")
@@ -204,7 +208,7 @@ pub(super) async fn page_item_rows(
     lineage: &RolloutLineage,
     params: &ListItemsParams,
 ) -> ThreadStoreResult<SegmentPage<StoredThreadItemRow>> {
-    // Update ordinals are local to a physical rollout. Forked lineages need a structured
+    // Update ordinals are local to a rollout. Forked lineages need a structured
     // watermark before incremental replay can safely span their segments.
     if params.after_updated_at_ordinal.is_some() && lineage.segments().len() > 1 {
         return Err(ThreadStoreError::InvalidRequest {
@@ -217,7 +221,18 @@ pub(super) async fn page_item_rows(
                 message: "update-ordinal item sorting requires an update watermark".to_string(),
             });
         };
-        return page_updated_item_rows(pool, params, after_updated_at_ordinal).await;
+        let [segment] = lineage.segments() else {
+            return Err(ThreadStoreError::Internal {
+                message: "update-ordinal item paging requires one rollout segment".to_string(),
+            });
+        };
+        return page_updated_item_rows(
+            pool,
+            segment.rollout_id(),
+            params,
+            after_updated_at_ordinal,
+        )
+        .await;
     }
     let cursor = parse_cursor(
         params.cursor.as_deref(),
@@ -234,12 +249,12 @@ pub(super) async fn page_item_rows(
         }
         let mut query = QueryBuilder::<Sqlite>::new(
             r#"
-SELECT turn_id, item_id, rollout_ordinal, updated_at_ordinal, created_at_ms, item_json
+SELECT turn_id, item_id, rollout_ordinal, updated_at_ordinal, created_at_ms, started_at_ms, completed_at_ms, item_json
 FROM thread_items
 WHERE thread_id =
             "#,
         );
-        query.push_bind(segment.thread_id().to_string());
+        query.push_bind(segment.rollout_id().to_string());
         push_segment_range(&mut query, segment)?;
         if let Some(after_updated_at_ordinal) = params.after_updated_at_ordinal {
             query
@@ -272,6 +287,7 @@ WHERE thread_id =
 
 async fn page_updated_item_rows(
     pool: &sqlx::SqlitePool,
+    rollout_id: ThreadId,
     params: &ListItemsParams,
     after_updated_at_ordinal: u64,
 ) -> ThreadStoreResult<SegmentPage<StoredThreadItemRow>> {
@@ -282,13 +298,13 @@ async fn page_updated_item_rows(
     )?;
     let mut query = QueryBuilder::<Sqlite>::new(
         r#"
-SELECT turn_id, item_id, updated_at_ordinal AS rollout_ordinal, updated_at_ordinal, created_at_ms, item_json
+SELECT turn_id, item_id, updated_at_ordinal AS rollout_ordinal, updated_at_ordinal, created_at_ms, started_at_ms, completed_at_ms, item_json
 FROM thread_items
 WHERE thread_id =
         "#,
     );
     query
-        .push_bind(params.thread_id.to_string())
+        .push_bind(rollout_id.to_string())
         .push(" AND updated_at_ordinal > ")
         .push_bind(sqlite_integer(after_updated_at_ordinal)?);
     if let Some(turn_id) = params.turn_id.as_deref() {
@@ -462,17 +478,17 @@ fn finish_page<T: HasPosition>(
 }
 
 trait HasPosition {
-    fn position(&self) -> PhysicalHistoryPosition;
+    fn position(&self) -> RolloutHistoryPosition;
 }
 
 impl HasPosition for StoredTurnRow {
-    fn position(&self) -> PhysicalHistoryPosition {
+    fn position(&self) -> RolloutHistoryPosition {
         self.position
     }
 }
 
 impl HasPosition for StoredThreadItemRow {
-    fn position(&self) -> PhysicalHistoryPosition {
+    fn position(&self) -> RolloutHistoryPosition {
         self.position
     }
 }

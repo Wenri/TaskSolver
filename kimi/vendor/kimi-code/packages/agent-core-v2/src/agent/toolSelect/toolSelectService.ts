@@ -1,25 +1,14 @@
-/**
- * `toolSelect` domain — `IAgentToolSelectService` implementation.
- *
- * Shapes the provider-visible tool and history views for progressive tool
- * disclosure, loads dynamic schemas into `contextMemory`, and exposes
- * loadable-tools announcement text. Reads live tools from `toolRegistry`,
- * active-tool and capability state from `profile`, gates through `flag`,
- * hooks into `toolExecutor`, and listens to context lifecycle events through
- * `event`. The mutable load-tracking state (`pendingLoaded`) is registered
- * into `agentState` (`IAgentStateService`) and read/written through it. Bound
- * at Agent scope.
- */
-
 import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
-import { defineState } from '#/_base/state/stateRegistry';
+import { defineState } from '#/state/state';
 import { IEventBus } from '#/app/event/eventBus';
 import { IFlagService } from '#/app/flag/flag';
-import type { Tool } from '#/kosong/contract/tool';
+import type { ToolDescription as Tool } from '#human/llm/message';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { ContextSpliced } from '#/agent/contextMemory/contextEvents';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { CompactionCompleted } from '#/agent/fullCompaction/compactionOps';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
@@ -29,7 +18,6 @@ import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 
 import {
   collectLoadedDynamicToolNames,
-  DYNAMIC_TOOL_SCHEMA_VARIANT,
   foldAnnouncedToolNames,
   renderLoadableToolsAnnouncement,
   stripDynamicToolContext,
@@ -61,7 +49,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     @IAgentStateService private readonly states: IAgentStateService,
   ) {
     super();
-    this.states.register(toolSelectPendingLoadedKey);
+    this.states.contributeState(toolSelectPendingLoadedKey);
     this._register(
       toolExecutor.registerUnavailableToolDescriber((name) => this.describeUnavailableTool(name)),
     );
@@ -69,13 +57,13 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
       toolExecutor.registerMissingToolDescriber((name) => this.describeMissingTool(name)),
     );
     this._register(
-      eventBus.subscribe('compaction.completed', () => {
+      eventBus.subscribe(CompactionCompleted, () => {
         this.pendingLoaded.clear();
       }),
     );
     this._register(
-      eventBus.subscribe('context.spliced', (splice) => {
-        if (splice.deleteCount === 0 || this.pendingLoaded.size === 0) return;
+      eventBus.subscribe(ContextSpliced, (splice) => {
+        if (splice.deleteCount === 0 || splice.messages.length > 0) return;
         this.dropPendingLoadedNotLanded();
       }),
     );
@@ -131,33 +119,52 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   load(names: readonly string[]): LoadToolsResult {
     const loadable = new Set(this.loadableToolNames());
     const loaded = this.activeLoadedToolNames();
+    const registryInfos = this.toolRegistry.list();
     const toLoad: string[] = [];
     const alreadyAvailable: string[] = [];
+    const alreadyCallable: string[] = [];
     const unknown: string[] = [];
     for (const name of new Set(names)) {
       if (loaded.has(name)) {
         alreadyAvailable.push(name);
       } else if (loadable.has(name)) {
         toLoad.push(name);
+      } else if (this.isStaticCallable(name, registryInfos)) {
+        alreadyCallable.push(name);
       } else {
         unknown.push(name);
       }
     }
+    const suggestions: Record<string, readonly string[]> = {};
+    const suggestionPool = [...new Set([...loadable, ...loaded])];
+    for (const name of unknown) {
+      const candidates = suggestToolNames(name, suggestionPool);
+      if (candidates.length > 0) suggestions[name] = candidates;
+    }
     if (toLoad.length > 0) {
-      toLoad.sort((a, b) => a.localeCompare(b));
-      const tools = toLoad
-        .map((name) => this.schemaOf(name))
-        .filter((tool): tool is Tool => tool !== undefined);
-      this.context.append({
-        role: 'system',
-        content: [],
-        toolCalls: [],
-        tools,
-        origin: { kind: 'injection', variant: DYNAMIC_TOOL_SCHEMA_VARIANT },
-      });
       for (const name of toLoad) this.pendingLoaded.add(name);
     }
-    return { toLoad, alreadyAvailable, unknown };
+    return {
+      toLoad,
+      alreadyAvailable,
+      alreadyCallable,
+      unknown,
+      suggestions,
+      loadable: [...loadable].filter((name) => !loaded.has(name)),
+    };
+  }
+
+  drainPendingToolSchemas(): readonly Tool[] | undefined {
+    if (!this.enabled() || this.pendingLoaded.size === 0) return undefined;
+    const names = [...this.pendingLoaded].toSorted((a, b) => a.localeCompare(b));
+    const tools: Tool[] = [];
+    for (const name of names) {
+      const tool = this.schemaOf(name);
+      if (tool === undefined) continue;
+      this.pendingLoaded.delete(name);
+      tools.push(tool);
+    }
+    return tools.length === 0 ? undefined : tools;
   }
 
   loadableToolsAnnouncement(): string | undefined {
@@ -247,7 +254,13 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   }
 
   private isDynamicallyLoadable(info: ToolInfo): boolean {
-    return info.source === 'mcp' || info.disclosure === 'deferred';
+    return info.disclosure === 'deferred';
+  }
+
+  private isStaticCallable(name: string, registryInfos: readonly ToolInfo[]): boolean {
+    const info = registryInfos.find((entry) => entry.name === name);
+    if (info === undefined) return false;
+    return !this.isDynamicallyLoadable(info) && this.toolPolicy.isToolActive(name, info.source);
   }
 
   private shapeActiveHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
@@ -322,6 +335,27 @@ function notLoadedToolOutput(name: string): string {
     `Tool "${name}" is available but not loaded. ` +
     `Call select_tools with ["${name}"] first, then call the tool.`
   );
+}
+
+function suggestToolNames(name: string, pool: readonly string[]): string[] {
+  const lower = name.toLowerCase();
+  const caseFix = pool.filter((candidate) => candidate.toLowerCase() === lower);
+  if (caseFix.length > 0) return caseFix.toSorted((a, b) => a.localeCompare(b)).slice(0, 3);
+  const matches = new Set<string>();
+  const stripped = lower.startsWith('mcp__') ? lower.slice('mcp__'.length) : lower;
+  if (stripped.length >= 3) {
+    for (const candidate of pool) {
+      if (candidate.toLowerCase().includes(stripped)) matches.add(candidate);
+    }
+  }
+  if (matches.size === 0) {
+    for (const candidate of pool) {
+      const segments = candidate.split('__');
+      const last = segments.at(-1)!.toLowerCase();
+      if (last.length >= 3 && lower.includes(last)) matches.add(candidate);
+    }
+  }
+  return [...matches].toSorted((a, b) => a.localeCompare(b)).slice(0, 3);
 }
 
 function inactiveLoadedToolOutput(name: string): string {

@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
-use codex_core_skills::injection::HostSkillsCatalogInWorldState;
 use codex_extension_api::ContextualUserFragment;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionWarning;
+use codex_extension_api::SelectedPluginSnapshot;
 use codex_extension_api::WorldStateContributionInput;
 use codex_extension_api::WorldStateSectionContribution;
-use codex_protocol::openai_models::ModelInfo;
 
 use crate::HostSkillsSnapshot;
 use crate::SkillsExtensionConfig;
 use crate::catalog::SkillCatalog;
 use crate::provider::SkillListQuery;
+use crate::provider::attribute_executor_plugins;
 use crate::render::AvailableSkillsRender;
 use crate::render::RenderedSkillCatalogs;
 use crate::render::SkillMetadataBudget;
@@ -22,20 +22,21 @@ use crate::render_observability::record_catalog_render;
 use crate::sources::SkillProviders;
 use crate::state::EmittedCatalogBudgetWarnings;
 use crate::state::ExecutorSkillsStepState;
+use crate::state::HostSkillsCatalogInWorldState;
 use crate::state::HostSkillsStepState;
 use crate::state::SkillsSessionState;
 use crate::state::SkillsThreadState;
 use crate::world_state::CatalogRenderCallback;
+use crate::world_state::cloud_skills_world_state_section;
 use crate::world_state::executor_skills_world_state_section;
 use crate::world_state::host_skills_world_state_section;
-use crate::world_state::orchestrator_skills_world_state_section;
 
 type CatalogWarningEmitter = Arc<dyn Fn(String) + Send + Sync>;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum CatalogKind {
     Executor,
-    Orchestrator,
+    Cloud,
     Host,
 }
 
@@ -43,7 +44,7 @@ impl CatalogKind {
     fn metrics_surface(self) -> CatalogSurface {
         match self {
             Self::Executor => CatalogSurface::ExecutorWorldState,
-            Self::Orchestrator => CatalogSurface::OrchestratorWorldState,
+            Self::Cloud => CatalogSurface::CloudWorldState,
             Self::Host => CatalogSurface::HostWorldState,
         }
     }
@@ -72,7 +73,7 @@ impl CatalogContribution {
 
 pub(crate) struct CatalogContributions {
     executor: CatalogContribution,
-    orchestrator: CatalogContribution,
+    cloud: CatalogContribution,
     host: CatalogContribution,
 }
 
@@ -100,13 +101,9 @@ impl<'a> CatalogContext<'a> {
     ) -> Option<Self> {
         let thread_state = input.thread_store.get::<SkillsThreadState>()?;
         let config = thread_state.config();
-        let model_info = input.thread_store.get::<ModelInfo>();
-        let include_usage = model_info
-            .as_deref()
-            .is_some_and(|model_info| model_info.include_skills_usage_instructions);
-        let context_window = model_info
-            .as_deref()
-            .and_then(ModelInfo::resolved_context_window);
+        let include_usage = input.model_info.include_skills_usage_instructions;
+        let context_window = input.model_info.resolved_context_window();
+        let metadata_budget = skill_metadata_budget(context_window, config.max_context_tokens);
         let emitted_warnings = input
             .turn_store
             .get_or_init(EmittedCatalogBudgetWarnings::default);
@@ -127,15 +124,15 @@ impl<'a> CatalogContext<'a> {
             input,
             thread_state,
             config,
-            metadata_budget: skill_metadata_budget(context_window),
+            metadata_budget,
             include_usage,
             warning_emitter,
         })
     }
 
     pub(crate) async fn discover_catalogs(&self) -> CatalogContributions {
-        let orchestrator_enabled = self.thread_state.orchestrator_skills_enabled()
-            && self.providers.has_orchestrator_provider();
+        let cloud_enabled =
+            self.thread_state.cloud_skill_enabled() && self.providers.has_cloud_provider();
         let query = SkillListQuery {
             turn_id: self.input.turn_id.to_string(),
             executor_roots: self.input.ready_selected_capability_roots.to_vec(),
@@ -143,7 +140,7 @@ impl<'a> CatalogContext<'a> {
             host_snapshot: None,
             include_host_skills: false,
             include_bundled_skills: self.config.bundled_skills_enabled,
-            include_orchestrator_skills: orchestrator_enabled,
+            include_cloud_skills: cloud_enabled,
             mcp_resources: self
                 .input
                 .session_store
@@ -152,24 +149,27 @@ impl<'a> CatalogContext<'a> {
             executor_capability_discovery: self.input.executor_capability_discovery.cloned(),
         };
 
-        let (executor, orchestrator, host) = futures::join!(
-            self.discover_executor_catalog(query.clone()),
-            self.discover_orchestrator_catalog(query),
+        let cloud = self.cloud_catalog_contribution(&query);
+        let (executor, host) = futures::join!(
+            self.discover_executor_catalog(query),
             self.discover_host_catalog(),
         );
 
         CatalogContributions {
             executor,
-            orchestrator,
+            cloud,
             host,
         }
     }
 
     async fn discover_executor_catalog(&self, query: SkillListQuery) -> CatalogContribution {
-        let catalog = self
-            .thread_state
-            .executor_catalog_snapshot(self.providers, query)
+        self.thread_state
+            .refresh_executor_catalog(self.providers, query)
             .await;
+        let mut catalog = self.thread_state.executor_catalog_snapshot();
+        if let Some(selected_plugins) = self.input.turn_store.get::<SelectedPluginSnapshot>() {
+            attribute_executor_plugins(&mut catalog, &selected_plugins);
+        }
         self.input
             .turn_store
             .insert(ExecutorSkillsStepState(catalog.clone()));
@@ -180,12 +180,12 @@ impl<'a> CatalogContext<'a> {
         }
     }
 
-    async fn discover_orchestrator_catalog(&self, query: SkillListQuery) -> CatalogContribution {
-        if !self.providers.has_orchestrator_provider() {
+    fn cloud_catalog_contribution(&self, query: &SkillListQuery) -> CatalogContribution {
+        if !self.providers.has_cloud_provider() {
             return CatalogContribution::unavailable();
         }
 
-        if !query.include_orchestrator_skills {
+        if !query.include_cloud_skills {
             return CatalogContribution {
                 catalog: SkillCatalog::default(),
                 status: CatalogStatus::Disabled,
@@ -193,10 +193,7 @@ impl<'a> CatalogContext<'a> {
         }
 
         CatalogContribution {
-            catalog: self
-                .thread_state
-                .orchestrator_catalog_snapshot(self.providers, query)
-                .await,
+            catalog: self.thread_state.cloud_catalog_snapshot(),
             status: CatalogStatus::Enabled,
         }
     }
@@ -223,7 +220,7 @@ impl<'a> CatalogContext<'a> {
                     host_snapshot: Some(host_snapshot),
                     include_host_skills: true,
                     include_bundled_skills: false,
-                    include_orchestrator_skills: false,
+                    include_cloud_skills: false,
                     mcp_resources: None,
                     executor_capability_discovery: None,
                 })
@@ -249,9 +246,10 @@ impl<'a> CatalogContext<'a> {
         let rendered = if self.config.include_instructions {
             render_combined_available_skills(
                 &catalogs.executor.catalog,
-                &catalogs.orchestrator.catalog,
+                &catalogs.cloud.catalog,
                 &catalogs.host.catalog,
                 self.metadata_budget,
+                self.include_usage,
             )
         } else {
             RenderedSkillCatalogs::default()
@@ -259,11 +257,7 @@ impl<'a> CatalogContext<'a> {
 
         [
             (CatalogKind::Executor, catalogs.executor, rendered.executor),
-            (
-                CatalogKind::Orchestrator,
-                catalogs.orchestrator,
-                rendered.orchestrator,
-            ),
+            (CatalogKind::Cloud, catalogs.cloud, rendered.cloud),
             (CatalogKind::Host, catalogs.host, rendered.host),
         ]
         .map(|(kind, catalog, rendered)| RenderedCatalogContribution {
@@ -314,7 +308,7 @@ impl<'a> CatalogContext<'a> {
             CatalogKind::Executor => {
                 executor_skills_world_state_section(body, include_instructions, on_render)
             }
-            CatalogKind::Orchestrator => orchestrator_skills_world_state_section(
+            CatalogKind::Cloud => cloud_skills_world_state_section(
                 body,
                 include_instructions,
                 status == CatalogStatus::Enabled,
