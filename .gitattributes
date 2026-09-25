@@ -1,0 +1,3 @@
+# Vendored upstream trees (codex/vendor, kimi/vendor) stay byte-identical to
+# upstream, so keep the global nbstripout clean filter off their notebooks.
+*/vendor/**/*.ipynb -filter
