@@ -48,11 +48,12 @@ class CLIBackendModel(object):
     #: adapters that shell into a git workspace set this per instance; the rest keep the None default
     workspace = None
 
-    def __init__(self, api_key: str = None, task: TaskSpec = None, model: str = None):
+    def __init__(self, api_key: str | None = None, task: TaskSpec | None = None,
+                 model: str | None = None):
         self.api_key = api_key
-        self.task: TaskSpec = task
+        self.task: TaskSpec | None = task
         # normalize the generic alias to "let the CLI pick its default"
-        self.model: str = model if model not in (None, *self.generic_model_aliases) else None
+        self.model: str | None = model if model not in (None, *self.generic_model_aliases) else None
 
     # --- payload --------------------------------------------------------------
     @classmethod
@@ -82,7 +83,8 @@ class CLIBackendModel(object):
             parts.append(cls.vision_preamble)
             parts.extend(f"Image {i}: {p}" for i, p in enumerate(image_paths, 1))
         parts.extend(strings)
-        return {"prompt": "\n\n".join(parts), "max_tokens": max_tokens, "workspace": workspace}
+        return {"prompt": "\n\n".join(parts), "max_tokens": max_tokens,
+                "workspace": workspace, "image_paths": image_paths}
 
     # --- the provider call ----------------------------------------------------
     def _call_kwargs(self, payload: dict) -> dict:

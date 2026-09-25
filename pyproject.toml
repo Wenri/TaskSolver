@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tasksolver"
 version = "0.0.1"
-description = "Provider-agnostic VLM query flow: an Agent that dispatches to OpenAI / Anthropic / Gemini / vLLM / Claude Code CLI / local HuggingFace model backends."
+description = "Provider-agnostic VLM query flow with API, Claude Agent SDK, Codex SDK, instrumented CLI, and local HuggingFace backends."
 readme = "README.md"
 requires-python = ">=3.10"
 # Core deps are the ones imported unconditionally (Agent + common/event/keychain)
-# plus the lightweight API SDKs the provider adapters use. Versions are left
-# unpinned so the consuming environment (e.g. a pixi workspace) owns resolution.
+# plus API clients and runtime dependencies for the SDK sources bundled here.
+# The consuming environment owns resolution within these compatibility bounds.
 dependencies = [
     "loguru",
     "pillow",
@@ -21,6 +21,10 @@ dependencies = [
     "pymongo",            # provides the `bson` module (standalone `bson` breaks on Python 3.14)
     "openai",             # gpt4v + vLLM adapters
     "anthropic",          # claude + kimi adapters
+    # Runtime dependencies of the checked-in Claude Agent SDK (claude/vendor/sdk).
+    "anyio>=4", "sniffio>=1", "mcp>=1.23,<3", "jsonschema>=4.20",
+    "typing-extensions>=4; python_version<'3.11'",
+    "pydantic>=2.12", "packaging>=26.2", # official Codex Python SDK bundled from the pinned vendor tree
     "google-generativeai", # gemini adapter
     "frida>=17.15.3,<18", "frida-tools>=14.10.4,<15",   # antigravity/pyagy: instrument the agy binary
     "pygit2",             # wirecap/runtime/workspace.py: scratch git workspace pyagy/pycodex run in
@@ -64,14 +68,22 @@ app = [
 
 # Package roots: tasksolver + the shared `wirecap` (capture/decode/native bridge, reused by
 # all wrappers) at the repo root; the antigravity `pyagy` package under antigravity/; the
-# codex `pycodex` package under codex/; the kimi-code `pykimi` package under kimi/. List all
+# codex `pycodex` package under codex/; the kimi-code `pykimi` package under kimi/;
+# pyclaude plus both official SDK source packages under their vendor roots. List all
 # roots so they ship in the (editable) package instead of relying on the PYTHONPATH activation.
 # The nested shim-runtime subpackages (pyagy.agy_process, pycodex.codex_process,
 # pykimi.kimi_process, wirecap.decode/runtime) are found automatically; the test/experiment
 # scripts live in test_scripts/, not the package.
 [tool.setuptools.packages.find]
-where = [".", "antigravity", "codex", "kimi"]
-include = ["tasksolver*", "wirecap*", "pyagy*", "pycodex*", "pykimi*"]
+where = [".", "antigravity", "codex", "kimi", "claude", "codex/vendor/sdk/python/src", "claude/vendor/sdk/src"]
+include = ["tasksolver*", "wirecap*", "pyagy*", "pycodex*", "pykimi*", "pyclaude*", "openai_codex*", "claude_agent_sdk*"]
+
+[tool.setuptools]
+license-files = ["LICENSE", "codex/vendor/LICENSE", "codex/vendor/NOTICE", "claude/vendor/sdk/LICENSE"]
+
+[tool.setuptools.package-data]
+openai_codex = ["py.typed"]
+claude_agent_sdk = ["py.typed", "_bundled/claude"]
 
 # --- pixi workspace + buildable package -----------------------------------
 # Uses the `pixi-build` preview feature: rather than installing this project as

@@ -4,7 +4,7 @@ General agents class
 
 from .common import *
 from abc import abstractmethod
-from typing import Union, Dict
+from typing import Union, Dict, Final
 from bson import ObjectId
 from .event import *
 from .keychain import KeyChain
@@ -61,10 +61,11 @@ class Agent(object):
                 api_key = api_key["claude"]
             self.visual_interface = ClaudeModel(api_key, task, model=vision_model)
 
-        elif vision_model == "claude-code" or vision_model.startswith("claude-code-"):
+        elif vision_model in ("claude-code", "claude-agent") or vision_model.startswith(("claude-code-", "claude-agent-")):
             from .claude_code import ClaudeCodeModel
 
-            logger.info(f"creating Claude Code CLI-based agent of type: {vision_model}")
+            logger.info(f"creating Claude Agent SDK-based agent of type: {vision_model}")
+            claude_alias: Final = vision_model.replace("claude-agent", "claude-code", 1)
             # Support stable BlenderGym-facing model_ids while still targeting
             # the names accepted by the local Claude Code CLI.
             _CLAUDE_CODE_ALIASES = {
@@ -80,10 +81,10 @@ class Agent(object):
                 "claude-code-opus-4-5": "claude-opus-4-5",
                 "claude-code-opus-4-7": "claude-opus-4-7",
             }
-            if vision_model in _CLAUDE_CODE_ALIASES:
-                model = _CLAUDE_CODE_ALIASES[vision_model]
+            if claude_alias in _CLAUDE_CODE_ALIASES:
+                model = _CLAUDE_CODE_ALIASES[claude_alias]
             else:
-                suffix = vision_model[len("claude-code-"):]
+                suffix = claude_alias[len("claude-code-"):]
                 if suffix.startswith(("sonnet-", "opus-", "haiku-", "fable-")):
                     # e.g. "claude-code-sonnet-4-6" -> "claude-sonnet-4-6"
                     model = "claude-" + suffix
@@ -96,7 +97,11 @@ class Agent(object):
                         "or `claude-code-fable-5`; "
                         f"supported built-in aliases: {supported}."
                     )
-            self.visual_interface = ClaudeCodeModel(None, task, model=model,
+            if isinstance(api_key, KeyChain):
+                api_key = api_key.keys.get("claude")
+            if isinstance(api_key, str) and (os.sep in api_key or api_key.endswith(".txt")):
+                api_key = None
+            self.visual_interface = ClaudeCodeModel(api_key, task, model=model,
                                                     mcp_servers=mcp_servers,
                                                     workspace=workspace)
 
@@ -121,10 +126,12 @@ class Agent(object):
         elif vision_model == "codex" or vision_model.startswith("codex-"):
             from pycodex import CodexModel
 
-            logger.info(f"creating Codex CLI-based agent of type: {vision_model}")
-            # `codex` -> codex default model; `codex-<model>` -> `codex exec -m <model>`
+            logger.info(f"creating Codex SDK-based agent of type: {vision_model}")
+            # `codex` -> SDK default model; `codex-<model>` -> SDK model selection
             # (e.g. `codex-gpt-5-codex`).
-            model = None if vision_model == "codex" else vision_model[len("codex-"):]
+            sdk_transport: Final = vision_model == "codex-sdk" or vision_model.startswith("codex-sdk-")
+            codex_prefix: Final = "codex-sdk" if sdk_transport else "codex"
+            model = None if vision_model == codex_prefix else vision_model[len(codex_prefix) + 1:]
             if model == "":
                 raise ValueError(
                     f"Empty codex model suffix in {vision_model!r}; use `codex` or "
@@ -141,6 +148,7 @@ class Agent(object):
             if not api_key:
                 api_key = os.environ.get("OPENAI_API_KEY") or None
             self.visual_interface = CodexModel(api_key, task, model=model, timeout=1800,
+                                               transport="sdk",
                                                workspace=workspace,
                                                mcp_servers=mcp_servers)
 

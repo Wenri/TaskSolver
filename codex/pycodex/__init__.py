@@ -30,6 +30,10 @@ _LAZY = {
     "CodexResponse": ".client",
     "Usage": ".client",
     "CodexModel": ".model",
+    "ask_sdk": ".sdk",
+    "ask_many_sdk": ".sdk",
+    "SDKSession": ".sdk",
+    "CodexSDKResponse": ".sdk",
     # re-exported so callers can seed a workspace before ask() — pycodex.ask's own
     # docstring tells them to, and pyagy exports it under the same name.
     "ensure_git_workspace": "wirecap.runtime.workspace",

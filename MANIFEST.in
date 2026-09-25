@@ -1,0 +1,3 @@
+include claude/build_cli.py
+include claude/vendor.json
+include claude/README.md

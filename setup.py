@@ -45,8 +45,12 @@ class BinaryDistribution(Distribution):
 
 class BuildPyNative(build_py):
     def run(self):
-        super().run()
         root = os.path.dirname(os.path.abspath(__file__))
+        # Both agent SDKs ship from checked-in source. Claude's closed CLI is
+        # fetched by version/hash into that source package before build_py copies it.
+        subprocess.run([sys.executable, os.path.join(root, "claude", "build_cli.py")],
+                       cwd=root, check=True)
+        super().run()
         self._build_antigravity_shim(root)   # builds wirecap_bridge + antigravity.so
         self._build_codex(root)              # links the bridge from the shim step → must follow it
         self._build_kimi(root)               # independent: kimi/native builds its own bridge copy

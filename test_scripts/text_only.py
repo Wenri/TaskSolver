@@ -101,7 +101,7 @@ if __name__=='__main__':
         "--model",
         choices=["claude", "claude-code", "gpt", "gemini", "qwen", "intern"],
         default="claude-code",
-        help="Model backend to test. `claude-code` uses your local Claude Code Pro login; `claude` uses an Anthropic API key.",
+        help="Model backend to test. `claude-code` uses the Claude Agent SDK with API-key or local CLI authentication; `claude` uses the Messages API.",
     )
     args = parser.parse_args()
 

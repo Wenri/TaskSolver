@@ -13,8 +13,8 @@ regression in the base shows up for whichever backend you can currently authenti
   agy          `agy --print` under a PTY, in a throwaway git workspace. Needs agy logged in
                (~/.gemini/antigravity-cli/).
   codex        `codex exec` under a PTY. Needs the built binary (`pixi install`) + codex auth
-               (OPENAI_API_KEY or `codex login`). This is the ONLY test that covers CodexModel.
-  claude-code  `claude -p` subprocesses. Needs the claude CLI logged in (`claude /login`).
+               (OPENAI_API_KEY or `codex login`). Offline SDK coverage is in test_codex_sdk.py.
+  claude-code  Claude Agent SDK. Uses ANTHROPIC_API_KEY or existing CLI authentication.
 
 Skips cleanly (exit 0, "NOTE: skipping") when the selected backend is unavailable — treat a
 skip as UNVERIFIED, not as a pass.
@@ -58,7 +58,7 @@ def build_model(backend, task, timeout):
                           model=None, timeout=timeout)
     if backend == "claude-code":
         from tasksolver.claude_code import ClaudeCodeModel
-        return ClaudeCodeModel(api_key=None, task=task)
+        return ClaudeCodeModel(api_key=None, task=task, timeout=timeout)
     raise SystemExit(f"unknown backend {backend!r}")
 
 
@@ -116,7 +116,7 @@ def main():
 
 def _had_model_turn(m0):
     """Did the CLI actually complete a model turn? agy/codex expose a wirecap `Usage` (token
-    counts) in their metadata; claude-code passes the raw CLI JSON, which carries its own usage."""
+    counts) in their metadata; claude-code exposes the SDK result usage dictionary."""
     if not isinstance(m0, dict):
         return False
     u = m0.get("usage")

@@ -44,7 +44,7 @@ class CodexResponse:
     n_streamed: int = 0   # codex_turns that arrived over the LIVE queue (fd-inheritance probe; the
     #                       returned `turns` come from the authoritative capture JSONL, not this)
     timed_out: bool = False   # the drain deadline fired before codex exited (close() then reaped it)
-    session_id: str = None    # store-read after the run — never an echo of a requested resume id,
+    session_id: str | None = None    # store-read after the run — never an echo of a requested resume id,
     #                           so a resume that silently forked a new thread is visible here
 
     @property
