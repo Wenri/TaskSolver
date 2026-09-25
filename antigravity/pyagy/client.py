@@ -113,14 +113,16 @@ class AgyResponse:
     def from_objs(cls, objs, transcript, **meta):
         """Build a response from the decoded objects the worker streamed home + the PTY
         transcript. One answer policy: the app-boundary text (longest ``app_response``), else
-        the wire turn (longest ``genai_turn`` text), else the filtered transcript — so ``.text``
-        and ``.source`` always agree. ``**meta`` supplies exit_status/capture_path/workspace/
-        funcmap/conversation_id (``instrumented`` defaults True)."""
+        the wire turn (the primary ``genai_turn`` with text — the most tokens, since the
+        session-title call's streamed thoughts can outrun a short answer), else the filtered
+        transcript — so ``.text`` and ``.source`` always agree. ``**meta`` supplies
+        exit_status/capture_path/workspace/funcmap/conversation_id (``instrumented`` defaults
+        True)."""
         turns = [o for o in objs if o.get("kind") == "genai_turn"]
         app_texts = [o["text"] for o in objs if o.get("kind") == "app_response" and o.get("text")]
-        wire_texts = [o["text"] for o in turns if o.get("text")]
+        wire = primary_turn([o for o in turns if o.get("text")])
         text = (max(app_texts, key=len) if app_texts else
-                max(wire_texts, key=len) if wire_texts else _answer_text(transcript))
+                wire["text"] if wire else _answer_text(transcript))
         meta.setdefault("instrumented", True)
         return cls(text=text, transcript=transcript, turns=turns, app_turns=app_texts, **meta)
 

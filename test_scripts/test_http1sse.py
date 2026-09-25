@@ -203,6 +203,92 @@ def test_correlator_resp_chunk():
           "resp_chunk: [DONE] after finish does not emit a second turn")
 
 
+def _request_bytes(model, request_id):
+    body = json.dumps({**REQUEST_JSON, "model": model, "requestId": request_id}).encode()
+    return (b"POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1\r\n"
+            b"Host: daily-cloudcode-pa.googleapis.com\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+
+
+def _chunk(response_id, model, text=None, finish=None, total=None):
+    cand = {"content": {"parts": [{"text": text}] if text is not None else []}}
+    if finish:
+        cand["finishReason"] = finish
+    response = {"responseId": response_id, "modelVersion": model, "candidates": [cand]}
+    if total is not None:
+        response["usageMetadata"] = {"totalTokenCount": total}
+    return b"data: " + json.dumps({"response": response}).encode()
+
+
+def test_correlator_overlapping_streams():
+    print("[correlator] overlapping responses (agy's title call during a turn) stay apart")
+
+    class FakeRec:
+        def __init__(self):
+            self.events = []
+
+        def event(self, obj):
+            self.events.append(obj)
+
+        def record(self, *a, **k):
+            pass
+
+    rec = FakeRec()
+    corr = capture.BaseCorrelator(rec, h.GenaiTurnBuilder(), reassembler=None)
+    # the answer request, then agy's title request, then their responses interleaved; the
+    # answer ends first while the title call is still streaming its thoughts
+    corr.feed("c2s", 0xA1, _request_bytes("gemini-3.8-flash", "answer"), t=100.0)
+    corr.feed("c2s", 0xB2, _request_bytes("gemini-3.5-flash-lite", "title"), t=100.1)
+    for i, ln in enumerate([
+            _chunk("T", "gemini-3.5-flash-lite", text="Thinking about a title..."),
+            _chunk("A", "gemini-3.8-flash", text="Score: "),
+            _chunk("T", "gemini-3.5-flash-lite", text=" still thinking"),
+            _chunk("A", "gemini-3.8-flash", text="0.8", finish="STOP", total=900),
+            _chunk("T", "gemini-3.5-flash-lite", text="Keypoint Judge", finish="STOP", total=60)]):
+        corr.feed_chunk(ln, t=100.5 + i * 0.01)
+    turns = [e for e in rec.events if e.get("kind") == "genai_turn"]
+    check(len(turns) == 2, "overlap: one genai_turn per responseId")
+    by_model = {t["model"]: t for t in turns}
+    answer, title = by_model.get("gemini-3.8-flash"), by_model.get("gemini-3.5-flash-lite")
+    check(answer is not None and answer["text"] == "Score: 0.8",
+          "overlap: the answer's text holds only the answer's parts")
+    check(answer is not None and answer.get("request", {}).get("requestId") == "answer",
+          "overlap: the answer pairs with its own request, though the title request is newer")
+    check(title is not None and title.get("request", {}).get("requestId") == "title",
+          "overlap: the title call pairs with the title request")
+
+    # a response cut off before its terminal event is emitted by flush() (agy's exit hook)
+    rec2 = FakeRec()
+    corr2 = capture.BaseCorrelator(rec2, h.GenaiTurnBuilder(), reassembler=None)
+    corr2.feed("c2s", 0xC3, _request_bytes("gemini-3.5-flash-lite", "title"), t=200.0)
+    corr2.feed_chunk(_chunk("T", "gemini-3.5-flash-lite", text="partial"), t=200.5)
+    check(not [e for e in rec2.events if e.get("kind") == "genai_turn"],
+          "flush: nothing is emitted before the terminal event")
+    corr2.flush()
+    cut = [e for e in rec2.events if e.get("kind") == "genai_turn"]
+    check(len(cut) == 1 and cut[0]["text"] == "partial", "flush: the cut-off response is emitted")
+
+
+def test_thought_parts_are_reasoning():
+    print("[response] thought parts go to reasoning, not the answer")
+    events = [{"response": {"candidates": [{"content": {"parts": [
+        {"text": "**Assessing** the pair", "thought": True}, {"text": "Score: 0.8"}]}}]}}]
+    turn = h.build_turn_from_events(events, 1.0, None, None)
+    check(turn["text"] == "Score: 0.8", "thoughts: the answer holds only answer parts")
+    check(turn["reasoning"] == "**Assessing** the pair", "thoughts: reasoning holds the thought parts")
+
+
+def test_client_answer_is_primary_turn():
+    print("[client] AgyResponse.text is the primary turn, not the longest text")
+    from pyagy.client import AgyResponse
+    objs = [{"kind": "genai_turn", "text": "A long streamed title-call thought " * 5,
+             "usage": {"total_tokens": 60}},
+            {"kind": "genai_turn", "text": "Score: 0.8", "usage": {"total_tokens": 900}}]
+    r = AgyResponse.from_objs(objs, "", exit_status=0, capture_path=None, workspace="/tmp")
+    check(r.text == "Score: 0.8" and r.source == "wire", "client: answer from the primary turn")
+
+
 def test_import_purity():
     print("[purity] agy_process imports under python3 -S with no tasksolver")
     code = ("import sys; sys.path[:0] = [%r, %r]; import pyagy.agy_process; "
@@ -222,6 +308,9 @@ def main():
     test_classify()
     test_correlator_cross_stream()
     test_correlator_resp_chunk()
+    test_correlator_overlapping_streams()
+    test_thought_parts_are_reasoning()
+    test_client_answer_is_primary_turn()
     test_import_purity()
     print()
     if _failures:

@@ -85,6 +85,17 @@ class TurnBuilder:
         """Have the accumulated stream events reached the end of a turn?"""
         raise NotImplementedError
 
+    def stream_key(self, event):
+        """Which in-flight response ``event`` belongs to. ``None`` (the default) suits a CLI that
+        streams one response at a time; a builder whose CLI overlaps responses returns an id
+        carried by every event, so each response accumulates and ends on its own."""
+        return None
+
+    def request_matches(self, req_repr, events):
+        """Could the pending request ``req_repr`` have produced ``events``? ``None`` = no opinion;
+        pairing then goes by time alone, as it does for every candidate without a verdict."""
+        return None
+
     def build_from_events(self, events, resp_t, resp_stream, req):
         """Assemble the turn dict from accumulated stream events + an optional paired request
         ``(req_t, req_stream, req_repr)`` (``None`` if unpaired)."""

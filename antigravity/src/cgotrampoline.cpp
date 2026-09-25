@@ -287,19 +287,27 @@ static void cgt_response_emit(agy_block *b)
     wire_emit(&ev);
 }
 
-/* Emit an entry-arg []byte (ptr/len already sitting in arg registers) as a capture
- * event — the trampoline analog of the gum on_enter []byte path. We can't deref a Go
- * pointer directly on the g0 stack, so safe-read a bounded copy (truncates at
- * CGT_RESP_CAP; for chunked response bodies the reassembler stitches successive fires). */
-static void cgt_bytes_emit(const char *kind, uint64_t id, uint64_t ptr, uint64_t len)
+/* Emit an entry-arg []byte (ptr/len already sitting in arg registers) as capture events
+ * — the trampoline analog of the gum on_enter []byte path. We can't deref a Go pointer
+ * directly on the g0 stack, so safe-read it through a bounded stack buffer. A byte STREAM
+ * (``stream=true``: TLS egress, the http2 pipe) goes out as one event per CGT_RESP_CAP piece,
+ * which the HTTP/1.1 and h2 decoders stitch back together; only the first piece used to be
+ * emitted, so a request over 16 KB (every agent turn carrying tool declarations or images)
+ * never decoded and its turn stayed unpaired. A self-contained record (one SSE line) keeps
+ * the old bounded copy: a piece of it would not parse either. */
+static void cgt_bytes_emit(const char *kind, uint64_t id, uint64_t ptr, uint64_t len,
+                           bool stream)
 {
     if (ptr < 0x10000 || len == 0 || len > (16u << 20)) return;
     char buf[CGT_RESP_CAP];
-    size_t n = len < CGT_RESP_CAP ? (size_t)len : CGT_RESP_CAP;
-    if (agy_safe_read(ptr, buf, n) != (long)n) return;
-    wire_event_t ev = { .kind = kind, .stream_id = id,
-                       .data = (const uint8_t *)buf, .len = n, .mode = WIRE_ASYNC };
-    wire_emit(&ev);
+    const uint64_t end = stream ? len : (len < CGT_RESP_CAP ? len : CGT_RESP_CAP);
+    for (uint64_t off = 0; off < end; off += CGT_RESP_CAP) {
+        size_t n = end - off < CGT_RESP_CAP ? (size_t)(end - off) : CGT_RESP_CAP;
+        if (agy_safe_read(ptr + off, buf, n) != (long)n) return;
+        wire_event_t ev = { .kind = kind, .stream_id = id,
+                           .data = (const uint8_t *)buf, .len = n, .mode = WIRE_ASYNC };
+        wire_emit(&ev);
+    }
 }
 
 /* The C hook — runs on the g0/system stack during cgocall. MUST stay light and
@@ -350,13 +358,13 @@ static void agy_cgo_hook(agy_block *b)
      * These emit their own full event and return — no generic fire event below. */
     if (kind == "resp") {
         /* http2 (*pipe).Write(p []byte): receiver=rax, p.ptr=rbx, p.len=rcx */
-        cgt_bytes_emit("resp", b->regs.rax, b->regs.rbx, b->regs.rcx);
+        cgt_bytes_emit("resp", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
         return;
     }
     if (kind == "tls_write") {
         /* crypto/tls.(*Conn).Write(c=rax, b.ptr=rbx, b.len=rcx): the model REQUEST (egress).
          * Entry-arg read on the trampoline — the reliable replacement for the gum on_enter path. */
-        cgt_bytes_emit("tls_write", b->regs.rax, b->regs.rbx, b->regs.rcx);
+        cgt_bytes_emit("tls_write", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
         return;
     }
     if (kind == "file_open") {
@@ -395,7 +403,7 @@ static void agy_cgo_hook(agy_block *b)
         /* codeassistclient.toStreamResponseChunk(line string): line.ptr=rax, line.len=rbx — one
          * raw SSE response line ("data: {\"response\": {...}}"), the wire RESPONSE. Entry-arg read
          * on the trampoline — the reliable replacement for the retired TLS_DECRYPT leave hook. */
-        cgt_bytes_emit("resp_chunk", b->regs.rax, b->regs.rax, b->regs.rbx);
+        cgt_bytes_emit("resp_chunk", b->regs.rax, b->regs.rax, b->regs.rbx, false);
         return;
     }
     if (kind == "readlink_filter") {

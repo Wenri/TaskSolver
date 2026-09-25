@@ -26,13 +26,16 @@ def _candidates(event):
     return r.get("candidates", []) or []
 
 
-def assemble_text(events):
-    """Concatenate ``candidates[].content.parts[].text`` across streamed events."""
+def assemble_text(events, thoughts=False):
+    """Concatenate ``candidates[].content.parts[].text`` across streamed events: the answer
+    parts, or with ``thoughts=True`` the reasoning parts (``"thought": true``). Thought parts
+    used to be joined into the answer, so a turn that reasoned before answering returned its
+    reasoning as the reply."""
     out = []
     for e in events:
         for cand in _candidates(e):
             for part in (cand.get("content", {}) or {}).get("parts", []) or []:
-                if "text" in part:
+                if "text" in part and bool(part.get("thought")) == thoughts:
                     out.append(part["text"])
     return "".join(out)
 
@@ -121,6 +124,7 @@ def build_turn_from_events(events, resp_t, resp_stream, req):
         "t": resp_t,
         "resp_stream": resp_stream,
         "text": assemble_text(events),
+        "reasoning": assemble_text(events, thoughts=True),
         "model": model_version(events),   # served model id, straight from the response
         "usage": extract_usage(events),
         "finish_reason": finish_reason(events),
@@ -155,6 +159,24 @@ class GenaiTurnBuilder(TurnBuilder):
 
     def is_terminal(self, events):
         return finish_reason(events) is not None
+
+    def stream_key(self, event):
+        # agy streams its session-title call alongside the answer turn; every event of one
+        # streamGenerateContent response carries that response's responseId
+        return event.get("response", event).get("responseId")
+
+    def request_matches(self, req_repr, events):
+        """A request produced these events iff its model names the served ``modelVersion``
+        (``models/gemini-3-pro`` → ``gemini-3-pro``; a tier suffix such as ``-low`` may differ)."""
+        served = model_version(events)
+        try:
+            requested = json.loads(req_repr.body).get("model")
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not served or not isinstance(requested, str) or not requested:
+            return None
+        requested = requested.removeprefix("models/")
+        return served.startswith(requested) or requested.startswith(served)
 
     def build_from_events(self, events, resp_t, resp_stream, req):
         return build_turn_from_events(events, resp_t, resp_stream, req)

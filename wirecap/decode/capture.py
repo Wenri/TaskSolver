@@ -21,7 +21,11 @@ paired with the pending request.
 
 Request↔response pairing is by **time** (nearest preceding request within a small window,
 preferring same host) — captures often key the two directions differently, so stream id
-can't pair them. All provider-specific shaping is delegated to a ``TurnBuilder``.
+can't pair them; a builder that can tell (``TurnBuilder.request_matches``) narrows the
+candidates first. Responses that overlap in time stay apart when the builder names their stream
+(``TurnBuilder.stream_key``): agy streams its session-title call alongside the answer turn, and
+one shared accumulator used to merge the two into a single turn paired with the title request.
+All provider-specific shaping is delegated to a ``TurnBuilder``.
 """
 from . import http1sse
 
@@ -35,8 +39,8 @@ class BaseCorrelator:
         self._pre = {}           # (dir, stream) -> bytearray (pre-classification buffer)
         self._dec = {}           # (dir, stream) -> StreamDecoder (http1 only)
         self._pending = []       # recent requests: [(t, host, stream_id, req_repr)]
-        self._acc = []           # stream events accumulated for the in-flight response
-        self._acc_t = None       # timestamp of the first accumulated event
+        self._acc = {}           # stream key -> events accumulated for an in-flight response
+        self._acc_t = {}         # stream key -> timestamp of its first accumulated event
 
     # --- raw-bytes path (wire capture) ---------------------------------------
     def feed(self, direction, stream_id, data, t):
@@ -70,10 +74,7 @@ class BaseCorrelator:
             dec = self._dec[(direction, stream_id)] = http1sse.StreamDecoder()
         for msg in dec.feed(data):
             if msg.is_request and self._builder.is_request(msg):
-                # A new request means the previous response is over: flush it if it never hit
-                # a terminal event (aborted stream), so its events can't bleed into this turn.
-                if self._acc:
-                    self._flush_events()
+                self._flush_unkeyed()
                 self._remember(t, msg.headers.get("host"), stream_id, msg)
             elif not msg.is_request and msg.is_event_stream:
                 self._emit_message(stream_id, t, msg)
@@ -81,9 +82,15 @@ class BaseCorrelator:
     # --- pre-parsed path (patched-CLI capture) -------------------------------
     def feed_request(self, req_repr, t, host=None, stream_id=None):
         """Track a pre-parsed request (e.g. a serialized request JSON) for pairing."""
-        if self._acc:
-            self._flush_events()
+        self._flush_unkeyed()
         self._remember(t, host, stream_id, req_repr)
+
+    def _flush_unkeyed(self):
+        """A new request means an unkeyed response is over: flush it if it never hit a terminal
+        event (aborted stream), so its events can't bleed into the next turn. Keyed responses
+        cannot bleed and may still be streaming, so they wait for their own terminal event."""
+        if self._acc.get(None):
+            self._flush_events(None)
 
     def feed_chunk(self, data, t):
         """Accumulate one raw response chunk: parse it with the builder, then feed the events.
@@ -94,26 +101,38 @@ class BaseCorrelator:
         self.feed_events(self._builder.parse_events(data), t)
 
     def feed_events(self, events, t):
-        """Accumulate already-parsed stream events; emit the turn at the terminal event."""
+        """Accumulate already-parsed stream events per response (``TurnBuilder.stream_key``);
+        emit a response's turn at its terminal event."""
         if not events:
             return
-        if not self._acc:
-            self._acc_t = t
-        self._acc.extend(events)
-        if self._builder.is_terminal(self._acc):
-            self._flush_events()
+        groups = {}
+        for event in events:
+            groups.setdefault(self._builder.stream_key(event), []).append(event)
+        for key, group in groups.items():
+            acc = self._acc.setdefault(key, [])
+            if not acc:
+                self._acc_t[key] = t
+            acc.extend(group)
+            if self._builder.is_terminal(acc):
+                self._flush_events(key)
+
+    def flush(self):
+        """Emit every response still accumulating (a capture that ended mid-stream)."""
+        for key in list(self._acc):
+            if self._acc.get(key):
+                self._flush_events(key)
 
     # --- turn emission --------------------------------------------------------
-    def _flush_events(self):
-        req = self._match(self._acc_t, None)
+    def _flush_events(self, key=None):
+        events = self._acc.pop(key, [])
+        t = self._acc_t.pop(key, None)
+        req = self._match(t, None, events)
         turn = self._builder.build_from_events(
             # resp_stream is None on this path: the accumulated-event route has no connection id
             # (resp_chunk's stream_id is a Go string pointer, not a conn — see agy_process).
-            self._acc, self._acc_t, None,
+            events, t, None,
             (req[0], req[2], req[3]) if req else None,
         )
-        self._acc = []
-        self._acc_t = None
         self.rec.event(turn)
 
     def _emit_message(self, resp_stream, resp_t, resp_msg):
@@ -127,10 +146,20 @@ class BaseCorrelator:
         if len(self._pending) > 32:                  # keep only the recent tail
             self._pending = self._pending[-32:]
 
-    def _match(self, resp_t, resp_host):
-        """Nearest preceding request within a small time window; prefer same host."""
+    def _match(self, resp_t, resp_host, events=None):
+        """Nearest preceding request within a small time window; prefer same host. Given the
+        response ``events``, the builder's ``request_matches`` narrows the candidates first: to
+        the requests it accepts if any, else to those it has no verdict on; if it rejects every
+        one, time alone decides."""
+        candidates = self._pending
+        if events:
+            verdicts = [self._builder.request_matches(entry[3], events) for entry in candidates]
+            for keep in (True, None):
+                if keep in verdicts:
+                    candidates = [e for e, v in zip(candidates, verdicts) if v is keep]
+                    break
         best = None
-        for entry in self._pending:
+        for entry in candidates:
             qt, host, sid, req = entry
             if qt > resp_t + 1.0:
                 continue

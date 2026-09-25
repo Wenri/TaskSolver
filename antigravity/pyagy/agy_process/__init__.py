@@ -128,6 +128,10 @@ def on_exit(stream_id, data):
     # os.Exit(code) fired — the clean end-of-capture marker. The exit code rode stream_id from the
     # C hook, which SYNC-emits so this record is written (line-buffered → flushed) BEFORE agy's
     # exit_group syscall. A capture that ends without this marker was truncated (crash/kill).
+    # Responses still streaming (e.g. a session-title call agy never waited for) are emitted
+    # first: they accumulate per responseId now, so no later request flushes them.
+    if _corr:
+        _corr.flush()
     _rec.event({"kind": "exit", "code": int(stream_id)})
     return None
 
