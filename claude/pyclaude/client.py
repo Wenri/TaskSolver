@@ -101,10 +101,23 @@ def _tool_names(value: str | list[str] | tuple[str, ...] | None):
     return list(value) if value is not None else None
 
 
+#: Variables a running Claude Code session exports to its tool subprocesses. An SDK child is
+#: a separate session, but the SDK passes the parent environment through (dropping only
+#: CLAUDECODE), so a child launched from inside Claude Code would join the parent's session id,
+#: messaging socket and effort. ``ClaudeAgentOptions.env`` can override but not unset a
+#: variable, so they are blanked; the CLI treats an empty value as unset.
+PARENT_SESSION_ENV: Final = (
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_EFFORT",
+)
+
+
 def _options(sdk, *, model, workspace, api_key, extra_env, mcp_servers,
              session_id, tools, allowed_tools, permission_mode, sdk_options):
     options: Final = dict(sdk_options or {})
-    env: Final = dict(options.get("env") or {})
+    env: Final = {name: "" for name in PARENT_SESSION_ENV if os.environ.get(name)}
+    env.update(options.get("env") or {})
     env.update(extra_env or {})
     if api_key is not None:
         env["ANTHROPIC_API_KEY"] = api_key

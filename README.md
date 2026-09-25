@@ -121,6 +121,10 @@ print(parsed)
 
 To dispatch by model-id instead of importing an adapter directly, use `tasksolver.agent.Agent(api_key, task, vision_model="claude-code-sonnet-4-6")` and call `agent.visual_interface.run_once(question)`. Runnable text-only and vision examples live in [`test_scripts/`](test_scripts/).
 
+### Chat mode
+
+`Agent(api_key, task, vision_model=..., chat=True)` runs the Claude, Codex and agy backends as plain chat calls, for example to use a subscription login as a judge: no MCP servers, skills, memory or project instructions, and thinking off (Claude) or lowest (Codex `effort="none"`, agy `--effort low`). Claude and Codex receive the Question's images inline and get no tools; agy cannot take inline images, so it gets the PNG files and only its `view_file` tool. A reply that uses any other tool, or opens a file it was not given, raises `tasksolver.cli_backend.ChatModeViolation`. `backend_options={"effort": ..., "system_prompt": ..., "timeout": ...}` passes backend settings through `Agent`. kimi-code has no chat mode. Details: the [Claude](claude/README.md#chat-mode), [Codex](codex/README.md#chat-mode) and [agy](antigravity/README.md#chat-mode-agymodelchattrue) READMEs; offline tests in `test_scripts/test_chat_mode.py`.
+
 ## Agent SDKs
 
 The existing `tasksolver.claude_code.ClaudeCodeModel` now uses the official

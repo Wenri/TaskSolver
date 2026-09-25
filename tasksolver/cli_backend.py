@@ -22,17 +22,36 @@ and `no_output_hint`) OR override `ask`:
 The HTTP/SDK adapters (gpt4v, claude, gemini, vllm, kimi, and the local HF ones) are deliberately
 NOT in this hierarchy — they share no subprocess/workspace machinery and stay duck-typed.
 
+**Chat mode** (``chat=True`` on the backends that support it: Claude, Codex over the SDK, and
+agy) makes an agent runtime behave like a plain chat-completion call: no MCP servers, skills,
+project instructions or memory, and thinking off or at its lowest setting. Claude and Codex take
+the Question as ordered inline text/image content and get no tools at all; agy cannot take inline
+images, so it gets the image files plus one tool to open them (``view_file``). A reply that used
+any other tool, or opened a file it was not given, raises :class:`ChatModeViolation`.
+
 This module pulls `tasksolver.common` and loguru, so — exactly like the `model.py` files that use
 it — it must only ever be imported from a provider's `model.py`, never from a package `__init__`, a
 `client.py`, or a `*_process` shim module (those are loaded by the CLI's embedded interpreter,
 which cannot import tasksolver; four `python3 -S` probes enforce it).
 """
+import os
 from typing import List, Tuple
 
 from loguru import logger
 
 from .common import ParsedAnswer, Question, TaskSpec, attach_response_metadata
 from .exceptions import GPTMaxTriesExceededException, GPTOutputParseException
+
+#: workspace subdirectory for the image files handed to file-reading agents
+WORKSPACE_IMAGE_DIR = ".tasksolver-images"
+
+
+class ChatModeViolation(RuntimeError):
+    """A chat-mode turn used a tool (or otherwise acted as an agent); ``response`` keeps it."""
+
+    def __init__(self, message: str, response=None):
+        super().__init__(message)
+        self.response = response
 
 
 class CLIBackendModel(object):
@@ -47,6 +66,8 @@ class CLIBackendModel(object):
     _client_ask_many = None
     #: adapters that shell into a git workspace set this per instance; the rest keep the None default
     workspace = None
+    #: chat mode (see the module docstring); only backends that implement it set it True
+    chat: bool = False
 
     def __init__(self, api_key: str | None = None, task: TaskSpec | None = None,
                  model: str | None = None):
@@ -58,15 +79,33 @@ class CLIBackendModel(object):
     # --- payload --------------------------------------------------------------
     @classmethod
     def prepare_payload(cls, question: Question, max_tokens=1000, verbose: bool = False,
-                        prepend=None, workspace: str = None, **kwargs) -> dict:
-        """Flatten a Question into ``{prompt, max_tokens, workspace}``. Image elements are saved to
-        local files and announced with ``cls.vision_preamble`` (a CLI reads them off disk).
+                        prepend=None, workspace: str = None, inline: bool = False,
+                        **kwargs) -> dict:
+        """Flatten a Question into ``{prompt, max_tokens, workspace, image_paths}``. Image
+        elements are saved as PNG files (inside ``workspace`` when given, so a sandboxed agent
+        can open them) and announced by absolute path after ``cls.vision_preamble``.
+
+        ``inline=True`` instead keeps the Question's order as inline ``content`` parts —
+        ``{"type": "text", "text"}`` / ``{"type": "image", "url": <data URL>}`` — and writes no
+        files; ``prompt`` is then just the joined text, for logs.
 
         A CLASSMETHOD, not a staticmethod, so the preamble and the error message follow the
         subclass — still callable both as ``Model.prepare_payload(q)`` and ``self.prepare_payload(q)``.
         """
+        if inline:
+            content = []
+            for dic in question.get_json():
+                if dic["type"] == "text":
+                    content.append({"type": "text", "text": dic["text"]})
+                elif dic["type"] == "image_url":
+                    content.append({"type": "image", "url": dic["image_url"]["url"]})
+            return {"prompt": "\n\n".join(p["text"] for p in content if p["type"] == "text"),
+                    "content": content, "max_tokens": max_tokens, "workspace": workspace,
+                    "image_paths": []}
+
+        save_dir = os.path.join(workspace, WORKSPACE_IMAGE_DIR) if workspace else None
         strings, image_paths = [], []
-        for dic in question.get_json(save_local=True):
+        for dic in question.get_json(save_local=True, save_dir=save_dir):
             if dic["type"] == "text":
                 strings.append(dic["text"])
             elif dic["type"] == "image_url":
@@ -75,8 +114,8 @@ class CLIBackendModel(object):
                     image = dic.get("image")
                     if image is None:
                         raise ValueError(f"{cls.__name__} needs local image files for vision inputs.")
-                    local_path = Question.get_pil_image_content_savecopy(image)["local_path"]
-                image_paths.append(local_path)
+                    local_path = Question.get_pil_image_content_savecopy(image, save_dir)["local_path"]
+                image_paths.append(os.path.abspath(local_path))
 
         parts = []
         if image_paths:
@@ -102,8 +141,28 @@ class CLIBackendModel(object):
     def _finish(self, r) -> dict:
         """Validate one client response object and shape the per-choice result dict."""
         self._check_output(r)
+        if self.chat:
+            self._check_chat(r)
         return {"result": r.text, "transcript": r.transcript, "exit_status": r.exit_status,
                 "workspace": r.workspace, "model": r.model, "usage": r.usage}
+
+    def _inline_images(self) -> bool:
+        """Does this model send images inline (``prepare_payload(inline=True)``)? Chat mode does,
+        on the backends whose runtime accepts inline images."""
+        return self.chat
+
+    def _chat_violations(self, r) -> list:
+        """Names of the tools (or other agent actions) a chat-mode response ``r`` used.
+        Backends that support chat mode override this; the base finds none."""
+        return []
+
+    def _check_chat(self, r) -> None:
+        """Raise :class:`ChatModeViolation` when a chat-mode turn acted as an agent."""
+        used = self._chat_violations(r)
+        if used:
+            raise ChatModeViolation(
+                f"{self.command_label or self.backend_label} used {', '.join(map(str, used))} "
+                "in chat mode", response=r)
 
     def ask(self, payload: dict, n_choices: int = 1) -> Tuple[List[dict], List[dict]]:
         """Run ``n_choices`` samples through the provider client → ``(messages, metadata)``.
@@ -134,7 +193,8 @@ class CLIBackendModel(object):
     def rough_guess(self, question: Question, max_tokens=1000, max_tries=1,
                     query_id: int = 0, verbose=False, **kwargs):
         p = self.prepare_payload(question, max_tokens=max_tokens, verbose=verbose,
-                                 prepend=None, workspace=self.workspace)
+                                 prepend=None, workspace=self.workspace,
+                                 inline=self._inline_images())
         reattempt = 0
         while True:
             response, meta_data = self.ask(p)
@@ -158,7 +218,8 @@ class CLIBackendModel(object):
     def many_rough_guesses(self, num_threads: int, question: Question, max_tokens=1000,
                            verbose=False, max_tries=1) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
         p = self.prepare_payload(question, max_tokens=max_tokens, verbose=verbose,
-                                 prepend=None, workspace=self.workspace)
+                                 prepend=None, workspace=self.workspace,
+                                 inline=self._inline_images())
         reattempt = 0
         while True:
             response, meta_data = self.ask(p, n_choices=num_threads)

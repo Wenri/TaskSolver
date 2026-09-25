@@ -23,15 +23,20 @@ def vendored(pkg_dir, pkg_name, in_pkg_rel, sibling_rel):
     """Resolve ``in_pkg_rel`` for the package rooted at ``pkg_dir`` (import name ``pkg_name``).
 
     Returns the first of the three candidates that exists, else the sibling path — so the caller
-    gets a real path to report in the "missing artifact" error rather than None."""
+    gets a real path to report in the "missing artifact" error rather than None.
+
+    A found path is returned symlink-resolved: when ``pkg_dir`` is reached through a symlink,
+    ``<pkg_dir>/../<sibling>`` exists only as the kernel walks it (``..`` of the link TARGET),
+    and callers that ``os.path.abspath`` the result would collapse the ``..`` lexically onto the
+    link's own parent and miss the artifact."""
     in_pkg = os.path.join(pkg_dir, in_pkg_rel)
     if os.path.exists(in_pkg):
-        return in_pkg
+        return os.path.realpath(in_pkg)
     sibling = os.path.join(pkg_dir, sibling_rel)
     if os.path.exists(sibling):
-        return sibling
+        return os.path.realpath(sibling)
     for entry in sys.path:
         candidate = os.path.join(entry, pkg_name, in_pkg_rel)
         if os.path.exists(candidate):
-            return candidate
+            return os.path.realpath(candidate)
     return sibling

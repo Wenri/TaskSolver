@@ -125,6 +125,20 @@ For advanced controls, `session.client` and `session.thread` expose the official
 These direct SDK calls do **not** inherit the wrapper's per-call timeout. Keep them inside
 the session context manager so the runtime and its descendants are closed reliably.
 
+### Chat mode
+
+`CodexModel(chat=True)` (SDK transport only; or `Agent(..., chat=True)`) runs each call as a
+plain Responses turn: an ephemeral thread whose base instructions are empty (or
+`system_prompt=`), `CHAT_CONFIG` overrides (tool features, web search, request-user-input,
+permission/apps/collaboration/environment instructions, AGENTS.md, skills, memories and
+reasoning summaries all off), `CODEX_EXEC_SERVER_URL=none` (no execution environment — the one
+switch that removes shell, `apply_patch` and `view_image`, which the model catalog enables
+regardless of features), every MCP server of `$CODEX_HOME/config.toml` disabled, images as
+`ImageInput` data URLs in the Question's order, reasoning `effort="none"` unless set, and
+capture off (`sdk_options={"capture": True}` keeps it). The captured request then has
+`tools: []`, the given instructions and a single user message. A turn whose items include a
+command, file change, tool or web call raises `tasksolver.cli_backend.ChatModeViolation`.
+
 ## Exec and PTY compatibility transport
 > Multi-turn `pycodex.Session` rides the shared `wirecap.runtime.session`
 > base (`ask_turn` + `WireSession`) — see `wirecap/runtime/session.py` and

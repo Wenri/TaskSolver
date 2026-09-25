@@ -816,6 +816,40 @@ parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 test_scripts/example_agy_backend.py`. For multi-turn scripting use
 `pyagy.Session` (the first-class multi-turn object).
 
+Images reach agy as PNG files (inside the workspace when one is set) named by
+absolute path; the prompt tells the agent to open them with `view_file`, agy's
+file tool (it has no `Read` tool).
+
+### Chat mode (`AgyModel(chat=True)`)
+
+For using agy like a chat-completion call (e.g. as a judge on a subscription
+login), `chat=True` writes a workspace agent,
+`<workspace>/.agents/agents/tasksolver-chat/agent.md`, and runs every call with
+`--agent tasksolver-chat --effort low`:
+
+```yaml
+tools:
+  - view_file                  # the only tool: opens the image files
+excludeDefaultComponents: true # no default prompt sections or built-in tools
+inheritCustomizations: false   # none of the user's skills, rules, plugins, subagents, MCP servers
+mainAgent: true
+subagent: false
+model: inherit                 # the --model flag decides
+commandExecutionPolicy: off
+```
+
+With agy 1.2.11 the answer turns then declare `view_file` and `manage_task` (a
+harness tool with nothing to manage) and carry a ~220-character system prompt
+instead of agy's ~8.7k-token default; agy 1.2.10 and earlier ignore workspace
+agents under `--print`. A call that uses any other tool, or opens a file it was
+not handed, raises `ChatModeViolation`. The stream-json `init` event lists all
+57 registered tools whatever the agent — it is not what the model is offered.
+Chat mode also runs with `trust=False` (plain agy does not need the workspace in
+the global `trustedWorkspaces`; `trust=True` adds every scratch workspace to it)
+and without `SSH_CLIENT`/`SSH_CONNECTION`/`SSH_TTY`, which make agy skip its
+keyring login. Each call still makes agy's own session-title request, a small
+tool-less side call on a flash-lite model.
+
 **pixi/WSL1 note:** `pixi install` builds tasksolver as a conda package; on this
 WSL1 host the setuptools link step needs the `wsl1-exec.so` shim (already in the
 shell's `LD_PRELOAD`), otherwise it fails copying `_distutils_hack/__init__.py`.

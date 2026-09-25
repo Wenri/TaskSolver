@@ -16,6 +16,29 @@ from typing import Union, Dict
 
 io_semaphore = threading.Semaphore(1)
 
+#: Where ``Question.get_pil_image_content_savecopy`` writes images when the caller names no
+#: directory. It used to be the CWD-relative ``temporary/``: that polluted the caller's working
+#: tree, and an agent CLI running in a different workspace could not resolve the relative path.
+IMAGE_DIR_ENV = "TASKSOLVER_IMAGE_DIR"
+
+
+def image_media_type(data: bytes, default: str = "image/jpeg") -> str:
+    """The media type of encoded image bytes, from their signature (``default`` if unknown)."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return default
+
+
+def default_image_dir() -> str:
+    import tempfile
+    return os.environ.get(IMAGE_DIR_ENV) or os.path.join(tempfile.gettempdir(), "tasksolver-images")
+
 
 def _stringify_reasoning_value(value):
     if value is None:
@@ -107,8 +130,8 @@ class ParsedAnswer(object):
         pass
 
     @abstractmethod
-    def __str__(self):
-        pass
+    def __str__(self) -> str:
+        raise NotImplementedError
 
 
 class Question(object):
@@ -162,10 +185,11 @@ class Question(object):
             img_byte_array = io.BytesIO()
             image.save(img_byte_array, format='PNG')  # Save the PIL image to the in-memory stream as PNG
             img_byte_array.seek(0) 
-            base64enc_image = base64.b64encode(img_byte_array.read()).decode('utf-8') 
+            base64enc_image = base64.b64encode(img_byte_array.read()).decode('utf-8')
+            # the bytes are PNG (above); the data URL used to claim image/jpeg
             pack = {"type": "image_url",
                 "image_url": {
-                    "url": f"data:image/jpeg;base64,{base64enc_image}"
+                    "url": f"data:image/png;base64,{base64enc_image}"
                     },
                 "image": image
                 }
@@ -173,30 +197,29 @@ class Question(object):
 
     @staticmethod
     def get_local_image_content(image_path:Union[Path, str]):
-        base64enc_image = Question.encode_image(image_path)
-        return {"type": "image_url", 
+        with open(str(image_path), "rb") as image_file:
+            data = image_file.read()
+        base64enc_image = base64.b64encode(data).decode('utf-8')
+        image = Image.open(io.BytesIO(data))
+        image.load()   # decode now: the lazily opened file used to stay open
+        return {"type": "image_url",
                 "image_url": {
-                    "url": f"data:image/jpeg;base64,{base64enc_image}"
+                    "url": f"data:{image_media_type(data)};base64,{base64enc_image}"
                     },
-                "image": Image.open(image_path)
+                "image": image
                 }
-      
-    @staticmethod     
-    def get_pil_image_content_savecopy(image:Image.Image):
-        
-        directory = "temporary/"
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-        
-        # unique id
-        unique_id = str(ObjectId())
-        filename = f'{unique_id}.jpg'
 
-        # Define the path where the image will be saved
-        filepath = os.path.join(directory, filename)
-        
-        # Save the image with the appropriate format based on the file extension
-        image.save(filepath)
+    @staticmethod
+    def get_pil_image_content_savecopy(image:Image.Image, directory:Union[str, Path, None]=None):
+        """Save ``image`` as a PNG under ``directory`` (default: :func:`default_image_dir`) and
+        return its content dict with the ABSOLUTE ``local_path``.
+
+        PNG, not the former JPEG: lossless, so thin annotations (1-px markers, line art) reach a
+        file-reading agent exactly as they reach the inline-image backends."""
+        directory = os.path.abspath(directory or default_image_dir())
+        os.makedirs(directory, exist_ok=True)
+        filepath = os.path.join(directory, f"{ObjectId()}.png")
+        image.save(filepath, format="PNG")
         ret = Question.get_local_image_content(filepath)
         ret["local_path"] = filepath
         return ret
@@ -271,14 +294,17 @@ class Question(object):
                     continue
         return imgs                
 
-    def get_json(self, **kwargs): 
+    def get_json(self, **kwargs):
+        """Provider-neutral content list. ``save_local=True`` also writes each PIL image to a
+        PNG file (under ``save_dir``, default :func:`default_image_dir`) for CLI agents that
+        read images off disk; the entry then carries its absolute ``local_path``."""
         payload = []
         for el in self.question_components:
             if isinstance(el, str):
                 payload.append(self.get_text_content(el))
             elif isinstance(el, Image.Image):
                 if "save_local" in kwargs and kwargs["save_local"] is True:
-                    payload.append(self.get_pil_image_content_savecopy(el))
+                    payload.append(self.get_pil_image_content_savecopy(el, kwargs.get("save_dir")))
                 else:
                     payload.append(self.get_pil_image_content(el))
             elif isinstance(el, Path):
@@ -315,8 +341,8 @@ class TaskSpec(object):
                  name:str,
                  description:str,
                  answer_type:Type,
-                 followup_func:Callable[[List[Question], List[ParsedAnswer]], Question],
-                 completed_func:Callable[[Question, ParsedAnswer], bool],
+                 followup_func:Union[Callable[[List[Question], List[ParsedAnswer]], Question], None],
+                 completed_func:Union[Callable[[Question, ParsedAnswer], bool], None],
                  ):
         """
         Args:

@@ -71,7 +71,8 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
     the shim is injected via :func:`preload_argv` (the loader's ``--preload``/``--library-path``) and
     the embedded interpreter finds pyagy/wirecap via ``site`` (see ``PYTHONHOME`` below), so nothing
     shim-related leaks into agy's children. Mirrors run-agy.sh; ``extra_env`` (applied last) can
-    override any AGY_PROC* knob."""
+    override any AGY_PROC* knob, and a ``None`` value removes that variable (e.g. the SSH_*
+    variables, which make agy skip its keyring login)."""
     env = dict(base if base is not None else os.environ)
     env.update({
         "AGY_PROC_ENABLE": "1",
@@ -99,6 +100,9 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
         env.setdefault("PYTHONHOME", env["CONDA_PREFIX"])
     if log:
         env["AGY_PROC_LOG"] = os.path.abspath(log)
-    if extra_env:
-        env.update(extra_env)
+    for key, value in (extra_env or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
     return env

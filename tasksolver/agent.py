@@ -14,17 +14,25 @@ import time
 import pickle
 
 class Agent(object):
-    def __init__(self, api_key:Union[str, KeyChain], task:TaskSpec,
+    def __init__(self, api_key:Union[str, KeyChain, None], task:TaskSpec,
                  vision_model:str="gpt-4-vision-preview",
                  followup_func=None,
                  session_token=None, *,
                  mcp_servers:dict=None,
-                 workspace:str=None): 
+                 workspace:str=None,
+                 chat:bool=False,
+                 backend_options:dict=None): 
         """
         Args:
-            api_key: openAI/Claude api key
+            api_key: openAI/Claude api key (None: the CLI backends' own login)
             task: Task specification for this agent
             vision_model: string identifier to the vision model used.
+            chat: run an agent-runtime backend (claude-code, codex, agy) as a plain chat call —
+                no MCP servers or injected context, thinking off or lowest, and no tools except
+                agy's view_file for its image files (see ``tasksolver.cli_backend``). The HTTP
+                backends are chat calls already; kimi-code has no chat mode.
+            backend_options: extra keyword arguments for a CLI backend's constructor (e.g.
+                ``effort``, ``thinking``, ``system_prompt``, ``timeout``).
         """
         self.followup_func = followup_func 
         self.api_key = api_key # if this is a string, then 
@@ -35,6 +43,8 @@ class Agent(object):
         # cannot honor them, so passing either with one raises below.
         self.mcp_servers = mcp_servers
         self.workspace = workspace
+        self.chat = chat
+        backend_options = dict(backend_options or {})
 
         '''
         # # TODO: Add your own model here
@@ -101,9 +111,9 @@ class Agent(object):
                 api_key = api_key.keys.get("claude")
             if isinstance(api_key, str) and (os.sep in api_key or api_key.endswith(".txt")):
                 api_key = None
-            self.visual_interface = ClaudeCodeModel(api_key, task, model=model,
-                                                    mcp_servers=mcp_servers,
-                                                    workspace=workspace)
+            self.visual_interface = ClaudeCodeModel(api_key, task, **{
+                "model": model, "mcp_servers": mcp_servers, "workspace": workspace,
+                "chat": chat, **backend_options})
 
         elif vision_model in ("agy", "antigravity") or vision_model.startswith("agy-"):
             from pyagy import AgyModel
@@ -119,9 +129,9 @@ class Agent(object):
                     f"Empty agy model suffix in {vision_model!r}; use `agy` or "
                     "`agy-<model>` (e.g. `agy-gemini-3-pro`)."
                 )
-            self.visual_interface = AgyModel(None, task, model=model, timeout=1800,
-                                             workspace=workspace,
-                                             mcp_servers=mcp_servers)
+            self.visual_interface = AgyModel(None, task, **{
+                "model": model, "timeout": 1800, "workspace": workspace,
+                "mcp_servers": mcp_servers, "chat": chat, **backend_options})
 
         elif vision_model == "codex" or vision_model.startswith("codex-"):
             from pycodex import CodexModel
@@ -147,10 +157,9 @@ class Agent(object):
                 api_key = None
             if not api_key:
                 api_key = os.environ.get("OPENAI_API_KEY") or None
-            self.visual_interface = CodexModel(api_key, task, model=model, timeout=1800,
-                                               transport="sdk",
-                                               workspace=workspace,
-                                               mcp_servers=mcp_servers)
+            self.visual_interface = CodexModel(api_key, task, **{
+                "model": model, "timeout": 1800, "transport": "sdk", "workspace": workspace,
+                "mcp_servers": mcp_servers, "chat": chat, **backend_options})
 
         elif vision_model == "kimi-code" or vision_model.startswith("kimi-code-"):
             from pykimi import KimiCodeModel
@@ -175,9 +184,12 @@ class Agent(object):
                 api_key = None
             if not api_key:
                 api_key = os.environ.get("MOONSHOT_API_KEY") or None
-            self.visual_interface = KimiCodeModel(api_key, task, model=model, timeout=1800,
-                                                  workspace=workspace,
-                                                  mcp_servers=mcp_servers)
+            if chat:
+                raise ValueError("kimi-code has no chat mode; use the HTTP Kimi backend "
+                                 "(e.g. `kimi2-6`) for plain chat calls")
+            self.visual_interface = KimiCodeModel(api_key, task, **{
+                "model": model, "timeout": 1800, "workspace": workspace,
+                "mcp_servers": mcp_servers, **backend_options})
 
         elif vision_model in ('qwen3', 'qwen3-5', 'qwen3-6'):
             from .vllm import VLLMModel, resolve_qwen3_api_key, resolve_qwen3_base_url, resolve_qwen3_model_name, resolve_qwen3_builtin_endpoint
@@ -308,10 +320,10 @@ class Agent(object):
             raise ValueError(f'{vision_model} not matched with any avalable choices.')
 
         from .cli_backend import CLIBackendModel
-        if ((mcp_servers or workspace)
+        if ((mcp_servers or workspace or backend_options)
                 and not isinstance(self.visual_interface, CLIBackendModel)):
             raise ValueError(
-                "mcp_servers/workspace are only supported by the CLI backends "
+                "mcp_servers/workspace/backend_options are only supported by the CLI backends "
                 f"(claude-code, agy, codex, kimi-code); {vision_model!r} cannot honor them")
 
             

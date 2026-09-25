@@ -113,6 +113,27 @@ Anthropic text/image content blocks as its prompt. `max_tokens` remains in
 TaskSolver's request payload for compatibility, but the Agent SDK offers no
 per-answer `max_tokens` control; use `max_turns` or `max_budget_usd` to limit runs.
 
+## Chat mode
+
+`ClaudeAgentModel(chat=True)` (or `Agent(..., chat=True)`) runs each call as a plain
+chat turn: no built-in tools, no MCP servers (strict config with none), no
+filesystem settings, skills, auto-memory or CLAUDE.md, one turn, no saved
+transcript and no session-title request; thinking is disabled and effort is
+`"low"` unless `thinking=` / `effort=` say otherwise. Without a `workspace` the
+CLI runs in a private empty directory. A reply with a tool call raises
+`tasksolver.cli_backend.ChatModeViolation`. The request that reaches the API
+then carries `tools: []`, the SDK's one-line system prompt (or `system_prompt=`)
+and one user message: the Question's parts plus four Claude Code context
+reminders (working directory, model, account email, date), which no setting
+removes. The switches are `CHAT_ENV` and `CHAT_SDK_OPTIONS` in `pyclaude.model`;
+they are CLI behaviour, so re-check them through a logging proxy
+(`ANTHROPIC_BASE_URL`) after a CLI upgrade.
+
+Every SDK child, chat mode or not, gets the parent Claude Code session's
+variables (`pyclaude.client.PARENT_SESSION_ENV`: session id, messaging socket and
+token, effort, ...) blanked, so a process started inside Claude Code does not
+join that session.
+
 ## Verification
 
 Run these checks from the TaskSolver checkout:

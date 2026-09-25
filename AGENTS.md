@@ -35,6 +35,7 @@ pixi run python test_scripts/test_claude_sdk.py
 pixi run python test_scripts/test_claude_bundle.py
 pixi run python test_scripts/test_codex_sdk.py
 pixi run python test_scripts/test_codex_sdk_native.py
+pixi run python test_scripts/test_chat_mode.py        # chat mode, image files, vendored paths
 
 # Live provider examples (credentials required)
 python test_scripts/text_only.py --model claude-code   # choices: claude, claude-code, gpt, gemini, qwen, intern
@@ -111,6 +112,52 @@ source. Do not add a duplicate pip SDK/runtime dependency. Both SDK transports
 keep the canonical TaskSolver four-tuple. See `codex/README.md`,
 `test_scripts/test_codex_sdk.py` and `test_scripts/test_codex_sdk_native.py`.
 
+### Chat mode — an agent runtime as a plain chat call
+
+`Agent(..., chat=True)` (or `chat=True` on `ClaudeAgentModel` / `CodexModel` / `AgyModel`) turns
+the Claude, Codex and agy backends into chat-completion equivalents, e.g. to use a subscription
+login as a judge. The agent gets no MCP servers, skills, memory or project instructions, and
+thinking is off (Claude: `thinking` disabled, `effort="low"`) or lowest (Codex: `effort="none"`,
+agy: `--effort low`). Claude and Codex take the Question as ordered inline text/image parts
+(`prepare_payload(inline=True)`: no image files, no vision preamble) and get no tools; agy cannot
+take inline images, so it gets the PNG files and one tool to open them (`view_file`). A reply
+that used any other tool, or opened a file it was not given, raises `ChatModeViolation`
+(`_chat_violations` per backend). `backend_options={...}` passes constructor overrides
+(`effort`, `thinking`, `system_prompt`, `timeout`, ...). kimi-code raises on `chat=True`.
+
+- **Claude** (`pyclaude.model.CHAT_ENV`, `CHAT_SDK_OPTIONS`): `tools=[]`, `--strict-mcp-config`
+  with no servers, `setting_sources=[]`, `skills=[]`, one turn, `--no-session-persistence`, a
+  named session (no per-call title request), a private empty cwd. What remains of Claude Code
+  is the one-line SDK system prompt and four context reminders (cwd, model, account email, date).
+  `pyclaude.client` also blanks the parent session's variables (`PARENT_SESSION_ENV`) in every
+  SDK child, chat or not — otherwise a child started inside Claude Code joins the parent's
+  session id, messaging socket and effort.
+- **Codex** (`pycodex.model.CHAT_CONFIG`, `CHAT_ENV`): an ephemeral thread with empty (or
+  `system_prompt`) base instructions, feature/instruction overrides, `CODEX_EXEC_SERVER_URL=none`
+  (no execution environment, which is what removes shell/apply_patch/view_image), each MCP
+  server of `$CODEX_HOME/config.toml` disabled (an override cannot delete a user server), images
+  as `ImageInput` data URLs, capture off.
+
+- **agy** (`pyagy.model.CHAT_AGENT_MD`): a workspace agent (`.agents/agents/tasksolver-chat/agent.md`,
+  run with `--agent`) with `tools: [view_file]`, `excludeDefaultComponents: true` (no default
+  prompt sections or built-in tools) and `inheritCustomizations: false` (no user skills, rules,
+  plugins, subagents or MCP servers); the harness still offers `manage_task`, which has nothing
+  to manage. `trust=False` keeps the workspace out of the user's global `trustedWorkspaces`, and
+  `CHAT_ENV` unsets `SSH_*` (with them agy skips its keyring login; `extra_env` values of `None`
+  now unset). Needs agy >= 1.2.11 (earlier releases ignore workspace agents under `--print`).
+
+All three were checked against the real requests (a logging proxy for Anthropic, the native
+capture for Codex and agy): no tools (agy: `view_file` + `manage_task`), one user message,
+thinking/reasoning as configured. Re-check after a
+CLI upgrade — the switches are CLI behaviour, not SDK contract. Offline tests:
+`test_scripts/test_chat_mode.py`.
+
+**Image files for file-reading agents.** `Question.get_json(save_local=True, save_dir=...)` writes
+PNG (lossless — thin annotations survive) under `save_dir`, default `$TASKSOLVER_IMAGE_DIR` or
+`<tmp>/tasksolver-images`; `CLIBackendModel.prepare_payload` saves into `<workspace>/.tasksolver-images`
+when a workspace is set and announces absolute paths. (It used to write JPEGs to a CWD-relative
+`temporary/`, which an agent running in another workspace could not resolve.)
+
 ### TAORI agent loop (scaffolding — mostly unused today)
 `Agent` also exposes a higher-level **think / act / observe / reflect / interject** loop backed by an `EventCollection` of typed `Event`s (`event.py`: `ThinkEvent`, `ActEvent`, `EvaluateEvent`, …). `act`, `observe`, and `run` are `@abstractmethod` — intended to be subclassed per environment/task. Current real usage drives `visual_interface.run_once()` / `rough_guess()` directly and does not exercise this loop; treat it as an extension point, not load-bearing code.
 
@@ -153,7 +200,15 @@ instrumentation layer; Claude uses its SDK protocol directly:
   - `wirecap/decode/` is **stdlib-import-pure** (it is imported by the CPython interpreter embedded
     inside the instrumented CLI): the JSONL `Recorder`, HTTP/1.1+SSE framing, `BaseCorrelator`,
     HTTP/2 reassembly, the `TurnBuilder`/`Usage` contract, and `mp_child` (the in-host
-    multiprocessing child). Never import `wirecap.runtime` or `tasksolver` from here — the
+    multiprocessing child). `BaseCorrelator` accumulates each response under
+    `TurnBuilder.stream_key` and lets `TurnBuilder.request_matches` narrow the time-based
+    pairing: agy's builder keys by `responseId` and matches the request model to the served
+    `modelVersion`, because agy streams its session-title call alongside the answer turn (one
+    shared accumulator merged them into one turn paired with the title request). Builders
+    without a key (codex, kimi) behave as before. agy turns keep Gemini thought parts in
+    `reasoning`, apart from the answer `text`, and the shim emits a TLS write larger than its
+    16 KB copy buffer as several events (it used to emit the first 16 KB only, so no request
+    carrying tool declarations or images ever decoded). Never import `wirecap.runtime` or `tasksolver` from here — the
     `python3 -S` probes in `test_scripts/` (one per instrumented CLI's dispatch module, plus the
     decode-layer probe) enforce it, and they are the tripwire for any move.
   - `wirecap/runtime/` is parent-side: `WirePopen`/`WireProcess`, the PTY flavours

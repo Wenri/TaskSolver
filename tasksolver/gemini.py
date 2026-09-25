@@ -80,7 +80,8 @@ class GeminiModel(object):
 
         strings = []
         images = []
-        for el in question.get_json(save_local=True):
+        # inline images only: the data URL is decoded below, so no copy is written to disk
+        for el in question.get_json():
             if 'text' in el:
                 strings.append(el['text'])
             elif 'image_url' in el:
