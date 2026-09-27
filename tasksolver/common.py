@@ -287,7 +287,7 @@ class Question(object):
                 try:
                     response= requests.get(str(component))
                     response.raise_for_status()
-                    img = Image.open(BytesIO(response.content))
+                    img = Image.open(io.BytesIO(response.content))
                     imgs.append(img)
                 except requests.RequestException as e:
                     logger.warning(f"Error fetching the image from URL: {e}")
@@ -433,7 +433,8 @@ class KeyChain(object):
             self.keys = {}
         else:
             assert isinstance(keys, dict), "Keys should be dict."
-         
+            self.keys = keys
+
     def add_key(self, service:str, key:str):
         if os.path.exists(key): # it's a file
             with open(key, "r") as f:

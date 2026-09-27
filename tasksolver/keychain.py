@@ -7,8 +7,8 @@ class KeyChain(object):
             self.keys = {}
         else:
             assert isinstance(keys, dict), "Keys should be dict."
-            
-         
+            self.keys = keys
+
     def add_key(self, service:str, key:str):
         if os.path.exists(key): # it's a file
             with open(key, "r") as f:

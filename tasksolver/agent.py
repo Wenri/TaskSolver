@@ -4,7 +4,7 @@ General agents class
 
 from .common import *
 from abc import abstractmethod
-from typing import Union, Dict, Final
+from typing import Union, Dict, Final, Tuple
 from bson import ObjectId
 from .event import *
 from .keychain import KeyChain
@@ -351,7 +351,7 @@ class Agent(object):
         self.session_token = str(ObjectId())
         self.event_buffer = EventCollection()
 
-    def think(self, question:Question) -> ParsedAnswer:
+    def think(self, question:Question) -> Tuple[ParsedAnswer, Dict, Union[list, Dict, None], Dict]:
         """ 
         Adds a THINKING event to the event buffer.
         
