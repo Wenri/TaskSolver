@@ -8,8 +8,8 @@ Low-level `pycodex.ask` and `pycodex.Session` keep the exec/PTY interfaces.
 
 ## Layout
 - `vendor/` — the Codex repo, git-subtree'd (originally `rust-v0.143.0-alpha.38`, since bumped to
-  **0.157.0** (`rust-v0.157.0`, upstream commit
-  `00c972e`) — see `codex-rs/Cargo.toml`; Apache-2.0; `LICENSE` preserved). Kept pristine except
+  **0.160.0** (`rust-v0.160.0`, upstream commit
+  `79b1b66`) — see `codex-rs/Cargo.toml`; Apache-2.0; `LICENSE` preserved). Kept pristine except
   our patch (below); `codex-rs/target/` is gitignored.
 - `pycodex/` — the Python wrapper: `ask()`/`CodexResponse`/`CodexModel` + the in-process decode
   side `codex_process` (the `WIRE_MODULE` the embedded interpreter loads) + the OpenAI-Responses

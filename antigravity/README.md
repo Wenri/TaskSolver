@@ -48,6 +48,12 @@ containing that RPC can still be decoded. The rebuilt shim passes an instrumente
 `agy --version` startup check: 28/28 hooks install and Python receives smoke events.
 Live model turns have not been revalidated for this release.
 
+agy **1.2.16** (2026-10-04, BuildID `9de01044862a23447e35f63165bc6bef`) was fetched with
+`agy_update.sh` but not adopted: `build_symbols.py` fails verification because two hooked
+functions are gone from that build (`core.createPlannerResponseStep` and
+`integration.(*ToolContextTrajectory).AppendStep`), so the shim stays pinned to 1.2.11 until
+`procdef.h` and the Python hooks follow their replacements.
+
 ---
 
 ## Architecture
