@@ -216,11 +216,14 @@ instrumentation layer; Claude uses its SDK protocol directly:
   - `wirecap/native/` is the C ABI bridge (`libwirecap_bridge.a`) that embeds CPython on a
     16 MB-stack worker thread; linked into the agy shim, the codex binary, and the kimi-code addon.
 - **`antigravity/`** → the `pyagy` package: Google's Go `agy` CLI converted into `vendor/libagy.so`
-  (`symbols/make_libagy.py`, exporting `agy_rt0_go`, `agy_firstmoduledata`, and all 41 `agy_go__*`
-  hook targets in `.dynsym`) and linked into a C++23 host executable (`vendor/agy`, built from
-  `antigravity/src/`) that binds those symbols via `ld`, splices its synthetic `moduledata`
-  (`md->bad = 1`) onto `agy_firstmoduledata.next`, and patches per-handler cgocall trampolines
-  before calling `agy_rt0_go`. See `antigravity/README.md`.
+  (`symbols/make_libagy.py`, exporting `agy_rt0_go`, `agy_firstmoduledata`, `agy_tramp_slots`, and
+  all 41 `agy_go__*` hook targets in `.dynsym`, while statically patching each hooked function's
+  `entry + skip` with `jmp *agy_tramp_slots[slot](%rip)` and importing `agy_stub__<ID>` via
+  `R_X86_64_GLOB_DAT`) and linked into a C++23 host executable (`vendor/agy`, built from
+  `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<ID>`) in
+  `.agy_trampolines`, binds both directions via `ld` / `ld.so`, and splices its synthetic
+  `moduledata` (`md->bad = 1`) onto `agy_firstmoduledata.next` before calling `agy_rt0_go`.
+  See `antigravity/README.md`.
 - **`codex/`** → the `pycodex` package: OpenAI's Rust codex, built from a vendored source tree with
   the bridge compiled in (no preload needed). See `codex/README.md`.
 - **`kimi/`** → the `pykimi` package: Moonshot's Node kimi-code, built from a vendored source tree

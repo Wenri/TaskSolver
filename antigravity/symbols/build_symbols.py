@@ -328,7 +328,29 @@ def main():
                 return j
         return 0
 
-    hooks, skips, missing, unverified = {}, {}, [], []
+    def frame_prologue_hex(addr, skip):
+        """Extract the position-independent Go frame-setup prologue at `addr + skip`
+        (`push %rbp; mov %rsp, %rbp; sub $imm8/imm32, %rsp` = 8 or 11 bytes) so the
+        static trampoline stubs can bake the displaced instructions at compile time.
+        Also reconstructs the original prologue losslessly if `make_libagy.py` has
+        already patched bytes 0..5 with `ff 25 <disp32>` and stored `0x81`/`0x83` at byte 6."""
+        if skip == 0:
+            return ""
+        try:
+            p = d[elf.v2o(addr + skip):elf.v2o(addr + skip) + 16]
+        except ValueError:
+            return ""
+        if len(p) >= 11 and p[:7] == b"\x55\x48\x89\xe5\x48\x81\xec":
+            return p[:11].hex()
+        if len(p) >= 8 and p[:7] == b"\x55\x48\x89\xe5\x48\x83\xec":
+            return p[:8].hex()
+        if len(p) >= 11 and p[:2] == b"\xff\x25" and p[6] == 0x81:
+            return "554889e54881ec" + p[7:11].hex()
+        if len(p) >= 8 and p[:2] == b"\xff\x25" and p[6] == 0x83:
+            return "554889e54883ec" + p[7:8].hex()
+        return ""
+
+    hooks, skips, prologues, missing, unverified = {}, {}, {}, [], []
     for nm in PROC_TARGETS:
         if nm not in name2addr:
             missing.append(nm)
@@ -336,7 +358,8 @@ def main():
         a = name2addr[nm]
         hooks[nm] = a
         skips[nm] = prologue_skip(a)
-        if not is_prologue(a):
+        prologues[nm] = frame_prologue_hex(a, skips[nm])
+        if not is_prologue(a) or (skips[nm] > 0 and not prologues[nm]):
             unverified.append(nm)
     # nosplit leaf getters: resolve with skip=0, exempt from the prologue assert.
     for nm in NOSPLIT_TARGETS:
@@ -345,6 +368,7 @@ def main():
             continue
         hooks[nm] = name2addr[nm]
         skips[nm] = 0
+        prologues[nm] = ""
 
     for fam in catalog:
         catalog[fam].sort(key=lambda x: x["name"])
@@ -359,6 +383,7 @@ def main():
         "total_funcs": nfunc,
         "hooks": {k: hooks[k] for k in PROC_TARGETS + NOSPLIT_TARGETS if k in hooks},
         "skips": {k: skips[k] for k in PROC_TARGETS + NOSPLIT_TARGETS if k in hooks},
+        "prologues": {k: prologues[k] for k in PROC_TARGETS + NOSPLIT_TARGETS if k in hooks},
         "missing": missing,
         "catalog": catalog,
     }

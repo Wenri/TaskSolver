@@ -12,24 +12,20 @@
  * ID     short unique tag, used by hk("ID") at the call sites (was the HK_* enum name).
  * MODE   WIRE_ASYNC (log, non-blocking) or WIRE_SYNC (block for a modify verdict).
  * kind   string tag passed to Python dispatch(kind, stream_id, data).
- * MECH   how the hook is installed (see install_hooks in antigravity.cpp):
- *          (There is no gum-attach mech any more. frida-gum inline attach was retired and its
- *          listener path DELETED: the self-modifying-code patching intermittently destabilized
- *          agy's Go runtime — gum RETURN hooks trip the GC unwinder (see RETCAP), and even ENTRY
- *          gum on hot funcs failed the full AgyProcess path under worker load (~15%), where
- *          all-trampoline is 100% (80/80). gum itself is still linked: the trampoline builder uses
- *          its x86 code writer and near-page allocator.)
- *          AGY_FULLCGO = cgocall trampoline (cgotrampoline.cpp) via full runtime.cgocall — for PARKING
- *                        funcs (entersyscall + P handoff, GC-safe). The default.
- *          AGY_ASMCGO  = cgocall trampoline via runtime.asmcgocall — the lighter g0-switch variant
- *                        (no syscall transition), for HOT NON-parking funcs (os.Getenv, tls_write):
- *                        same 100% reliability, less per-fire overhead. Falls back to full cgocall if
- *                        runtime.asmcgocall is unresolved. NOT for parking funcs (no P handoff → stall).
- *          AGY_OFF     = NOT installed. The row is kept as documentation of a hook that stalls agy
+ * MECH   how the hook is bound (see gen_symbols_header.py and gocall.cpp):
+ *          (There is no gum-attach mech any more. frida-gum was retired and removed completely.)
+ *          AGY_FULLCGO = static cgocall trampoline (`agy_stub__<ID>` in `.agy_trampolines`, gocall.cpp)
+ *                        via full `runtime.cgocall` — for PARKING funcs (entersyscall + P handoff,
+ *                        GC-safe). The default.
+ *          AGY_ASMCGO  = static cgocall trampoline via `runtime.asmcgocall` — the lighter g0-switch
+ *                        variant (no syscall transition), for HOT NON-parking funcs (os.Getenv,
+ *                        tls_write): same 100% reliability, less per-fire overhead. NOT for parking
+ *                        funcs (no P handoff → stall).
+ *          AGY_OFF     = NOT hooked. The row is kept as documentation of a hook that stalls agy
  *                        or collides with another.
- *        The shim installs the union of every non-OFF hook on each run (no stage selector).
- *        FULLCGO and ASMCGO hooks share one trampoline region + synthetic moduledata; the
- *        pcsp matches the full-cgo geometry (only those slots are ever GC-unwound).
+ *        `make_libagy.py` and `gen_symbols_header.py` emit and bind every non-OFF hook via `ld` /
+ *        `ld.so` `R_X86_64_GLOB_DAT` relocations. FULLCGO and ASMCGO hooks share one `.agy_trampolines`
+ *        section + synthetic moduledata (`gomod.cpp`).
  * RETCAP how a hook's RETURN value WOULD be captured. Historically this also selected the gum
  *        listener: any nonzero RETCAP meant intercepting the return, which costs a return-address
  *        rewrite Go's stack
@@ -60,8 +56,8 @@
 #define AGY_PROCDEF_H
 
 #include "wirecap.h"      /* wire_mode_t (WIRE_ASYNC / WIRE_SYNC) */
-#include "cgotrampoline.h" /* agy_hook_fn + per-hook C handlers (agy_on_*) */
-#include "symbols_gen.h"   /* consteval agy_fn / agy_sym / agy_skip — resolve fn/vaddr/skip at compile time */
+#include "gocall.h"       /* agy_hook_fn + per-hook C handlers (agy_on_*) */
+#include "symbols_gen.h"  /* consteval agy_fn / agy_sym / agy_skip / agy_ow / agy_stub / agy_slot */
 #include <cstdint>
 #include <string_view>
 
@@ -83,9 +79,10 @@ consteval agy_hook_fn agy_handler_for(std::string_view kind) {
     return &agy_on_generic;
 }
 
-/* One table row. `fn`/`handler`/`vaddr`/`skip` are resolved at compile time by the consteval
- * constructor: `fn` is the ld-bound Go function pointer (`&agy_go__*` from symbols_gen.h), and
- * `handler` is the dedicated C hook function (`&agy_on_*`) baked into that hook's trampoline. */
+/* One table row. `fn`/`stub`/`handler`/`vaddr`/`skip`/`ow`/`slot` are resolved at compile time by
+ * the consteval constructor: `fn` is the ld-bound Go function pointer (`&agy_go__*`), `stub` is
+ * the static `.agy_trampolines` assembly stub (`&agy_stub__<ID>`), and `handler` is the dedicated
+ * C hook function (`&agy_on_*`). */
 struct agy_hook {
     std::string_view id;      /* short unique id, for hk() compile-time lookup */
     const char      *name;    /* Go symbol → agy_fn / agy_sym */
@@ -94,15 +91,19 @@ struct agy_hook {
     agy_mech_t       mech;
     int32_t          retcap;  /* return-capture policy: 0 none, <0 special-cased, >0 min bytes to emit */
     agy_go_fn_t      fn;      /* = agy_fn(name), ld-bound Go function pointer */
+    agy_go_fn_t      stub;    /* = agy_stub(id), static assembly trampoline stub */
     agy_hook_fn      handler; /* = agy_handler_for(kind), statically bound C hook handler */
     uint64_t         vaddr;   /* = agy_sym(name), baked at compile time */
     uint32_t         skip;    /* = agy_skip(name), baked at compile time */
+    uint32_t         ow;      /* = agy_ow(name), displaced frame-prologue byte length (8 or 11) */
+    int              slot;    /* = agy_slot(id), index in agy_tramp_slots[] (-1 if AGY_OFF) */
 
     consteval agy_hook(std::string_view id_, const char *name_, wire_mode_t mode_,
                        const char *kind_, agy_mech_t mech_, int32_t retcap_)
         : id(id_), name(name_), mode(mode_), kind(kind_), mech(mech_),
-          retcap(retcap_), fn(agy_fn(name_)), handler(agy_handler_for(kind_)),
-          vaddr(agy_sym(name_)), skip(agy_skip(name_)) {}
+          retcap(retcap_), fn(agy_fn(name_)), stub(agy_stub(id_)),
+          handler(agy_handler_for(kind_)), vaddr(agy_sym(name_)),
+          skip(agy_skip(name_)), ow(agy_ow(name_)), slot(agy_slot(id_)) {}
 };
 
 inline constexpr agy_hook HOOKS[] = {
@@ -183,9 +184,8 @@ inline constexpr agy_hook HOOKS[] = {
 { "PROTO_MARSHAL","google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            WIRE_ASYNC, "proto_marshal", AGY_OFF, 256 },
 
 /* cgocall-TRAMPOLINE app-boundary hooks (Approach A — the robust general mechanism).
- * The parking targets (SendUserMessage/callbackStreamer.Send): instead of a gum
- * attach (whose return-tracking breaks on park/reschedule) we redirect them through
- * a generated trampoline (cgotrampoline.cpp) + a synthetic moduledata so GC stack-unwind is safe.
+ * The parking targets (SendUserMessage/callbackStreamer.Send): we redirect them through
+ * a static trampoline (gocall.cpp) + a synthetic moduledata so GC stack-unwind is safe.
  * MODE/retcap are advisory here — the trampoline reads args on the g0 stack and never
  * intercepts the return. Both PARK → AGY_FULLCGO (the P handoff; asmcgo would risk a stall). */
 { "CGT_SEND_USER_MSG", "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage", WIRE_ASYNC, "send_user_msg", AGY_FULLCGO, 0 },

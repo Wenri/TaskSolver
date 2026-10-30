@@ -1,18 +1,15 @@
-/* gomod.cpp — build + register a synthetic go1.26 runtime.moduledata that covers
- * the cgocall-trampoline page, so the Go GC's stack scanner (findfunc ->
- * findmoduledatap, walking the firstmoduledata linked list) resolves our
- * trampoline PCs instead of throw("unknown pc"). See gomod.h.
+/* gomod.cpp — build + register a synthetic go1.27 runtime.moduledata that covers
+ * the `.agy_trampolines` section (`[agy_tramp_region_start, agy_tramp_region_end)`),
+ * so the Go GC's stack scanner (findfunc -> findmoduledatap, walking the
+ * firstmoduledata linked list) resolves our static trampoline PCs instead of
+ * throw("unknown pc"). See gomod.h.
  *
- * Split in two phases because our LD_PRELOAD constructor runs BEFORE Go's rt0:
- *   - agy_gomod_prepare(): build the module + all its buffers at constructor time
- *     using the known go1.26/amd64 pcHeader constants. Does NOT read
- *     firstmoduledata (whose pointer fields are still unrelocated / NULL that
- *     early — dereferencing pcHeader there segfaults).
- *   - agy_gomod_ensure(): called from the trampoline on the FIRST hit (goroutine
- *     live, firstmoduledata fully relocated). Once-guarded: self-check the live
- *     layout, then splice our module onto the chain — all before the cgocall that
- *     opens the GC-scan window. Minimal stack + bare write() (runs on a goroutine
- *     stack), so it never overflows it.
+ * Called once from `agy_init()` before `agy_rt0_go()`: `ld.so` has already
+ * processed all `R_X86_64_RELATIVE` and `R_X86_64_GLOB_DAT` relocations in
+ * `libagy.so` and `vendor/agy`, so `agy_firstmoduledata` is bound directly via `ld`
+ * and its `pcHeader` is already relocated. Setting `md->bad = 1` tells Go's startup
+ * `runtime.modulesinit()` to skip our synthetic module while `findfunc` still walks
+ * `agy_firstmoduledata.next`.
  */
 #include "gomod.h"
 #include "wirecap.h"
@@ -165,9 +162,11 @@ int agy_gomod_register(uintptr_t region_base, uintptr_t region_end,
     while (tail->next) tail = tail->next;
     std::atomic_ref<go_moduledata *>(tail->next).store(md, std::memory_order_release);
 
-    GLOG("registered synthetic moduledata on agy_firstmoduledata (%p): text=[%#lx,%#lx) %d funcs, "
-         "frame=%u (spdelta in [%u,%u)), nbit=%d",
-         (void *)fmd, (unsigned long)region_base, (unsigned long)region_end, nfunc, frame,
-         frame_lo, frame_hi, nbit);
+    if (std::getenv("AGY_PROC_ENABLE") && !std::getenv("_AGY_SBOXSERVE")) {
+        GLOG("registered synthetic moduledata on agy_firstmoduledata (%p): text=[%#lx,%#lx) %d funcs, "
+             "frame=%u (spdelta in [%u,%u)), nbit=%d",
+             (void *)fmd, (unsigned long)region_base, (unsigned long)region_end, nfunc, frame,
+             frame_lo, frame_hi, nbit);
+    }
     return 0;
 }

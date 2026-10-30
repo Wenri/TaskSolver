@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""Bake symbols.json into a C++ header: extern "C" declarations for the Go symbols
-exported by libagy.so (`agy_go__*`) so `ld` binds them directly via ELF relocations,
-plus consteval `agy_fn`/`agy_sym`/`agy_skip` resolvers and the build-id guard.
+"""Bake symbols.json + src/procdef.h into src/symbols_gen.h:
+  1. `extern "C"` declarations for the Go symbols exported by libagy.so (`agy_go__*`)
+     and the static trampoline stubs exported by `vendor/agy` (`agy_stub__<ID>`) so
+     `ld` / `ld.so` bind both directions at link/load time via ELF relocations.
+  2. Static assembly cgocall/asmcgocall trampoline stubs (`agy_stub__<ID>`) in
+     `.section .agy_trampolines,"ax",@progbits` (256-byte slots bounded by
+     `agy_tramp_region_start` .. `agy_tramp_region_end`), each statically bound via `ld`
+     to its dedicated C handler (`agy_on_*`), `runtime.cgocall`/`runtime.asmcgocall`,
+     displaced Go frame-setup prologue bytes, and `agy_go__*` resume target.
+  3. `consteval` resolvers (`agy_fn`, `agy_sym`, `agy_skip`, `agy_ow`, `agy_stub`, `agy_slot`).
 """
 import json
 import os
@@ -9,6 +16,93 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from build_symbols import c_sym_name  # noqa: E402
+from gen_hooks_py import parse as parse_procdef  # noqa: E402
+
+HANDLER_MAP = {
+    "fh_update": "agy_on_fh_update",
+    "resp": "agy_on_resp",
+    "tls_write": "agy_on_tls_write",
+    "file_open": "agy_on_file_open",
+    "http_rt": "agy_on_http_rt",
+    "exit": "agy_on_exit",
+    "resp_chunk": "agy_on_resp_chunk",
+    "readlink_filter": "agy_on_readlink_filter",
+}
+
+SLOT_SIZE = 256
+FRAME_SIZE = 120
+FRAME_LO = 17
+FRAME_HI = 182
+
+
+def emit_stub_asm(slot: int, row: dict, c_sym: str, skip: int, phex: str) -> list[str]:
+    hid = row["id"]
+    mech = row["mech"]
+    handler = HANDLER_MAP.get(row["kind"], "agy_on_generic")
+    gw_sym = "agy_go__runtime_asmcgocall" if mech == "asmcgo" else "agy_go__runtime_cgocall"
+    ow = len(phex) // 2
+    if ow not in (8, 11):
+        raise SystemExit(f"hook {hid} ({row['symbol']}): unexpected prologue hex {phex!r} (ow={ow})")
+    pbytes = ", ".join(f"0x{phex[j:j + 2]}" for j in range(0, len(phex), 2))
+    resume_off = skip + ow
+    enable_sym = "g_agy_conv_id" if hid == "FILE_OPEN" else "g_agy_enabled"
+
+    lines = [
+        f".globl agy_stub__{hid}",
+        f".type agy_stub__{hid}, @function",
+        f"agy_stub__{hid}:",
+        f"    cmpb    $0, {enable_sym}(%rip)",
+        f"    je      .Lpass__{slot}",
+        f"    subq    ${FRAME_SIZE}, %rsp",
+        f".Lframe_lo__{slot}:",
+        f"    movq    %rax, 24(%rsp)",
+        f"    movq    %rbx, 32(%rsp)",
+        f"    movq    %rcx, 40(%rsp)",
+        f"    movq    %rdi, 48(%rsp)",
+        f"    movq    %rsi, 56(%rsp)",
+        f"    movq    %r8,  64(%rsp)",
+        f"    movq    %r9,  72(%rsp)",
+        f"    movq    %r10, 80(%rsp)",
+        f"    movq    %r11, 88(%rsp)",
+        f"    movq    %rdx, 96(%rsp)",
+        f"    movq    %rbp, 104(%rsp)",
+        f"    leaq    .Lkind__{slot}(%rip), %rax",
+        f"    movq    %rax, 16(%rsp)",
+        f"    xorl    %eax, %eax",
+        f"    movq    %rax, 112(%rsp)",
+        f"    leaq    16(%rsp), %rbx",
+        f"    leaq    {handler}(%rip), %rax",
+        f"    movq    %rax, 0(%rsp)",
+        f"    movq    %rbx, 8(%rsp)",
+        f"    xorps   %xmm15, %xmm15",
+        f"    call    *{gw_sym}@GOTPCREL(%rip)",
+        f"    movq    24(%rsp), %rax",
+        f"    movq    32(%rsp), %rbx",
+        f"    movq    40(%rsp), %rcx",
+        f"    movq    48(%rsp), %rdi",
+        f"    movq    56(%rsp), %rsi",
+        f"    movq    64(%rsp), %r8",
+        f"    movq    72(%rsp), %r9",
+        f"    movq    80(%rsp), %r10",
+        f"    movq    88(%rsp), %r11",
+        f"    movq    96(%rsp), %rdx",
+        f"    movq    104(%rsp), %rbp",
+        f"    movq    112(%rsp), %r12",
+        f".Lframe_hi__{slot}:",
+        f"    addq    ${FRAME_SIZE}, %rsp",
+        f"    testq   %r12, %r12",
+        f"    jne     .Lret__{slot}",
+        f".Lpass__{slot}:",
+        f"    .byte   {pbytes}",
+        f"    movq    {c_sym}@GOTPCREL(%rip), %r12",
+        f"    leaq    {resume_off}(%r12), %r12",
+        f"    jmp     *%r12",
+        f".Lret__{slot}:",
+        f"    xorps   %xmm15, %xmm15",
+        f"    ret",
+        f"    .org agy_tramp_region_start + {(slot + 1) * SLOT_SIZE}, 0x90",
+    ]
+    return lines
 
 
 def main():
@@ -17,27 +111,50 @@ def main():
     d = json.load(open(sys.argv[1]))
     hooks = d["hooks"]
     skips = d.get("skips", {})
-    with open(sys.argv[2], "w") as f:
+    prologues = d.get("prologues", {})
+
+    out_path = sys.argv[2]
+    procdef_path = os.path.join(os.path.dirname(os.path.abspath(out_path)), "procdef.h")
+    rows = parse_procdef(open(procdef_path).read())
+    active_rows = [r for r in rows if r["mech"] in ("fullcgo", "asmcgo")]
+
+    with open(out_path, "w") as f:
         w = f.write
         w("/* generated by gen_symbols_header.py — do not edit */\n")
         w("#ifndef AGY_SYMBOLS_GEN_H\n#define AGY_SYMBOLS_GEN_H\n")
         w("#include <cstdint>\n#include <string_view>\n\n")
-        w('inline constexpr char     AGY_BUILD_ID[]       = "%s";\n' % d.get("build_id", ""))
-        w("inline constexpr uint64_t AGY_TEXT_BASE        = 0x%xULL;\n" % d.get("text_base", 0))
-        w("inline constexpr uint64_t AGY_MODULEDATA_VADDR = 0x%xULL;\n\n" % d.get("moduledata_vaddr", 0))
+        w('inline constexpr char     AGY_BUILD_ID[]        = "%s";\n' % d.get("build_id", ""))
+        w("inline constexpr uint64_t AGY_TEXT_BASE         = 0x%xULL;\n" % d.get("text_base", 0))
+        w("inline constexpr uint64_t AGY_MODULEDATA_VADDR  = 0x%xULL;\n" % d.get("moduledata_vaddr", 0))
+        w("inline constexpr uint32_t AGY_TRAMP_SLOT_SIZE   = %d;\n" % SLOT_SIZE)
+        w("inline constexpr int      AGY_TRAMP_NSLOTS      = %d;\n" % len(active_rows))
+        w("inline constexpr uint32_t AGY_TRAMP_FRAME       = %d;\n" % FRAME_SIZE)
+        w("inline constexpr uint32_t AGY_TRAMP_FRAME_LO    = %d;\n" % FRAME_LO)
+        w("inline constexpr uint32_t AGY_TRAMP_FRAME_HI    = %d;\n\n" % FRAME_HI)
 
         w('extern "C" {\n')
         for name in hooks:
             w("void %s();\n" % c_sym_name(name))
+        for r in active_rows:
+            w('__attribute__((visibility("default"))) void agy_stub__%s();\n' % r["id"])
+        w("extern const uint8_t agy_tramp_region_start[];\n")
+        w("extern const uint8_t agy_tramp_region_end[];\n")
         w("}\n\n")
 
         w("using agy_go_fn_t = void (*)();\n")
-        w("struct agy_symrec { std::string_view name; agy_go_fn_t fn; uint64_t vaddr; uint32_t skip; };\n")
+        w("struct agy_symrec { std::string_view name; agy_go_fn_t fn; uint64_t vaddr; uint32_t skip; uint32_t ow; };\n")
         w("inline constexpr agy_symrec AGY_SYMS[] = {\n")
         for name, addr in hooks.items():
             esc = name.replace("\\", "\\\\").replace('"', '\\"')
-            w('    { "%s", &%s, 0x%xULL, %d },\n'
-              % (esc, c_sym_name(name), addr, skips.get(name, 0)))
+            ow = len(prologues.get(name, "")) // 2
+            w('    { "%s", &%s, 0x%xULL, %d, %d },\n'
+              % (esc, c_sym_name(name), addr, skips.get(name, 0), ow))
+        w("};\n\n")
+
+        w("struct agy_stubrec { std::string_view id; agy_go_fn_t stub; int slot; };\n")
+        w("inline constexpr agy_stubrec AGY_STUBS[] = {\n")
+        for slot, r in enumerate(active_rows):
+            w('    { "%s", &agy_stub__%s, %d },\n' % (r["id"], r["id"], slot))
         w("};\n\n")
 
         w("consteval agy_go_fn_t agy_fn(std::string_view name) {\n")
@@ -49,8 +166,55 @@ def main():
         w("consteval uint32_t agy_skip(std::string_view name) {\n")
         w("    for (auto &s : AGY_SYMS) if (s.name == name) return s.skip;\n")
         w("    return 0;\n}\n\n")
+        w("consteval uint32_t agy_ow(std::string_view name) {\n")
+        w("    for (auto &s : AGY_SYMS) if (s.name == name) return s.ow;\n")
+        w("    return 0;\n}\n\n")
+        w("consteval agy_go_fn_t agy_stub(std::string_view id) {\n")
+        w("    for (auto &s : AGY_STUBS) if (s.id == id) return s.stub;\n")
+        w("    return nullptr;\n}\n\n")
+        w("consteval int agy_slot(std::string_view id) {\n")
+        w("    for (auto &s : AGY_STUBS) if (s.id == id) return s.slot;\n")
+        w("    return -1;\n}\n\n")
+
+        asm_lines = [
+            '.pushsection .rodata.agy_trampolines,"a",@progbits',
+        ]
+        for slot, r in enumerate(active_rows):
+            kind_esc = r["kind"].replace("\\", "\\\\").replace('"', '\\"')
+            asm_lines.append(f'.Lkind__{slot}: .asciz "{kind_esc}"')
+        asm_lines.append(".popsection")
+        asm_lines.append('.pushsection .agy_trampolines,"ax",@progbits')
+        asm_lines.append(".p2align 8")
+        asm_lines.append(".globl agy_tramp_region_start")
+        asm_lines.append(".hidden agy_tramp_region_start")
+        asm_lines.append("agy_tramp_region_start:")
+
+        for slot, r in enumerate(active_rows):
+            sym = r["symbol"]
+            asm_lines.extend(
+                emit_stub_asm(slot, r, c_sym_name(sym), skips[sym], prologues[sym])
+            )
+
+        asm_lines += [
+            ".globl agy_tramp_region_end",
+            ".hidden agy_tramp_region_end",
+            "agy_tramp_region_end:",
+            ".popsection",
+        ]
+
+        w("#ifdef AGY_EMIT_STATIC_TRAMPOLINES\n")
+        w("__asm__(\n")
+        for ln in asm_lines:
+            esc_ln = ln.replace("\\", "\\\\").replace('"', '\\"')
+            w(f'    "{esc_ln}\\n"\n')
+        w(");\n")
+        w("#endif /* AGY_EMIT_STATIC_TRAMPOLINES */\n\n")
         w("#endif\n")
-    print("wrote %s (%d symbols, build-id %s)" % (sys.argv[2], len(hooks), d.get("build_id", "")))
+
+    print(
+        "wrote %s (%d symbols, %d static trampoline stubs, build-id %s)"
+        % (out_path, len(hooks), len(active_rows), d.get("build_id", ""))
+    )
 
 
 if __name__ == "__main__":

@@ -211,7 +211,7 @@ cleanup — don't run parallel sessions that way.
 
 ## Antigravity (`agy`) instrumentation
 
-[`antigravity/`](antigravity/) is a research subsystem that instruments Google's Antigravity CLI (`agy`) in-process via an `LD_PRELOAD` shim (cgocall trampolines generated with frida-gum plus an embedded CPython), and also exposes `agy` as a TaskSolver-style backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the cgocall-trampoline hook mechanism for parking Go functions, current build/validation notes, and the historical WSL1/cloud-kernel investigations.
+[`antigravity/`](antigravity/) is a subsystem that instruments Google's Antigravity CLI (`agy`) in-process (converting the Go PIE binary into `vendor/libagy.so` and linking a C++23 host executable `vendor/agy` with bidirectional `ld` / `ld.so`-bound static cgocall trampolines plus an embedded CPython), and exposes `agy` as a TaskSolver backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the static cgocall-trampoline hook mechanism (`src/gocall.cpp` + `src/gomod.cpp`), current build/validation notes, and the historical WSL1/cloud-kernel investigations.
 
 ## License
 

@@ -206,7 +206,6 @@ int agy_gomod_register(uintptr_t region_base, uintptr_t region_end,
 #endif
 
 /* The frame-pointer unwinder (agy_safe_read/agy_backtrace/agy_emit_stack) and the
- * cgocall-trampoline installer (class AgyGoHook) are cgotrampoline.cpp's API — see
- * cgotrampoline.h. cgotrampoline.cpp includes this header for agy_gomod_register. */
+ * per-hook C handlers (`agy_on_*`) are gocall.cpp's API — see gocall.h. */
 
 #endif /* AGY_GOMOD_H */

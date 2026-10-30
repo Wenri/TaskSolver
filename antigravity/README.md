@@ -7,28 +7,31 @@ without a supported plugin API for what we need.
 
 It does this by converting the upstream PIE `agy` binary into `antigravity/vendor/libagy.so`
 (`make_libagy.py`: clears `DF_1_PIE`, sets `DT_SONAME = "libagy.so"`, exports
-`runtime.rt0_go` as `agy_rt0_go`, `runtime.firstmoduledata` as `agy_firstmoduledata`, and
-all 41 Go hook target functions as `agy_go__*` in `.dynsym`, while retaining `PT_TLS` inside
-`libagy.so`) and linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy`
-as its first `DT_NEEDED` dependency (so `ld-linux-x86-64.so.2` assigns `libagy.so` static TLS
-slot 1 at `[%fs:-0x4a0 .. %fs:0)` with no external `agy_tls.S` needed). At startup, `main()`
-runs `agy_init()` before calling `agy_rt0_go(argc, argv)`, combining two mechanisms:
+`runtime.rt0_go` as `agy_rt0_go`, `runtime.firstmoduledata` as `agy_firstmoduledata`,
+`agy_tramp_slots` (`512` bytes in `.bss`), and all 41 Go hook target functions as `agy_go__*`
+in `.dynsym`, statically patches each hooked Go function's `entry + skip` with
+`jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`), and imports all 28 `agy_stub__<ID>`
+symbols via `R_X86_64_GLOB_DAT` relocations, while retaining `PT_TLS` inside `libagy.so`) and
+linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` as its first
+`DT_NEEDED` dependency (so `ld-linux-x86-64.so.2` assigns `libagy.so` static TLS slot 1 at
+`[%fs:-0x4a0 .. %fs:0)` with no external `agy_tls.S` needed). At startup, `main()` runs
+`agy_init()` before calling `agy_rt0_go(argc, argv)`, combining two mechanisms:
 
-1. **Dynamic symbol interposition & `ld` binding** (`-Wl,--export-dynamic`) for libc entry points
-   (cgo DNS via `getaddrinfo`, plus `main()` running `agy_init()` in-process before Go starts)
-   and direct ELF relocation binding (`R_X86_64_64` / `R_X86_64_GLOB_DAT`) of `agy_rt0_go`,
-   `agy_firstmoduledata`, and every `agy_go__*` target function.
-2. **cgocall trampolines** patched over `ld`-bound `agy_go__*` function prologues in `libagy.so`,
-   with a synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto
-   `agy_firstmoduledata.next` before `agy_rt0_go()` starts and each hook row bound at compile
-   time (`consteval`) to its dedicated C hook handler (`agy_on_fh_update`, `agy_on_resp`,
-   `agy_on_tls_write`, `agy_on_file_open`, `agy_on_http_rt`, `agy_on_exit`, `agy_on_resp_chunk`,
-   `agy_on_readlink_filter`, `agy_on_generic`). Each patched prologue jumps to a generated
-   trampoline that marshals the Go-ABI arg registers and calls `runtime.cgocall`/`asmcgocall`
-   directly into that hook's C handler. frida-gum is still linked and used for its x86 code
-   writer + near-page allocator,
-   but its *inline-attach listener* path was retired and deleted: gum return hooks trip
-   Go's GC unwinder, and even entry-only attaches destabilized agy under load.
+1. **Bidirectional static `ld` / `ld.so` binding** (`-Wl,--export-dynamic`):
+   - `vendor/agy` → `libagy.so`: direct ELF relocation binding (`R_X86_64_64` /
+     `R_X86_64_GLOB_DAT`) of `agy_rt0_go`, `agy_firstmoduledata`, and every `agy_go__*`
+     target function (plus libc `getaddrinfo` interposition for cgo DNS).
+   - `libagy.so` → `vendor/agy`: `ld.so` populates `agy_tramp_slots[slot]` in `libagy.so`
+     with the address of each static trampoline stub `agy_stub__<ID>` in `vendor/agy` at
+     process load time — zero runtime code patching or `mprotect`.
+2. **Static cgocall trampolines (`src/gocall.cpp` + `src/gomod.cpp`)** assembled at build time
+   into `.section .agy_trampolines,"ax",@progbits` (via `gen_symbols_header.py`), with a
+   synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto `agy_firstmoduledata.next`
+   before `agy_rt0_go()` starts and each stub statically calling its dedicated C hook handler
+   (`agy_on_fh_update`, `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`,
+   `agy_on_http_rt`, `agy_on_exit`, `agy_on_resp_chunk`, `agy_on_readlink_filter`,
+   `agy_on_generic`) via `ld`-bound `runtime.cgocall`/`runtime.asmcgocall`. frida-gum has been
+   completely removed.
 
 Hook events are delivered to an **embedded CPython interpreter** running on a
 dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/`).
@@ -45,7 +48,7 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | `pcHeader.textStart == 0`; real base is a PIE-relocated `moduledata.text` (`0x4eb5080`, `0x80` past the ELF `.text` addr) | Stdlib `debug/gosym` mis-resolves (uses `textStart`, returns morestack trailers) and **GoReSym can't even locate the pclntab**. We resolve directly: find `moduledata` via the reloc whose addend is the pclntab vaddr, read `moduledata.text`, then `addr = text + func.entryoff`. `textsectmap` has one entry (code is one contiguous Go text section), so the mapping is linear — and every hooked address is **prologue-verified**. |
 | Backend is `google.cloud.businessaicode` (Gemini); env overrides exist: **`BAICODE_ENDPOINT_URL`**, `CLOUD_CODE_URL` | Pure *redirection* may need no hook at all — just an env var. |
 | Speaks **MCP as a client** (`mcp.json`/`mcpServers`, `GetPluginMCPSpecs`, `SetMcpManager`) and supports **custom agents** | Custom **tools** and **mcp_context** can largely be delivered *natively* by config (the hybrid path); hooks are reserved for what config can't express. |
-| Runs on **WSL1** (syscall-translation layer, not a real kernel) | Frida's ptrace/`frida-server` injection is unreliable here. We use **frida-gum *embedded*** (loaded in-process by our `LD_PRELOAD` constructor, `gum_init_embedded()`), which needs no ptrace — only `mprotect`. |
+| Runs on **WSL1** (syscall-translation layer, not a real kernel) | `ptrace` injection is unreliable here. We statically patch `libagy.so` on disk and bind our `.agy_trampolines` stubs via `ld` / `ld.so` `R_X86_64_GLOB_DAT` relocations — no `ptrace` and no runtime `mprotect`. |
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
 `85d3425a18a809e545747dcb9d87c03c`, agy **1.4.11**). The shim refuses to install hooks if
@@ -84,8 +87,8 @@ verification. The rebuilt shim passes an instrumented `agy --version` startup ch
         │   │        write verdict → signal condvar       │                   │
         │   └───────────────────────────────────────────┘                   │
         └────────────────────────────────────────────────────────────────────┘
-             ▲ vendor/agy links libagy.so (first DT_NEEDED) + wirecap_bridge + frida-gum.a;
-               main() -> agy_init() (verify build-id, start pyworker, install hooks) -> agy_rt0_go()
+             ▲ vendor/agy links libagy.so (first DT_NEEDED) + wirecap_bridge;
+               main() -> agy_init() (register moduledata, verify build-id, start pyworker, enable hooks) -> agy_rt0_go()
 ```
 
 ### Why a dedicated worker thread with a big stack
@@ -177,18 +180,20 @@ the trampoline: `codeassistclient.toStreamResponseChunk(line string)` gets each 
 model/usage). Reassembling those chunks into `genai_turn` is DONE — `BaseCorrelator.feed_chunk`
 (`wirecap/decode/capture.py`) accumulates them and emits the turn at the terminal event.
 
-**Approach A (`src/cgotrampoline.cpp` + `src/gomod.cpp`)** avoids gum's return-tracking
-entirely. It redirects the target — **past its stack-check prologue** — into a generated
-trampoline that:
+**Approach A (`src/gocall.cpp` + `src/gomod.cpp`)** avoids gum's return-tracking
+entirely. `make_libagy.py` statically patches the target — **past its stack-check prologue** —
+with `jmp *agy_tramp_slots[slot](%rip)` into a static assembly trampoline stub
+(`agy_stub__<ID>` in `.section .agy_trampolines,"ax",@progbits`, bound by `ld.so` via
+`R_X86_64_GLOB_DAT`) that:
 1. snapshots the Go-ABI arg registers into a stack **block**,
-2. `CALL runtime.cgocall(fn=h.handler, arg=&block)` — Go's own Go→C gateway, which switches
+2. `CALL runtime.cgocall(fn=handler, arg=&block)` — Go's own Go→C gateway, which switches
    to the g0/system stack and runs that hook's dedicated C handler (`agy_on_fh_update`,
    `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`, `agy_on_http_rt`, `agy_on_exit`,
-   `agy_on_resp_chunk`, `agy_on_readlink_filter`, or `agy_on_generic`, bound at compile time
-   via `consteval agy_handler_for(kind)`) in a safe cgo context (`entersyscall`, P-handoff,
+   `agy_on_resp_chunk`, `agy_on_readlink_filter`, or `agy_on_generic`, bound at link time
+   by `ld`) in a safe cgo context (`entersyscall`, P-handoff,
    GC coordination); the handler copies + enqueues to the pyworker,
-3. restores the registers, runs the overwritten original instructions, and `jmp`s back into
-   the target body.
+3. restores the registers, runs the displaced original frame-setup prologue instructions, and
+   `jmp`s back into `agy_go__* + skip + ow` via `@GOTPCREL`.
 
 Because the trampoline never rewrites *our* return address, parking/rescheduling is
 unaffected — the goroutine may resume on any M. A hook picks its Go→C gateway *per hook*
@@ -234,7 +239,7 @@ it never intercepts the return.)
 
 We evaluated hooking agy's **app boundary** to get the model response as pre-decoded Go
 values instead of parsing HTTP/1.1+SSE. The `AGY_PROC_CGT_ARGS` diagnostic (a fault-safe
-`process_vm_readv` recursive object-graph string-finder in `cgotrampoline.cpp`, gated on that env; the
+`process_vm_readv` recursive object-graph string-finder in `gocall.cpp`, gated on that env; the
 report lands as a `cgt_args` capture event) let us dump any trampoline hook's argument graph
 and reverse-engineer where text lives. Fanning out over the **whole** enumerated model-text
 pipeline (`gemini_coder/framework/{generator,core}` + `jetski/language_server/modelapi*`, not
@@ -306,7 +311,7 @@ falls back to the wire turn and then the PTY transcript (`.source` `"wire"`/`"tr
 ### Call-stack probe (`AGY_PROC_STACK=1`) — mapping HOW agy assembles a turn
 
 To understand the pipeline (not just the bytes), the shim can dump the **Go call stack** at
-every hook fire. `agy_backtrace` (cgotrampoline.cpp) walks the frame-pointer chain (`[rbp]`=saved rbp,
+every hook fire. `agy_backtrace` (gocall.cpp) walks the frame-pointer chain (`[rbp]`=saved rbp,
 `[rbp+8]`=return addr — Go keeps frame pointers) with **fault-safe `process_vm_readv`** reads,
 emitting each return PC as a link vaddr (`pc - base`). `build_symbols.py` writes a full sorted
 `symbols/funcmap.tsv.gz` (addr→name over all ~132k funcs; gitignored, regenerated by `make
@@ -392,18 +397,19 @@ result). See `config/` and `pyagy/config.py`.
 ```
 antigravity/
   README.md                 ← this file (the design)
-  CMakeLists.txt            ← the build: configure fetches deps (agy, frida-gum) + compile
-  vendor/                   ← agy copy (164 MB) + frida-gum devkit + built shim (gitignored; fetched at configure)
+  CMakeLists.txt            ← the build: generates symbols_gen.h + links vendor/agy against vendor/libagy.so
+  vendor/                   ← libagy.so (164 MB) + built vendor/agy host executable
   symbols/
     build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
-                              symbols.json; self-verifies every hook is a prologue
-    gen_symbols_header.py   ← symbols.json → symbols_gen.h (build-id + name→vaddr)
+                              symbols.json; self-verifies every hook prologue + extracts frame_prologue_hex
+    make_libagy.py          ← converts PIE agy → libagy.so; exports agy_go__* / agy_tramp_slots,
+                              imports agy_stub__* via R_X86_64_GLOB_DAT, and statically patches entry+skip
+    gen_symbols_header.py   ← symbols.json + procdef.h → symbols_gen.h (declarations + static .agy_trampolines stubs)
     patch_agy_wsl1.py       ← WSL1: clear tcmalloc MAP_FIXED_NOREPLACE in the fetched agy
-    symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, catalog}
+    symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, skips, prologues, catalog}
   src/
-    antigravity.cpp         ← LD_PRELOAD constructor + gum install + Go-ABI hook
-                              callbacks + getaddrinfo interposer
-    gomod.cpp / cgotrampoline.cpp ← synthetic Go moduledata + the cgocall trampolines
+    antigravity.cpp         ← main() entrypoint + agy_init() + getaddrinfo interposer
+    gomod.cpp / gocall.cpp  ← synthetic Go moduledata + static cgocall trampoline handlers & stack unwinder
     pybridge.cpp/.h         ← embed libpython (C++23); pyworker boost::thread, Boost.Python
                               object/call layer, queue, dispatch
     procdef.h                ← constexpr hook table + consteval hk() (id, symbol, mode, kind, mech, …)
@@ -444,11 +450,11 @@ The in-process module is **`pyagy.agy_process`** (loaded by `vendor/agy` via
 `pixi install` **builds `vendor/libagy.so` and `vendor/agy`** — the tasksolver package build (`setup.py` →
 `build_py`) runs `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …`,
 which (at configure time) fetches the pinned upstream `agy` tarball, converts it via
-`symbols/make_libagy.py` into `antigravity/vendor/libagy.so`, fetches `frida-gum`, and
+`symbols/make_libagy.py` into `antigravity/vendor/libagy.so`, and
 compiles the linked host executable `antigravity/vendor/agy`. Since the build is x86-64-specific and a main
 target, the package is **arch-specific (linux-64)** (`[tool.pixi.package.build.config]
 noarch=false`) and the build is **required, with no skip/opt-out** — it fails loudly
-if the toolchain (g++ / frida-gum / libpython) is missing, because a wheel without the
+if the toolchain (g++ / libpython / lief) is missing, because a wheel without the
 shim can't run the `agy` backend. (`cmake`, `ninja`, `hpack`, and `brotli-python`
 are pixi/conda deps — no `pip install` needed.)
 
@@ -465,15 +471,12 @@ pixi run build-shim     # a plain recompile (configure fetches the vendored deps
 multiprocessing/pickle wire between them is same-version (see *AgyProcess* below). It links
 `-Wl,-rpath,$(CONDA_PREFIX)/lib` so agy finds `libpython3.13.so.1.0` at runtime (agy is always
 launched via `pyagy/_env.py` under the pixi env). Build with `pixi run build-shim`
-(needs `g++` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). cmake configure fetches the
-**frida-gum devkit** from GitHub releases; where GitHub egress is blocked (e.g. a locked-down
-cloud container), vendor it manually into `vendor/frida-gum/` (`libfrida-gum.a`, `frida-gum.h`,
-`VERSION`) and cmake's existence guard skips the download. `pyagy.agy_process` needs `hpack`/`brotli` only for the
+(needs `g++` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). `pyagy.agy_process` needs `hpack`/`brotli` only for the
 HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
-Run agy under the hook via the launcher in `test_scripts/` — it installs the full working
-hook union (gum wire hooks + cgocall-trampoline app/rpc hooks, each hook's cgo gateway
-chosen per the `procdef.h` `MECH` column) in one pass; the GC-safe synthetic moduledata is
+Run agy under the hook via the launcher in `test_scripts/` — it enables the full working
+hook union (all 28 static `.agy_trampolines` stubs bound via `ld` / `ld.so`, each hook's cgo
+gateway chosen per the `procdef.h` `MECH` column); the GC-safe synthetic moduledata is
 always on:
 
 ```bash

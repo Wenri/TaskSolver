@@ -1,15 +1,15 @@
-# antigravity — build the LD_PRELOAD shim (vendor/antigravity.so).
+# antigravity — build `vendor/libagy.so` and the linked host executable (`vendor/agy`).
 #
 # Configure + build (both done by setup.py's build_py hook during `pixi install`, and by the
 # `build-shim` pixi task):
 #   cmake -S antigravity -B antigravity/build -G Ninja
 #   cmake --build antigravity/build
 # Maintenance targets (see the pixi tasks shim-symbols / shim-agy-update):
-#   cmake --build antigravity/build --target symbols     # re-resolve symbols.json from vendor/agy
+#   cmake --build antigravity/build --target symbols     # re-resolve symbols.json from vendor/libagy.so
 #   cmake --build antigravity/build --target agy-update   # fetch the latest agy + print new pins
 #
-# Configure-time "setup": fetch the pinned agy (sha512-verified) + the frida-gum devkit into
-# vendor/ (idempotent; guarded by existence), then the build compiles the four C++23 TUs.
+# Configure-time "setup": fetch the pinned agy (sha512-verified) and convert it into
+# vendor/libagy.so (idempotent; guarded by existence), then the build compiles the three C++23 TUs.
 cmake_minimum_required(VERSION 3.19)
 project(antigravity CXX)
 
@@ -29,8 +29,6 @@ set(CONDA_PREFIX "$ENV{CONDA_PREFIX}")
 if(NOT CONDA_PREFIX)
   message(FATAL_ERROR "CONDA_PREFIX is not set — configure inside the pixi env (pixi run build-shim).")
 endif()
-
-set(GUM "${CMAKE_SOURCE_DIR}/vendor/frida-gum")
 
 # ---- pinned agy release (keep these three in sync; then `pixi run shim-symbols`) ---------------
 # agy self-updates in the background, so a local install's build-id DRIFTS; we vendor a PINNED,
@@ -59,7 +57,6 @@ set(AGY_VERSION "1.4.11")
 set(AGY_URL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.11-5180209989812224/linux-x64/cli_linux_x64.tar.gz")
 set(AGY_SHA512 "2935601efa745ed6e314d32b415c71f44d9d455f0e6a2583372584be5a9074c28154cf81d5eec65b4416579453a3b3b05d3abe4d4f176754d5ef93a84af6cf28")
 set(AGY_BIN "" CACHE STRING "optional: local agy binary to vendor instead of downloading")
-set(FRIDA_VER "17.15.3")
 # WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag; a freshly-fetched agy must be
 # byte-patched to run there (address- & build-id-preserving). Auto-detect; override with -DAGY_WSL1=.
 execute_process(COMMAND uname -r OUTPUT_VARIABLE _uname_r OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -141,27 +138,7 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
   message(STATUS "[setup] vendored libagy.so ${AGY_VERSION}")
 endif()
 
-# ---- fetch frida-gum devkit (GitHub-only; not on conda-forge/PyPI) ----------------------------
-if(EXISTS "${GUM}/libfrida-gum.a")
-  message(STATUS "[setup] frida-gum present")
-else()
-  message(STATUS "[setup] fetching frida-gum devkit ${FRIDA_VER}")
-  file(MAKE_DIRECTORY "${GUM}")
-  set(_gum_txz "${CMAKE_BINARY_DIR}/frida-gum.tar.xz")
-  file(DOWNLOAD
-    "https://github.com/frida/frida/releases/download/${FRIDA_VER}/frida-gum-devkit-${FRIDA_VER}-linux-x86_64.tar.xz"
-    "${_gum_txz}" STATUS _gum_st SHOW_PROGRESS)
-  list(GET _gum_st 0 _gum_rc)
-  if(NOT _gum_rc EQUAL 0)
-    file(REMOVE "${_gum_txz}")
-    message(FATAL_ERROR "frida-gum download failed: ${_gum_st}")
-  endif()
-  file(ARCHIVE_EXTRACT INPUT "${_gum_txz}" DESTINATION "${GUM}")
-  file(WRITE "${GUM}/VERSION" "${FRIDA_VER}\n")
-  file(REMOVE "${_gum_txz}")
-endif()
-
-# ---- Linux UAPI headers: glibc <limits.h> (via frida-gum.h) needs <linux/limits.h>. Reference the
+# ---- Linux UAPI headers: glibc <limits.h> needs <linux/limits.h>. Reference the
 # conda kernel-headers sysroot in place via -idirafter; empty on a host that has /usr/include/linux.
 set(UAPI_INC "")
 if(NOT EXISTS "/usr/include/linux/limits.h")
@@ -180,13 +157,16 @@ message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 
 # NOTE: no python3-config probe here. No shim TU includes a Python header — CPython is embedded by
 # the SHARED bridge (wirecap/native), which does its own probe and carries the embed link flags.
-# ---- generate symbols_gen.h from the committed symbols.json (into src/, gitignored) -----------
+# ---- generate symbols_gen.h from the committed symbols.json + src/procdef.h -------------------
 add_custom_command(
   OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
   COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/gen_symbols_header.py"
                   "${CMAKE_SOURCE_DIR}/symbols/symbols.json" "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
-  DEPENDS "${CMAKE_SOURCE_DIR}/symbols/symbols.json" "${CMAKE_SOURCE_DIR}/symbols/gen_symbols_header.py"
-  COMMENT "gen src/symbols_gen.h from symbols.json"
+  DEPENDS "${CMAKE_SOURCE_DIR}/symbols/symbols.json"
+          "${CMAKE_SOURCE_DIR}/symbols/gen_symbols_header.py"
+          "${CMAKE_SOURCE_DIR}/symbols/gen_hooks_py.py"
+          "${CMAKE_SOURCE_DIR}/src/procdef.h"
+  COMMENT "gen src/symbols_gen.h from symbols.json + src/procdef.h"
   VERBATIM)
 add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h")
 
@@ -198,7 +178,7 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wi
 
 # ---- the instrumented host executable: vendor/agy (links vendor/libagy.so first) --------------
 add_executable(agy
-  src/antigravity.cpp src/gomod.cpp src/cgotrampoline.cpp)
+  src/antigravity.cpp src/gomod.cpp src/gocall.cpp)
 add_dependencies(agy gen_symbols)
 set_target_properties(agy PROPERTIES
   OUTPUT_NAME "agy"
@@ -215,15 +195,14 @@ target_compile_options(agy PRIVATE
 if(UAPI_INC)
   target_compile_options(agy PRIVATE -idirafter "${UAPI_INC}")
 endif()
-target_include_directories(agy PRIVATE "${GUM}" "${CONDA_PREFIX}/include")
+target_include_directories(agy PRIVATE "${CONDA_PREFIX}/include")
 
 # Link order is critical: vendor/libagy.so MUST be first so its PT_TLS segment receives the first
 # static TLS slot [%fs:-0x4a0 .. %fs:0) from ld-linux-x86-64.so.2 (the host executable itself
-# defines no thread-local variables). Followed by wirecap_bridge, frida-gum.a, and system libs.
+# defines no thread-local variables). Followed by wirecap_bridge and system libs.
 target_link_libraries(agy PRIVATE
   "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
   wirecap_bridge                       # the shared bridge (PUBLIC-propagates libpython embed + boost + rpath)
-  "${GUM}/libfrida-gum.a"
   -L${CONDA_PREFIX}/lib rt resolv dl m -pthread)
 target_link_options(agy PRIVATE
   -Wl,--exclude-libs,ALL -Wl,--gc-sections -Wl,--enable-new-dtags
