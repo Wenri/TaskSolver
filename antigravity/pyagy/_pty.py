@@ -61,10 +61,10 @@ class PtyPopen(WirePtyPopen):
         extra = {**(getattr(process_obj, "_extra_env", None) or {}), **env_ovr}
         env = instrumented_env(capture=capture, extra_env=extra)
         agy_args = getattr(process_obj, "_agy_args", None) or ["--print", "agy-mp"]
-        # Inject the shim via agy's PT_INTERP + --preload (per-exec) rather than LD_PRELOAD, which
-        # every child agy spawns would inherit and needlessly load the shim into. An explicit empty
-        # LD_PRELOAD in extra_env opts out (an uninstrumented baseline — e.g. test auth probes).
+        # An explicit empty LD_PRELOAD in extra_env opts out of instrumentation (e.g. baseline
+        # auth probes).
         if env.pop("LD_PRELOAD", None) == "":
+            env.pop("AGY_PROC_ENABLE", None)
             argv = [agy, *agy_args]
         else:
             argv = preload_argv(agy, agy_args, env=env)

@@ -1,13 +1,11 @@
-"""Environment + argv wiring for an instrumented agy run: inject the antigravity shim via the
-program interpreter's ``--preload`` (see :func:`preload_argv`) and wire the in-process Python
-subsystem (``pyagy.agy_process``) + capture JSONL. Used by :class:`pyagy.agyprocess.AgyProcess`
-(the single agy launcher) and test_scripts/run-agy.sh.
+"""Environment + argv wiring for an instrumented agy run: run the linked ``vendor/agy`` host
+executable (which links ``vendor/libagy.so`` as its first ``DT_NEEDED`` dependency) and wire the
+in-process Python subsystem (``pyagy.agy_process``) + capture JSONL. Used by
+:class:`pyagy.agyprocess.AgyProcess` (the single agy launcher) and test_scripts/run-agy.sh.
 
-The shim is injected as a per-exec loader argument, NOT via ``LD_PRELOAD``: an env var is inherited
-by every process agy spawns (a Playwright/Node helper, each ``bash -c`` tool command), each of which
-then needlessly loads the shim — the reason the shim carries a build-id / ``_AGY_SBOXSERVE`` bail-out.
-Running agy through its own ``PT_INTERP`` with ``--preload`` (+ ``--library-path`` for the shim's
-libpython) scopes the injection to the one agy exec, leaving nothing shim-related in the environment.
+Because ``vendor/agy`` is a normal ELF executable linked against ``libagy.so`` with a ``RUNPATH``,
+no ``LD_PRELOAD`` or ``ld.so --preload`` wrapper is needed, and child processes spawned by ``agy``
+do not inherit any preload environment variables.
 """
 import os
 
@@ -21,44 +19,19 @@ def _vendored(in_pkg_rel, sibling_rel):
     return vendored(_PKG_DIR, "pyagy", in_pkg_rel, sibling_rel)
 
 
-# The bundled pyagy/vendor/antigravity.so (wheel) or the sibling antigravity/vendor/antigravity.so
-# (checkout) — build-id coupled to the agy that _VENDOR_AGY resolves to (same build).
-SHIM = _vendored("vendor/antigravity.so", "../vendor/antigravity.so")
-
-
-def _elf_interp(path):
-    """The program interpreter (``PT_INTERP``) baked into an ELF — the dynamic loader the kernel
-    would use to run it (e.g. ``/lib64/ld-linux-x86-64.so.2``). We invoke that loader explicitly so
-    ``--preload`` injects the shim for this one exec instead of via an inherited ``LD_PRELOAD``.
-    Parsed with LIEF; raises if the binary has no interpreter (statically linked). LIEF is imported
-    lazily so the shim's embedded interpreter — which imports only the stdlib-pure decode layer, not
-    this launcher module — never needs it (only the parent-side launcher calls this)."""
-    import lief
-    binary = lief.parse(path)
-    if binary is None:
-        raise ValueError(f"{path}: not parseable as an ELF binary")
-    if not binary.has_interpreter:
-        raise ValueError(f"{path}: no PT_INTERP (statically linked?)")
-    return binary.interpreter
+# The bundled pyagy/vendor/libagy.so (wheel) or the sibling antigravity/vendor/libagy.so
+# (checkout) — build-id coupled to the vendor/agy host executable (same build).
+LIBAGY = _vendored("vendor/libagy.so", "../vendor/libagy.so")
+SHIM = LIBAGY
 
 
 def preload_argv(agy_bin, agy_args, shim=None, env=None):
-    """Build the argv that runs ``agy_bin`` with the shim injected via its interpreter's
-    ``--preload`` — a per-exec injection that (unlike ``LD_PRELOAD``) agy's children do not inherit.
-    ``--argv0`` preserves agy's own ``argv[0]``; ``--library-path`` points the loader at
-    ``$CONDA_PREFIX/lib`` (+ any existing ``LD_LIBRARY_PATH``) so the shim's libpython resolves
-    without leaving ``LD_LIBRARY_PATH`` in the environment either."""
-    shim = shim or SHIM
+    """Build the argv that runs ``agy_bin`` (linked directly against ``libagy.so``) and record
+    ``AGY_PROC_REAL_EXE`` in ``env`` for the ``READLINK_FILTER`` hook."""
+    del shim
     env = os.environ if env is None else env
-    # The shim's READLINK_FILTER hook returns this for os.readlink("/proc/self/exe") — which the
-    # kernel resolves to the loader here (argv[0] is the interpreter, below), not agy.
     env["AGY_PROC_REAL_EXE"] = os.path.abspath(agy_bin)
-    argv = [_elf_interp(agy_bin), "--argv0", agy_bin]
-    libpath = [p for p in (os.path.join(env["CONDA_PREFIX"], "lib") if env.get("CONDA_PREFIX") else None,
-                           env.get("LD_LIBRARY_PATH")) if p]
-    if libpath:
-        argv += ["--library-path", os.pathsep.join(libpath)]
-    return argv + ["--preload", shim, agy_bin, *agy_args]
+    return [agy_bin, *agy_args]
 
 
 def instrumented_env(capture="agy-capture.jsonl", log=None,

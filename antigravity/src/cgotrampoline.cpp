@@ -310,11 +310,13 @@ static void cgt_bytes_emit(const char *kind, uint64_t id, uint64_t ptr, uint64_t
     }
 }
 
-/* The C hook — runs on the g0/system stack during cgocall. MUST stay light and
- * must not allocate Go memory; wire_emit() copies + enqueues to the worker.
- * Emits the receiver (RAX) as stream_id + the borrowed rodata kind tag. With
- * AGY_PROC_CGT_ARGS set, also emits a diagnostic arg-register report. */
-static uint64_t g_gh_base;   /* main-module base, for reducing PCs to link vaddrs */
+/* Per-hook C handlers — run on the g0/system stack during cgocall. MUST stay light
+ * and must not allocate Go memory; wire_emit() copies + enqueues to the worker.
+ * Each trampoline stub bakes its own dedicated handler pointer directly into its
+ * cgocall/asmcgocall target register, so there is no runtime string dispatch chain. */
+static uint64_t g_gh_base;   /* libagy.so load base, for reducing PCs to link vaddrs */
+static bool g_cgt_args;      /* cached AGY_PROC_CGT_ARGS */
+static bool g_cgt_stack;     /* cached AGY_PROC_STACK */
 
 /* The real agy path the READLINK_FILTER hook substitutes for /proc/self/exe. A static (BSS) buffer,
  * filled once at agy_init from AGY_PROC_REAL_EXE (before Go starts → no concurrent-writer race), so
@@ -340,108 +342,108 @@ static bool mem_has(const char *h, size_t n, std::string_view needle)
     return !needle.empty() && std::string_view(h, n).find(needle) != std::string_view::npos;
 }
 
-static void agy_cgo_hook(agy_block *b)
+static inline void cgt_common(agy_block *b)
 {
-    if (std::getenv("AGY_PROC_CGT_ARGS")) cgt_diag(b);
-    if (std::getenv("AGY_PROC_STACK"))    /* captured rbp = the CALLER's frame (target
-                                        prologue runs on the way out) → chain starts
-                                        one frame above the target (= the kind). */
+    if (g_cgt_args) cgt_diag(b);
+    if (g_cgt_stack)
         agy_emit_stack((const char *)b->kind, b->regs.rbp, g_gh_base);
-    /* One non-owning view of the kind tag for the dispatch below (strlen only, no allocation;
-     * guarded because std::string_view from a null pointer is UB). */
-    std::string_view kind = b->kind ? std::string_view((const char *)b->kind) : std::string_view{};
-    /* updateWithStep is the shallow response consumer → emit the clean answer text
-     * (in addition to the fire-count event below, which other kinds also emit). */
-    if (kind == "fh_update")
-        cgt_response_emit(b);
-    /* Entry-arg hooks migrated off gum because they PARK (the trampoline is park-safe).
-     * These emit their own full event and return — no generic fire event below. */
-    if (kind == "resp") {
-        /* http2 (*pipe).Write(p []byte): receiver=rax, p.ptr=rbx, p.len=rcx */
-        cgt_bytes_emit("resp", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
-        return;
-    }
-    if (kind == "tls_write") {
-        /* crypto/tls.(*Conn).Write(c=rax, b.ptr=rbx, b.len=rcx): the model REQUEST (egress).
-         * Entry-arg read on the trampoline — the reliable replacement for the gum on_enter path. */
-        cgt_bytes_emit("tls_write", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
-        return;
-    }
-    if (kind == "file_open") {
-        /* os.OpenFile(name string, ...): name.ptr=rax, name.len=rbx. agy's conversation store
-         * lives at .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl, so the
-         * uuid is IN the path. Filter to those paths HERE (C, cheap) so the worker only ever sees
-         * a conversation open, then Python parses the uuid → a conversation_id event. The hook is
-         * gated at install time on AGY_PROC_CONV_ID, so an ordinary run pays nothing at all. */
-        const char *p = (const char *)b->regs.rax;
-        size_t len = (size_t)b->regs.rbx;
-        if (p && len > 0 && len < 4096 &&
-            (mem_has(p, len, "conversations/") || mem_has(p, len, "/brain/"))) {
-            wire_event_t ev = { .kind = "file_open", .stream_id = 0,
-                               .data = (const uint8_t *)p, .len = len, .mode = WIRE_ASYNC };
-            wire_emit(&ev);
-        }
-        return;
-    }
-    if (kind == "http_rt") {
-        /* net/http.(*Transport).RoundTrip(t=rax, req=rbx): marker keyed by the request ptr */
-        wire_event_t rt = { .kind = "http_rt", .stream_id = b->regs.rbx, .mode = WIRE_ASYNC };
-        wire_emit(&rt);
-        return;
-    }
-    if (kind == "exit") {
-        /* os.Exit(code int): code=rax. The clean end-of-capture marker. SYNC so the worker
-         * writes it BEFORE agy's exit_group syscall (an ASYNC event would race process death);
-         * FULLCGO hands off the P so other goroutines run while we briefly block. The code rides
-         * stream_id; Python on_exit records {"kind":"exit","code":N}. */
-        wire_event_t ev = { .kind = "exit", .stream_id = b->regs.rax, .mode = WIRE_SYNC };
-        wire_emit(&ev);        /* SYNC: marker recorded before we stop the worker (below) */
-        wire_shutdown();       /* now cooperatively stop + join the worker (deterministic teardown) */
-        return;
-    }
-    if (kind == "resp_chunk") {
-        /* codeassistclient.toStreamResponseChunk(line string): line.ptr=rax, line.len=rbx — one
-         * raw SSE response line ("data: {\"response\": {...}}"), the wire RESPONSE. Entry-arg read
-         * on the trampoline — the reliable replacement for the retired TLS_DECRYPT leave hook. */
-        cgt_bytes_emit("resp_chunk", b->regs.rax, b->regs.rax, b->regs.rbx, false);
-        return;
-    }
-    if (kind == "readlink_filter") {
-        /* os.readlink(name string) (string, error): name.ptr=rax, name.len=rbx. For /proc/self/exe
-         * (misresolved to the loader under `ld.so --preload`), RETURN the real agy path via the filter
-         * mode: os.readlink returns (string,error) → rax=str.ptr, rbx=str.len, rcx=err.tab=0,
-         * rdi=err.data=0; set action=1 to skip the body (the readlinkat syscall + grow loop). Every
-         * other readlink — and the case where AGY_PROC_REAL_EXE is unset (g_real_exe_len==0) — PASSes
-         * untouched (never return "", which would poison os.Executable's cached path). */
-        uint64_t nptr = b->regs.rax, nlen = b->regs.rbx;
-        char nm[16];
-        if (g_real_exe_len && nlen == 14 && agy_safe_read(nptr, nm, 14) == 14 &&
-            std::memcmp(nm, "/proc/self/exe", 14) == 0) {
-            b->regs.rax = (uint64_t)(uintptr_t)g_real_exe;   /* string.ptr → static BSS buffer */
-            b->regs.rbx = g_real_exe_len;                    /* string.len */
-            b->regs.rcx = 0;                                 /* error.tab  = nil */
-            b->regs.rdi = 0;                                 /* error.data = nil */
-            b->action = 1;                                   /* RETURN — skip the body */
-            /* one-shot: log the correction (kernel's real answer = the loader → our substitute) */
-            static int logged;
-            if (!logged) {
-                logged = 1;
-                char kr[512];
-                ssize_t n = readlink("/proc/self/exe", kr, sizeof kr - 1);
-                kr[n > 0 ? n : 0] = 0;
-                GHLOG("os.readlink(/proc/self/exe): kernel=%s -> RETURN %s", kr, g_real_exe);
-            }
-            /* emit the substitute (the path we handed back) so a test can assert it */
-            wire_event_t ev = { .kind = "readlink_filter", .stream_id = nptr,
-                               .data = (const uint8_t *)g_real_exe, .len = g_real_exe_len,
-                               .mode = WIRE_ASYNC };
-            wire_emit(&ev);
-        }
-        return;   /* non-match / no real-exe → PASS (action stays 0) */
-    }
+}
+
+extern "C" void agy_on_generic(agy_block *b)
+{
+    cgt_common(b);
     wire_event_t ev = { .kind = (const char *)b->kind,
                        .stream_id = b->regs.rax, .mode = WIRE_ASYNC };
     wire_emit(&ev);
+}
+
+extern "C" void agy_on_fh_update(agy_block *b)
+{
+    cgt_common(b);
+    cgt_response_emit(b);
+    wire_event_t ev = { .kind = (const char *)b->kind,
+                       .stream_id = b->regs.rax, .mode = WIRE_ASYNC };
+    wire_emit(&ev);
+}
+
+extern "C" void agy_on_resp(agy_block *b)
+{
+    cgt_common(b);
+    /* http2 (*pipe).Write(p []byte): receiver=rax, p.ptr=rbx, p.len=rcx */
+    cgt_bytes_emit("resp", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
+}
+
+extern "C" void agy_on_tls_write(agy_block *b)
+{
+    cgt_common(b);
+    /* crypto/tls.(*Conn).Write(c=rax, b.ptr=rbx, b.len=rcx): the model REQUEST (egress). */
+    cgt_bytes_emit("tls_write", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
+}
+
+extern "C" void agy_on_file_open(agy_block *b)
+{
+    cgt_common(b);
+    /* os.OpenFile(name string, ...): name.ptr=rax, name.len=rbx. */
+    const char *p = (const char *)b->regs.rax;
+    size_t len = (size_t)b->regs.rbx;
+    if (p && len > 0 && len < 4096 &&
+        (mem_has(p, len, "conversations/") || mem_has(p, len, "/brain/"))) {
+        wire_event_t ev = { .kind = "file_open", .stream_id = 0,
+                           .data = (const uint8_t *)p, .len = len, .mode = WIRE_ASYNC };
+        wire_emit(&ev);
+    }
+}
+
+extern "C" void agy_on_http_rt(agy_block *b)
+{
+    cgt_common(b);
+    /* net/http.(*Transport).RoundTrip(t=rax, req=rbx): marker keyed by the request ptr */
+    wire_event_t rt = { .kind = "http_rt", .stream_id = b->regs.rbx, .mode = WIRE_ASYNC };
+    wire_emit(&rt);
+}
+
+extern "C" void agy_on_exit(agy_block *b)
+{
+    cgt_common(b);
+    /* os.Exit(code int): code=rax. SYNC end-of-capture marker before exit_group. */
+    wire_event_t ev = { .kind = "exit", .stream_id = b->regs.rax, .mode = WIRE_SYNC };
+    wire_emit(&ev);
+    wire_shutdown();
+}
+
+extern "C" void agy_on_resp_chunk(agy_block *b)
+{
+    cgt_common(b);
+    /* codeassistclient.toStreamResponseChunk(line string): line.ptr=rax, line.len=rbx */
+    cgt_bytes_emit("resp_chunk", b->regs.rax, b->regs.rax, b->regs.rbx, false);
+}
+
+extern "C" void agy_on_readlink_filter(agy_block *b)
+{
+    cgt_common(b);
+    /* os.readlink(name string) (string, error): name.ptr=rax, name.len=rbx. */
+    uint64_t nptr = b->regs.rax, nlen = b->regs.rbx;
+    char nm[16];
+    if (g_real_exe_len && nlen == 14 && agy_safe_read(nptr, nm, 14) == 14 &&
+        std::memcmp(nm, "/proc/self/exe", 14) == 0) {
+        b->regs.rax = (uint64_t)(uintptr_t)g_real_exe;   /* string.ptr → static BSS buffer */
+        b->regs.rbx = g_real_exe_len;                    /* string.len */
+        b->regs.rcx = 0;                                 /* error.tab  = nil */
+        b->regs.rdi = 0;                                 /* error.data = nil */
+        b->action = 1;                                   /* RETURN — skip the body */
+        static int logged;
+        if (!logged) {
+            logged = 1;
+            char kr[512];
+            ssize_t n = readlink("/proc/self/exe", kr, sizeof kr - 1);
+            kr[n > 0 ? n : 0] = 0;
+            GHLOG("os.readlink(/proc/self/exe): kernel=%s -> RETURN %s", kr, g_real_exe);
+        }
+        wire_event_t ev = { .kind = "readlink_filter", .stream_id = nptr,
+                           .data = (const uint8_t *)g_real_exe, .len = g_real_exe_len,
+                           .mode = WIRE_ASYNC };
+        wire_emit(&ev);
+    }
 }
 
 /* Recognize the Go frame-setup prologue we overwrite: push rbp; mov rbp,rsp;
@@ -469,37 +471,39 @@ AgyGoHook::~AgyGoHook()
     if (w_) gum_x86_writer_unref(w_);
 }
 
-std::unique_ptr<AgyGoHook> AgyGoHook::begin(uint64_t base, uint64_t cgocall_va,
-                                            uint64_t asmcgocall_va, int max_targets)
+std::unique_ptr<AgyGoHook> AgyGoHook::begin(uint64_t base, void (*cgocall_fn)(),
+                                            void (*asmcgocall_fn)(), int max_targets)
 {
-    if (!cgocall_va)      { GHLOG("runtime.cgocall unresolved; cannot build trampolines"); return nullptr; }
-    if (!asmcgocall_va)   { GHLOG("runtime.asmcgocall unresolved; cannot build trampolines"); return nullptr; }
+    if (!cgocall_fn)      { GHLOG("runtime.cgocall unresolved; cannot build trampolines"); return nullptr; }
+    if (!asmcgocall_fn)   { GHLOG("runtime.asmcgocall unresolved; cannot build trampolines"); return nullptr; }
     if (max_targets <= 0) { GHLOG("bad max_targets=%d", max_targets); return nullptr; }
 
     auto h = std::unique_ptr<AgyGoHook>(new (std::nothrow) AgyGoHook());  /* members default-init */
     if (!h) { GHLOG("alloc failed"); return nullptr; }
     h->base_ = base;
-    h->cgocall_abs_ = base + cgocall_va;
-    h->asmcgocall_abs_ = base + asmcgocall_va;   /* required, assumed resolved (checked above) */
+    h->cgocall_abs_ = (uint64_t)(uintptr_t)cgocall_fn;
+    h->asmcgocall_abs_ = (uint64_t)(uintptr_t)asmcgocall_fn;
     h->max_ = max_targets;
     g_gh_base = base;                            /* for agy_emit_stack PC→vaddr reduction */
+    g_cgt_args  = std::getenv("AGY_PROC_CGT_ARGS") != nullptr;
+    g_cgt_stack = std::getenv("AGY_PROC_STACK") != nullptr;
 
-    /* Slot region NEAR agy's text so each target->trampoline jmp is a 5-byte rel32. */
+    /* Slot region NEAR libagy.so's .text so each target->trampoline jmp is a 5-byte rel32. */
     long page = sysconf(_SC_PAGESIZE);
     gsize need = (gsize)max_targets * GH_SLOT;
     guint npages = (guint)((need + page - 1) / page);
-    GumAddressSpec spec = { (gpointer)(uintptr_t)base, 0x7f000000 };  /* within +-~2GB of text */
+    GumAddressSpec spec = { (gpointer)(uintptr_t)h->cgocall_abs_, 0x70000000 };  /* within +-1.75GB of .text */
     h->region_ = (uint8_t *)gum_alloc_n_pages_near(npages, GUM_PAGE_RWX, &spec);
     if (!h->region_) { GHLOG("gum_alloc_n_pages_near failed"); return nullptr; }  /* unique_ptr frees h */
     h->w_ = gum_x86_writer_new(h->region_);
     return h;   /* caller owns the unique_ptr across add()/finalize() */
 }
 
-void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
+void AgyGoHook::add(void (*target)(), uint32_t skip, const char *kind, agy_hook_fn handler, int asmcgo)
 {
     if (made_ >= max_) { GHLOG("region full (max=%d); dropping kind=%s", max_, kind); return; }
 
-    uint64_t hook_addr = base_ + entry + skip;
+    uint64_t hook_addr = (uint64_t)(uintptr_t)target + skip;
     const uint8_t *orig = (const uint8_t *)(uintptr_t)hook_addr;
     uint32_t ov = match_prologue(orig);
     if (!ov) { GHLOG("unexpected prologue at +%u (kind=%s); skipping", skip, kind); return; }
@@ -518,31 +522,15 @@ void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
     gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)kind);
     gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_KIND, GUM_X86_RAX);
     /* block.action = 0 (PASS) — full 64-bit zero so a non-opting hook reads a defined 0, not
-     * stack garbage (a 32-bit store would leave the high half garbage → spurious RETURN). RAX is
-     * dead here (kind already stored) and is reloaded with agy_gomod_ensure next, so the clobber is free. */
+     * stack garbage (a 32-bit store would leave the high half garbage → spurious RETURN). */
     gum_x86_writer_put_xor_reg_reg(w, GUM_X86_RAX, GUM_X86_RAX);
     gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, OFF_ACTION, GUM_X86_RAX);
 
-    /* Register the synthetic moduledata (once) BEFORE the cgocall opens the
-     * _Gsyscall GC-scan window. Runs on the goroutine stack in _Grunning (our
-     * unknown PC is never an async-safe-point → no scan/preempt), and only
-     * clobbers already-saved caller-saved regs. rsp is 16-aligned here. */
-    gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_gomod_ensure);
-    gum_x86_writer_put_call_reg(w, GUM_X86_RAX);
-
     if (asmcgo) {
-        /* asmcgocall(fn, arg) — the g0-stack-switch inner half of cgocall, WITHOUT
-         * entersyscall/exitsyscall (no _Gsyscall, no P handoff, no reschedule-onto-
-         * new-stack). asmcgocall takes ABI0 STACK args (verified in agy): the caller
-         * places fn@[sp+0], arg@[sp+8], errno@[sp+16] at the CALL, and it re-derives
-         * g from TLS + passes arg to fn in RDI. We carve a transient 32-byte outgoing
-         * frame BELOW the block (kept 16-aligned) so the block the hook reads stays
-         * intact. NOTE: within [frame_lo,frame_hi) the moduledata claims spdelta==FRAME,
-         * but here it's FRAME+32 — benign: asmcgocall never enters _Gsyscall, so GC does
-         * no non-preemptive stack scan of this window (the cgocall hazard). */
+        /* asmcgocall(fn, arg): statically bound per-hook C handler in [sp+0], &block in [sp+8] */
         gum_x86_writer_put_lea_reg_reg_offset(w, GUM_X86_RSI, GUM_X86_RSP, OFF_KIND); /* rsi=&block */
         gum_x86_writer_put_sub_reg_imm(w, GUM_X86_RSP, 32);
-        gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_cgo_hook);
+        gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)handler);
         gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, 0, GUM_X86_RAX);   /* [sp+0]=fn  */
         gum_x86_writer_put_mov_reg_offset_ptr_reg(w, GUM_X86_RSP, 8, GUM_X86_RSI);   /* [sp+8]=arg */
         gum_x86_writer_put_bytes(w, XORPS_XMM15, sizeof XORPS_XMM15);
@@ -550,11 +538,9 @@ void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
         gum_x86_writer_put_call_reg(w, GUM_X86_R12);
         gum_x86_writer_put_add_reg_imm(w, GUM_X86_RSP, 32);
     } else {
-        /* cgocall(fn=RAX, arg=RBX): arg=&block, fn=&agy_cgo_hook; X15 must be 0.
-         * The 16-byte GH_SPILL scratch below the block absorbs cgocall's two
-         * caller-arg spill slots ([S],[S+8]), so block.kind/regs.rax stay intact. */
+        /* cgocall(fn=RAX, arg=RBX): arg=&block, fn=statically bound per-hook C handler; X15 must be 0. */
         gum_x86_writer_put_lea_reg_reg_offset(w, GUM_X86_RBX, GUM_X86_RSP, OFF_KIND);
-        gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)agy_cgo_hook);
+        gum_x86_writer_put_mov_reg_address(w, GUM_X86_RAX, (GumAddress)(uintptr_t)handler);
         gum_x86_writer_put_bytes(w, XORPS_XMM15, sizeof XORPS_XMM15);
         gum_x86_writer_put_mov_reg_address(w, GUM_X86_R12, (GumAddress)cgocall_abs_);
         gum_x86_writer_put_call_reg(w, GUM_X86_R12);
@@ -617,20 +603,17 @@ void AgyGoHook::add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo)
     made_++;
 }
 
-int AgyGoHook::finalize(uint64_t md_vaddr)
+int AgyGoHook::finalize()
 {
     int made = made_;
     if (made == 0) { GHLOG("no trampolines installed"); return 0; }
 
-    /* GC-unwind safety: BUILD the covering synthetic moduledata now (constructor
-     * time; no firstmoduledata read). The trampolines call agy_gomod_ensure() to
-     * SPLICE it lazily on first hit, when Go is up. Required — without it a GC that
-     * unwinds a trampoline frame throws("unknown pc"). */
+    /* GC-unwind safety: build and register the covering synthetic moduledata directly
+     * onto ld-bound `agy_firstmoduledata.next` before agy_rt0_go() starts. */
     uintptr_t rbase = (uintptr_t)region_;
-    int rc = agy_gomod_prepare(base_ + md_vaddr, cgocall_abs_,
-                               rbase, rbase + (uintptr_t)made * GH_SLOT,
-                               GH_SLOT, made, GH_FRAME, frame_lo_, frame_hi_);
-    if (rc != 0) GHLOG("moduledata prepare failed (rc=%d); trampolines are live "
+    int rc = agy_gomod_register(rbase, rbase + (uintptr_t)made * GH_SLOT,
+                                GH_SLOT, made, GH_FRAME, frame_lo_, frame_hi_);
+    if (rc != 0) GHLOG("moduledata register failed (rc=%d); trampolines are live "
                        "but NOT GC-safe — expect throw(\"unknown pc\") under GC", rc);
     return made;
 }

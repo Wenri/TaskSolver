@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Bake symbols.json into a C++ header: a constexpr name->vaddr table + consteval
-agy_sym/agy_skip resolvers + the build-id guard.
-
-The resolvers are `consteval`: callers pass literal names (e.g. runtime.cgocall) or
-resolve per-hook at table-build time (agy_hook's consteval constructor in procdef.h
-bakes each hook's vaddr/skip), so no symbol lookup happens at runtime."""
+"""Bake symbols.json into a C++ header: extern "C" declarations for the Go symbols
+exported by libagy.so (`agy_go__*`) so `ld` binds them directly via ELF relocations,
+plus consteval `agy_fn`/`agy_sym`/`agy_skip` resolvers and the build-id guard.
+"""
 import json
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from build_symbols import c_sym_name  # noqa: E402
+
 
 def main():
     if len(sys.argv) != 3:
@@ -21,19 +24,25 @@ def main():
         w("#include <cstdint>\n#include <string_view>\n\n")
         w('inline constexpr char     AGY_BUILD_ID[]       = "%s";\n' % d.get("build_id", ""))
         w("inline constexpr uint64_t AGY_TEXT_BASE        = 0x%xULL;\n" % d.get("text_base", 0))
-        # &runtime.firstmoduledata (file vaddr); runtime addr = main_module_base +
-        # this. Used by the cgocall-trampoline path to clone/splice a synthetic module.
         w("inline constexpr uint64_t AGY_MODULEDATA_VADDR = 0x%xULL;\n\n" % d.get("moduledata_vaddr", 0))
-        # vaddr = function entry; skip = bytes past the stack-check prologue (hook
-        # there so Go's morestack re-enters the real entry, not our trampoline).
-        w("struct agy_symrec { std::string_view name; uint64_t vaddr; uint32_t skip; };\n")
+
+        w('extern "C" {\n')
+        for name in hooks:
+            w("void %s();\n" % c_sym_name(name))
+        w("}\n\n")
+
+        w("using agy_go_fn_t = void (*)();\n")
+        w("struct agy_symrec { std::string_view name; agy_go_fn_t fn; uint64_t vaddr; uint32_t skip; };\n")
         w("inline constexpr agy_symrec AGY_SYMS[] = {\n")
         for name, addr in hooks.items():
-            w('    { "%s", 0x%xULL, %d },\n'
-              % (name.replace('\\', '\\\\').replace('"', '\\"'), addr, skips.get(name, 0)))
+            esc = name.replace("\\", "\\\\").replace('"', '\\"')
+            w('    { "%s", &%s, 0x%xULL, %d },\n'
+              % (esc, c_sym_name(name), addr, skips.get(name, 0)))
         w("};\n\n")
-        # consteval: resolved at compile time. Unresolved name -> 0 (the install loop
-        # then logs + skips that hook, exactly as the old runtime lookup did).
+
+        w("consteval agy_go_fn_t agy_fn(std::string_view name) {\n")
+        w("    for (auto &s : AGY_SYMS) if (s.name == name) return s.fn;\n")
+        w("    return nullptr;\n}\n\n")
         w("consteval uint64_t agy_sym(std::string_view name) {\n")
         w("    for (auto &s : AGY_SYMS) if (s.name == name) return s.vaddr;\n")
         w("    return 0;\n}\n\n")
@@ -42,6 +51,7 @@ def main():
         w("    return 0;\n}\n\n")
         w("#endif\n")
     print("wrote %s (%d symbols, build-id %s)" % (sys.argv[2], len(hooks), d.get("build_id", "")))
+
 
 if __name__ == "__main__":
     main()

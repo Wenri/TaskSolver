@@ -73,16 +73,43 @@ endif()
 
 file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor")
 
-# ---- vendor agy (pinned, sha512-verified) -----------------------------------------------------
-if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/agy")
-  message(STATUS "[setup] agy present")
+# ---- vendor libagy.so (pinned agy converted to shared library, sha512-verified) ---------------
+if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
+  message(STATUS "[setup] libagy.so present")
 elseif(AGY_BIN AND EXISTS "${AGY_BIN}")
-  file(COPY_FILE "${AGY_BIN}" "${CMAKE_SOURCE_DIR}/vendor/agy")
-  message(STATUS "[setup] vendored agy from ${AGY_BIN}")
+  file(COPY_FILE "${AGY_BIN}" "${CMAKE_BINARY_DIR}/antigravity.raw")
+  message(STATUS "[setup] vendoring libagy.so from ${AGY_BIN}")
   if(AGY_WSL1)
-    execute_process(COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/patch_agy_wsl1.py" "${CMAKE_SOURCE_DIR}/vendor/agy")
+    execute_process(COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/patch_agy_wsl1.py" "${CMAKE_BINARY_DIR}/antigravity.raw"
+                    RESULT_VARIABLE _wsl1_rc)
+    if(NOT _wsl1_rc EQUAL 0)
+      message(FATAL_ERROR "patch_agy_wsl1.py failed")
+    endif()
   endif()
-else()
+  execute_process(
+    COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
+            "${CMAKE_BINARY_DIR}/antigravity.raw" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
+    RESULT_VARIABLE _mk_rc)
+  file(REMOVE "${CMAKE_BINARY_DIR}/antigravity.raw" "${CMAKE_BINARY_DIR}/antigravity.raw.orig")
+  if(NOT _mk_rc EQUAL 0)
+    message(FATAL_ERROR "make_libagy.py failed")
+  endif()
+elseif(EXISTS "${CMAKE_SOURCE_DIR}/vendor/agy")
+  file(SIZE "${CMAKE_SOURCE_DIR}/vendor/agy" _existing_agy_sz)
+  if(_existing_agy_sz GREATER 50000000)
+    message(STATUS "[setup] converting existing raw vendor/agy -> vendor/libagy.so")
+    execute_process(
+      COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
+              "${CMAKE_SOURCE_DIR}/vendor/agy" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
+      RESULT_VARIABLE _mk_rc)
+    if(NOT _mk_rc EQUAL 0)
+      message(FATAL_ERROR "make_libagy.py failed")
+    endif()
+    file(REMOVE "${CMAKE_SOURCE_DIR}/vendor/agy")
+  endif()
+endif()
+
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
   message(STATUS "[setup] fetching pinned agy ${AGY_VERSION} (sha512-verified)")
   set(_agy_tgz "${CMAKE_BINARY_DIR}/agy.tar.gz")
   file(DOWNLOAD "${AGY_URL}" "${_agy_tgz}" EXPECTED_HASH "SHA512=${AGY_SHA512}" STATUS _agy_st SHOW_PROGRESS)
@@ -91,16 +118,27 @@ else()
     file(REMOVE "${_agy_tgz}")
     message(FATAL_ERROR "agy download/verify failed: ${_agy_st}")
   endif()
-  execute_process(COMMAND tar -xzf "${_agy_tgz}" -C "${CMAKE_SOURCE_DIR}/vendor" antigravity RESULT_VARIABLE _agy_tar)
+  execute_process(COMMAND tar -xzf "${_agy_tgz}" -C "${CMAKE_BINARY_DIR}" antigravity RESULT_VARIABLE _agy_tar)
   file(REMOVE "${_agy_tgz}")
   if(NOT _agy_tar EQUAL 0)
     message(FATAL_ERROR "agy extract failed")
   endif()
-  file(RENAME "${CMAKE_SOURCE_DIR}/vendor/antigravity" "${CMAKE_SOURCE_DIR}/vendor/agy")
   if(AGY_WSL1)
-    execute_process(COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/patch_agy_wsl1.py" "${CMAKE_SOURCE_DIR}/vendor/agy")
+    execute_process(COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/patch_agy_wsl1.py" "${CMAKE_BINARY_DIR}/antigravity"
+                    RESULT_VARIABLE _wsl1_rc)
+    if(NOT _wsl1_rc EQUAL 0)
+      message(FATAL_ERROR "patch_agy_wsl1.py failed")
+    endif()
   endif()
-  message(STATUS "[setup] vendored agy ${AGY_VERSION}")
+  execute_process(
+    COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
+            "${CMAKE_BINARY_DIR}/antigravity" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
+    RESULT_VARIABLE _mk_rc)
+  file(REMOVE "${CMAKE_BINARY_DIR}/antigravity" "${CMAKE_BINARY_DIR}/antigravity.orig")
+  if(NOT _mk_rc EQUAL 0)
+    message(FATAL_ERROR "make_libagy.py failed")
+  endif()
+  message(STATUS "[setup] vendored libagy.so ${AGY_VERSION}")
 endif()
 
 # ---- fetch frida-gum devkit (GitHub-only; not on conda-forge/PyPI) ----------------------------
@@ -158,43 +196,45 @@ add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h")
 # the shim below. ------------------------------------------------------------------------------
 add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wirecap_bridge")
 
-# ---- the shim: vendor/antigravity.so (a MODULE = dlopen/LD_PRELOAD .so) ------------------------
-add_library(antigravity MODULE
+# ---- the instrumented host executable: vendor/agy (links vendor/libagy.so first) --------------
+add_executable(agy
   src/antigravity.cpp src/gomod.cpp src/cgotrampoline.cpp)
-add_dependencies(antigravity gen_symbols)
-set_target_properties(antigravity PROPERTIES
-  PREFIX "" OUTPUT_NAME "antigravity" SUFFIX ".so"
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor")
+add_dependencies(agy gen_symbols)
+set_target_properties(agy PROPERTIES
+  OUTPUT_NAME "agy"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor"
+  ENABLE_EXPORTS ON)
 
-target_compile_features(antigravity PRIVATE cxx_std_23)
+target_compile_features(agy PRIVATE cxx_std_23)
 # All the shim's TUs are C++23. -Wno-deprecated-declarations: one std::auto_ptr warning from
 # Boost.Python (via the bridge's propagated includes). -Wno-missing-field-initializers: the shim uses
 # partial designated initializers pervasively (C's -Wextra exempts them, C++'s doesn't).
-target_compile_options(antigravity PRIVATE
+target_compile_options(agy PRIVATE
   -O2 -g -fPIC -Wall -Wextra -Wno-deprecated-declarations -Wno-missing-field-initializers
   -fvisibility=hidden -ffunction-sections -fdata-sections)
 if(UAPI_INC)
-  target_compile_options(antigravity PRIVATE -idirafter "${UAPI_INC}")
+  target_compile_options(agy PRIVATE -idirafter "${UAPI_INC}")
 endif()
-target_include_directories(antigravity PRIVATE "${GUM}" "${CONDA_PREFIX}/include")
+target_include_directories(agy PRIVATE "${GUM}" "${CONDA_PREFIX}/include")
 
-# Link order mirrors the Makefile: frida-gum.a, python embed, boost, system. Boost lib names are
-# hardcoded (libboost_python313 is python-version-specific → matches the embedded libpython3.13);
-# found at runtime via the rpath below → dynamic link, no /nix rpath.
-target_link_libraries(antigravity PRIVATE
+# Link order is critical: vendor/libagy.so MUST be first so its PT_TLS segment receives the first
+# static TLS slot [%fs:-0x4a0 .. %fs:0) from ld-linux-x86-64.so.2 (the host executable itself
+# defines no thread-local variables). Followed by wirecap_bridge, frida-gum.a, and system libs.
+target_link_libraries(agy PRIVATE
+  "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
   wirecap_bridge                       # the shared bridge (PUBLIC-propagates libpython embed + boost + rpath)
   "${GUM}/libfrida-gum.a"
   -L${CONDA_PREFIX}/lib rt resolv dl m -pthread)
-target_link_options(antigravity PRIVATE
-  -Wl,--exclude-libs,ALL -Wl,--gc-sections -Wl,-rpath,${CONDA_PREFIX}/lib)
+target_link_options(agy PRIVATE
+  -Wl,--exclude-libs,ALL -Wl,--gc-sections -Wl,--enable-new-dtags
+  "-Wl,-rpath,\$ORIGIN:\$ORIGIN/../../../..:${CONDA_PREFIX}/lib")
 
 # ---- maintenance targets ----------------------------------------------------------------------
 add_custom_target(symbols
-  # Run from the source dir with RELATIVE paths so the recorded agy_path stays "vendor/agy"
-  # (byte-identical to the old Makefile's regeneration).
-  COMMAND python3 symbols/build_symbols.py vendor/agy symbols/symbols.json
+  # Run from the source dir with RELATIVE paths so the recorded agy_path stays "vendor/libagy.so".
+  COMMAND python3 symbols/build_symbols.py vendor/libagy.so symbols/symbols.json
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-  COMMENT "re-resolve symbols.json from vendor/agy (after an agy update)"
+  COMMENT "re-resolve symbols.json from vendor/libagy.so (after an agy update)"
   VERBATIM USES_TERMINAL)
 add_custom_target(agy-update
   COMMAND bash "${CMAKE_SOURCE_DIR}/symbols/agy_update.sh"

@@ -20,8 +20,14 @@ shim adds the load bias: `runtime_addr = main_module_base + offset`.
 Usage:  python3 build_symbols.py <agy-binary> <out.json>
 """
 import json
+import re
 import struct
 import sys
+
+
+def c_sym_name(go_name: str) -> str:
+    """Deterministic valid C/ELF identifier for a Go symbol exported in libagy.so."""
+    return "agy_go__" + re.sub(r"[^A-Za-z0-9_]", "_", go_name)
 
 # Functions the native shim hooks by default. Keep in sync with src/procdef.h.
 PROC_TARGETS = [

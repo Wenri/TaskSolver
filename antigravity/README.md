@@ -5,17 +5,28 @@ coding tool, internal codename *jetski*) so we can observe and modify its
 behaviour from our own **Python** code, in-process — without the source and
 without a supported plugin API for what we need.
 
-It does this with two cooperating mechanisms, loaded via a single `LD_PRELOAD`
-shared object:
+It does this by converting the upstream PIE `agy` binary into `antigravity/vendor/libagy.so`
+(`make_libagy.py`: clears `DF_1_PIE`, sets `DT_SONAME = "libagy.so"`, exports
+`runtime.rt0_go` as `agy_rt0_go`, `runtime.firstmoduledata` as `agy_firstmoduledata`, and
+all 41 Go hook target functions as `agy_go__*` in `.dynsym`, while retaining `PT_TLS` inside
+`libagy.so`) and linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy`
+as its first `DT_NEEDED` dependency (so `ld-linux-x86-64.so.2` assigns `libagy.so` static TLS
+slot 1 at `[%fs:-0x4a0 .. %fs:0)` with no external `agy_tls.S` needed). At startup, `main()`
+runs `agy_init()` before calling `agy_rt0_go(argc, argv)`, combining two mechanisms:
 
-1. **`LD_PRELOAD` interposition** for the few things that actually cross libc in
-   this binary (cgo DNS via `getaddrinfo`, `getenv` config injection, and — most
-   importantly — being present in-process so we can bootstrap the next part).
-2. **cgocall trampolines** patched over recovered Go function addresses, for everything
-   Go does *not* route through libc (its own TLS/HTTP stack, MCP manager, tool
-   registry, prompt assembly). Each patched prologue jumps to a generated trampoline that
-   marshals the Go-ABI arg registers and calls `runtime.cgocall`/`asmcgocall` into our C
-   hook. frida-gum is still linked and used for its x86 code writer + near-page allocator,
+1. **Dynamic symbol interposition & `ld` binding** (`-Wl,--export-dynamic`) for libc entry points
+   (cgo DNS via `getaddrinfo`, plus `main()` running `agy_init()` in-process before Go starts)
+   and direct ELF relocation binding (`R_X86_64_64` / `R_X86_64_GLOB_DAT`) of `agy_rt0_go`,
+   `agy_firstmoduledata`, and every `agy_go__*` target function.
+2. **cgocall trampolines** patched over `ld`-bound `agy_go__*` function prologues in `libagy.so`,
+   with a synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto
+   `agy_firstmoduledata.next` before `agy_rt0_go()` starts and each hook row bound at compile
+   time (`consteval`) to its dedicated C hook handler (`agy_on_fh_update`, `agy_on_resp`,
+   `agy_on_tls_write`, `agy_on_file_open`, `agy_on_http_rt`, `agy_on_exit`, `agy_on_resp_chunk`,
+   `agy_on_readlink_filter`, `agy_on_generic`). Each patched prologue jumps to a generated
+   trampoline that marshals the Go-ABI arg registers and calls `runtime.cgocall`/`asmcgocall`
+   directly into that hook's C handler. frida-gum is still linked and used for its x86 code
+   writer + near-page allocator,
    but its *inline-attach listener* path was retired and deleted: gum return hooks trip
    Go's GC unwinder, and even entry-only attaches destabilized agy under load.
 
@@ -73,9 +84,8 @@ verification. The rebuilt shim passes an instrumented `agy --version` startup ch
         │   │        write verdict → signal condvar       │                   │
         │   └───────────────────────────────────────────┘                   │
         └────────────────────────────────────────────────────────────────────┘
-             ▲ ld.so --preload antigravity.so  (per-exec, not LD_PRELOAD — see below;
-                                       constructor: gum_init_embedded, verify build-id,
-                                       load symbols.json, install hooks, spawn pyworker)
+             ▲ vendor/agy links libagy.so (first DT_NEEDED) + wirecap_bridge + frida-gum.a;
+               main() -> agy_init() (verify build-id, start pyworker, install hooks) -> agy_rt0_go()
 ```
 
 ### Why a dedicated worker thread with a big stack
@@ -171,9 +181,12 @@ model/usage). Reassembling those chunks into `genai_turn` is DONE — `BaseCorre
 entirely. It redirects the target — **past its stack-check prologue** — into a generated
 trampoline that:
 1. snapshots the Go-ABI arg registers into a stack **block**,
-2. `CALL runtime.cgocall(fn=agy_cgo_hook, arg=&block)` — Go's own Go→C gateway, which switches
-   to the g0/system stack and runs our C hook in a safe cgo context (`entersyscall`, P-handoff,
-   GC coordination); the hook copies + enqueues to the pyworker, exactly like the ASYNC path,
+2. `CALL runtime.cgocall(fn=h.handler, arg=&block)` — Go's own Go→C gateway, which switches
+   to the g0/system stack and runs that hook's dedicated C handler (`agy_on_fh_update`,
+   `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`, `agy_on_http_rt`, `agy_on_exit`,
+   `agy_on_resp_chunk`, `agy_on_readlink_filter`, or `agy_on_generic`, bound at compile time
+   via `consteval agy_handler_for(kind)`) in a safe cgo context (`entersyscall`, P-handoff,
+   GC coordination); the handler copies + enqueues to the pyworker,
 3. restores the registers, runs the overwritten original instructions, and `jmp`s back into
    the target body.
 
@@ -187,9 +200,12 @@ matches the full-cgo geometry, since only those slots are ever GC-unwound.
 
 **Synthetic moduledata (`gomod.cpp`).** `cgocall`'s `entersyscall()` opens a GC-scannable window
 over our trampoline frame; if Go's unwinder can't `findfunc` the trampoline PCs it
-`throw("unknown pc")`s. `agy_gomod_register()` installs a **synthetic moduledata** whose
-pclntab/pcsp cover the trampoline, so GC unwinds it cleanly — and the pcsp must report **one
-constant spdelta** across the whole trampoline-frame window.
+`throw("unknown pc")`s. `agy_gomod_register()` installs a **synthetic moduledata** (with
+`md->bad = 1`, so `runtime.modulesinit` skips it while `runtime.moduledataverify1` and
+`runtime.findfunc` validate and walk it) spliced synchronously onto the `ld`-bound
+`agy_firstmoduledata.next` before `agy_rt0_go()` starts. Its pclntab/pcsp cover the trampoline,
+so GC unwinds it cleanly — and the pcsp must report **one constant spdelta** across the whole
+trampoline-frame window.
 
 **The GH_SPILL geometry (the fix that made the cgocall variant correct).** `runtime.cgocall`
 uses Go's internal ABI and spills its two register args (`fn`, `arg`) into **caller-provided
@@ -419,16 +435,17 @@ antigravity/
     mcp.json  agents.json  README.md  ← native custom MCP server / agent (hybrid path)
 ```
 
-The shim's in-process module is **`pyagy.agy_process`** (loaded by `antigravity.so` via
-`AGY_PROC_MODULE`, which defaults to it). Test/experiment drivers live in the repo's
+The in-process module is **`pyagy.agy_process`** (loaded by `vendor/agy` via
+`WIRE_MODULE`, which defaults to it). Test/experiment drivers live in the repo's
 `test_scripts/`: `run-agy.sh`, `agy_session.py`, `analyze_capture.py`, `example_agy_backend.py`.
 
 ## Build & run
 
-`pixi install` **builds the shim** — the tasksolver package build (`setup.py` →
+`pixi install` **builds `vendor/libagy.so` and `vendor/agy`** — the tasksolver package build (`setup.py` →
 `build_py`) runs `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …`,
-which (at configure time) vendors the deps and then compiles
-`antigravity/vendor/antigravity.so`. Since the shim is x86-64-specific and a main
+which (at configure time) fetches the pinned upstream `agy` tarball, converts it via
+`symbols/make_libagy.py` into `antigravity/vendor/libagy.so`, fetches `frida-gum`, and
+compiles the linked host executable `antigravity/vendor/agy`. Since the build is x86-64-specific and a main
 target, the package is **arch-specific (linux-64)** (`[tool.pixi.package.build.config]
 noarch=false`) and the build is **required, with no skip/opt-out** — it fails loudly
 if the toolchain (g++ / frida-gum / libpython) is missing, because a wheel without the

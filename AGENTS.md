@@ -62,7 +62,7 @@ The four **agent-runtime** backends share `CLIBackendModel` (`tasksolver/cli_bac
 
 For another agent-runtime backend, subclass this base and set `backend_label`, `command_label`, `generic_model_aliases`, `no_output_hint`, and `_client_ask_many`; override payload/call/finish methods when the protocol requires it. Direct HTTP adapters remain standalone because they share no subprocess/workspace machinery. `CLIBackendModel` lives in `tasksolver/`, never `wirecap/`, whose stdlib-import purity is enforced by the `python3 -S` probes. Import the base only from provider `model.py` modules; keep those behind the packages' PEP-562 lazy exports so embedded CLI interpreters do not import TaskSolver.
 
-The three instrumented CLIs share `wirecap` but differ in how the bridge is hosted: agy injects a C++ shim into its closed Go binary through the ELF loader's `--preload`; Codex compiles the bridge into its Rust binary; Kimi loads it as an N-API addon (`kimi/native/wirecap_node.node`) through source hooks. Their exec/PTY clients use `WirePtyPopen` and `mp_child`, with capture JSONL authoritative. The Codex SDK instead drives app-server through JSON-RPC pipes and combines SDK results with native capture. Kimi's addon promotes libpython to the global namespace (`dlopen(RTLD_GLOBAL|RTLD_NOLOAD)`) before `wire_start()`, allowing Python's C extensions to resolve the C API.
+The three instrumented CLIs share `wirecap` but differ in how the bridge is hosted: agy converts its closed Go PIE binary into `libagy.so` and links a C++ host executable (`vendor/agy`) against it; Codex compiles the bridge into its Rust binary; Kimi loads it as an N-API addon (`kimi/native/wirecap_node.node`) through source hooks. Their exec/PTY clients use `WirePtyPopen` and `mp_child`, with capture JSONL authoritative. The Codex SDK instead drives app-server through JSON-RPC pipes and combines SDK results with native capture. Kimi's addon promotes libpython to the global namespace (`dlopen(RTLD_GLOBAL|RTLD_NOLOAD)`) before `wire_start()`, allowing Python's C extensions to resolve the C API.
 
 - `__init__(api_key, task, model=...)`
 - `prepare_payload(question, max_tokens, ...)` *(a staticmethod on the HTTP adapters; a **classmethod** on `CLIBackendModel`, so the vision preamble and error text follow the subclass — callable either on the class or an instance)* → provider-specific request dict
@@ -215,9 +215,12 @@ instrumentation layer; Claude uses its SDK protocol directly:
     `WirePtyPopen`/`WirePtyProcess`, git-workspace scoping, the vendored-artifact resolver.
   - `wirecap/native/` is the C ABI bridge (`libwirecap_bridge.a`) that embeds CPython on a
     16 MB-stack worker thread; linked into the agy shim, the codex binary, and the kimi-code addon.
-- **`antigravity/`** → the `pyagy` package: Google's Go `agy` CLI, instrumented by a preloaded
-  C++23 shim (`antigravity/src/`) that patches cgocall trampolines over recovered Go addresses.
-  See `antigravity/README.md`.
+- **`antigravity/`** → the `pyagy` package: Google's Go `agy` CLI converted into `vendor/libagy.so`
+  (`symbols/make_libagy.py`, exporting `agy_rt0_go`, `agy_firstmoduledata`, and all 41 `agy_go__*`
+  hook targets in `.dynsym`) and linked into a C++23 host executable (`vendor/agy`, built from
+  `antigravity/src/`) that binds those symbols via `ld`, splices its synthetic `moduledata`
+  (`md->bad = 1`) onto `agy_firstmoduledata.next`, and patches per-handler cgocall trampolines
+  before calling `agy_rt0_go`. See `antigravity/README.md`.
 - **`codex/`** → the `pycodex` package: OpenAI's Rust codex, built from a vendored source tree with
   the bridge compiled in (no preload needed). See `codex/README.md`.
 - **`kimi/`** → the `pykimi` package: Moonshot's Node kimi-code, built from a vendored source tree

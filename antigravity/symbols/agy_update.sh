@@ -21,10 +21,12 @@ tmp="$(mktemp -t agy.XXXXXX.tar.gz)"
 curl -fsSL --max-time 300 "$url" -o "$tmp"
 printf '%s  %s\n' "$sha" "$tmp" | sha512sum -c - >/dev/null \
   || { rm -f "$tmp"; echo "[agy-update] FATAL: sha512 mismatch" >&2; exit 1; }
-mkdir -p vendor && tar -xzf "$tmp" -C vendor antigravity && mv -f vendor/antigravity vendor/agy && chmod +x vendor/agy
+mkdir -p vendor && tar -xzf "$tmp" -C vendor antigravity && chmod +x vendor/antigravity
 rm -f "$tmp"
-if [ "$AGY_WSL1" = 1 ]; then python3 symbols/patch_agy_wsl1.py vendor/agy; fi
-echo "[agy-update] vendored agy $ver ($(readelf -n vendor/agy 2>/dev/null | awk '/Build ID/{print $NF}')). Update the pins in CMakeLists.txt:"
+if [ "$AGY_WSL1" = 1 ]; then python3 symbols/patch_agy_wsl1.py vendor/antigravity; fi
+python3 symbols/make_libagy.py vendor/antigravity vendor/libagy.so
+rm -f vendor/antigravity vendor/antigravity.orig
+echo "[agy-update] vendored libagy.so $ver ($(readelf -n vendor/libagy.so 2>/dev/null | awk '/Build ID/{print $NF}')). Update the pins in CMakeLists.txt:"
 echo "    set(AGY_VERSION \"$ver\")"
 echo "    set(AGY_URL     \"$url\")"
 echo "    set(AGY_SHA512  \"$sha\")"

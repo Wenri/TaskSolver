@@ -185,35 +185,28 @@ typedef struct { uint64_t kind; agy_go_regs regs; uint64_t action; } agy_block;
 #define AGY_GOMOD_MAX_SLOTS    64
 #define AGY_GOMOD_MAX_MAPBYTES 8
 
-/* Two-phase registration (our LD_PRELOAD ctor runs before Go rt0, when
- * firstmoduledata's pointer fields are still unrelocated):
+/* Single-phase registration (called from main() -> agy_init() before agy_rt0_go,
+ * after ld.so has already relocated libagy.so and bound `agy_firstmoduledata`):
  *
- * agy_gomod_prepare() — CONSTRUCTOR time. Build a synthetic moduledata covering
+ * agy_gomod_register() — build a synthetic moduledata covering
  * [region_base, region_end) as `nslots` identical trampoline funcs (each
- * `slot_size` bytes, entry i at region_base + i*slot_size), using the known
- * go1.26/amd64 pcHeader constants (no firstmoduledata read). Per-slot SP-delta
- * profile: 0 for [0,frame_lo), FRAME for [frame_lo,frame_hi), 0 for
- * [frame_hi,slot_size); saved regs in the locals region are scanned conservatively
- * (all-ones stackmap). Stores state for ensure(). Returns 0, or <0 on OOM.
- *
- * agy_gomod_ensure() — called from the trampoline on the first hit (Go live).
- * Once-guarded: self-check the now-relocated firstmoduledata layout, then splice
- * our module onto the chain tail so findfunc/GC-unwind resolve the trampoline PCs.
- * Minimal stack + bare write() — safe to run on a goroutine stack. */
+ * `slot_size` bytes, entry i at region_base + i*slot_size), mark `md->bad = 1`
+ * (so `runtime.modulesinit` skips it while `moduledataverify1` and `findfunc`
+ * walk it), and splice it onto `agy_firstmoduledata.next`. */
 #ifdef __cplusplus
 extern "C" {
 #endif
-int  agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
-                       uintptr_t region_base, uintptr_t region_end,
+extern go_moduledata agy_firstmoduledata;
+
+int agy_gomod_register(uintptr_t region_base, uintptr_t region_end,
                        uint32_t slot_size, int nslots,
                        uint32_t frame, uint32_t frame_lo, uint32_t frame_hi);
-void agy_gomod_ensure(void);
 #ifdef __cplusplus
 }
 #endif
 
 /* The frame-pointer unwinder (agy_safe_read/agy_backtrace/agy_emit_stack) and the
  * cgocall-trampoline installer (class AgyGoHook) are cgotrampoline.cpp's API — see
- * cgotrampoline.h. cgotrampoline.cpp includes this header for agy_gomod_prepare/ensure. */
+ * cgotrampoline.h. cgotrampoline.cpp includes this header for agy_gomod_register. */
 
 #endif /* AGY_GOMOD_H */

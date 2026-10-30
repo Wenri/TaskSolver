@@ -15,9 +15,9 @@ dist/
 captures/
 
 # --- antigravity build deps + artifacts (all under antigravity/, never committed) ---
-# Vendored/fetched deps + the built shim — recreate with `pixi run build-shim`:
-#   vendor/agy (~164 MB binary), vendor/frida-gum (devkit),
-#   vendor/antigravity.so (compiled LD_PRELOAD shim).  UAPI headers are NOT vendored
+# Vendored/fetched deps + the built host executable — recreate with `pixi run build-shim`:
+#   vendor/libagy.so (~256 MB Go shared library), vendor/frida-gum (devkit),
+#   vendor/agy (compiled host executable linked against libagy.so).  UAPI headers are NOT vendored
 #   (referenced in place from the kernel-headers_linux-64 conda dep — see CMakeLists.txt).
 antigravity/vendor/
 # cmake build tree + the compile db it symlinks to the source root (for clangd):

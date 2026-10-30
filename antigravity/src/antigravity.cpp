@@ -1,10 +1,13 @@
-/* antigravity.cpp — LD_PRELOAD shim: embed frida-gum, install inline hooks on the
- * recovered Go function addresses, and forward events to the Python worker.
+/* antigravity.cpp — host executable for `libagy.so`: embed frida-gum, install
+ * inline cgocall-trampoline hooks on the recovered Go function addresses in
+ * `libagy.so`, forward events to the Python worker, and transfer control to
+ * `agy_rt0_go(argc, argv)`.
  *
- * Loaded into `agy` via LD_PRELOAD. The constructor (agy_init) verifies the
- * binary's build-id, starts the CPython worker, then installs gum hooks. All
- * heavy work happens in Python; the hook bodies here are deliberately tiny
- * because they run on goroutine stacks (see README).
+ * Linked directly against `libagy.so` as its first DT_NEEDED dependency (with
+ * no PT_TLS segment of its own, so `ld-linux-x86-64.so.2` assigns `libagy.so`
+ * static TLS slot 1 at [%fs:-0x4a0 .. %fs:0)). `main()` runs `agy_init()` —
+ * verifying `libagy.so`'s build-id, starting the CPython worker, and installing
+ * trampoline hooks — before jumping into Go's `runtime.rt0_go`.
  */
 #ifndef _GNU_SOURCE          /* g++ already defines it; guard avoids a redefinition warning */
 #define _GNU_SOURCE
@@ -35,15 +38,19 @@ static FILE *g_logf;
 
 static int g_tls_write_sync;   /* AGY_PROC_TLS_WRITE_SYNC=1 → allow modifying egress */
 static int g_conv_id;          /* AGY_PROC_CONV_ID=1 → install the os.OpenFile conversation-id probe */
-static uint64_t g_base;        /* main-module base (for PC→link-vaddr reduction) */
+static uint64_t g_base;        /* libagy.so load base (for PC→link-vaddr reduction) */
 
-/* ---- build-id of the main executable (via PT_NOTE, no file IO) ------------ */
-struct bid { char hex[80]; int done; };
+extern "C" void agy_rt0_go(int argc, char **argv);
+
+/* ---- build-id + load base of libagy.so (via PT_NOTE, no file IO) ---------- */
+struct bid { char hex[80]; uint64_t base; int done; };
 static int bid_cb(struct dl_phdr_info *info, size_t size, void *data)
 {
     (void)size;
     struct bid *b = (struct bid *)data;
-    if (b->done) return 0;                 /* first object == main program */
+    if (b->done) return 0;
+    if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libagy.so")) return 0;
+    b->base = (uint64_t)info->dlpi_addr;
     for (int i = 0; i < info->dlpi_phnum; i++) {
         const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
         if (ph->p_type != PT_NOTE) continue;
@@ -65,29 +72,25 @@ static int bid_cb(struct dl_phdr_info *info, size_t size, void *data)
             p = desc + ((descsz + 3) & ~3u);
         }
     }
-    b->done = 1;   /* main program had no build-id note */
+    b->done = 1;   /* libagy.so had no build-id note */
     return 1;
 }
 
-static void install_hooks(void)
+static void install_hooks(uint64_t base)
 {
     /* Still needed after the gum listener path was retired: the trampoline builder uses gum's
-     * x86 code writer + its near-page allocator, and gum_process_get_main_module below. */
+     * x86 code writer + its near-page allocator. */
     gum_init_embedded();
-    GumModule *mainmod = gum_process_get_main_module();
-    GumAddress base = gum_module_get_range(mainmod)->base_address;
-    g_base = (uint64_t)base;       /* for agy_emit_stack PC→link-vaddr reduction */
+    g_base = base;       /* for agy_emit_stack PC→link-vaddr reduction */
     LOG("main module base = 0x%llx", (unsigned long long)base);
 
-    /* Trampoline hooks (AGY_FULLCGO/AGY_ASMCGO): the cgocall-trampoline path
-     * (cgotrampoline.cpp) — NOT a gum attach. These are the parking scheduling-path funcs
-     * (SendUserMessage/Send, the gemini_coder framework consumers, the CodeAssistClient
-     * RPCs). Resolve + filter the union HERE and stream each into the builder — no
-     * intermediate array. It's a SINGLE region + synthetic moduledata (the gomod.cpp
-     * singletons make a second install unsafe), so all go through one begin/add/finalize. */
+    /* Trampoline hooks (AGY_FULLCGO/AGY_ASMCGO): each target's Go function pointer (`HOOKS[i].fn`)
+     * is bound directly by `ld` against `libagy.so`, and each hook's dedicated C callback
+     * (`HOOKS[i].handler`) is baked directly into its trampoline stub. `finalize()` registers the
+     * covering synthetic moduledata onto `ld`-bound `agy_firstmoduledata.next`. */
     {
-        auto gh = AgyGoHook::begin((uint64_t)base, agy_sym("runtime.cgocall"),
-                                   agy_sym("runtime.asmcgocall"), HK_COUNT);
+        auto gh = AgyGoHook::begin(base, agy_fn("runtime.cgocall"),
+                                   agy_fn("runtime.asmcgocall"), HK_COUNT);
         int n_tramp = 0, n_asm = 0, made = 0;
         if (gh) {
             for (int i = 0; i < HK_COUNT; i++) {
@@ -96,13 +99,12 @@ static void install_hooks(void)
                  * conversation-id capture, so an ordinary run doesn't pay a cgocall on every
                  * os.OpenFile. */
                 if (i == hk("FILE_OPEN") && !g_conv_id) continue;
-                uint64_t va = HOOKS[i].vaddr;
-                if (!va) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
+                if (!HOOKS[i].fn) { LOG("symbol not found in map: %s", HOOKS[i].name); continue; }
                 int asmcgo = (HOOKS[i].mech == AGY_ASMCGO);
-                gh->add(va, HOOKS[i].skip, HOOKS[i].kind, asmcgo);
+                gh->add(HOOKS[i].fn, HOOKS[i].skip, HOOKS[i].kind, HOOKS[i].handler, asmcgo);
                 n_tramp++; n_asm += asmcgo;
             }
-            made = gh->finalize(AGY_MODULEDATA_VADDR);
+            made = gh->finalize();
         }
         LOG("cgocall-trampoline: installed %d/%d target(s) (%d asmcgo, %d full-cgo)",
             made, n_tramp, n_asm, n_tramp - n_asm);
@@ -132,8 +134,7 @@ int getaddrinfo(const char *node, const char *service,
     return rc;
 }
 
-/* ---- constructor ---------------------------------------------------------- */
-__attribute__((constructor))
+/* ---- initialization + entrypoint ------------------------------------------ */
 static void agy_init(void)
 {
     if (!std::getenv("AGY_PROC_ENABLE")) return;          /* opt-in */
@@ -145,21 +146,29 @@ static void agy_init(void)
     g_conv_id = std::getenv("AGY_PROC_CONV_ID") != nullptr;
     agy_set_real_exe(std::getenv("AGY_PROC_REAL_EXE"));   /* the path READLINK_FILTER returns for /proc/self/exe */
 
-    /* build-id guard: refuse to apply offsets to a different agy build */
-    struct bid b = { .hex = "" };
+    /* build-id guard: refuse to apply offsets to a different libagy.so build */
+    struct bid b = { .hex = "", .base = 0, .done = 0 };
     dl_iterate_phdr(bid_cb, &b);
     /* Require an EXACT build-id match. Missing/mismatched → skip (else we'd try to
-     * hook agy offsets in the wrong binary — e.g. a preloaded child — and crash). */
-    if (std::strcmp(b.hex, AGY_BUILD_ID) != 0) {
+     * hook agy offsets in the wrong binary and crash). */
+    if (!b.base || std::strcmp(b.hex, AGY_BUILD_ID) != 0) {
         LOG("build-id not agy (running=%s symbols=%s); not hooking this process",
             b.hex[0] ? b.hex : "<none>", AGY_BUILD_ID);
-        if (!std::getenv("AGY_PROC_FORCE")) return;
+        if (!b.base || !std::getenv("AGY_PROC_FORCE")) return;
     } else {
         LOG("build-id ok (%s)", b.hex);
     }
 
     /* Start the embedded Python bridge, then install the full working hook union. */
     if (wire_start() != 0) { LOG("python bridge failed to start; not installing hooks"); return; }
-    install_hooks();
+    install_hooks(b.base);
     LOG("initialized");
+}
+
+__attribute__((visibility("default")))
+int main(int argc, char **argv)
+{
+    agy_init();
+    agy_rt0_go(argc, argv);
+    return 0;
 }

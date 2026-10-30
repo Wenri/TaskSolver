@@ -29,8 +29,8 @@ sys.path.insert(0, _HERE)
 
 from pyagy.agy_process import rewrite as rw  # noqa: E402
 
-SHIM = os.path.join(_ANTIGRAVITY, "vendor", "antigravity.so")
-AGY = os.path.expanduser(os.environ.get("AGY_BIN", "~/.local/bin/agy"))
+SHIM = os.path.join(_ANTIGRAVITY, "vendor", "libagy.so")
+AGY = os.path.expanduser(os.environ.get("AGY_BIN", os.path.join(_ANTIGRAVITY, "vendor", "agy")))
 PROMPT = "Reply with exactly the single word ZORPLE and nothing else."
 
 _failures = []

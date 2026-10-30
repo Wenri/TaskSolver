@@ -25,8 +25,8 @@ sys.path.insert(0, _REPO)
 from pyagy import client as C  # noqa: E402
 from pyagy.client import AgyResponse, RewriteRule, ToolSpec  # noqa: E402
 
-SHIM = os.path.join(_ANTIGRAVITY, "vendor", "antigravity.so")
-AGY = os.path.expanduser(os.environ.get("AGY_BIN", "~/.local/bin/agy"))
+SHIM = os.path.join(_ANTIGRAVITY, "vendor", "libagy.so")
+AGY = os.path.expanduser(os.environ.get("AGY_BIN", os.path.join(_ANTIGRAVITY, "vendor", "agy")))
 
 _failures = []
 

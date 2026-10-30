@@ -6,13 +6,26 @@
 
 #include <cstdint>
 #include <memory>
+#include "gomod.h"
 
-/* ---- frame-pointer stack unwinder --------------------------------------------
- * C linkage kept: these are called across TUs (and agy_safe_read is resolved by name),
- * so unmangled symbols keep the cross-TU wiring byte-identical regardless of compiler. */
+using agy_hook_fn = void (*)(agy_block *);
+
+/* ---- frame-pointer stack unwinder + per-hook C handlers ----------------------
+ * C linkage kept: these are called across TUs (and bound directly into each
+ * hook's trampoline), so unmangled symbols keep the wiring explicit. */
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+void agy_on_generic(agy_block *b);
+void agy_on_fh_update(agy_block *b);
+void agy_on_resp(agy_block *b);
+void agy_on_tls_write(agy_block *b);
+void agy_on_file_open(agy_block *b);
+void agy_on_http_rt(agy_block *b);
+void agy_on_exit(agy_block *b);
+void agy_on_resp_chunk(agy_block *b);
+void agy_on_readlink_filter(agy_block *b);
 
 /* Fault-safe read of `n` bytes from a possibly-bogus address in our own process
  * (process_vm_readv → EFAULT instead of SIGSEGV). Returns bytes read or -1. */
@@ -64,10 +77,10 @@ struct _GumX86Writer;   /* frida-gum's opaque x86 writer — fwd-declared to kee
 
 class AgyGoHook {
 public:
-    static std::unique_ptr<AgyGoHook> begin(uint64_t base, uint64_t cgocall_va,
-                                            uint64_t asmcgocall_va, int max_targets);
-    void add(uint64_t entry, uint32_t skip, const char *kind, int asmcgo);
-    int  finalize(uint64_t md_vaddr);
+    static std::unique_ptr<AgyGoHook> begin(uint64_t base, void (*cgocall_fn)(),
+                                            void (*asmcgocall_fn)(), int max_targets);
+    void add(void (*target)(), uint32_t skip, const char *kind, agy_hook_fn handler, int asmcgo);
+    int  finalize();
     ~AgyGoHook();
 
     AgyGoHook(const AgyGoHook &) = delete;

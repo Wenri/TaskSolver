@@ -56,15 +56,10 @@ static size_t put_step(uint8_t *p, int32_t dval, uint32_t dpc)
     return n;
 }
 
-/* Deferred-registration state: prepare() fills this at constructor time; ensure()
- * consumes it (once) at the first trampoline hit. */
-static uint64_t g_firstmd_addr, g_cgocall_rt;   /* g_firstmd_addr!=0 doubles as "prepare() done" */
-static std::atomic<int> g_claimed{0}, g_done{0};
-
 /* The synthetic moduledata + all its tables in ONE static (BSS) block — the process singleton:
  * zero-initialized, fixed address, alive for the whole run (Go owns it forever), and NO heap
  * (nothing to leak, no OOM path, and a second build is structurally impossible). Sized for
- * AGY_GOMOD_MAX_SLOTS; prepare() fills only the first `nslots`. The raw byte buffers that back Go
+ * AGY_GOMOD_MAX_SLOTS; agy_gomod_register() fills only the first `nslots`. The raw byte buffers that back Go
  * structs are aligned for them (go_func / go_stackmap are uint32-aligned; the typed arrays and md/ph
  * self-align). */
 static struct {
@@ -78,10 +73,9 @@ static struct {
     alignas(uint32_t) uint8_t smap[sizeof(go_stackmap) + AGY_GOMOD_MAX_MAPBYTES];  /* stackmap hdr+bits */
 } g_mod;
 
-int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
-                      uintptr_t region_base, uintptr_t region_end,
-                      uint32_t slot_size, int nslots,
-                      uint32_t frame, uint32_t frame_lo, uint32_t frame_hi)
+int agy_gomod_register(uintptr_t region_base, uintptr_t region_end,
+                       uint32_t slot_size, int nslots,
+                       uint32_t frame, uint32_t frame_lo, uint32_t frame_hi)
 {
     int nfunc = nslots;
     uint32_t region_size = (uint32_t)(region_end - region_base);
@@ -89,11 +83,6 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     int nbit = (int)((frame - 8) / 8);
     int mapbytes = (nbit + 7) / 8;
 
-    /* All buffers come from the static g_mod singleton (no heap → nothing to leak, no OOM). Guard
-     * its fixed caps: the static_assert in antigravity.cpp (HK_COUNT <= AGY_GOMOD_MAX_SLOTS) makes
-     * the nfunc case unreachable, but keep the runtime check so an oversized frame/region degrades
-     * gracefully (rc<0 → "live but NOT GC-safe") rather than overflowing. moduledata is NotInHeap;
-     * static (BSS) storage qualifies just as a C alloc did. */
     if (nfunc > AGY_GOMOD_MAX_SLOTS || nbuckets > AGY_GOMOD_MAX_SLOTS + 1 ||
         mapbytes > AGY_GOMOD_MAX_MAPBYTES) {
         GLOG("moduledata exceeds static caps (nfunc=%d nbuckets=%d mapbytes=%d) — bump AGY_GOMOD_MAX_SLOTS",
@@ -109,21 +98,15 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     uint8_t           *pctab = g_mod.pctab;
     go_stackmap       *smap  = (go_stackmap *)g_mod.smap;
 
-    /* pcHeader: hardcode the go1.26/amd64 constants (NOT read from firstmoduledata,
-     * which isn't relocated yet at constructor time). Only moduledataverify1 (a
-     * startup-only check that never runs on our dynamically-spliced module) reads
-     * these; ensure()'s self-check confirms the live binary matches. */
     ph->magic   = GO_PCLNTAB_MAGIC_GO120;
     ph->minLC   = 1;   /* sys.PCQuantum (amd64) */
     ph->ptrSize = 8;
     ph->nfunc   = nfunc;
     ph->nfiles  = 0;
 
-    /* funcnametab: byte 0 empty, name at offset 1. */
     std::memcpy(names + 1, "agy_cgo_tramp", 13);
     uint32_t nameOff = 1;
 
-    /* pctab: index 0 is reserved ("no table"); real table starts at 1. */
     size_t po = 1;
     po += put_step(pctab + po, /*dval*/ 0 - (-1),        /*dpc*/ frame_lo);
     po += put_step(pctab + po, /*dval*/ (int32_t)frame,  /*dpc*/ frame_hi - frame_lo);
@@ -131,16 +114,11 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     pctab[po++] = 0;   /* terminator (uvdelta==0) */
     uint32_t pcspOff = 1;
 
-    /* stackmap: n=1 bitmap, nbit words, all pointer bits set (conservative). */
     smap->n = 1;
     smap->nbit = nbit;
     std::memset(smap->bytedata, 0xff, mapbytes);
     if (nbit % 8) smap->bytedata[mapbytes - 1] = (uint8_t)((1u << (nbit % 8)) - 1);
 
-    /* _func records: identical but for entryOff. funcdata sits at fixed offset 44
-     * (Go computes it from &nfuncdata, so it must follow the header):
-     *   funcdata[ArgsPointerMaps=0]  = ^0  (nil, args==0 so never read)
-     *   funcdata[LocalsPointerMaps=1]= 0   (gofunc+0 == our stackmap) */
     for (int i = 0; i < nfunc; i++) {
         go_func *f = (go_func *)(pcln + (size_t)i * AGY_FUNC_STRIDE);
         f->entryOff  = (uint32_t)i * slot_size;
@@ -155,7 +133,6 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
         fd[GO_FUNCDATA_LocalsPointerMaps] = 0;             /* gofunc + 0 */
     }
 
-    /* ftab: nfunc entries (sorted by entryoff) + sentinel at [nfunc]. */
     for (int i = 0; i < nfunc; i++) {
         ftab[i].entryoff = (uint32_t)i * slot_size;
         ftab[i].funcoff  = (uint32_t)i * AGY_FUNC_STRIDE;
@@ -163,9 +140,6 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     ftab[nfunc].entryoff = (uint32_t)nfunc * slot_size;   /* == region_size; textAddr => maxpc */
     ftab[nfunc].funcoff  = 0;
 
-    /* moduledata: only the fields findfunc/GC-unwind consult; the rest stays zero
-     * so no phantom data/type ranges are ever scanned (we only join the
-     * findmoduledatap linked list, never modulesSlice). */
     md->pcHeader     = ph;
     md->funcnametab  = go_slice{ names, 32, 32 };
     md->pctab        = go_slice{ pctab, (intptr_t)po, (intptr_t)po };
@@ -177,52 +151,23 @@ int agy_gomod_prepare(uint64_t firstmd_addr, uint64_t cgocall_rt,
     md->text         = region_base;
     md->etext        = region_end;
     md->gofunc       = (uintptr_t)smap;   /* @344: funcdata[Locals] offset 0 => &stackmap */
+    md->bad          = 1;                 /* @513: skip in runtime.modulesinit, still walked by findfunc */
     md->next         = nullptr;           /* @560: our module is the chain tail */
 
-    g_firstmd_addr = firstmd_addr;   /* set LAST (with the buffers filled) → the "prepared" signal */
-    g_cgocall_rt = cgocall_rt;
-    GLOG("prepared synthetic moduledata: text=[%#lx,%#lx) %d funcs, frame=%u "
-         "(spdelta in [%u,%u)), nbit=%d — splice deferred to first trampoline hit",
-         (unsigned long)region_base, (unsigned long)region_end, nfunc, frame,
+    go_moduledata *fmd = &agy_firstmoduledata;
+    go_pcHeader   *fph = fmd->pcHeader;
+    if (!fph || ((uintptr_t)fph & 7) || fph->magic != GO_PCLNTAB_MAGIC_GO120 ||
+        fmd->minpc >= fmd->maxpc || !fmd->text) {
+        GLOG("firstmoduledata layout check failed (fmd=%p pcHeader=%p)", (void *)fmd, (void *)fph);
+        return -4;
+    }
+    go_moduledata *tail = fmd;
+    while (tail->next) tail = tail->next;
+    std::atomic_ref<go_moduledata *>(tail->next).store(md, std::memory_order_release);
+
+    GLOG("registered synthetic moduledata on agy_firstmoduledata (%p): text=[%#lx,%#lx) %d funcs, "
+         "frame=%u (spdelta in [%u,%u)), nbit=%d",
+         (void *)fmd, (unsigned long)region_base, (unsigned long)region_end, nfunc, frame,
          frame_lo, frame_hi, nbit);
     return 0;
-}
-
-void agy_gomod_ensure(void)
-{
-    if (g_done.load(std::memory_order_acquire)) return;             /* fast path */
-    int expected = 0;
-    while (!g_claimed.compare_exchange_strong(expected, 1,
-                                              std::memory_order_acq_rel, std::memory_order_relaxed)) {
-        /* Lost the claim to another thread. If it finished the splice, we're done.
-         * Otherwise it may have hit the pre-init retry path and dropped g_claimed back
-         * to 0 WITHOUT setting g_done — so loop and try to become the splicer ourselves
-         * rather than wait forever on a g_done the claimer is not obligated to set. */
-        if (g_done.load(std::memory_order_acquire)) return;
-        __builtin_ia32_pause();
-        expected = 0;
-    }
-
-    go_moduledata *md  = &g_mod.md;   /* our synthetic module — a fixed static object (no g_md needed) */
-    go_moduledata *fmd = (go_moduledata *)(uintptr_t)g_firstmd_addr;
-    go_pcHeader   *fph = fmd ? fmd->pcHeader : nullptr;
-    int magic_ok = fph && !((uintptr_t)fph & 7) && fph->magic == GO_PCLNTAB_MAGIC_GO120;
-    /* `fmd` is null until prepare() completed (g_firstmd_addr is set last, with g_mod filled), so it
-     * gates "prepared" — md is always valid here, no separate flag needed. */
-    int ok = fmd && magic_ok
-             && fmd->minpc < fmd->maxpc && fmd->text
-             && fmd->minpc <= g_cgocall_rt && g_cgocall_rt < fmd->maxpc;
-    if (ok) {
-        go_moduledata *tail = fmd;
-        while (tail->next) tail = tail->next;                       /* @560, correct go1.27 offset */
-        /* Publish our module on Go's own `next` field. Its type must stay go_moduledata* (the
-         * moduledata layout is pinned by static_asserts), so use atomic_ref for the release store
-         * rather than making the field itself std::atomic. */
-        std::atomic_ref<go_moduledata *>(tail->next).store(md, std::memory_order_release);
-        g_done.store(1, std::memory_order_release);
-    } else {
-        /* self-check failed (e.g. first hit was pre-runtime-init: firstmoduledata
-         * pointers not relocated yet) — release the claim so a later hit retries. */
-        g_claimed.store(0, std::memory_order_release);
-    }
 }

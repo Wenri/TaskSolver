@@ -40,8 +40,8 @@ from agy_session import AgySession  # noqa: E402
 from pyagy import trust_workspace   # noqa: E402  (pre-trust the PTY workspace)
 
 ROOT = os.path.join(os.path.dirname(HERE), "antigravity")
-SHIM = os.path.join(ROOT, "vendor", "antigravity.so")
-AGY = os.path.expanduser(os.environ.get("AGY_BIN", "~/.local/bin/agy"))
+SHIM = os.path.join(ROOT, "vendor", "libagy.so")
+AGY = os.path.expanduser(os.environ.get("AGY_BIN", os.path.join(ROOT, "vendor", "agy")))
 PROMPT = "Reply with exactly the single word ZORPLE and nothing else."
 CRASH = ["throw", "unexpected return pc", "unknown pc", "fatal error", "panic", "SIGSEGV"]
 

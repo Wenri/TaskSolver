@@ -4,8 +4,9 @@ Both native targets are built as part of the tasksolver package build, so one `p
 produces everything (the package is arch-specific — linux-64; see
 [tool.pixi.package.build.config] noarch=false):
 
-  1. the antigravity LD_PRELOAD shim `antigravity/vendor/antigravity.so` (which also builds the
-     shared `wirecap_bridge` static lib), via CMake + Ninja; and
+  1. the antigravity host executable `antigravity/vendor/agy` + converted shared library
+     `antigravity/vendor/libagy.so` (which also builds the shared `wirecap_bridge` static lib),
+     via CMake + Ninja; and
   2. the vendored, wirecap-patched codex CLI `codex/vendor/codex-rs/target/release/codex`
      (gnu-dynamic, linking the bridge from step 1 + libpython), via Cargo. This runs AFTER the
      shim so `libwirecap_bridge.a` exists for codex's build.rs.
@@ -66,7 +67,7 @@ class BuildPyNative(build_py):
         build = os.path.join("antigravity", "build")
         subprocess.run(["cmake", "-S", "antigravity", "-B", build, "-G", "Ninja"], cwd=root, check=True)
         subprocess.run(["cmake", "--build", build], cwd=root, check=True)
-        sys.stderr.write("[setup] antigravity.so + wirecap_bridge built\n")
+        sys.stderr.write("[setup] vendor/agy + vendor/libagy.so + wirecap_bridge built\n")
 
     def _build_codex(self, root):
         codex_rs = os.path.join(root, "codex", "vendor", "codex-rs")
@@ -126,8 +127,8 @@ class BuildPyNative(build_py):
         # existence check is defensive — after the required builds above the artifacts are present;
         # it only no-ops on a degenerate sourceless checkout that skipped the builds entirely.
         jobs = [
-            (os.path.join(root, "antigravity", "vendor", "antigravity.so"), "pyagy", "antigravity.so", False),
-            (os.path.join(root, "antigravity", "vendor", "agy"),            "pyagy", "agy",            False),  # build-id coupled to the shim — never strip
+            (os.path.join(root, "antigravity", "vendor", "libagy.so"),      "pyagy", "libagy.so",      False),  # build-id coupled to symbols.json — never strip
+            (os.path.join(root, "antigravity", "vendor", "agy"),            "pyagy", "agy",            False),
             (os.path.join(root, "codex", "vendor", "codex-rs", "target", "release", "codex"), "pycodex", "codex", True),  # ~72% debuginfo — strip for the wheel
             (os.path.join(root, "kimi", "vendor", "kimi-code", "apps", "kimi-code", "dist", "main.mjs"), "pykimi", "main.mjs", False),
             (os.path.join(root, "kimi", "vendor", "kimi-code", "apps", "kimi-code", "dist", "search-worker.mjs"), "pykimi", "search-worker.mjs", False),

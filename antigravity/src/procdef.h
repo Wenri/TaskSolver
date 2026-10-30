@@ -60,7 +60,8 @@
 #define AGY_PROCDEF_H
 
 #include "wirecap.h"      /* wire_mode_t (WIRE_ASYNC / WIRE_SYNC) */
-#include "symbols_gen.h"   /* consteval agy_sym / agy_skip — resolve vaddr/skip at compile time */
+#include "cgotrampoline.h" /* agy_hook_fn + per-hook C handlers (agy_on_*) */
+#include "symbols_gen.h"   /* consteval agy_fn / agy_sym / agy_skip — resolve fn/vaddr/skip at compile time */
 #include <cstdint>
 #include <string_view>
 
@@ -69,26 +70,39 @@
  * full runtime.cgocall vs the lighter runtime.asmcgocall); see the MECH doc above. */
 enum agy_mech_t { AGY_OFF = 0, AGY_FULLCGO, AGY_ASMCGO };
 
-/* One table row. `vaddr`/`skip` are NOT written per row — the consteval constructor resolves them
- * from `name` at compile time via agy_sym/agy_skip (0 if unresolved → install skips + logs). `retcap`
- * is the return-capture policy (0 none / <0 special / >0 min bytes) — see the RETCAP doc above.
- * With the gum listener path deleted, `retcap` no longer selects a listener and nothing outside
- * this header reads it; it is retained as the DOCUMENTED per-hook return-register contract, which
- * is what a future leaf-getter would need to re-derive. */
+/* Compile-time map from a hook's kind tag to its dedicated C handler function. */
+consteval agy_hook_fn agy_handler_for(std::string_view kind) {
+    if (kind == "fh_update")       return &agy_on_fh_update;
+    if (kind == "resp")            return &agy_on_resp;
+    if (kind == "tls_write")       return &agy_on_tls_write;
+    if (kind == "file_open")       return &agy_on_file_open;
+    if (kind == "http_rt")         return &agy_on_http_rt;
+    if (kind == "exit")            return &agy_on_exit;
+    if (kind == "resp_chunk")      return &agy_on_resp_chunk;
+    if (kind == "readlink_filter") return &agy_on_readlink_filter;
+    return &agy_on_generic;
+}
+
+/* One table row. `fn`/`handler`/`vaddr`/`skip` are resolved at compile time by the consteval
+ * constructor: `fn` is the ld-bound Go function pointer (`&agy_go__*` from symbols_gen.h), and
+ * `handler` is the dedicated C hook function (`&agy_on_*`) baked into that hook's trampoline. */
 struct agy_hook {
     std::string_view id;      /* short unique id, for hk() compile-time lookup */
-    const char      *name;    /* Go symbol → agy_sym */
+    const char      *name;    /* Go symbol → agy_fn / agy_sym */
     wire_mode_t       mode;
     const char      *kind;    /* → dispatch(kind,…) / wire_event_t.kind */
     agy_mech_t       mech;
     int32_t          retcap;  /* return-capture policy: 0 none, <0 special-cased, >0 min bytes to emit */
-    uint64_t         vaddr;    /* = agy_sym(name), baked at compile time */
-    uint32_t         skip;     /* = agy_skip(name), baked at compile time */
+    agy_go_fn_t      fn;      /* = agy_fn(name), ld-bound Go function pointer */
+    agy_hook_fn      handler; /* = agy_handler_for(kind), statically bound C hook handler */
+    uint64_t         vaddr;   /* = agy_sym(name), baked at compile time */
+    uint32_t         skip;    /* = agy_skip(name), baked at compile time */
 
     consteval agy_hook(std::string_view id_, const char *name_, wire_mode_t mode_,
                        const char *kind_, agy_mech_t mech_, int32_t retcap_)
         : id(id_), name(name_), mode(mode_), kind(kind_), mech(mech_),
-          retcap(retcap_), vaddr(agy_sym(name_)), skip(agy_skip(name_)) {}
+          retcap(retcap_), fn(agy_fn(name_)), handler(agy_handler_for(kind_)),
+          vaddr(agy_sym(name_)), skip(agy_skip(name_)) {}
 };
 
 inline constexpr agy_hook HOOKS[] = {
