@@ -8,8 +8,8 @@ Low-level `pycodex.ask` and `pycodex.Session` keep the exec/PTY interfaces.
 
 ## Layout
 - `vendor/` — the Codex repo, git-subtree'd (originally `rust-v0.143.0-alpha.38`, since bumped to
-  **0.160.0** (`rust-v0.160.0`, upstream commit
-  `79b1b66`) — see `codex-rs/Cargo.toml`; Apache-2.0; `LICENSE` preserved). Kept pristine except
+  **0.166.0** (`rust-v0.166.0`, upstream commit
+  `6ff1e1c`) — see `codex-rs/Cargo.toml`; Apache-2.0; `LICENSE` preserved). Kept pristine except
   our patch (below); `codex-rs/target/` is gitignored.
 - `pycodex/` — the Python wrapper: `ask()`/`CodexResponse`/`CodexModel` + the in-process decode
   side `codex_process` (the `WIRE_MODULE` the embedded interpreter loads) + the OpenAI-Responses
@@ -190,8 +190,9 @@ pixi run python test_scripts/test_codex_sdk_native.py
 
 These cover request arguments, MCP configuration, scoped and reverted session stores,
 response decoding, timeout/process cleanup, and the shared persistent-session loop.
-The 0.157.0 upgrade also passed the native build, 196 `codex-api` Rust tests, and a local
-mock-endpoint smoke that exercised native request/response capture and session readback.
+The 0.166.0 upgrade also passed the native build and the local mock-endpoint SDK/app-server
+checks (`test_codex_sdk_native.py`) exercising native request/response capture and session
+resume.
 These checks do not establish authenticated service compatibility. To check that separately
 after building and authenticating, run `pixi run python test_scripts/test_codex.py`; inspect
 its output because missing artifacts or authentication cause it to skip.

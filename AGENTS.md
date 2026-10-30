@@ -224,7 +224,7 @@ instrumentation layer; Claude uses its SDK protocol directly:
   with a three-line wiretap patch that loads the bridge as an N-API addon (`kimi/native/`). See
   `kimi/README.md`.
 - **`claude/`** → the `pyclaude` wrapper and the pristine `claude/vendor/sdk` source.
-  `claude/vendor.json` pins SDK v0.2.159 and Claude Code 2.1.281;
+  `claude/vendor.json` pins SDK v0.2.175 and Claude Code 2.1.314;
   `claude/build_cli.py` verifies and stages the executable under the SDK's
   `_bundled/` directory before packaging. See `claude/README.md`.
 

@@ -7,10 +7,10 @@ The existing `claude-code` model aliases now use this backend; the direct
 Anthropic Messages adapter remains separate.
 
 The official Python SDK source is checked into `claude/vendor/sdk` at tag
-`v0.2.163` (commit `69af22658d4af855fd8280d71116043e6069af6c`), and packaged
+`v0.2.175` (commit `1ea8cb74ddcdadbfaa9b20dfa8268e18047851e7`), and packaged
 as part of TaskSolver. There is no separate `claude-agent-sdk` package dependency.
 `pixi install` builds from this source and bundles the matching Claude Code
-2.1.286 executable from Anthropic's distribution, verified by size and SHA256.
+2.1.314 executable from Anthropic's distribution, verified by size and SHA256.
 The pins live in [`vendor.json`](vendor.json); [`build_cli.py`](build_cli.py)
 checks the SDK's CLI version before downloading, reuses verified cached files,
 and replaces the executable only after verification. The executable is packaged

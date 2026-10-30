@@ -93,12 +93,12 @@ PROC_TARGETS = [
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse",
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",
-    "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",
+    "google3/third_party/oneharness/internal/core/core.createPlannerResponseStep",
     # consumer-entry hook for the RESPONSE: these take the completed *Step (with the
     # assembled assistant text) as an entry ARG — sidesteps the return-value problem.
     # (protoTrajectory.AppendStep did NOT fire in --print/interactive; the step commit
     # goes through the framework/cortex trajectory + the step-changed callback instead.)
-    "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep",
+    "google3/third_party/oneharness/internal/core/integration/integration.(*ToolContextTrajectory).AppendStep",
     "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep",
     "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged",
     # THE better consumer (Plan 7): one frame above OnStepsChanged in the CONSUMER

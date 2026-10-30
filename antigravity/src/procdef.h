@@ -209,12 +209,12 @@ inline constexpr agy_hook HOOKS[] = {
  * `app_response` (far shallower than AppendStep/OnStepsChanged's 6-deep graphs). */
 { "FH_UPDATE",   "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",          WIRE_ASYNC, "fh_update",   AGY_FULLCGO, 0 },
 { "FH_PROCESS",  "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",           WIRE_ASYNC, "fh_process",  AGY_FULLCGO, 0 },
-{ "CORE_PLANSTEP", "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep",                                WIRE_ASYNC, "core_planstep", AGY_FULLCGO, 0 },
+{ "CORE_PLANSTEP", "google3/third_party/oneharness/internal/core/core.createPlannerResponseStep",                                WIRE_ASYNC, "core_planstep", AGY_FULLCGO, 0 },
 /* consumer-entry hook for the RESPONSE (solves the return-value problem without
  * capturing a return): AppendStep/SetStep take the completed *Step — with the
  * assembled assistant text (GetPlannerResponse→GetResponse) — as an ENTRY arg.
  * Trampoline (they park committing to the trajectory); walk with AGY_PROC_CGT_ARGS. */
-{ "TRAJ_APPENDSTEP", "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep", WIRE_ASYNC, "traj_appendstep", AGY_FULLCGO, 0 },
+{ "TRAJ_APPENDSTEP", "google3/third_party/oneharness/internal/core/integration/integration.(*ToolContextTrajectory).AppendStep", WIRE_ASYNC, "traj_appendstep", AGY_FULLCGO, 0 },
 { "TRAJ_ADDSTEP",    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep",                                             WIRE_ASYNC, "traj_addstep",    AGY_FULLCGO, 0 },
 { "TRAJ_ONSTEPS",    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged",     WIRE_ASYNC, "traj_onsteps",    AGY_FULLCGO, 0 },
 /* Plan 7 — the commit point one frame above OnStepsChanged (runExecution → AppendStep

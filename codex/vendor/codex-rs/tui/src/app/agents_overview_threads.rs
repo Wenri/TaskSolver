@@ -5,9 +5,9 @@
 use super::App;
 use super::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 use super::agents_overview_details::preview_agent_message;
+use super::agents_overview_discovery::list_pinned_threads;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
-use crate::AppServerTarget;
 use crate::app_event::AgentsOverviewThreadRefresh;
 use crate::app_event::AppEvent;
 use crate::app_server_session::AppServerSession;
@@ -17,7 +17,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::Thread;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadReadParams;
@@ -55,6 +55,7 @@ fn detail_thread_ids<'a>(threads: impl Iterator<Item = &'a Thread>) -> Vec<Threa
 
 impl App {
     pub(super) fn remove_agents_overview_thread(&mut self, thread_id: ThreadId) {
+        self.prepare_agents_overview_removal(&std::collections::HashSet::from([thread_id]));
         self.agents_overview.removed_threads.insert(thread_id);
         if let Some(Some(thread)) = self.agents_overview.threads.remove(&thread_id)
             && !thread.ephemeral
@@ -120,6 +121,9 @@ impl App {
             }
             ServerNotification::ThreadArchived(_) | ServerNotification::ThreadDeleted(_) => {
                 self.agents_overview
+                    .requested_permission_profiles
+                    .remove(&thread_id);
+                self.agents_overview
                     .selected_permission_profiles
                     .remove(&thread_id);
                 self.agents_overview.activity.remove(&thread_id);
@@ -132,6 +136,9 @@ impl App {
                 self.agents_overview.removed_threads.remove(&thread_id);
             }
             ServerNotification::ThreadClosed(_) => {
+                self.agents_overview
+                    .requested_permission_profiles
+                    .remove(&thread_id);
                 self.agents_overview.activity.remove(&thread_id);
                 if let Some(usage) = self.agents_overview.usage.get_mut(&thread_id) {
                     usage.tokens = None;
@@ -160,6 +167,10 @@ impl App {
             }
             ServerNotification::ThreadSettingsUpdated(settings) => {
                 if !self.pending_server_profiles.contains_key(&thread_id)
+                    && !self
+                        .agents_overview
+                        .requested_permission_profiles
+                        .contains_key(&thread_id)
                     && self
                         .agents_overview
                         .selected_permission_profiles
@@ -207,6 +218,7 @@ impl App {
     }
 
     pub(super) fn refresh_agents_overview_threads(&mut self, app_server: &AppServerSession) {
+        self.agents_overview.pin_refresh_requested = true;
         self.agents_overview.refresh_thread_ids.extend(
             self.agents_overview
                 .threads
@@ -243,7 +255,7 @@ impl App {
             .is_some();
         if !visible
             && (self.agents_overview.initialized
-                || matches!(self.app_server_target, AppServerTarget::Embedded))
+                || !self.app_server_target.supports_command_center())
         {
             return;
         }
@@ -255,16 +267,19 @@ impl App {
             && self.agents_overview.refresh_thread_ids.is_empty()
             && !self.agents_overview.show_more_requested
             && !(self.agents_overview.refill_count > 0 && self.agents_overview.discovery.has_more())
+            && !self.agents_overview.pin_refresh_requested
         {
             return;
         }
 
+        self.agents_overview.pin_refresh_requested = false;
         let request_id = Uuid::new_v4();
         self.agents_overview.request_id = Some(request_id);
         let initialized = self.agents_overview.initialized;
         let refill = self.agents_overview.refill_count;
         let show_more =
             refill == 0 && std::mem::take(&mut self.agents_overview.show_more_requested);
+        self.agents_overview.refresh_show_more = show_more;
         let discover =
             !initialized || show_more || (refill > 0 && self.agents_overview.discovery.has_more());
         let limit = if initialized && refill > 0 {
@@ -281,6 +296,7 @@ impl App {
             }
         });
         let mut thread_ids = std::mem::take(&mut self.agents_overview.refresh_thread_ids);
+        self.agents_overview.active_refresh_thread_ids = thread_ids.clone();
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         self.agents_overview
@@ -293,6 +309,23 @@ impl App {
                 let mut threads = HashMap::new();
                 let mut last_messages = HashMap::new();
                 let mut recent_seed_complete = true;
+                let pinned_thread_ids = match list_pinned_threads(&request_handle).await {
+                    Ok(Some(pinned_threads)) => {
+                        let mut ids = Vec::with_capacity(pinned_threads.len());
+                        for thread in pinned_threads {
+                            if let Ok(thread_id) = ThreadId::from_string(&thread.id) {
+                                ids.push(thread_id);
+                                threads.insert(thread_id, Some(thread));
+                            }
+                        }
+                        Some(Some(ids))
+                    }
+                    Ok(None) => Some(None),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to list pinned agent threads");
+                        None
+                    }
+                };
                 if let Some(discovery) = &mut discovery {
                     let loaded = async {
                         if initialized {
@@ -366,16 +399,17 @@ impl App {
                                     .await
                                     && let Some(turn) = turns.data.first()
                                 {
-                                    if let Some(ThreadItem::UserMessage { content, .. }) =
-                                        turn.items.first()
+                                    if let Some(ThreadItemPayload::UserMessage {
+                                        content, ..
+                                    }) = turn.item_payloads().next()
                                     {
                                         response.thread.preview =
                                             ChatWidget::user_message_display_from_inputs(content)
                                                 .message;
                                     }
                                     last_message =
-                                        turn.items.iter().rev().find_map(|item| match item {
-                                            ThreadItem::AgentMessage { text, .. } => {
+                                        turn.item_payloads().rev().find_map(|item| match item {
+                                            ThreadItemPayload::AgentMessage { text, .. } => {
                                                 Some(preview_agent_message(text))
                                             }
                                             _ => None,
@@ -412,6 +446,7 @@ impl App {
                     last_messages,
                     recent_seed_complete,
                     discovery,
+                    pinned_thread_ids,
                 })
             }
             .await;

@@ -1,53 +1,53 @@
 {
   "agy_path": "vendor/agy",
-  "build_id": "257bedb917787ceb25bbe0d36687c663",
+  "build_id": "85d3425a18a809e545747dcb9d87c03c",
   "ptr_size": 8,
-  "moduledata_vaddr": 193204320,
-  "text_base": 107225216,
-  "minpc": 107225216,
-  "total_funcs": 151599,
+  "moduledata_vaddr": 206548096,
+  "text_base": 109047936,
+  "minpc": 109047936,
+  "total_funcs": 174282,
   "hooks": {
-    "crypto/tls.(*Conn).Write": 111580928,
-    "crypto/tls.(*Conn).Read": 111586208,
-    "net/http.(*Transport).RoundTrip": 112570432,
-    "net/http/internal/http2.(*pipe).Write": 112084928,
-    "crypto/tls.(*halfConn).decrypt": 111552736,
-    "runtime.main": 107593056,
-    "os.Getenv": 108466144,
-    "os.Exit": 108496800,
-    "os.OpenFile": 108476544,
-    "os.readlink": 108488352,
-    "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize": 153978592,
-    "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON": 153867008,
-    "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 109458848,
-    "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage": 148135488,
-    "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 148125728,
-    "runtime.cgocall": 107822880,
-    "runtime.asmcgocall": 107869824,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).StreamGenerateContent": 135646464,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).GenerateContent": 135652352,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchLoadCodeAssistResponse": 135757728,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchUserInfo": 135758784,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchAvailableModels": 135706432,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).ListExperiments": 135606816,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RetrieveUserQuotaSummary": 135762624,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordTrajectorySegmentAnalytics": 135742016,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).WriteTrajectoryACLs": 135742912,
-    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse": 136854496,
-    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep": 136853696,
-    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream": 136844448,
-    "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep": 129409888,
-    "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep": 136942464,
-    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep": 141637376,
-    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged": 132041664,
-    "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep": 136876064,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.toStreamResponseChunk": 135678016,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*streamResponseHandler).sendUsageDelta": 135630976,
-    "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText": 117898176,
-    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText": 115785408,
-    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse": 117049824,
-    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking": 117049888,
-    "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response": 122519872
+    "crypto/tls.(*Conn).Write": 114628992,
+    "crypto/tls.(*Conn).Read": 114634080,
+    "net/http.(*Transport).RoundTrip": 115591040,
+    "net/http/internal/http2.(*pipe).Write": 115119584,
+    "crypto/tls.(*halfConn).decrypt": 114600768,
+    "runtime.main": 109405792,
+    "os.Getenv": 110190912,
+    "os.Exit": 110220064,
+    "os.OpenFile": 110200896,
+    "os.readlink": 110212032,
+    "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize": 163569056,
+    "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON": 163482624,
+    "google3/third_party/golang/gogo/protobuf/proto/proto.Marshal": 113068320,
+    "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage": 156556960,
+    "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send": 156548192,
+    "runtime.cgocall": 109632576,
+    "runtime.asmcgocall": 109679232,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).StreamGenerateContent": 140976832,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).GenerateContent": 140985408,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchLoadCodeAssistResponse": 141116096,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchUserInfo": 141117184,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchAvailableModels": 141048416,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).ListExperiments": 140936960,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RetrieveUserQuotaSummary": 141121728,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RecordTrajectorySegmentAnalytics": 141098400,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).WriteTrajectoryACLs": 141099200,
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse": 141614944,
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep": 141614144,
+    "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream": 141605088,
+    "google3/third_party/oneharness/internal/core/core.createPlannerResponseStep": 131779968,
+    "google3/third_party/oneharness/internal/core/integration/integration.(*ToolContextTrajectory).AppendStep": 141794592,
+    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep": 150649024,
+    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged": 135443552,
+    "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep": 141636448,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.toStreamResponseChunk": 141016480,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*streamResponseHandler).sendUsageDelta": 140961376,
+    "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText": 120293824,
+    "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText": 117824672,
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse": 119884480,
+    "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking": 119884544,
+    "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response": 124278208
   },
   "skips": {
     "crypto/tls.(*Conn).Write": 15,
@@ -70,7 +70,7 @@
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).StreamGenerateContent": 15,
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).GenerateContent": 10,
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchLoadCodeAssistResponse": 6,
-    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchUserInfo": 6,
+    "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchUserInfo": 10,
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).FetchAvailableModels": 6,
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).ListExperiments": 15,
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient).RetrieveUserQuotaSummary": 6,
@@ -79,10 +79,10 @@
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse": 10,
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep": 10,
     "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream": 18,
-    "google3/third_party/gemini_coder/framework/core/core.createPlannerResponseStep": 10,
-    "google3/third_party/gemini_coder/framework/core/integration/integration.(*ToolContextTrajectory).AppendStep": 6,
+    "google3/third_party/oneharness/internal/core/core.createPlannerResponseStep": 10,
+    "google3/third_party/oneharness/internal/core/integration/integration.(*ToolContextTrajectory).AppendStep": 6,
     "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep": 15,
-    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged": 15,
+    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged": 18,
     "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep": 10,
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.toStreamResponseChunk": 10,
     "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*streamResponseHandler).sendUsageDelta": 10,
@@ -96,3062 +96,4226 @@
   "catalog": {
     "jetski_mcp": [
       {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*ACPServer).preloadMCPServers",
+        "addr": 156961440
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*ACPServer).sessionMCPSpecs",
+        "addr": 156957728
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.buildMCPServerSpec",
+        "addr": 156958976
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.ideMCPPortSpec",
+        "addr": 156958528
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.mcpAndProjectConfig",
+        "addr": 156956224
+      },
+      {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetPluginMCPSpecs",
-        "addr": 148192832
+        "addr": 156616224
       },
       {
         "name": "google3/third_party/jetski/cli/commands/commands.(*mcpCommand).Description",
-        "addr": 151976864
+        "addr": 161088192
       },
       {
         "name": "google3/third_party/jetski/cli/commands/commands.(*mcpCommand).Execute",
-        "addr": 151976896
+        "addr": 161088256
       },
       {
         "name": "google3/third_party/jetski/cli/commands/commands.(*mcpCommand).Execute.func1",
-        "addr": 152013696
+        "addr": 161149312
+      },
+      {
+        "name": "google3/third_party/jetski/cli/commands/commands.(*mcpCommand).Feature",
+        "addr": 161088224
       },
       {
         "name": "google3/third_party/jetski/cli/commands/commands.(*mcpCommand).Name",
-        "addr": 151976832
+        "addr": 161088160
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*Config).Delete",
-        "addr": 152374880
+        "addr": 161507040
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*Config).Edit",
-        "addr": 152373856
+        "addr": 161506016
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*Config).Has",
-        "addr": 152373088
+        "addr": 161505280
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*Config).IsEmptyEntry",
-        "addr": 152375040
+        "addr": 161507200
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*Config).Marshal",
-        "addr": 152377152
+        "addr": 161509280
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*Config).Save",
-        "addr": 152379040
+        "addr": 161511136
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*Config).Servers",
-        "addr": 152376000
+        "addr": 161508128
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*Config).Set",
-        "addr": 152373376
+        "addr": 161505536
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*Config).Unreadable",
-        "addr": 152373248
+        "addr": 161505440
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.(*NotFoundError).Error",
-        "addr": 152370016
+        "addr": 161502368
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.Add.func1",
-        "addr": 154245952
+        "addr": 163958944
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.Apply",
-        "addr": 152370144
+        "addr": 161502496
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.List",
-        "addr": 152370432
+        "addr": 161502752
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.Load",
-        "addr": 152372352
+        "addr": 161504544
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.Parse",
-        "addr": 152370944
+        "addr": 161503200
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.Path",
-        "addr": 152370784
+        "addr": 161503072
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.Remove.func1",
-        "addr": 154247584
+        "addr": 163960576
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.SetDisabled.1",
-        "addr": 153755104
+        "addr": 163341056
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.SetDisabled.1.1",
-        "addr": 153755840
+        "addr": 163341760
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.SetDisabled.func1",
-        "addr": 154247776
+        "addr": 163960768
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.SetDisabled.func1.1",
-        "addr": 154248512
+        "addr": 163961472
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.init",
-        "addr": 152369792
+        "addr": 161502144
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.init.func1",
-        "addr": 152381152
+        "addr": 161513152
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.mergeServerEntry",
-        "addr": 152379584
+        "addr": 161511648
       },
       {
         "name": "google3/third_party/jetski/cli/mcp/mcp.setDisabled",
-        "addr": 152370592
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).ActionFromMsg",
-        "addr": 153916736
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).HasArtifacts",
-        "addr": 153916928
+        "addr": 161502912
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).HorizontalKeyboard",
-        "addr": 153916992
+        "addr": 163522528
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).Init",
-        "addr": 153917024
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).Keybindings",
-        "addr": 153917312
+        "addr": 163522560
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).KeyboardHints",
-        "addr": 153917344
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).Layout",
-        "addr": 153917920
+        "addr": 163522848
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).RenderHeader",
-        "addr": 153918240
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).SetLayout",
-        "addr": 153918816
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).Store",
-        "addr": 153919072
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).UIPhase",
-        "addr": 153919136
+        "addr": 163523424
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).Update",
-        "addr": 153919168
+        "addr": 163524064
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).View",
-        "addr": 153919744
+        "addr": 163524640
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).ensureValidFocus",
-        "addr": 153226400
+        "addr": 162582816
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*MCPModel).refreshSelections",
-        "addr": 153204256
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).ActionFromMsg",
-        "addr": 153920352
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).HasArtifacts",
-        "addr": 153920544
+        "addr": 162561152
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).Init",
-        "addr": 153920864
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).Keybindings",
-        "addr": 153921152
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).Layout",
-        "addr": 153921504
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).SetLayout",
-        "addr": 153922112
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).Store",
-        "addr": 153922368
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).UIPhase",
-        "addr": 153922432
+        "addr": 163525568
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).Update",
-        "addr": 153922464
+        "addr": 163526528
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*McpAuthModel).View",
-        "addr": 153922752
+        "addr": 163526816
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.ActionFromMsg",
-        "addr": 153916576
+        "addr": 163522304
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.HasArtifacts",
-        "addr": 153916864
+        "addr": 163522464
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.HorizontalKeyboard",
-        "addr": 153200736
+        "addr": 162557664
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.Init",
-        "addr": 153202880
+        "addr": 162559776
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.Init.func1",
-        "addr": 153752384
+        "addr": 163338304
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.Init.func2",
-        "addr": 153752064
+        "addr": 163337984
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.Keybindings",
-        "addr": 153917280
+        "addr": 163522816
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.KeyboardHints",
-        "addr": 153200768
+        "addr": 162557696
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.Layout",
-        "addr": 153917600
+        "addr": 163523104
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.RenderHeader",
-        "addr": 153200512
+        "addr": 162557472
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.SetLayout",
-        "addr": 153918528
+        "addr": 163523712
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.Store",
-        "addr": 153919040
+        "addr": 163524000
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.UIPhase",
-        "addr": 153919104
+        "addr": 163524032
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.Update",
-        "addr": 153207584
+        "addr": 162564192
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.View",
-        "addr": 153217312
+        "addr": 162573760
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.closePanel.func1",
-        "addr": 153788960
+        "addr": 163388768
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.doRestart",
-        "addr": 153216416
+        "addr": 162572864
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.doRestart.func1",
-        "addr": 153753152
+        "addr": 163339104
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.doSignOut.func1",
-        "addr": 153752768
+        "addr": 163338720
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.doToggle",
-        "addr": 153216832
+        "addr": 162573280
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.doToggle.func1",
-        "addr": 153753696
+        "addr": 163339648
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.getStates",
-        "addr": 153204128
+        "addr": 162561024
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.renderActions",
-        "addr": 153223584
+        "addr": 162580032
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.renderItem",
-        "addr": 153219200
+        "addr": 162575648
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.updateEditing",
-        "addr": 153211552
+        "addr": 162568064
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.updateEditing.func1",
-        "addr": 153752640
+        "addr": 163338592
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.MCPModel.updateNav",
-        "addr": 153209952
+        "addr": 162566496
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.ActionFromMsg",
-        "addr": 153920192
+        "addr": 163525120
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.HasArtifacts",
-        "addr": 153920480
+        "addr": 163525280
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.Init",
-        "addr": 153193984
+        "addr": 162550880
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.Keybindings",
-        "addr": 153921120
+        "addr": 163525824
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.Layout",
-        "addr": 153921184
+        "addr": 163525856
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.SetLayout",
-        "addr": 153921824
+        "addr": 163526176
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.Store",
-        "addr": 153922336
+        "addr": 163526464
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.UIPhase",
-        "addr": 153922400
+        "addr": 163526496
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.Update",
-        "addr": 153194176
+        "addr": 162551072
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.Update.func1",
-        "addr": 153751968
+        "addr": 163337920
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.Update.func2",
-        "addr": 153788896
+        "addr": 163388704
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.Update.func3",
-        "addr": 153788928
+        "addr": 163388736
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.Update.func4",
-        "addr": 153751840
+        "addr": 163337792
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.McpAuthModel.View",
-        "addr": 153197408
+        "addr": 162554240
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.NewMCPModel",
-        "addr": 153199808
+        "addr": 162556768
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.NewMcpAuthModel",
-        "addr": 153193408
+        "addr": 162550304
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.mcpStatusRows",
+        "addr": 162759520
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.mcpStatusRows.func1",
+        "addr": 163386912
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.renderMcpSetupStatus",
+        "addr": 162761184
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/claude/claude.convertClaudeMCPServer",
+        "addr": 159900960
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/claude/claude.readClaudeMCPServers",
+        "addr": 159900352
       },
       {
         "name": "google3/third_party/jetski/cli/plugins/claude/claude.stageClaudeMCPServers",
-        "addr": 151192032
+        "addr": 159898240
       },
       {
         "name": "google3/third_party/jetski/cli/plugins/common/common.(*Stager).StageMCPServers",
-        "addr": 151178304
+        "addr": 159878176
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*Manager).NeedsMcpSetup",
+        "addr": 159984288
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).checkMcp",
+        "addr": 160088960
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).checkMcpConfig",
+        "addr": 160100640
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).checkMcpOverlay",
+        "addr": 160108608
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).checkMcpPlaceholders",
+        "addr": 160096960
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).checkMcpPlaceholders.func1",
+        "addr": 160118240
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).checkMcpServers",
+        "addr": 160089792
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).checkMcpTopLevel",
+        "addr": 160104416
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).checkSpecMcp",
+        "addr": 160112640
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).checkSpecMcpFiles",
+        "addr": 160107264
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.(*pluginValidator).readMcpConfig",
+        "addr": 160101952
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.McpSetupFromSpecs",
+        "addr": 159981952
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.McpSetupRequiredError",
+        "addr": 159981728
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.ReadMcpSpecs",
+        "addr": 159983456
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.SaveMcpVariables",
+        "addr": 159984928
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.isMcpServer",
+        "addr": 160103872
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.isMcpServerMap",
+        "addr": 160106208
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.mcpConfigFieldProblem",
+        "addr": 160106720
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.mcpField.inheritHint",
+        "addr": 160096384
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.mcpFields",
+        "addr": 160093696
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.mcpOverlayFieldProblem",
+        "addr": 160111744
       },
       {
         "name": "google3/third_party/jetski/cli/plugins/plugins.scanMcpServers",
-        "addr": 151225184
+        "addr": 159960256
+      },
+      {
+        "name": "google3/third_party/jetski/cli/plugins/plugins.specMcpFieldProblem",
+        "addr": 160115008
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.formatMCPRun",
-        "addr": 150881952
+        "addr": 159552384
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).CompleteMcpOAuth",
-        "addr": 151491328
+        "addr": 160462752
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).DisconnectMcpOAuth",
-        "addr": 151491904
+        "addr": 160463392
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).GetCachedMcpStates",
-        "addr": 151482944
+        "addr": 160449024
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).GetCachedMcpStates.deferwrap1",
-        "addr": 151726176
+        "addr": 160789920
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).GetMcpManager",
-        "addr": 151482496
+        "addr": 160448576
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).GetMcpManager.deferwrap1",
-        "addr": 151726048
+        "addr": 160789792
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).ReloadMcpConfig",
-        "addr": 151490656
+        "addr": 160457376
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).RestartPluginMcpServers",
+        "addr": 160458208
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).RestartPluginMcpServers-fm",
+        "addr": 163570624
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).SetCachedMcpStates",
-        "addr": 151483200
+        "addr": 160449280
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).SetCachedMcpStates.deferwrap1",
-        "addr": 151726240
+        "addr": 160789984
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).SetMcpAuthState",
-        "addr": 151476128
+        "addr": 160440928
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).SetMcpAuthSuccess",
-        "addr": 151476640
+        "addr": 160441472
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).SetMcpManager",
-        "addr": 151481472
+        "addr": 160447584
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).SetMcpManager.deferwrap1",
-        "addr": 151725792
+        "addr": 160789536
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).StartPluginMcpServers",
+        "addr": 160458080
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).StartPluginMcpServers-fm",
+        "addr": 163570752
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).loadPluginMcpServers",
+        "addr": 160458336
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).loadPluginMcpServers.func1",
+        "addr": 160791200
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).stopPluginMcpServers",
+        "addr": 160460064
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).stopPluginMcpServers.func1",
+        "addr": 160819008
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).stopPluginMcpServers.func2",
+        "addr": 160819040
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).stopPluginMcpServers.func3",
+        "addr": 160819072
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).stopPluginMcpServers.func5",
+        "addr": 160791520
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*PluginsManager).EnablePluginAfterMcpSetup",
+        "addr": 160531904
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*PluginsManager).NeedsMcpSetup",
+        "addr": 160533728
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*PluginsManager).SavePluginMcpVariables",
+        "addr": 160533824
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*PluginsManager).SavePluginMcpVariables.deferwrap1",
+        "addr": 160797504
+      },
+      {
+        "name": "google3/third_party/jetski/cli/types/types.(*McpServerSetup).MissingVariables",
+        "addr": 156343584
+      },
+      {
+        "name": "google3/third_party/jetski/cli/types/types.(*McpVariable).Label",
+        "addr": 156343520
+      },
+      {
+        "name": "google3/third_party/jetski/cli/types/types.(*PluginSummary).McpSetupIncomplete",
+        "addr": 156343680
+      },
+      {
+        "name": "google3/third_party/jetski/cli/types/types.(*PluginSummary).NeedsMcpSetup",
+        "addr": 156343840
+      },
+      {
+        "name": "google3/third_party/jetski/cli/types/types.McpServerSetup.MissingVariables",
+        "addr": 156294240
+      },
+      {
+        "name": "google3/third_party/jetski/cli/types/types.McpVariable.Label",
+        "addr": 156294848
+      },
+      {
+        "name": "google3/third_party/jetski/cli/types/types.PluginSummary.McpSetupIncomplete",
+        "addr": 156294112
+      },
+      {
+        "name": "google3/third_party/jetski/cli/types/types.PluginSummary.NeedsMcpSetup",
+        "addr": 156294080
       }
     ],
     "jetski_tool": [
       {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*ACPServer).getToolOutput",
+        "addr": 156999264
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*SessionState).RecordToolCall",
+        "addr": 157018272
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*SessionState).RecordToolCall.deferwrap1",
+        "addr": 157034336
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*SessionState).SetPendingToolPermission",
+        "addr": 157019360
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*SessionState).SetPendingToolPermission.deferwrap1",
+        "addr": 157034464
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.getToolKindTitleAndLocations",
+        "addr": 157003168
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.(*ContentToolCallContent).MarshalJSON",
+        "addr": 156818176
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.(*ContentToolCallContent).Type",
+        "addr": 156818240
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.(*DiffToolCallContent).MarshalJSON",
+        "addr": 156818048
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.(*DiffToolCallContent).Type",
+        "addr": 156818144
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.(*ToolCallSessionUpdate).MarshalJSON",
+        "addr": 156818656
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.(*ToolCallSessionUpdate).SessionUpdate",
+        "addr": 156819008
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.(*ToolCallUpdateSessionUpdate).MarshalJSON",
+        "addr": 156819040
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.(*ToolCallUpdateSessionUpdate).SessionUpdate",
+        "addr": 156819392
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.ContentToolCallContent.MarshalJSON",
+        "addr": 156815584
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.ContentToolCallContent.Type",
+        "addr": 156815552
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.DiffToolCallContent.MarshalJSON",
+        "addr": 156815232
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.DiffToolCallContent.Type",
+        "addr": 156815200
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.ToolCallSessionUpdate.MarshalJSON",
+        "addr": 156816576
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.ToolCallSessionUpdate.SessionUpdate",
+        "addr": 156816544
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.ToolCallUpdateSessionUpdate.MarshalJSON",
+        "addr": 156816960
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/messages/messages.ToolCallUpdateSessionUpdate.SessionUpdate",
+        "addr": 156816928
+      },
+      {
+        "name": "google3/third_party/jetski/cli/analytics/analytics.RecordToolConfirmationDismissed",
+        "addr": 156373184
+      },
+      {
         "name": "google3/third_party/jetski/cli/analytics/analytics.RecordToolConfirmationResponded",
-        "addr": 147992832
+        "addr": 156372416
       },
       {
         "name": "google3/third_party/jetski/cli/analytics/analytics.RecordToolConfirmationSurfaced",
-        "addr": 147992416
+        "addr": 156372000
+      },
+      {
+        "name": "google3/third_party/jetski/cli/audio/audio.selectPlayerTool",
+        "addr": 161438976
       },
       {
         "name": "google3/third_party/jetski/cli/audio/audio.selectTool",
-        "addr": 152304576
+        "addr": 161446624
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).FinishToolSchema",
-        "addr": 148143520
+        "addr": 156566144
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).FinishToolSchema.deferwrap1",
-        "addr": 148245504
+        "addr": 156710144
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RespondToToolConfirmation",
-        "addr": 148156096
+        "addr": 156581760
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RespondToToolConfirmationWithScope",
+        "addr": 156582016
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetFinishToolSchema",
-        "addr": 148143264
+        "addr": 156565888
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetFinishToolSchema.deferwrap1",
-        "addr": 148245440
+        "addr": 156710080
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetToolPermissionMode",
-        "addr": 148145088
+        "addr": 156567680
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetToolPermissionMode.deferwrap1",
-        "addr": 148245952
+        "addr": 156710592
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).respondToToolConfirmation",
+        "addr": 156582240
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.buildScopedToolInteraction",
+        "addr": 156586816
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.buildToolInteraction",
-        "addr": 148160480
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).ActionFromMsg",
-        "addr": 153960096
+        "addr": 156585920
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).ExpandedView",
-        "addr": 153656224
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).HasArtifacts",
-        "addr": 153960288
+        "addr": 163219296
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).Init",
-        "addr": 153635680
+        "addr": 163199040
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).IsExpandedView",
-        "addr": 153625472
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).Keybindings",
-        "addr": 153960384
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).Layout",
-        "addr": 153960736
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).SetLayout",
-        "addr": 153961344
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).Store",
-        "addr": 153961600
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).UIPhase",
-        "addr": 153961664
+        "addr": 163189216
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).Update",
-        "addr": 153636384
+        "addr": 163199776
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).Update.func1",
-        "addr": 153775040
+        "addr": 163371776
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).View",
-        "addr": 153643456
+        "addr": 163206464
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).autoModeSelected",
+        "addr": 163230112
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).canAmend",
-        "addr": 153628128
+        "addr": 163190464
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).choices",
-        "addr": 153630368
+        "addr": 163192832
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).collectDiffComments",
-        "addr": 153678656
+        "addr": 163242592
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).copyFor",
-        "addr": 153628448
+        "addr": 163190752
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).createFileDiffEntry",
-        "addr": 153667584
+        "addr": 163230944
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).createFilePreview",
-        "addr": 153668192
+        "addr": 163231648
       },
       {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).editAreaScrollHints",
-        "addr": 153662048
+        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).diffLineRenderer",
+        "addr": 163238144
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).escDisabledHint",
+        "addr": 163198816
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).expandedDimensions",
-        "addr": 153655968
+        "addr": 163219040
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).getFullCommand",
-        "addr": 153662816
+        "addr": 163225952
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).handleConfirm",
-        "addr": 153642240
+        "addr": 163205280
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).handleConfirm.func1",
-        "addr": 153775168
+        "addr": 163371904
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).handleSave",
-        "addr": 153642048
+        "addr": 163205088
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).initEditDiff",
-        "addr": 153676128
+        "addr": 163239936
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).inlinePreview",
-        "addr": 153662976
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).isAskPermission",
-        "addr": 153626688
+        "addr": 163226080
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).isCommandPermission",
-        "addr": 153626080
+        "addr": 163189856
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).isCreateFile",
-        "addr": 153667264
+        "addr": 163230624
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).isOutsideWorkspace",
-        "addr": 153626528
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).isSendInputApproval",
-        "addr": 153627104
+        "addr": 163190304
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).isWriteFileEdit",
-        "addr": 153666816
+        "addr": 163230208
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).parseDiffEntry",
-        "addr": 153669056
+        "addr": 163232544
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).rawTarget",
-        "addr": 153626368
+        "addr": 163190144
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).renderAmendInput",
-        "addr": 153655584
+        "addr": 163218592
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).standardChoices",
-        "addr": 153629088
+        "addr": 163191392
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).styledFilePreview",
+        "addr": 163238336
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).syncLayout",
-        "addr": 153635712
+        "addr": 163199072
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).updateAmending",
-        "addr": 153641344
+        "addr": 163204416
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).updateEditDiffConfirm",
-        "addr": 153678016
+        "addr": 163241984
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).updateExpandedDiff",
-        "addr": 153676800
+        "addr": 163240768
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).updateExpandedView",
-        "addr": 153639392
+        "addr": 163202432
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).withAutoModeChoice",
+        "addr": 163229888
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*ToolConfirmationModel).writeFileEditPreview",
-        "addr": 153675296
+        "addr": 163239072
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.NewToolConfirmationModel",
-        "addr": 153625504
+        "addr": 163189248
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.ToolConfirmationModel.ActionFromMsg",
-        "addr": 153959936
+        "addr": 163557632
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.ToolConfirmationModel.HasArtifacts",
-        "addr": 153960224
+        "addr": 163557792
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.ToolConfirmationModel.Keybindings",
-        "addr": 153960352
+        "addr": 163557856
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.ToolConfirmationModel.Layout",
-        "addr": 153960416
+        "addr": 163557888
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.ToolConfirmationModel.SetLayout",
-        "addr": 153961056
+        "addr": 163558208
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.ToolConfirmationModel.Store",
-        "addr": 153961568
+        "addr": 163558496
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.ToolConfirmationModel.UIPhase",
-        "addr": 153961632
+        "addr": 163558528
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.copyToolGroups",
-        "addr": 153089920
+        "addr": 162439712
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.deriveSubagentTools",
-        "addr": 153555680
+        "addr": 163109568
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.formatTools",
-        "addr": 153226976
+        "addr": 162583360
       },
       {
         "name": "google3/third_party/jetski/cli/printmode/printmode.advertisedTools",
-        "addr": 154045504
+        "addr": 163683552
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.CollapsedSummaryToolGroup",
-        "addr": 150837280
+        "addr": 159508704
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.CollapsedToolGroup",
-        "addr": 150909984
+        "addr": 159589088
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.ExpandedSummaryToolGroup",
-        "addr": 150837760
+        "addr": 159509184
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.ExpandedToolGroup",
-        "addr": 150914144
+        "addr": 159593184
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.cleanGenericToolName",
-        "addr": 150963488
+        "addr": 159644256
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.fixToolElbowPadding",
-        "addr": 150821728
+        "addr": 159493280
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.genericToolInfo",
-        "addr": 150891200
+        "addr": 159570912
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.renderToolCallWithStatus",
-        "addr": 150945312
+        "addr": 159626560
       },
       {
         "name": "google3/third_party/jetski/cli/render/render.truncateToolSummary",
-        "addr": 150963936
+        "addr": 159644704
+      },
+      {
+        "name": "google3/third_party/jetski/cli/render/render.workflowToolDetail",
+        "addr": 159718208
       },
       {
         "name": "google3/third_party/jetski/cli/steps/steps.DeriveToolName",
-        "addr": 147437344
+        "addr": 156462208
       },
       {
         "name": "google3/third_party/jetski/cli/steps/steps.ExtractToolInfo",
-        "addr": 147439104
+        "addr": 156463936
       },
       {
         "name": "google3/third_party/jetski/cli/steps/steps.IsToolInvocationStep",
-        "addr": 147435712
+        "addr": 156460704
       },
       {
         "name": "google3/third_party/jetski/cli/steps/steps.IsToolStep",
-        "addr": 147435136
+        "addr": 156460128
       },
       {
         "name": "google3/third_party/jetski/cli/steps/steps.enumToolName",
-        "addr": 147438912
+        "addr": 156463744
       },
       {
         "name": "google3/third_party/jetski/cli/steps/steps.filterToolParameters",
-        "addr": 147446880
+        "addr": 156471552
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).HeadlessSoftDeniedTools",
-        "addr": 151673920
+        "addr": 160718976
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).HeadlessSoftDeniedTools.deferwrap1",
-        "addr": 151745984
+        "addr": 160817792
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).RespondToSubagentToolConfirmation",
-        "addr": 151617600
+        "addr": 160656128
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).RespondToToolConfirmation",
-        "addr": 151676928
+        "addr": 160722400
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).SetToolPermission",
-        "addr": 151316928
+        "addr": 160232896
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).ToolResponsesForTest",
+        "addr": 160646240
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).ToolResponsesForTest.func1",
+        "addr": 160801408
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).applyToolPermissionOverride",
-        "addr": 151261088
+        "addr": 160162432
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).commitPendingToolConfirmation",
-        "addr": 151672672
+        "addr": 160717760
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).handleToolConfirmation",
-        "addr": 151674272
+        "addr": 160719328
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).handleToolConfirmation.func1",
-        "addr": 151746240
+        "addr": 160818048
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).handleToolConfirmation.func2",
-        "addr": 151746144
+        "addr": 160817952
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).handleToolConfirmation.func3",
-        "addr": 151746048
+        "addr": 160817856
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).scanToolConfirmation",
-        "addr": 151443232
+        "addr": 160401216
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.ToolArgsFromPermission",
-        "addr": 151679424
+        "addr": 160724736
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.canUpgradeTrailingThoughtToToolGroup",
-        "addr": 151399040
+        "addr": 160350336
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.findLastToolGroupAbsIdx",
-        "addr": 151392736
+        "addr": 160339840
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.lastToolStepInGroup",
-        "addr": 151398304
+        "addr": 160346912
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.sharesToolStep",
+        "addr": 160350048
+      },
+      {
+        "name": "google3/third_party/jetski/cli/types/types.(*PendingToolConfirmation).IsAskPermission",
+        "addr": 156328032
       }
     ],
     "jetski_backend": [
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*AgentModel).PreferredID",
-        "addr": 148272864
+        "addr": 156743712
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*AuthStatus).EligibilityError",
-        "addr": 148078336
+        "addr": 156494592
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*CloudPermissionSettings).Loaded",
+        "addr": 156743776
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ContextWindow).MaxTokenLimit",
+        "addr": 156743424
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ContextWindow).PricingNote",
+        "addr": 156743488
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ContextWindow).QuotaMultiplier",
+        "addr": 156743616
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*OnboardingStatus).IsComplete",
-        "addr": 148078976
+        "addr": 156495936
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).AddWorkspaceDir",
-        "addr": 148117632
+        "addr": 156538720
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).BindInMemoryCLISettingsProvider",
-        "addr": 148096096
+        "addr": 156519264
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).Cancel",
-        "addr": 148149504
+        "addr": 156575136
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CancelOAuthProcess",
-        "addr": 148231520
+        "addr": 156691616
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CancelSteps",
-        "addr": 148149696
+        "addr": 156575328
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CancelSubagent",
-        "addr": 148149600
+        "addr": 156575232
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CliSettingsFilePath",
-        "addr": 148107904
+        "addr": 156528736
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).Close",
-        "addr": 148096192
+        "addr": 156519360
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CloudConversationsListed",
+        "addr": 156655360
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CloudProject",
+        "addr": 156654560
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CloudProject.deferwrap1",
+        "addr": 156718816
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CloudProjectsListed",
+        "addr": 156655456
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ContextWindow",
+        "addr": 156569920
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ContextWindow.deferwrap1",
+        "addr": 156711040
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CreateCloudProject",
+        "addr": 156679616
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).CustomModelsEnabled",
-        "addr": 148147936
+        "addr": 156571328
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).DefaultHooksPath",
-        "addr": 148114176
+        "addr": 156535040
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).DeleteConversation",
-        "addr": 148142688
+        "addr": 156565024
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).DeletePendingAgentMessage",
-        "addr": 148136928
+        "addr": 156558624
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).DisconnectCloudPlugin",
+        "addr": 156677472
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).EndBattleMode",
-        "addr": 148229792
+        "addr": 156688640
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).EnsureCloudProject",
+        "addr": 156656384
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).FeatureProvider",
-        "addr": 148142560
+        "addr": 156564544
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).FetchAdminControls",
-        "addr": 148115072
+        "addr": 156536128
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).FetchCloudPermissionSettings",
+        "addr": 156674432
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).FetchLicenses",
-        "addr": 148115232
+        "addr": 156536416
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).FinishToolSchema",
-        "addr": 148143520
+        "addr": 156566144
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).FinishToolSchema.deferwrap1",
-        "addr": 148245504
+        "addr": 156710144
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ForkConversation",
-        "addr": 148152928
+        "addr": 156578976
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetAgentCustomizations",
-        "addr": 148192640
+        "addr": 156615936
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetAgentsCreatePath",
-        "addr": 148193120
+        "addr": 156616672
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetAllowNonWorkspaceAccess",
-        "addr": 148144320
+        "addr": 156566912
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetAllowNonWorkspaceAccess.deferwrap1",
-        "addr": 148245696
+        "addr": 156710336
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetChangelog",
-        "addr": 148195264
+        "addr": 156619520
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetConversationDetail",
-        "addr": 148179072
-      },
-      {
-        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetConversationDetail.func1",
-        "addr": 148248992
+        "addr": 156601888
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetCustomModelInfoOverride",
-        "addr": 148147520
+        "addr": 156570464
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetCustomModelInfoOverride.deferwrap1",
-        "addr": 148246400
+        "addr": 156711168
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetG1Credits",
-        "addr": 148195296
+        "addr": 156619552
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetGlobalAgentsCreatePath",
-        "addr": 148193440
+        "addr": 156617056
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetGlobalSkillsCreatePath",
-        "addr": 148165344
+        "addr": 156588032
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetIncludeDefaultCustomizations",
-        "addr": 148144704
+        "addr": 156567296
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetIncludeDefaultCustomizations-fm",
-        "addr": 148273344
+        "addr": 156744512
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetIncludeDefaultCustomizations.deferwrap1",
-        "addr": 148245824
+        "addr": 156710464
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetInstalledPlugins",
-        "addr": 148192960
+        "addr": 156616448
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetModelConfig",
-        "addr": 148101408
-      },
-      {
-        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetModelConfig.func1",
-        "addr": 148242144
-      },
-      {
-        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetOnShellCommandFinished",
-        "addr": 148101376
+        "addr": 156524160
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetPluginMCPSpecs",
-        "addr": 148192832
+        "addr": 156616224
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetProjectID",
-        "addr": 148145760
+        "addr": 156568352
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetProjectID.deferwrap1",
-        "addr": 148246080
+        "addr": 156710720
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetSelectedModelOverride",
-        "addr": 148148448
+        "addr": 156571840
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetSelectedModelOverride.deferwrap1",
-        "addr": 148246528
+        "addr": 156711424
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetShellCommandTracker",
-        "addr": 148101344
+        "addr": 156524128
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetSkills",
-        "addr": 148164992
+        "addr": 156587072
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetSkillsCreatePath",
-        "addr": 148165088
+        "addr": 156587680
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetSlashCommands",
-        "addr": 148100544
+        "addr": 156522976
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetTelemetryEnabled",
-        "addr": 148146368
+        "addr": 156568960
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetTurnDiff",
+        "addr": 156573408
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetUseG1Credits",
-        "addr": 148198080
+        "addr": 156622240
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetUseG1Credits.deferwrap1",
-        "addr": 148249792
+        "addr": 156714592
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetWorkspaceDirs",
-        "addr": 148114272
+        "addr": 156535136
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).GetWorkspaceDirs.deferwrap1",
-        "addr": 148242848
+        "addr": 156706912
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ImportConversation",
-        "addr": 148188000
+        "addr": 156611104
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).IsAuthMethodSupported",
-        "addr": 148235232
+        "addr": 156696480
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).IsCloudSession",
+        "addr": 156654528
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).IsLocalConversation",
+        "addr": 156601984
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).KeybindingsFilePath",
-        "addr": 148111200
+        "addr": 156531936
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ListCascadeNuxes",
+        "addr": 156688672
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ListCloudPlugins",
+        "addr": 156676384
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ListCloudProjects",
+        "addr": 156678848
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ListCloudResourceProviders",
+        "addr": 156684576
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ListCloudResources",
+        "addr": 156685376
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ListConversations",
-        "addr": 148165568
+        "addr": 156588352
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ListConversations.func1",
-        "addr": 148246656
+        "addr": 156711552
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ListConversations.func1.1",
-        "addr": 148247552
+        "addr": 156712448
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).Logout",
-        "addr": 148231840
+        "addr": 156691936
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).MissingCloudProject",
+        "addr": 156669152
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).MoveConversationToGroup",
-        "addr": 148141792
+        "addr": 156563552
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).NumSteps",
+        "addr": 156572416
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).QuarantineCliSettings",
-        "addr": 148108000
+        "addr": 156528832
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).QuarantineCliSettings.deferwrap1",
-        "addr": 148242592
+        "addr": 156706656
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadAllHooks",
-        "addr": 148111296
+        "addr": 156532032
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadCliSettings",
-        "addr": 148106368
+        "addr": 156527264
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadCliSettings.deferwrap1",
-        "addr": 148242464
+        "addr": 156706528
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadConversationFile",
+        "addr": 156478304
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadKeybindings",
-        "addr": 148109568
+        "addr": 156530368
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadKeybindings.deferwrap1",
-        "addr": 148242656
+        "addr": 156706720
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadLastConversations",
-        "addr": 148210560
+        "addr": 156634688
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadLastConversations.deferwrap1",
-        "addr": 148251232
+        "addr": 156716000
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadNuxState",
+        "addr": 156689024
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadOnboardingStatus",
-        "addr": 148214176
+        "addr": 156638176
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ReadOnboardingStatus.deferwrap1",
-        "addr": 148251360
+        "addr": 156716128
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RecordFeedback",
-        "addr": 148150208
+        "addr": 156575936
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RefreshExperiments",
-        "addr": 148142272
+        "addr": 156564256
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RememberedWIFProvider",
-        "addr": 148235328
+        "addr": 156696576
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RemoteControlStatus",
-        "addr": 148206080
+        "addr": 156629920
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RemoveWorkspaceDir",
-        "addr": 148118336
+        "addr": 156539424
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RenameConversation",
-        "addr": 148141312
+        "addr": 156563296
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RespondToAskQuestion",
-        "addr": 148159104
+        "addr": 156584448
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RespondToToolConfirmation",
-        "addr": 148156096
+        "addr": 156581760
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RespondToToolConfirmationWithScope",
+        "addr": 156582016
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RetrieveUserQuotaSummary",
-        "addr": 148196096
+        "addr": 156620320
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).RevertToStep",
-        "addr": 148151968
+        "addr": 156577696
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SearchCode",
-        "addr": 148194080
+        "addr": 156617888
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SearchConversations",
-        "addr": 148070208
+        "addr": 156482784
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SearchConversations.deferwrap1",
-        "addr": 148239360
+        "addr": 156703520
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SearchFiles",
-        "addr": 148193792
+        "addr": 156617376
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SelectLicense",
-        "addr": 148116000
+        "addr": 156537184
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SelfAssignLicense",
-        "addr": 148117120
+        "addr": 156538240
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendSideQuestion",
-        "addr": 148198464
+        "addr": 156622624
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendSideQuestion.deferwrap1",
-        "addr": 148249920
+        "addr": 156714720
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendSideQuestion.deferwrap2",
-        "addr": 148249856
+        "addr": 156714656
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendSideQuestion.func1",
-        "addr": 148250944
+        "addr": 156715744
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendSideQuestion.func2",
-        "addr": 148250048
+        "addr": 156714848
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendSideQuestion.func2.deferwrap1",
-        "addr": 148250880
+        "addr": 156715680
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendSideQuestion.func3",
-        "addr": 148249984
+        "addr": 156714784
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage",
-        "addr": 148135488
+        "addr": 156556960
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage.func1",
-        "addr": 148245056
+        "addr": 156709504
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetAllowNonWorkspaceAccess",
-        "addr": 148144128
+        "addr": 156566720
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetAllowNonWorkspaceAccess.deferwrap1",
-        "addr": 148245632
+        "addr": 156710272
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetAutoExecutionPolicy",
-        "addr": 148144896
+        "addr": 156567488
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetAutoExecutionPolicy.deferwrap1",
-        "addr": 148245888
+        "addr": 156710528
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCloudArtifactReviewMode",
+        "addr": 156675456
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCloudPermissionGrants",
+        "addr": 156675616
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCloudPermissionPreset",
+        "addr": 156675296
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCloudProject",
+        "addr": 156655232
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCloudProjectWithUndo",
+        "addr": 156686560
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCloudProjectWithUndo.func1",
+        "addr": 156727168
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetContextWindow",
+        "addr": 156569696
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetContextWindow.deferwrap1",
+        "addr": 156710976
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetConversationPermissions",
-        "addr": 148143744
+        "addr": 156566368
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetConversationPermissions.deferwrap1",
-        "addr": 148245568
+        "addr": 156710208
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCustomModelInfoOverride",
-        "addr": 148147136
+        "addr": 156570112
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCustomModelInfoOverride.deferwrap1",
-        "addr": 148246336
+        "addr": 156711104
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCustomModels",
-        "addr": 148147712
+        "addr": 156571136
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetCustomModels.deferwrap1",
-        "addr": 148246464
+        "addr": 156711360
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetFinishToolSchema",
-        "addr": 148143264
+        "addr": 156565888
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetFinishToolSchema.deferwrap1",
-        "addr": 148245440
+        "addr": 156710080
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetIncludeDefaultCustomizations",
-        "addr": 148144512
+        "addr": 156567104
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetIncludeDefaultCustomizations.deferwrap1",
-        "addr": 148245760
+        "addr": 156710400
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetLastConversation",
-        "addr": 148212000
+        "addr": 156636064
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetLastConversation.deferwrap1",
-        "addr": 148251296
+        "addr": 156716064
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetOnRunStatusChange",
-        "addr": 148148640
+        "addr": 156572032
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetOnRunStatusChange.deferwrap1",
-        "addr": 148246592
+        "addr": 156711488
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetProjectID",
-        "addr": 148145344
+        "addr": 156567936
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetProjectID.deferwrap1",
-        "addr": 148246016
+        "addr": 156710656
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetRemoteControlSession",
-        "addr": 148205920
+        "addr": 156629792
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetSandboxOverrideForNextConfirmation",
-        "addr": 148146176
+        "addr": 156568768
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetSandboxOverrideForNextConfirmation.deferwrap1",
-        "addr": 148246208
+        "addr": 156710848
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetSelectedModelOverride",
-        "addr": 148146912
+        "addr": 156569504
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetSelectedModelOverride.deferwrap1",
-        "addr": 148246272
+        "addr": 156710912
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetStreamCreatedHook",
-        "addr": 148125504
+        "addr": 156547968
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetStreamCreatedHook.deferwrap1",
-        "addr": 148244640
+        "addr": 156709440
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetTelemetryEnabled",
-        "addr": 148146624
+        "addr": 156569216
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetTerminalSandboxSettings",
-        "addr": 148145984
+        "addr": 156568576
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetTerminalSandboxSettings.deferwrap1",
-        "addr": 148246144
+        "addr": 156710784
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetThinkingLevelOverride",
+        "addr": 156570656
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetThinkingLevelOverride.deferwrap1",
+        "addr": 156711232
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetToolPermissionMode",
-        "addr": 148145088
+        "addr": 156567680
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetToolPermissionMode.deferwrap1",
-        "addr": 148245952
+        "addr": 156710592
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetUseG1Credits",
-        "addr": 148197888
-      },
-      {
-        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SetUseG1Credits.deferwrap1",
-        "addr": 148249728
+        "addr": 156621952
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StartBattleMode",
-        "addr": 148229760
+        "addr": 156688608
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StartConversation",
-        "addr": 148121696
+        "addr": 156543424
       },
       {
-        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StartConversation.gowrap1",
-        "addr": 148242912
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StartConversation.func1",
+        "addr": 156706976
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StartGCPAuthProcess",
-        "addr": 148231328
+        "addr": 156691424
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StartOAuthProcess",
-        "addr": 148231168
+        "addr": 156691264
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StartSideQuestion",
-        "addr": 148206400
+        "addr": 156630240
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StartTranscription",
-        "addr": 148200672
+        "addr": 156624768
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StreamConversationUpdates",
-        "addr": 148124032
+        "addr": 156546240
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StreamConversationUpdates.func1",
-        "addr": 148244576
+        "addr": 156709376
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StreamConversationUpdates.func2",
-        "addr": 148244352
+        "addr": 156709120
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StreamConversationUpdates.func3",
-        "addr": 148242976
+        "addr": 156707296
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StreamConversationUpdates.func3.1",
-        "addr": 148244064
+        "addr": 156708800
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StreamConversationUpdates.func3.2",
+        "addr": 156708384
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StreamOAuthStatus",
-        "addr": 148230208
+        "addr": 156690304
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StreamOAuthStatus.func1",
-        "addr": 148253792
+        "addr": 156722688
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).StreamSearchCode",
-        "addr": 148194688
+        "addr": 156618752
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SubmitOAuthAuthorizationCode",
-        "addr": 148231744
+        "addr": 156691840
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SubscribeToSummaries",
+        "addr": 156699328
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SubscribeToSummaries.func1",
+        "addr": 156726432
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SubscribeToSummaries.func1.deferwrap1",
+        "addr": 156726752
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SubscribeToSummaries.func2",
+        "addr": 156726080
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ThinkingLevelOverride",
+        "addr": 156570880
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ThinkingLevelOverride.deferwrap1",
+        "addr": 156711296
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).TrySilentAuth",
-        "addr": 148234624
+        "addr": 156694720
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).UpdateCloudProject",
+        "addr": 156682112
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ValidateAndOnboardAccount",
-        "addr": 148234752
+        "addr": 156694848
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ValidateAndOnboardAccount-fm",
+        "addr": 156744192
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).ValidateAndOnboardAccount.func1",
-        "addr": 148256064
+        "addr": 156725376
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).VersionInfo",
-        "addr": 148100416
+        "addr": 156522848
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WaitForConversationFullyIdle",
-        "addr": 148106240
+        "addr": 156526848
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WarmUpAgentSync",
-        "addr": 148155776
+        "addr": 156581088
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WriteCliSettings",
-        "addr": 148107104
+        "addr": 156527968
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WriteCliSettings.deferwrap1",
-        "addr": 148242528
+        "addr": 156706592
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WriteHooksTo",
-        "addr": 148112960
+        "addr": 156533856
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WriteHooksTo.deferwrap1",
-        "addr": 148242784
+        "addr": 156706848
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WriteKeybindings",
-        "addr": 148110400
+        "addr": 156531168
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WriteKeybindings.deferwrap1",
-        "addr": 148242720
+        "addr": 156706784
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WriteNuxState",
+        "addr": 156689248
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WriteOnboardingStatus",
-        "addr": 148217312
+        "addr": 156641216
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).WriteOnboardingStatus.deferwrap1",
-        "addr": 148251424
+        "addr": 156716192
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).activeConversations",
+        "addr": 156592704
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).activeInMemorySummaries",
-        "addr": 148167008
+        "addr": 156589696
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).appendCustomModels",
-        "addr": 148148000
+        "addr": 156571392
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).appendCustomModels-fm",
+        "addr": 156744576
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).applyAuthResult",
-        "addr": 148232416
+        "addr": 156692480
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).authStatusFor",
-        "addr": 148229824
+        "addr": 156689920
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).authStatusFor.deferwrap1",
-        "addr": 148253728
+        "addr": 156722624
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).buildBtwCascadeConfig",
-        "addr": 148208544
+        "addr": 156632928
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).buildCascadeConfig",
-        "addr": 148129504
+        "addr": 156552064
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).buildCascadeConfigAndAgentSpec",
-        "addr": 148128352
+        "addr": 156551008
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).buildCascadeConfigInternal",
-        "addr": 148129632
+        "addr": 156552192
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).buildCustomAgentSpec",
-        "addr": 148128768
+        "addr": 156551392
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).cancelConversation",
-        "addr": 148148864
+        "addr": 156573856
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).cancelInvocation",
+        "addr": 156574464
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).clearConversationCache",
-        "addr": 148223200
+        "addr": 156646880
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).clearConversationCache.deferwrap1",
-        "addr": 148252800
+        "addr": 156717536
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).closeConversationSearchIndex",
-        "addr": 148068576
+        "addr": 156481056
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).closeConversationSearchIndex.deferwrap1",
-        "addr": 148239296
+        "addr": 156703456
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).cloudConversationDetail",
+        "addr": 156672288
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).cloudConversationSummary",
+        "addr": 156672704
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).cloudConversations",
+        "addr": 156670912
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).cloudProjectID",
+        "addr": 156655904
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).cloudProjectID.deferwrap1",
+        "addr": 156718880
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).cloudProjectIDNamed",
+        "addr": 156667936
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).conversationDirs",
-        "addr": 148235808
+        "addr": 156699936
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).conversationIDsOnDisk",
-        "addr": 148236288
+        "addr": 156700416
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).conversationIDsOnDisk-fm",
-        "addr": 148272928
+        "addr": 156744000
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).conversationMetadata",
+        "addr": 156572544
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).createCloudProject",
+        "addr": 156662944
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).createCloudProjectWith",
+        "addr": 156663200
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).deleteTrajectory",
+        "addr": 156574816
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fallbackConvImportDirs",
-        "addr": 148229344
+        "addr": 156688224
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fallbackGetConversationDetail",
-        "addr": 148182208
+        "addr": 156605344
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fallbackGetConversationDetail.func1",
-        "addr": 148249344
+        "addr": 156714208
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fetchPlanTierAndAntigravityUsage",
-        "addr": 148234240
+        "addr": 156694368
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fetchTrajectory",
+        "addr": 156572896
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fillSummaryCacheChunk",
-        "addr": 148218752
+        "addr": 156642624
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fillSummaryCacheChunk.deferwrap1",
-        "addr": 148252544
+        "addr": 156717280
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fillSummaryCacheChunk.deferwrap2",
-        "addr": 148252480
+        "addr": 156717216
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fillSummaryCacheInBackground",
-        "addr": 148218432
+        "addr": 156642304
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fillSummaryCacheInBackground.func1",
-        "addr": 148251488
+        "addr": 156716256
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).fillSummaryCacheInBackground.func1.deferwrap1",
-        "addr": 148252448
+        "addr": 156717184
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).findCloudProject",
+        "addr": 156667328
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).getActiveModelOrAlias",
-        "addr": 148101024
+        "addr": 156523776
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).getWorkspaceURIs",
-        "addr": 148140576
+        "addr": 156562400
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).globalCustomizationDirPaths",
+        "addr": 156542976
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).globalCustomizationDirs",
+        "addr": 156541408
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).handleAuthResult",
-        "addr": 148230656
+        "addr": 156690752
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).handleAuthResult-fm",
-        "addr": 148273024
+        "addr": 156744096
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).handleAuthResult.func1",
-        "addr": 148253984
+        "addr": 156722880
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).handleAuthResult.func1.1",
-        "addr": 148255744
+        "addr": 156725056
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).handleAuthResult.func1.2",
-        "addr": 148255552
-      },
-      {
-        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).handleCodeAcknowledgement",
-        "addr": 148163904
+        "addr": 156724864
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).hasCustomAgentPlanner",
-        "addr": 148134976
-      },
-      {
-        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).hasCustomAgentPlanner.func1",
-        "addr": 148244704
+        "addr": 156556640
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).initConversationSearchIndex",
-        "addr": 148068096
+        "addr": 156479296
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).initConversationSearchIndex.func1",
-        "addr": 148256608
+        "addr": 156727296
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).initConversationSearchIndex.func2",
+        "addr": 156703360
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).kindGateChecker",
+        "addr": 156564704
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).listCloudProjectIDs",
+        "addr": 156665216
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).listConversationsFromDir",
-        "addr": 148175168
+        "addr": 156598272
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).listConversationsFromDir.deferwrap1",
-        "addr": 148248928
+        "addr": 156713792
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).listConversationsFromStore",
-        "addr": 148236992
+        "addr": 156701056
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).loadConversationCache",
-        "addr": 148220768
+        "addr": 156644576
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).loadConversationCache.deferwrap1",
-        "addr": 148252672
+        "addr": 156717408
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).loadSummaryFromFile",
-        "addr": 148223520
+        "addr": 156647168
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).loadSummaryFromFile.func1",
-        "addr": 148252864
+        "addr": 156717600
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).localConversationDetail",
+        "addr": 156602080
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).localConversationDetail.func1",
+        "addr": 156713856
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).loginTokenSource",
-        "addr": 148201632
+        "addr": 156625728
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).loginTokenSource-fm",
-        "addr": 148273120
+        "addr": 156744288
       },
       {
-        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).newCustomizationManager",
-        "addr": 148119104
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).mergeAnnotations",
+        "addr": 156563840
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).newCustomizationManagerWithOptions",
+        "addr": 156540192
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).notifyConversationSearch",
-        "addr": 148068832
+        "addr": 156481280
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).notifyConversationSearchDelete",
-        "addr": 148069280
+        "addr": 156481824
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).nuxStatePath",
+        "addr": 156689664
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).parallelLoadSummaries",
-        "addr": 148227200
+        "addr": 156650784
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).parallelLoadSummaries.func1",
-        "addr": 148253056
+        "addr": 156717792
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).parallelLoadSummaries.func1.1",
-        "addr": 148253600
+        "addr": 156718304
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).parallelLoadSummaries.func1.deferwrap1",
-        "addr": 148253664
+        "addr": 156718368
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).parallelLoadSummaries.gowrap1",
-        "addr": 148252928
+        "addr": 156717664
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).populatePermissionConfig",
-        "addr": 148137120
+        "addr": 156559008
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).prepareCloudStart",
+        "addr": 156655552
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).projectNames",
+        "addr": 156479840
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).projectNames-fm",
+        "addr": 156744640
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).readCloudProject",
+        "addr": 156666624
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).readListedCloudProject",
+        "addr": 156669248
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).requestedCloudProject",
+        "addr": 156668832
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).resolveCloudProject",
+        "addr": 156657344
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).resolveIsInteractive",
-        "addr": 148128576
+        "addr": 156551232
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).resolveModelLabel",
-        "addr": 148140992
+        "addr": 156563008
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).respondToToolConfirmation",
+        "addr": 156582240
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).saveConversationCache",
-        "addr": 148221984
+        "addr": 156645728
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).saveConversationCache.deferwrap1",
-        "addr": 148252736
+        "addr": 156717472
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).scanConversations",
-        "addr": 148169696
+        "addr": 156592992
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).scanConversations.deferwrap1",
-        "addr": 148248864
+        "addr": 156713728
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).scanConversations.deferwrap2",
-        "addr": 148248800
+        "addr": 156713664
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).scanConversations.func1",
-        "addr": 148256512
+        "addr": 156727200
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).sendUserCascadeMessage",
+        "addr": 156558368
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startCloudProjects",
+        "addr": 156670144
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startCloudProjects.func1",
+        "addr": 156719520
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startCloudProjects.func1.1",
+        "addr": 156720064
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startCloudProjects.func1.deferwrap1",
+        "addr": 156720992
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startCloudSummaries",
+        "addr": 156670560
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startCloudSummaries.func1",
+        "addr": 156721056
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startCloudSummaries.func1.1",
+        "addr": 156721568
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startCloudSummaries.func1.deferwrap1",
+        "addr": 156721984
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startConversationSearchIndex",
-        "addr": 148067840
+        "addr": 156479008
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startConversationSearchIndex.func1",
-        "addr": 148238592
+        "addr": 156702688
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startSummaryStoreReconcile",
-        "addr": 148095744
+        "addr": 156518912
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startSummaryStoreReconcile.func1",
-        "addr": 148241952
+        "addr": 156706368
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startTranscription",
-        "addr": 148201952
+        "addr": 156626048
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).startTranscription-fm",
-        "addr": 148273216
+        "addr": 156744384
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).summaryStoreReadsEnabled",
-        "addr": 148236768
+        "addr": 156700896
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).syncSummariesToStore",
-        "addr": 148173728
+        "addr": 156596832
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).trajectoryID",
+        "addr": 156572256
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).updateCloudPermissionSettings",
+        "addr": 156676000
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).waitForCloudListing",
+        "addr": 156664320
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).waitForCloudListing.deferwrap1",
+        "addr": 156719392
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).waitForCloudProjectRouting",
+        "addr": 156687232
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).waitForCloudProjects",
+        "addr": 156664768
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).waitForCloudProjects.deferwrap1",
+        "addr": 156719456
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).waitForSummaryFill",
-        "addr": 148220416
+        "addr": 156644224
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).waitForSummaryFill.deferwrap1",
-        "addr": 148252608
+        "addr": 156717344
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).warmUpAgentProcess",
+        "addr": 156581408
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*ServerBackendConfig).chainedAuthOrDefault",
-        "addr": 148097376
+        "addr": 156519936
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*UnavailableModelError).Error",
+        "addr": 156503168
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*adHocCustomModelResolver).resolve",
-        "addr": 148081632
+        "addr": 156504352
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",
-        "addr": 148125728
+        "addr": 156548192
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).adoptProject",
+        "addr": 156656480
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).adoptProject.deferwrap1",
+        "addr": 156718944
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).allSummaries",
+        "addr": 156654112
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).allSummaries.deferwrap1",
+        "addr": 156718752
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).applySummaries",
+        "addr": 156652768
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).applySummaries.deferwrap1",
+        "addr": 156718432
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).defaultID",
+        "addr": 156658944
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).defaultID.deferwrap1",
+        "addr": 156719136
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).knownProject",
+        "addr": 156662656
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).knownProject.deferwrap1",
+        "addr": 156719328
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).markListed",
+        "addr": 156653280
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).markListed.func1",
+        "addr": 156718496
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).markProjectsListed",
+        "addr": 156653376
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).markProjectsListed.func1",
+        "addr": 156718560
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).markRequestedProjectMissing",
+        "addr": 156656960
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).markRequestedProjectMissing.deferwrap1",
+        "addr": 156719008
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).projectName",
+        "addr": 156671680
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).projectName.deferwrap1",
+        "addr": 156722048
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).rememberDefaultProject",
+        "addr": 156659168
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).rememberProjectName",
+        "addr": 156671968
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).rememberProjectName.deferwrap1",
+        "addr": 156722112
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).requestedProjectMissing",
+        "addr": 156657152
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).requestedProjectMissing.deferwrap1",
+        "addr": 156719072
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).setAccount",
+        "addr": 156659616
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).setAccount.deferwrap1",
+        "addr": 156719264
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).setAccount.deferwrap2",
+        "addr": 156719200
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).setProject",
+        "addr": 156653472
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).setProject.deferwrap1",
+        "addr": 156718624
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).setProjectWithUndo",
+        "addr": 156686688
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).setProjectWithUndo.deferwrap1",
+        "addr": 156722560
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).setProjectWithUndo.func1",
+        "addr": 156722176
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).setProjectWithUndo.func1.deferwrap1",
+        "addr": 156722496
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).summary",
+        "addr": 156653824
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*cloudSession).summary.deferwrap1",
+        "addr": 156718688
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*customModelsResolver).resolve",
-        "addr": 148081888
+        "addr": 156504608
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*deliveryTracker).Send",
+        "addr": 156699168
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*projectUpdatesSink).Send",
+        "addr": 156743808
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*retry).RetryOnSubstrings.func1",
-        "addr": 148245216
+        "addr": 156709856
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*retry).Run",
-        "addr": 148089120
+        "addr": 156511936
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.(*standardModelResolver).resolve",
-        "addr": 148079072
+        "addr": 156500672
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*summariesSink).Send",
+        "addr": 156743904
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*updateQueue).Send",
+        "addr": 156697216
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*updateQueue).close",
+        "addr": 156697696
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*updateQueue).run",
+        "addr": 156697888
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.(*updateQueue).run.deferwrap1",
+        "addr": 156725536
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.AgentModel.PreferredID",
-        "addr": 148079040
+        "addr": 156496000
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.ApplyPassThroughEffort",
-        "addr": 148077792
+        "addr": 156492512
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.CloudPermissionSettings.Loaded",
+        "addr": 156496032
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.ContextWindow.MaxTokenLimit",
+        "addr": 156477952
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.ContextWindow.PricingNote",
+        "addr": 156478176
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.ContextWindow.QuotaMultiplier",
+        "addr": 156478080
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.CurrentBaseEffort",
-        "addr": 148072096
+        "addr": 156484800
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.CurrentEffortSelection",
-        "addr": 148073696
+        "addr": 156486624
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.DefaultEffortForBase",
+        "addr": 156491360
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.EffortUnsupportedError",
-        "addr": 148077408
+        "addr": 156491648
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.EffortsForBase",
-        "addr": 148072480
+        "addr": 156485312
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.FindUnavailableModel",
+        "addr": 156503456
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.IneligibilityFromResult",
-        "addr": 148078752
+        "addr": 156495136
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.IsValidEffort",
-        "addr": 148070624
+        "addr": 156483200
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.LogModelRewrite",
-        "addr": 148081280
+        "addr": 156504000
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.ModelForBaseEffort",
-        "addr": 148073088
+        "addr": 156485920
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend",
-        "addr": 148089728
+        "addr": 156512640
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func1",
-        "addr": 148241824
+        "addr": 156706272
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func2",
-        "addr": 148241504
+        "addr": 156705952
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func2.deferwrap1",
-        "addr": 148241760
+        "addr": 156706208
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func3",
-        "addr": 148240992
+        "addr": 156705472
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func3.deferwrap1",
-        "addr": 148241440
+        "addr": 156705888
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func4",
-        "addr": 148240672
+        "addr": 156705152
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func4.deferwrap1",
-        "addr": 148240928
+        "addr": 156705408
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func5",
-        "addr": 148240416
+        "addr": 156704896
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func6",
-        "addr": 148240320
+        "addr": 156704800
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func7",
-        "addr": 148239424
+        "addr": 156703904
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func8",
-        "addr": 148256160
+        "addr": 156726816
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.NewServerBackend.func9",
-        "addr": 148256352
+        "addr": 156727008
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.ParsePresetContextWindow",
+        "addr": 156477696
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.ResolveCustomModelLabel",
-        "addr": 148082880
+        "addr": 156505632
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.ResolveEffort",
-        "addr": 148074528
+        "addr": 156487456
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.ResolveModel",
-        "addr": 148080352
+        "addr": 156502272
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.ResolvePassThroughEffort",
+        "addr": 156492704
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.UserFacingSlug",
-        "addr": 148088992
+        "addr": 156511840
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.applyDisableSafetyFilteringOverride",
-        "addr": 148134784
+        "addr": 156556448
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.applyIneligibilityURLs",
+        "addr": 156495584
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.applyModelAPIMaxRetriesOverride",
-        "addr": 148134112
+        "addr": 156555776
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.availableEfforts",
-        "addr": 148074048
+        "addr": 156486976
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.baseEffortForLabel",
+        "addr": 156484896
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.buildCustomAgentModel",
-        "addr": 148087232
+        "addr": 156510080
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.buildCustomModelDescription",
-        "addr": 148087776
+        "addr": 156510656
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.buildScopedToolInteraction",
+        "addr": 156586816
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.buildToolInteraction",
-        "addr": 148160480
+        "addr": 156585920
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.buildVersion",
-        "addr": 148089504
+        "addr": 156512416
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.cloudPluginSummary",
+        "addr": 156678112
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.cloudProjectInfo",
+        "addr": 156687456
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.constructCustomModelInfo",
-        "addr": 148085408
+        "addr": 156508128
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.constructFromCustomModelConfig",
-        "addr": 148084000
+        "addr": 156506720
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.conversationIDFromFileName",
-        "addr": 148235648
+        "addr": 156699776
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.currentGatewayThinkingModel",
+        "addr": 156493728
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.describeTranscriptionErr",
-        "addr": 148204928
+        "addr": 156628832
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.effortIndex",
-        "addr": 148070816
+        "addr": 156483392
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.effortToThinkingLevel",
-        "addr": 148077600
+        "addr": 156491840
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.extractAPIProvider",
-        "addr": 148083552
+        "addr": 156506304
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.extractFeaturesFromProto",
-        "addr": 148088032
+        "addr": 156510912
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.findModelBySlug",
-        "addr": 148071456
+        "addr": 156484096
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.init",
-        "addr": 148067168
+        "addr": 156476832
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.isHiddenRecord",
+        "addr": 156702496
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.isInsufficientScopeErr",
-        "addr": 148204768
+        "addr": 156628672
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.isInternalTrajectory",
-        "addr": 148174944
+        "addr": 156598016
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.isTransientEligibilityErr",
+        "addr": 156696064
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.map.init.0",
-        "addr": 148067264
+        "addr": 156477120
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.mapQuotaSummary",
-        "addr": 148196352
+        "addr": 156620576
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.matchModel",
+        "addr": 156499424
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.modelConfigFromData",
+        "addr": 156496288
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.newRetry.func1",
-        "addr": 148256480
+        "addr": 156727136
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.newUpdateQueue",
+        "addr": 156696864
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.newUpdateQueue.gowrap1",
+        "addr": 156725472
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.parseModelSlug",
-        "addr": 148088576
+        "addr": 156511456
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.passThroughThinkingLevel",
+        "addr": 156492000
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.projectUpdatesSink.Send",
+        "addr": 156670496
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.readDefaultCloudProjects",
+        "addr": 156660384
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.recordSummaryStoreEvent",
-        "addr": 148174560
+        "addr": 156597632
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.rememberDefaultCloudProject",
+        "addr": 156661248
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.resolveCustomAgentModels",
-        "addr": 148085632
+        "addr": 156508352
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.searchSummaries",
+        "addr": 156481536
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.slugFor",
-        "addr": 148088416
+        "addr": 156511296
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.sortByLabelOrder.func1",
+        "addr": 156703584
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.sortConversationSummaries.func1",
-        "addr": 148248512
+        "addr": 156713376
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.startTranscriptionWithTimeout",
-        "addr": 148200928
+        "addr": 156625024
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.startTranscriptionWithTimeout.func1",
-        "addr": 148251104
+        "addr": 156715904
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.startTranscriptionWithTimeout.func2",
-        "addr": 148251008
+        "addr": 156715808
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.subscribeWithRetry",
+        "addr": 156698368
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.subscribeWithRetry.func1",
+        "addr": 156725824
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.subscribeWithRetry.func2",
+        "addr": 156725600
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.summariesSink.Send",
+        "addr": 156699264
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.summaryToTrajectorySummary",
-        "addr": 148069600
+        "addr": 156482112
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.trajectoryLastStepTime",
-        "addr": 148198272
+        "addr": 156622432
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.transcriptionQuotaInfo",
-        "addr": 148205440
+        "addr": 156629312
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.unsupported",
+        "addr": 156496064
+      },
+      {
+        "name": "google3/third_party/jetski/cli/backend/backend.validateEligibilityWithRetry",
+        "addr": 156695328
       },
       {
         "name": "google3/third_party/jetski/cli/backend/backend.wrapTranscriptionErrs",
-        "addr": 148203680
+        "addr": 156627648
       },
       {
-        "name": "slices.DeleteFunc[go.shape.[]google3/third_party/jetski/cli/backend/backend.ConversationSummary,go.shape.struct { ID string; Title string; Preview string; NumSteps int; Loaded bool; UpdatedAt time.Time; WorkspaceURIs []string; AppDataDir string; ProjectID string; AgentName string; GroupID string; Internal bool }]",
-        "addr": 153814816
+        "name": "slices.DeleteFunc[go.shape.[]google3/third_party/jetski/cli/backend/backend.ConversationSummary,go.shape.struct { ID string; Title string; Preview string; NumSteps int; Loaded bool; UpdatedAt time.Time; WorkspaceURIs []string; AppDataDir string; ProjectID string; AgentName string; GroupID string; Internal bool; Cloud bool; CloudProject google3/third_party/jetski/cli/backend/backend.CloudProject }]",
+        "addr": 163437696
       },
       {
         "name": "slices.breakPatternsCmpFunc[go.shape.struct { google3/third_party/jetski/cli/backend/backend.id string; google3/third_party/jetski/cli/backend/backend.path google3/third_party/jetski/fs/fs.Path; google3/third_party/jetski/cli/backend/backend.appDataDir string; google3/third_party/jetski/cli/backend/backend.lastModifiedTime time.Time }]",
-        "addr": 148269952
+        "addr": 156740576
       },
       {
         "name": "slices.choosePivotCmpFunc[go.shape.struct { google3/third_party/jetski/cli/backend/backend.id string; google3/third_party/jetski/cli/backend/backend.path google3/third_party/jetski/fs/fs.Path; google3/third_party/jetski/cli/backend/backend.appDataDir string; google3/third_party/jetski/cli/backend/backend.lastModifiedTime time.Time }]",
-        "addr": 148267936
+        "addr": 156738624
       },
       {
         "name": "slices.heapSortCmpFunc[go.shape.struct { google3/third_party/jetski/cli/backend/backend.id string; google3/third_party/jetski/cli/backend/backend.path google3/third_party/jetski/fs/fs.Path; google3/third_party/jetski/cli/backend/backend.appDataDir string; google3/third_party/jetski/cli/backend/backend.lastModifiedTime time.Time }]",
-        "addr": 148270656
+        "addr": 156741248
       },
       {
         "name": "slices.medianCmpFunc[go.shape.struct { google3/third_party/jetski/cli/backend/backend.id string; google3/third_party/jetski/cli/backend/backend.path google3/third_party/jetski/fs/fs.Path; google3/third_party/jetski/cli/backend/backend.appDataDir string; google3/third_party/jetski/cli/backend/backend.lastModifiedTime time.Time }]",
-        "addr": 148268576
+        "addr": 156739232
       },
       {
         "name": "slices.partialInsertionSortCmpFunc[go.shape.struct { google3/third_party/jetski/cli/backend/backend.id string; google3/third_party/jetski/cli/backend/backend.path google3/third_party/jetski/fs/fs.Path; google3/third_party/jetski/cli/backend/backend.appDataDir string; google3/third_party/jetski/cli/backend/backend.lastModifiedTime time.Time }]",
-        "addr": 148265280
+        "addr": 156736064
       },
       {
         "name": "slices.partitionCmpFunc[go.shape.struct { google3/third_party/jetski/cli/backend/backend.id string; google3/third_party/jetski/cli/backend/backend.path google3/third_party/jetski/fs/fs.Path; google3/third_party/jetski/cli/backend/backend.appDataDir string; google3/third_party/jetski/cli/backend/backend.lastModifiedTime time.Time }]",
-        "addr": 148260032
+        "addr": 156730848
       },
       {
         "name": "slices.partitionEqualCmpFunc[go.shape.struct { google3/third_party/jetski/cli/backend/backend.id string; google3/third_party/jetski/cli/backend/backend.path google3/third_party/jetski/fs/fs.Path; google3/third_party/jetski/cli/backend/backend.appDataDir string; google3/third_party/jetski/cli/backend/backend.lastModifiedTime time.Time }]",
-        "addr": 148263552
+        "addr": 156734336
       },
       {
         "name": "slices.pdqsortCmpFunc[go.shape.struct { google3/third_party/jetski/cli/backend/backend.id string; google3/third_party/jetski/cli/backend/backend.path google3/third_party/jetski/fs/fs.Path; google3/third_party/jetski/cli/backend/backend.appDataDir string; google3/third_party/jetski/cli/backend/backend.lastModifiedTime time.Time }]",
-        "addr": 148257152
+        "addr": 156728032
+      },
+      {
+        "name": "slices.rotateCmpFunc[go.shape.struct { ID string; Title string; Preview string; NumSteps int; Loaded bool; UpdatedAt time.Time; WorkspaceURIs []string; AppDataDir string; ProjectID string; AgentName string; GroupID string; Internal bool; Cloud bool; CloudProject google3/third_party/jetski/cli/backend/backend.CloudProject }]",
+        "addr": 163444448
       },
       {
         "name": "slices.siftDownCmpFunc[go.shape.struct { google3/third_party/jetski/cli/backend/backend.id string; google3/third_party/jetski/cli/backend/backend.path google3/third_party/jetski/fs/fs.Path; google3/third_party/jetski/cli/backend/backend.appDataDir string; google3/third_party/jetski/cli/backend/backend.lastModifiedTime time.Time }]",
-        "addr": 148271456
+        "addr": 156742048
+      },
+      {
+        "name": "slices.stableCmpFunc[go.shape.struct { ID string; Title string; Preview string; NumSteps int; Loaded bool; UpdatedAt time.Time; WorkspaceURIs []string; AppDataDir string; ProjectID string; AgentName string; GroupID string; Internal bool; Cloud bool; CloudProject google3/third_party/jetski/cli/backend/backend.CloudProject }]",
+        "addr": 163438752
+      },
+      {
+        "name": "slices.symMergeCmpFunc[go.shape.struct { ID string; Title string; Preview string; NumSteps int; Loaded bool; UpdatedAt time.Time; WorkspaceURIs []string; AppDataDir string; ProjectID string; AgentName string; GroupID string; Internal bool; Cloud bool; CloudProject google3/third_party/jetski/cli/backend/backend.CloudProject }]",
+        "addr": 163441344
       }
     ],
     "jetski_prompt": [
       {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*ACPServer).handleSessionPrompt",
+        "addr": 156967904
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*ACPServer).handleSessionPrompt.func1",
+        "addr": 157030240
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*ACPServer).handleSessionPrompt.func2",
+        "addr": 157029888
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.(*ACPServer).handleSessionPrompt.func2.deferwrap1",
+        "addr": 157030176
+      },
+      {
+        "name": "google3/third_party/jetski/cli/acp/acp.extractAntigravitySystemPrompt",
+        "addr": 156923008
+      },
+      {
         "name": "google3/third_party/jetski/cli/commands/commands.runPromptOnModel",
-        "addr": 151980224
+        "addr": 161092064
       },
       {
         "name": "google3/third_party/jetski/cli/commands/commands.splitModelAndPrompt",
-        "addr": 151978784
-      },
-      {
-        "name": "google3/third_party/jetski/cli/editing/editing.(*EditArea).SetPromptFunc",
-        "addr": 151968704
+        "addr": 161090528
       },
       {
         "name": "google3/third_party/jetski/cli/editing/editing.FastPromptEditorEnabled",
-        "addr": 151910080
+        "addr": 161058048
       },
       {
-        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).ActionFromMsg",
-        "addr": 153865888
+        "name": "google3/third_party/jetski/cli/model/model.(*ConversationModel).jumpToPrompt",
+        "addr": 163109056
       },
       {
-        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).HasArtifacts",
-        "addr": 153866080
+        "name": "google3/third_party/jetski/cli/model/model.(*ConversationModel).stickyPromptAt",
+        "addr": 163108800
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*ConversationModel).stickyPromptEnabled",
+        "addr": 163108288
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*ConversationModel).stickyPromptHeader",
+        "addr": 163108128
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*ConversationModel).stickyPromptItem",
+        "addr": 163108416
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*DiffModel).openSearchPrompt",
+        "addr": 162295520
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*DiffModel).searchPromptRow",
+        "addr": 162291456
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*DiffModel).updateSearchPrompt",
+        "addr": 162296032
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).Init",
-        "addr": 153866144
+        "addr": 163482112
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).IsInterrupted",
-        "addr": 153866176
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).Keybindings",
-        "addr": 153866336
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).Layout",
-        "addr": 153866688
+        "addr": 163482144
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON",
-        "addr": 153867008
+        "addr": 163482624
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).ResetModePlaceholder",
-        "addr": 153408256
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).SetLayout",
-        "addr": 153867424
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).Store",
-        "addr": 153867680
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).UIPhase",
-        "addr": 153867744
+        "addr": 162936832
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).Update",
-        "addr": 153867776
+        "addr": 163483104
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).View",
-        "addr": 153868064
+        "addr": 163483392
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).acceptArgSuggestion",
-        "addr": 152443232
+        "addr": 161592096
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).createCharPlaceholder",
-        "addr": 153407776
+        "addr": 162936352
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).ensureCursorVisible",
-        "addr": 153380224
+        "addr": 162906816
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).findAtMentionStart",
+        "addr": 162026400
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).handleSuggestionSelection",
-        "addr": 153416640
+        "addr": 162945760
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).interruptedLine",
+        "addr": 162919424
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).matchSubagentSuggestions",
-        "addr": 153587296
+        "addr": 163146560
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).navigateHistory",
-        "addr": 153408384
+        "addr": 162936960
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).navigateHistory.func1",
-        "addr": 153764576
+        "addr": 163358560
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).parseAtQuery",
-        "addr": 153418432
+        "addr": 162948256
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).pastePlaceholderRanges",
-        "addr": 153379168
+        "addr": 162905792
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).replaceQueryAndSetCursor",
-        "addr": 153422816
+        "addr": 162952416
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).resetVimMode",
-        "addr": 153702336
+        "addr": 163266208
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).resolveSubagentMention",
-        "addr": 153588672
+        "addr": 163148000
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).runAtSearch",
-        "addr": 153420192
+        "addr": 162950016
       },
       {
-        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).runAtSearch.func1",
-        "addr": 153764864
+        "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).runAtSearch.func2",
+        "addr": 163358848
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).truncateByLineLength",
-        "addr": 153407552
+        "addr": 162936128
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).truncateText",
-        "addr": 153406880
+        "addr": 162935456
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).updateArgSuggestions",
-        "addr": 152442144
+        "addr": 161591040
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).updateAtSuggestions",
-        "addr": 153419296
+        "addr": 162949088
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).updateAtSuggestions.func1",
-        "addr": 153764800
+        "addr": 163358784
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*PromptModel).updateSuggestions",
-        "addr": 153381280
-      },
-      {
-        "name": "google3/third_party/jetski/cli/model/model.(*RootModel).handleInteractivePrompt-fm",
-        "addr": 153980320
+        "addr": 162908704
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.(*RootModel).handleInteractivePrompt.func1",
-        "addr": 153792192
+        "addr": 163363328
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.(*RootModel).isPromptNonEmpty",
+        "addr": 162993408
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.CloudPluginsModel.renderDisconnectPrompt",
+        "addr": 161884800
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.NewPromptModel",
-        "addr": 153340096
+        "addr": 162857824
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.ProjectsModel.exitPrompt",
+        "addr": 162836320
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.ProjectsModel.switchPrompt",
+        "addr": 162856352
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.ActionFromMsg",
-        "addr": 153865728
+        "addr": 163481888
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.HasArtifacts",
-        "addr": 153866016
+        "addr": 163482048
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Init",
-        "addr": 153343616
+        "addr": 162866304
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.IsInterrupted",
-        "addr": 153390720
+        "addr": 162919296
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Keybindings",
-        "addr": 153866304
+        "addr": 163482272
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Layout",
-        "addr": 153866368
+        "addr": 163482304
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.MarshalJSON",
-        "addr": 153339712
+        "addr": 162857440
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.SetLayout",
-        "addr": 153867136
+        "addr": 163482752
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Store",
-        "addr": 153867648
+        "addr": 163483040
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.UIPhase",
-        "addr": 153867712
+        "addr": 163483072
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update",
-        "addr": 153345248
+        "addr": 162867904
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func1",
-        "addr": 153762080
+        "addr": 163355968
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func1.1",
-        "addr": 153763072
+        "addr": 163356928
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func10",
-        "addr": 153760384
+        "addr": 163353248
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func11",
-        "addr": 153760032
+        "addr": 163352896
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func2",
-        "addr": 153761184
+        "addr": 163355104
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func3",
-        "addr": 153760928
+        "addr": 163354848
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func4",
-        "addr": 153760864
+        "addr": 163353728
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func5",
-        "addr": 153760800
+        "addr": 163353664
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func6",
-        "addr": 153760640
+        "addr": 163353504
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func7",
-        "addr": 153760512
+        "addr": 163353376
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func8",
-        "addr": 153791040
+        "addr": 163391328
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.Update.func9",
-        "addr": 153760448
+        "addr": 163353312
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.View",
-        "addr": 153390880
+        "addr": 162919712
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.absorbUnbracketedPasteNewline",
-        "addr": 153259264
+        "addr": 162628320
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.argGhostCompletion",
-        "addr": 153404256
+        "addr": 162932896
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.argHint",
-        "addr": 153403648
+        "addr": 162932288
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.canRecallQueued",
+        "addr": 162918496
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.cancelSearchMode",
-        "addr": 153344960
+        "addr": 162867616
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.cancelSearchMode.func1",
-        "addr": 153759968
+        "addr": 163352832
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.expandSearchToFullResults",
-        "addr": 153343648
+        "addr": 162866336
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.expandSearchToFullResults.func1",
-        "addr": 153759904
+        "addr": 163352768
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.expandSearchToFullResults.func2",
-        "addr": 153759744
+        "addr": 163352608
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.getWrappedLines",
-        "addr": 153342944
+        "addr": 162860576
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.ghostHint",
-        "addr": 153404928
+        "addr": 162933568
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleEditPending",
-        "addr": 153390016
+        "addr": 162918592
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleEscInterrupt",
-        "addr": 153390336
+        "addr": 162918912
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleEscInterrupt.func1",
-        "addr": 153764512
+        "addr": 163358496
       },
       {
-        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleInput",
-        "addr": 153382240
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleImplicitPasteMedia",
+        "addr": 162916288
       },
       {
-        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleInput.func1",
-        "addr": 153764256
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleImplicitPasteMedia.func1",
+        "addr": 163390816
       },
       {
-        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleInput.func2",
-        "addr": 153763808
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleInputWithOptions",
+        "addr": 162909600
       },
       {
-        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleInput.func3",
-        "addr": 153763136
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleInputWithOptions.func1",
+        "addr": 163358176
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleInputWithOptions.func2",
+        "addr": 163357728
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleInputWithOptions.func3",
+        "addr": 163356992
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleOpenEditor",
-        "addr": 153388448
+        "addr": 162916512
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleOpenEditor.func1",
-        "addr": 153764320
+        "addr": 163358240
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.handlePasteMedia",
-        "addr": 153388256
+        "addr": 162916064
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.handlePasteMedia.func1",
-        "addr": 153790944
+        "addr": 163391232
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleSendPendingNow",
+        "addr": 162918048
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleSendPendingNow.func1",
+        "addr": 163358432
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.handleTabCompletion",
-        "addr": 152657408
+        "addr": 161812736
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.isMultiline",
-        "addr": 153378944
+        "addr": 162905600
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.parseArgCompletion",
-        "addr": 152441184
+        "addr": 161590080
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.promptChevron",
+        "addr": 162907808
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.promptCursor",
-        "addr": 153405696
+        "addr": 162934336
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.PromptModel.promptLineWidth",
-        "addr": 153380960
+        "addr": 162907584
       },
       {
-        "name": "google3/third_party/jetski/cli/model/model.RootModel.isPromptNonEmpty",
-        "addr": 153461152
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.queuedSendNowHint",
+        "addr": 162918272
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.PromptModel.themedRules",
+        "addr": 162968448
+      },
+      {
+        "name": "google3/third_party/jetski/cli/model/model.renderPluginConfirmPrompt",
+        "addr": 162753312
       },
       {
         "name": "google3/third_party/jetski/cli/model/model.renderPromptLines",
-        "addr": 153556416
+        "addr": 163110432
       },
       {
-        "name": "google3/third_party/jetski/cli/printmode/printmode.(*streamInputUserMessage).promptText",
-        "addr": 154054336
+        "name": "google3/third_party/jetski/cli/printmode/printmode.(*StreamInputUserMessage).PromptText",
+        "addr": 163692992
+      },
+      {
+        "name": "google3/third_party/jetski/cli/render/render.StickyPrompt",
+        "addr": 159645280
+      },
+      {
+        "name": "google3/third_party/jetski/cli/render/render.UserPromptText",
+        "addr": 159645152
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).IsProactivePromptActive",
-        "addr": 151559872
+        "addr": 160585056
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).IsProactivePromptActive.deferwrap1",
-        "addr": 151728576
+        "addr": 160798304
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).ProactivePromptMetadata",
-        "addr": 151560160
+        "addr": 160585344
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).ProactivePromptMetadata.deferwrap1",
-        "addr": 151728640
+        "addr": 160798368
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).ResetProactivePromptState",
-        "addr": 151560960
+        "addr": 160586144
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).SetProactivePromptActive",
-        "addr": 151559136
+        "addr": 160584320
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).SetPromptHasInput",
-        "addr": 151479072
+        "addr": 160445184
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Manager).enterAutoModeFromPrompt",
+        "addr": 160187648
       },
       {
         "name": "google3/third_party/jetski/cli/store/store.(*Manager).resetProactivePromptStateUnlocked",
-        "addr": 151561088
+        "addr": 160586272
+      },
+      {
+        "name": "google3/third_party/jetski/cli/store/store.(*Store).autoModeClearsPrompt",
+        "addr": 160186656
       }
     ],
     "tls_conn": [
       {
         "name": "crypto/tls.(*Conn).Close",
-        "addr": 111587136
+        "addr": 114634976
       },
       {
         "name": "crypto/tls.(*Conn).CloseWrite",
-        "addr": 111587488
+        "addr": 114635328
       },
       {
         "name": "crypto/tls.(*Conn).ConnectionState",
-        "addr": 111590208
+        "addr": 114637984
       },
       {
         "name": "crypto/tls.(*Conn).ConnectionState.deferwrap1",
-        "addr": 111817184
+        "addr": 114856480
       },
       {
         "name": "crypto/tls.(*Conn).Handshake",
-        "addr": 111588000
+        "addr": 114635808
       },
       {
         "name": "crypto/tls.(*Conn).HandshakeContext",
-        "addr": 111588064
+        "addr": 114635872
       },
       {
         "name": "crypto/tls.(*Conn).LocalAddr",
-        "addr": 111551296
+        "addr": 114599360
       },
       {
         "name": "crypto/tls.(*Conn).NetConn",
-        "addr": 111551712
+        "addr": 114599776
       },
       {
         "name": "crypto/tls.(*Conn).OCSPResponse",
-        "addr": 111591424
+        "addr": 114639008
       },
       {
         "name": "crypto/tls.(*Conn).OCSPResponse.deferwrap1",
-        "addr": 111817248
+        "addr": 114856544
       },
       {
         "name": "crypto/tls.(*Conn).Read",
-        "addr": 111586208
+        "addr": 114634080
       },
       {
         "name": "crypto/tls.(*Conn).Read.deferwrap1",
-        "addr": 111816736
+        "addr": 114856032
       },
       {
         "name": "crypto/tls.(*Conn).RemoteAddr",
-        "addr": 111551360
+        "addr": 114599424
       },
       {
         "name": "crypto/tls.(*Conn).SetDeadline",
-        "addr": 111551424
+        "addr": 114599488
       },
       {
         "name": "crypto/tls.(*Conn).SetReadDeadline",
-        "addr": 111551520
+        "addr": 114599584
       },
       {
         "name": "crypto/tls.(*Conn).SetWriteDeadline",
-        "addr": 111551616
+        "addr": 114599680
       },
       {
         "name": "crypto/tls.(*Conn).VerifyHostname",
-        "addr": 111591680
+        "addr": 114639264
       },
       {
         "name": "crypto/tls.(*Conn).VerifyHostname.deferwrap1",
-        "addr": 111817312
+        "addr": 114856608
       },
       {
         "name": "crypto/tls.(*Conn).Write",
-        "addr": 111580928
+        "addr": 114628992
       },
       {
         "name": "crypto/tls.(*Conn).Write.deferwrap1",
-        "addr": 111816576
+        "addr": 114855872
       },
       {
         "name": "crypto/tls.(*Conn).Write.deferwrap2",
-        "addr": 111816512
+        "addr": 114855808
       },
       {
         "name": "crypto/tls.(*Conn).clientHandshake",
-        "addr": 111615872
+        "addr": 114662720
       },
       {
         "name": "crypto/tls.(*Conn).clientHandshake-fm",
-        "addr": 111885312
+        "addr": 114923488
       },
       {
         "name": "crypto/tls.(*Conn).clientHandshake.func1",
-        "addr": 111824800
+        "addr": 114864096
       },
       {
         "name": "crypto/tls.(*Conn).clientSessionCacheKey",
-        "addr": 111640800
+        "addr": 114686880
       },
       {
         "name": "crypto/tls.(*Conn).closeNotify",
-        "addr": 111587584
+        "addr": 114635392
       },
       {
         "name": "crypto/tls.(*Conn).closeNotify.deferwrap1",
-        "addr": 111816800
+        "addr": 114856096
       },
       {
         "name": "crypto/tls.(*Conn).connectionStateLocked",
-        "addr": 111590656
+        "addr": 114638432
       },
       {
         "name": "crypto/tls.(*Conn).flush",
-        "addr": 111574560
+        "addr": 114622848
       },
       {
         "name": "crypto/tls.(*Conn).getClientCertificate",
-        "addr": 111640320
+        "addr": 114686432
       },
       {
         "name": "crypto/tls.(*Conn).handleKeyUpdate",
-        "addr": 111584416
+        "addr": 114632320
       },
       {
         "name": "crypto/tls.(*Conn).handleKeyUpdate.deferwrap1",
-        "addr": 111816672
+        "addr": 114855968
       },
       {
         "name": "crypto/tls.(*Conn).handleNewSessionTicket",
-        "addr": 111661408
+        "addr": 114706560
       },
       {
         "name": "crypto/tls.(*Conn).handlePostHandshakeMessage",
-        "addr": 111583712
+        "addr": 114631648
       },
       {
         "name": "crypto/tls.(*Conn).handleRenegotiation",
-        "addr": 111582976
+        "addr": 114630944
       },
       {
         "name": "crypto/tls.(*Conn).handleRenegotiation.deferwrap1",
-        "addr": 111816608
+        "addr": 114855904
       },
       {
         "name": "crypto/tls.(*Conn).handshakeContext",
-        "addr": 111588160
+        "addr": 114635968
       },
       {
         "name": "crypto/tls.(*Conn).handshakeContext.deferwrap1",
-        "addr": 111816928
+        "addr": 114856224
       },
       {
         "name": "crypto/tls.(*Conn).handshakeContext.deferwrap2",
-        "addr": 111816864
+        "addr": 114856160
       },
       {
         "name": "crypto/tls.(*Conn).handshakeContext.func1",
-        "addr": 111817120
+        "addr": 114856416
       },
       {
         "name": "crypto/tls.(*Conn).handshakeContext.func2",
-        "addr": 111816992
+        "addr": 114856288
       },
       {
         "name": "crypto/tls.(*Conn).loadSession",
-        "addr": 111619264
+        "addr": 114665920
       },
       {
         "name": "crypto/tls.(*Conn).makeClientHello",
-        "addr": 111611488
+        "addr": 114658432
       },
       {
         "name": "crypto/tls.(*Conn).makeClientHello.func1",
-        "addr": 111875424
+        "addr": 114914144
       },
       {
         "name": "crypto/tls.(*Conn).maxPayloadSizeForWrite",
-        "addr": 111573664
+        "addr": 114621984
       },
       {
         "name": "crypto/tls.(*Conn).pickTLSVersion",
-        "addr": 111622560
+        "addr": 114669088
       },
       {
         "name": "crypto/tls.(*Conn).processCertsFromClient",
-        "addr": 111741056
+        "addr": 114782880
       },
       {
         "name": "crypto/tls.(*Conn).processECHClientHello",
-        "addr": 111608576
+        "addr": 114655552
       },
       {
         "name": "crypto/tls.(*Conn).quicGetTransportParameters",
-        "addr": 111795424
+        "addr": 114835136
       },
       {
         "name": "crypto/tls.(*Conn).quicReadHandshakeBytes",
-        "addr": 111794400
+        "addr": 114834144
       },
       {
         "name": "crypto/tls.(*Conn).quicResumeSession",
-        "addr": 111795008
+        "addr": 114834752
       },
       {
         "name": "crypto/tls.(*Conn).quicSetReadSecret",
-        "addr": 111794528
+        "addr": 114834272
       },
       {
         "name": "crypto/tls.(*Conn).quicWaitForSignal",
-        "addr": 111795776
+        "addr": 114835488
       },
       {
         "name": "crypto/tls.(*Conn).quicWaitForSignal.deferwrap1",
-        "addr": 111870464
+        "addr": 114909280
       },
       {
         "name": "crypto/tls.(*Conn).readClientHello",
-        "addr": 111722944
+        "addr": 114765344
       },
       {
         "name": "crypto/tls.(*Conn).readFromUntil",
-        "addr": 111571936
+        "addr": 114619872
       },
       {
         "name": "crypto/tls.(*Conn).readHandshake",
-        "addr": 111578048
+        "addr": 114626208
       },
       {
         "name": "crypto/tls.(*Conn).readHandshakeBytes",
-        "addr": 111577888
+        "addr": 114626048
       },
       {
         "name": "crypto/tls.(*Conn).readRecordOrCCS",
-        "addr": 111558976
+        "addr": 114606784
+      },
+      {
+        "name": "crypto/tls.(*Conn).releaseHand",
+        "addr": 114619712
       },
       {
         "name": "crypto/tls.(*Conn).retryReadRecord",
-        "addr": 111571488
+        "addr": 114619264
       },
       {
         "name": "crypto/tls.(*Conn).sendAlert",
-        "addr": 111573408
+        "addr": 114621760
       },
       {
         "name": "crypto/tls.(*Conn).sendAlert.deferwrap1",
-        "addr": 111816192
+        "addr": 114855488
       },
       {
         "name": "crypto/tls.(*Conn).sendAlertLocked",
-        "addr": 111572512
+        "addr": 114620896
       },
       {
         "name": "crypto/tls.(*Conn).sendSessionTicket",
-        "addr": 111766080
+        "addr": 114807168
       },
       {
         "name": "crypto/tls.(*Conn).serverHandshake",
-        "addr": 111721440
+        "addr": 114763904
       },
       {
         "name": "crypto/tls.(*Conn).serverHandshake-fm",
-        "addr": 111885408
+        "addr": 114923584
       },
       {
         "name": "crypto/tls.(*Conn).sessionState",
-        "addr": 111804608
+        "addr": 114844288
       },
       {
         "name": "crypto/tls.(*Conn).setReadTrafficSecret",
-        "addr": 111592288
+        "addr": 114639840
       },
       {
         "name": "crypto/tls.(*Conn).unmarshalHandshakeMessage",
-        "addr": 111579104
+        "addr": 114627200
       },
       {
         "name": "crypto/tls.(*Conn).verifyServerCertificate",
-        "addr": 111634944
+        "addr": 114681024
       },
       {
         "name": "crypto/tls.(*Conn).write",
-        "addr": 111574208
+        "addr": 114622496
       },
       {
         "name": "crypto/tls.(*Conn).writeChangeCipherRecord",
-        "addr": 111577600
+        "addr": 114625792
       },
       {
         "name": "crypto/tls.(*Conn).writeChangeCipherRecord.deferwrap1",
-        "addr": 111816448
+        "addr": 114855744
       },
       {
         "name": "crypto/tls.(*Conn).writeHandshakeRecord",
-        "addr": 111577088
+        "addr": 114625280
       },
       {
         "name": "crypto/tls.(*Conn).writeHandshakeRecord.deferwrap1",
-        "addr": 111816384
+        "addr": 114855680
       },
       {
         "name": "crypto/tls.(*Conn).writeRecordLocked",
-        "addr": 111574752
+        "addr": 114623008
       },
       {
         "name": "crypto/tls.(*Conn).writeRecordLocked.func1",
-        "addr": 111816256
+        "addr": 114855552
       }
     ],
     "http_transport": [
       {
         "name": "net/http.(*Transport).CancelRequest",
-        "addr": 112494080
+        "addr": 115514816
       },
       {
         "name": "net/http.(*Transport).Clone",
-        "addr": 112480896
+        "addr": 115503232
       },
       {
         "name": "net/http.(*Transport).CloseIdleConnections",
-        "addr": 112492640
+        "addr": 115514496
       },
       {
         "name": "net/http.(*Transport).NewClientConn",
-        "addr": 112274176
+        "addr": 115299168
       },
       {
         "name": "net/http.(*Transport).NewClientConn.deferwrap1",
-        "addr": 112548768
+        "addr": 115562304
       },
       {
         "name": "net/http.(*Transport).RegisterProtocol",
-        "addr": 112491072
+        "addr": 115512832
       },
       {
         "name": "net/http.(*Transport).RoundTrip",
-        "addr": 112570432
+        "addr": 115591040
       },
       {
         "name": "net/http.(*Transport).alternateRoundTripper",
-        "addr": 112483968
+        "addr": 115506144
       },
       {
         "name": "net/http.(*Transport).configureHTTP2",
-        "addr": 112325152
+        "addr": 115346400
       },
       {
         "name": "net/http.(*Transport).configureHTTP2.func1",
-        "addr": 112566304
+        "addr": 115587072
       },
       {
         "name": "net/http.(*Transport).connectMethodForRequest",
-        "addr": 112494400
+        "addr": 115514912
       },
       {
         "name": "net/http.(*Transport).customDialTLS",
-        "addr": 112503424
-      },
-      {
-        "name": "net/http.(*Transport).decConnsPerHost",
-        "addr": 112507520
-      },
-      {
-        "name": "net/http.(*Transport).decConnsPerHost.deferwrap1",
-        "addr": 112561792
+        "addr": 115516384
       },
       {
         "name": "net/http.(*Transport).dial",
-        "addr": 112500992
+        "addr": 115516000
       },
       {
         "name": "net/http.(*Transport).dialConn",
-        "addr": 112510208
+        "addr": 115519072
       },
       {
         "name": "net/http.(*Transport).dialConn.func2",
-        "addr": 112563360
+        "addr": 115576064
       },
       {
         "name": "net/http.(*Transport).dialConn.func3",
-        "addr": 112562336
+        "addr": 115575040
       },
       {
         "name": "net/http.(*Transport).dialConn.func3.deferwrap1",
-        "addr": 112563296
+        "addr": 115576000
       },
       {
         "name": "net/http.(*Transport).dialConn.gowrap1",
-        "addr": 112563616
+        "addr": 115576320
       },
       {
         "name": "net/http.(*Transport).dialConn.gowrap2",
-        "addr": 112562272
+        "addr": 115574976
       },
       {
         "name": "net/http.(*Transport).dialConn.gowrap3",
-        "addr": 112562208
+        "addr": 115574912
       },
       {
-        "name": "net/http.(*Transport).dialConnFor",
-        "addr": 112507072
+        "name": "net/http.(*Transport).expireIdleLRU",
+        "addr": 115559104
+      },
+      {
+        "name": "net/http.(*Transport).expireIdleLRU.deferwrap1",
+        "addr": 115586560
+      },
+      {
+        "name": "net/http.(*Transport).expireIdleLRU.func1",
+        "addr": 115585312
+      },
+      {
+        "name": "net/http.(*Transport).expireIdleLRU.func1.deferwrap1",
+        "addr": 115586496
+      },
+      {
+        "name": "net/http.(*Transport).expireIdleLRU.func1.deferwrap2",
+        "addr": 115586432
+      },
+      {
+        "name": "net/http.(*Transport).expireIdleLRU.func1.gowrap3",
+        "addr": 115586368
+      },
+      {
+        "name": "net/http.(*Transport).expireIdleLRU.func2",
+        "addr": 115585056
+      },
+      {
+        "name": "net/http.(*Transport).expireIdleLRU.func2.deferwrap1",
+        "addr": 115585248
       },
       {
         "name": "net/http.(*Transport).getConn",
-        "addr": 112503712
+        "addr": 115516672
       },
       {
-        "name": "net/http.(*Transport).getConn.func1",
-        "addr": 112561376
+        "name": "net/http.(*Transport).getLockedPoolEntry",
+        "addr": 115551712
+      },
+      {
+        "name": "net/http.(*Transport).getLockedPoolEntry.func1",
+        "addr": 115578368
+      },
+      {
+        "name": "net/http.(*Transport).getLockedPoolEntry.func1.1",
+        "addr": 115587008
+      },
+      {
+        "name": "net/http.(*Transport).getLockedPoolEntry.func1.2",
+        "addr": 115587040
+      },
+      {
+        "name": "net/http.(*Transport).getLockedPoolEntry.func1.deferwrap1",
+        "addr": 115579104
       },
       {
         "name": "net/http.(*Transport).http2AddConn",
-        "addr": 112326752
+        "addr": 115347936
       },
       {
         "name": "net/http.(*Transport).http2ExternalDial",
-        "addr": 112327968
+        "addr": 115349088
       },
       {
         "name": "net/http.(*Transport).http2NewClientConn",
-        "addr": 112327040
+        "addr": 115348192
       },
       {
         "name": "net/http.(*Transport).http2NewClientConnFromContext",
-        "addr": 112327200
+        "addr": 115348352
       },
       {
         "name": "net/http.(*Transport).http2NewClientConnFromContext.deferwrap1",
-        "addr": 112552448
+        "addr": 115565984
       },
       {
         "name": "net/http.(*Transport).onceSetNextProtoDefaults",
-        "addr": 112482656
+        "addr": 115504928
       },
       {
         "name": "net/http.(*Transport).onceSetNextProtoDefaults-fm",
-        "addr": 112605472
+        "addr": 115627968
       },
       {
-        "name": "net/http.(*Transport).prepareTransportCancel",
-        "addr": 112493664
+        "name": "net/http.(*Transport).poolCloseIdleConnections",
+        "addr": 115552640
       },
       {
-        "name": "net/http.(*Transport).prepareTransportCancel.func1",
-        "addr": 112560640
+        "name": "net/http.(*Transport).poolCloseIdleConnections.func1",
+        "addr": 115579232
+      },
+      {
+        "name": "net/http.(*Transport).poolCloseIdleConnections.func1.1",
+        "addr": 115579968
+      },
+      {
+        "name": "net/http.(*Transport).poolCloseIdleConnections.func1.deferwrap1",
+        "addr": 115580160
+      },
+      {
+        "name": "net/http.(*Transport).poolCopyEntries",
+        "addr": 115552160
+      },
+      {
+        "name": "net/http.(*Transport).poolCopyEntries.deferwrap1",
+        "addr": 115579168
+      },
+      {
+        "name": "net/http.(*Transport).poolDialForEntry",
+        "addr": 115558528
+      },
+      {
+        "name": "net/http.(*Transport).poolDialForEntry.func1",
+        "addr": 115583808
+      },
+      {
+        "name": "net/http.(*Transport).poolDialForEntry.func1.deferwrap1",
+        "addr": 115584928
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn",
+        "addr": 115555744
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.deferwrap1",
+        "addr": 115581664
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func2",
+        "addr": 115583680
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func3",
+        "addr": 115583232
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func3.deferwrap1",
+        "addr": 115583616
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func4",
+        "addr": 115582880
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func4.deferwrap1",
+        "addr": 115583168
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func5",
+        "addr": 115581376
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func5.deferwrap1",
+        "addr": 115581600
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func6",
+        "addr": 115581728
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func6.deferwrap1",
+        "addr": 115582816
+      },
+      {
+        "name": "net/http.(*Transport).poolGetConn.func6.gowrap2",
+        "addr": 115582752
+      },
+      {
+        "name": "net/http.(*Transport).poolIdleTimeout",
+        "addr": 115554432
+      },
+      {
+        "name": "net/http.(*Transport).poolIdleTimeout.deferwrap1",
+        "addr": 115581248
+      },
+      {
+        "name": "net/http.(*Transport).poolIdleTimeout.func1",
+        "addr": 115580768
+      },
+      {
+        "name": "net/http.(*Transport).poolIdleTimeout.func1.gowrap1",
+        "addr": 115581184
+      },
+      {
+        "name": "net/http.(*Transport).poolPutIdleConn",
+        "addr": 115552928
+      },
+      {
+        "name": "net/http.(*Transport).poolPutIdleConn.func1",
+        "addr": 115580224
+      },
+      {
+        "name": "net/http.(*Transport).poolPutIdleConn.func1.deferwrap1",
+        "addr": 115580576
+      },
+      {
+        "name": "net/http.(*Transport).poolPutIdleConnLocked",
+        "addr": 115553088
+      },
+      {
+        "name": "net/http.(*Transport).poolPutIdleConnLocked.deferwrap1",
+        "addr": 115580704
+      },
+      {
+        "name": "net/http.(*Transport).poolPutIdleConnLocked.func1",
+        "addr": 115580640
+      },
+      {
+        "name": "net/http.(*Transport).poolRemoveConn",
+        "addr": 115554976
+      },
+      {
+        "name": "net/http.(*Transport).poolRemoveConn.deferwrap1",
+        "addr": 115581312
+      },
+      {
+        "name": "net/http.(*Transport).poolTryGetForEntryLocked",
+        "addr": 115557248
+      },
+      {
+        "name": "net/http.(*Transport).poolTryGetForEntryLocked.gowrap1",
+        "addr": 115583744
       },
       {
         "name": "net/http.(*Transport).protocols",
-        "addr": 112483392
-      },
-      {
-        "name": "net/http.(*Transport).putOrCloseIdleConn",
-        "addr": 112495008
-      },
-      {
-        "name": "net/http.(*Transport).queueForDial",
-        "addr": 112505824
-      },
-      {
-        "name": "net/http.(*Transport).queueForDial.deferwrap1",
-        "addr": 112561440
-      },
-      {
-        "name": "net/http.(*Transport).queueForIdleConn",
-        "addr": 112498240
-      },
-      {
-        "name": "net/http.(*Transport).queueForIdleConn.deferwrap1",
-        "addr": 112561056
-      },
-      {
-        "name": "net/http.(*Transport).queueForIdleConn.gowrap2",
-        "addr": 112560992
+        "addr": 115505600
       },
       {
         "name": "net/http.(*Transport).registerProtocol",
-        "addr": 112491200
+        "addr": 115512960
       },
       {
         "name": "net/http.(*Transport).registerProtocol.deferwrap1",
-        "addr": 112560576
+        "addr": 115574496
       },
       {
-        "name": "net/http.(*Transport).removeIdleConn",
-        "addr": 112499968
+        "name": "net/http.(*Transport).removeFromIdleLRU",
+        "addr": 115558912
       },
       {
-        "name": "net/http.(*Transport).removeIdleConn.deferwrap1",
-        "addr": 112561120
-      },
-      {
-        "name": "net/http.(*Transport).removeIdleConnLocked",
-        "addr": 112500224
+        "name": "net/http.(*Transport).removeFromIdleLRU.deferwrap1",
+        "addr": 115584992
       },
       {
         "name": "net/http.(*Transport).roundTrip",
-        "addr": 112484896
+        "addr": 115507008
       },
       {
         "name": "net/http.(*Transport).roundTrip.func1",
-        "addr": 112560448
+        "addr": 115574368
       },
       {
         "name": "net/http.(*Transport).roundTrip.gowrap1",
-        "addr": 112560512
+        "addr": 115574432
       },
       {
-        "name": "net/http.(*Transport).startDialConnForLocked",
-        "addr": 112506720
-      },
-      {
-        "name": "net/http.(*Transport).startDialConnForLocked.func1",
-        "addr": 112561504
-      },
-      {
-        "name": "net/http.(*Transport).startDialConnForLocked.func1.deferwrap1",
-        "addr": 112561728
+        "name": "net/http.(*Transport).tlsConfigForDial",
+        "addr": 115517216
       },
       {
         "name": "net/http.(*Transport).tryPutIdleConn",
-        "addr": 112495104
+        "addr": 115515520
       },
       {
         "name": "net/http.(*Transport).tryPutIdleConn.deferwrap1",
-        "addr": 112560928
-      },
-      {
-        "name": "net/http.(*Transport).tryPutIdleConn.deferwrap2",
-        "addr": 112560864
+        "addr": 115574560
       }
     ]
   }

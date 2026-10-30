@@ -37,22 +37,16 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | Runs on **WSL1** (syscall-translation layer, not a real kernel) | Frida's ptrace/`frida-server` injection is unreliable here. We use **frida-gum *embedded*** (loaded in-process by our `LD_PRELOAD` constructor, `gum_init_embedded()`), which needs no ptrace — only `mprotect`. |
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
-`257bedb917787ceb25bbe0d36687c663`, agy **1.2.11**). The shim refuses to install hooks if
+`85d3425a18a809e545747dcb9d87c03c`, agy **1.4.11**). The shim refuses to install hooks if
 the running binary's BuildID doesn't match `symbols.json`, so offsets can never be
 silently applied to a different build. Re-run the extractor after any `agy` update
 (`pixi run shim-symbols`).
 
-The 1.2.11 upgrade removes the retired `RecordConversationOffered` telemetry hook;
-all 41 remaining symbol targets resolve and pass prologue verification. Older captures
-containing that RPC can still be decoded. The rebuilt shim passes an instrumented
-`agy --version` startup check: 28/28 hooks install and Python receives smoke events.
-Live model turns have not been revalidated for this release.
-
-agy **1.2.16** (2026-10-04, BuildID `9de01044862a23447e35f63165bc6bef`) was fetched with
-`agy_update.sh` but not adopted: `build_symbols.py` fails verification because two hooked
-functions are gone from that build (`core.createPlannerResponseStep` and
-`integration.(*ToolContextTrajectory).AppendStep`), so the shim stays pinned to 1.2.11 until
-`procdef.h` and the Python hooks follow their replacements.
+The 1.4.11 upgrade follows the package move of `createPlannerResponseStep` and
+`(*ToolContextTrajectory).AppendStep` from `gemini_coder/framework/core` to
+`oneharness/internal/core`; all 41 symbol targets resolve and pass prologue
+verification. The rebuilt shim passes an instrumented `agy --version` startup check:
+28/28 hooks install and Python receives smoke events.
 
 ---
 
@@ -475,7 +469,7 @@ The startup check writes `antigravity.log` and `agy-capture.jsonl` in the curren
 directory (override with `AGY_PROC_LOG` and `WIRE_CAPTURE`). Check the native log for
 the matching BuildID and installed hooks; a successful `--version` alone does not
 test model traffic. The status investigations below describe older releases; the
-current 1.2.11 validation scope is recorded under **Build pinning** above.
+current 1.4.11 validation scope is recorded under **Build pinning** above.
 
 ## Status (originally WSL1; re-validated on cloud Linux real kernel — agy 1.0.15 build 1d164dd9…, then re-pinned + re-verified on 1.0.16 build dee6de74…)
 
