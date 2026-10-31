@@ -57,15 +57,11 @@ set(AGY_VERSION "1.4.11")
 set(AGY_URL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.11-5180209989812224/linux-x64/cli_linux_x64.tar.gz")
 set(AGY_SHA512 "2935601efa745ed6e314d32b415c71f44d9d455f0e6a2583372584be5a9074c28154cf81d5eec65b4416579453a3b3b05d3abe4d4f176754d5ef93a84af6cf28")
 set(AGY_BIN "" CACHE STRING "optional: local agy binary to vendor instead of downloading")
-# WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag; a freshly-fetched agy must be
-# byte-patched to run there (address- & build-id-preserving). Auto-detect; override with -DAGY_WSL1=.
-execute_process(COMMAND uname -r OUTPUT_VARIABLE _uname_r OUTPUT_STRIP_TRAILING_WHITESPACE)
-if(NOT DEFINED AGY_WSL1)
-  if(_uname_r MATCHES "Microsoft")
-    set(AGY_WSL1 1)
-  else()
-    set(AGY_WSL1 0)
-  endif()
+# WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag, so a freshly-fetched agy must
+# be byte-patched to run there (length-preserving, so addresses and the build-id survive).
+# make_libagy.py detects WSL1 and patches as part of the conversion; -DAGY_WSL1=0/1 forces it.
+if(DEFINED AGY_WSL1)
+  set(ENV{AGY_WSL1} "${AGY_WSL1}")
 endif()
 
 file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor")
@@ -76,35 +72,19 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
 elseif(AGY_BIN AND EXISTS "${AGY_BIN}")
   file(COPY_FILE "${AGY_BIN}" "${CMAKE_BINARY_DIR}/antigravity.raw")
   message(STATUS "[setup] vendoring libagy.so from ${AGY_BIN}")
-  if(AGY_WSL1)
-    execute_process(COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/patch_agy_wsl1.py" "${CMAKE_BINARY_DIR}/antigravity.raw"
-                    RESULT_VARIABLE _wsl1_rc)
-    if(NOT _wsl1_rc EQUAL 0)
-      message(FATAL_ERROR "patch_agy_wsl1.py failed")
-    endif()
-  endif()
   execute_process(
     COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
             "${CMAKE_BINARY_DIR}/antigravity.raw" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
     RESULT_VARIABLE _mk_rc)
-  file(REMOVE "${CMAKE_BINARY_DIR}/antigravity.raw" "${CMAKE_BINARY_DIR}/antigravity.raw.orig")
+  file(REMOVE "${CMAKE_BINARY_DIR}/antigravity.raw")
   if(NOT _mk_rc EQUAL 0)
     message(FATAL_ERROR "make_libagy.py failed")
   endif()
-elseif(EXISTS "${CMAKE_SOURCE_DIR}/vendor/agy")
-  file(SIZE "${CMAKE_SOURCE_DIR}/vendor/agy" _existing_agy_sz)
-  if(_existing_agy_sz GREATER 50000000)
-    message(STATUS "[setup] converting existing raw vendor/agy -> vendor/libagy.so")
-    execute_process(
-      COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
-              "${CMAKE_SOURCE_DIR}/vendor/agy" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
-      RESULT_VARIABLE _mk_rc)
-    if(NOT _mk_rc EQUAL 0)
-      message(FATAL_ERROR "make_libagy.py failed")
-    endif()
-    file(REMOVE "${CMAKE_SOURCE_DIR}/vendor/agy")
-  endif()
 endif()
+# NOTE: there is deliberately no "convert whatever vendor/agy happens to be" branch. vendor/agy is
+# the linked C++ host this build produces, and agy's background self-updater used to drop a raw
+# upstream binary there under the same name — converting that silently vendored an unpinned,
+# unverified agy. Delete vendor/libagy.so to re-fetch the pin instead.
 
 if(NOT EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
   message(STATUS "[setup] fetching pinned agy ${AGY_VERSION} (sha512-verified)")
@@ -120,18 +100,11 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
   if(NOT _agy_tar EQUAL 0)
     message(FATAL_ERROR "agy extract failed")
   endif()
-  if(AGY_WSL1)
-    execute_process(COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/patch_agy_wsl1.py" "${CMAKE_BINARY_DIR}/antigravity"
-                    RESULT_VARIABLE _wsl1_rc)
-    if(NOT _wsl1_rc EQUAL 0)
-      message(FATAL_ERROR "patch_agy_wsl1.py failed")
-    endif()
-  endif()
   execute_process(
     COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
             "${CMAKE_BINARY_DIR}/antigravity" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
     RESULT_VARIABLE _mk_rc)
-  file(REMOVE "${CMAKE_BINARY_DIR}/antigravity" "${CMAKE_BINARY_DIR}/antigravity.orig")
+  file(REMOVE "${CMAKE_BINARY_DIR}/antigravity")
   if(NOT _mk_rc EQUAL 0)
     message(FATAL_ERROR "make_libagy.py failed")
   endif()
@@ -160,11 +133,11 @@ message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 # ---- generate symbols_gen.h from the committed symbols.json + src/procdef.h -------------------
 add_custom_command(
   OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
-  COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/gen_symbols_header.py"
+  COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
                   "${CMAKE_SOURCE_DIR}/symbols/symbols.json" "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
   DEPENDS "${CMAKE_SOURCE_DIR}/symbols/symbols.json"
-          "${CMAKE_SOURCE_DIR}/symbols/gen_symbols_header.py"
-          "${CMAKE_SOURCE_DIR}/symbols/gen_hooks_py.py"
+          "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
+          "${CMAKE_SOURCE_DIR}/symbols/agyelf.py"
           "${CMAKE_SOURCE_DIR}/src/procdef.h"
   COMMENT "gen src/symbols_gen.h from symbols.json + src/procdef.h"
   VERBATIM)
@@ -222,7 +195,8 @@ add_custom_target(symbols
   COMMENT "re-resolve symbols.json from vendor/libagy.so (after an agy update)"
   VERBATIM USES_TERMINAL)
 add_custom_target(agy-update
-  COMMAND bash "${CMAKE_SOURCE_DIR}/symbols/agy_update.sh"
+  COMMAND python3 symbols/make_libagy.py --update
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "fetch the LATEST agy + print new pin values for this CMakeLists"
   VERBATIM USES_TERMINAL)
 

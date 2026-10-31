@@ -33,11 +33,11 @@ Register it with `mcp.json` (template here). Steps:
 
 ## When to use hooks instead
 
-Use the Frida/LD_PRELOAD hooks (see ../README.md) when config can't do it:
+Use the static trampoline hooks (see ../README.md) when config can't do it:
 injecting context *invisibly* into prompt assembly, overriding a tool result, or
-observing/rewriting the model traffic. Catalog of candidate hook points (MCP
-manager, tool-spec builders, prompt assembly) is in `../symbols/symbols.json`
-under `catalog` — e.g. `...backend.(*ServerBackend).GetPluginMCPSpecs`.
+observing/rewriting the model traffic. Candidate hook points (MCP manager, tool-spec
+builders, prompt assembly) are in `../symbols/funcmap.tsv.gz`, the full addr→name map
+`pixi run shim-symbols` writes — e.g. `zcat ../symbols/funcmap.tsv.gz | grep GetPluginMCPSpecs`.
 
 ## agents.json
 

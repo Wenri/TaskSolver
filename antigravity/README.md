@@ -25,7 +25,7 @@ linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` a
      with the address of each static trampoline stub `agy_stub__<ID>` in `vendor/agy` at
      process load time — zero runtime code patching or `mprotect`.
 2. **Static cgocall trampolines (`src/gocall.cpp` + `src/gomod.cpp`)** assembled at build time
-   into `.section .agy_trampolines,"ax",@progbits` (via `gen_symbols_header.py`), with a
+   into `.section .agy_trampolines,"ax",@progbits` (via `gen_sources.py`), with a
    synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto `agy_firstmoduledata.next`
    before `agy_rt0_go()` starts and each stub statically calling its dedicated C hook handler
    (`agy_on_fh_update`, `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`,
@@ -135,7 +135,7 @@ build-id). Names are stable across Go versions; offsets are not.
 | `crypto/tls.(*Conn).Write` | `(c *Conn=RAX, b.ptr=RBX, b.len=RCX, b.cap=RDI)` | plaintext **egress** to LLM backend | ASYNC (→SYNC for rewrite) |
 | `crypto/tls.(*Conn).Read` | `(c=RAX, b.ptr=RBX, b.len=RCX)` → `n=RAX` on return | plaintext **ingress** from backend | ASYNC |
 | `net/http.(*Transport).RoundTrip` | `(t=RAX, req *Request=RBX)` → `resp=RAX` | HTTP-level URL/headers (structured view) | ASYNC |
-| *(catalog)* MCP/tool/prompt funcs | see `symbols.json.catalog` | reserved for tool/context injection | — |
+| *(candidates)* MCP/tool/prompt funcs | grep `symbols/funcmap.tsv.gz` | reserved for tool/context injection | — |
 
 **Go register ABI (amd64, Go 1.17+).** Integer/pointer args go in
 `RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11`; results in the same order. A `[]byte`
@@ -400,13 +400,20 @@ antigravity/
   CMakeLists.txt            ← the build: generates symbols_gen.h + links vendor/agy against vendor/libagy.so
   vendor/                   ← libagy.so (164 MB) + built vendor/agy host executable
   symbols/
+    agyelf.py               ← shared parsing: procdef.h rows, hook targets and the kind→handler map
+                              (read from `agy_handler_for`), ELF (lief) + Go pclntab/moduledata,
+                              prologue skip/extract. The three tools below cannot disagree about
+                              an offset. lief loads lazily, so --hooks needs no binary library.
     build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
-                              symbols.json; self-verifies every hook prologue + extracts frame_prologue_hex
+                              symbols.json; self-verifies every installed hook's prologue
     make_libagy.py          ← converts PIE agy → libagy.so; exports agy_go__* / agy_tramp_slots,
-                              imports agy_stub__* via R_X86_64_GLOB_DAT, and statically patches entry+skip
-    gen_symbols_header.py   ← symbols.json + procdef.h → symbols_gen.h (declarations + static .agy_trampolines stubs)
-    patch_agy_wsl1.py       ← WSL1: clear tcmalloc MAP_FIXED_NOREPLACE in the fetched agy
-    symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, skips, prologues, catalog}
+                              imports agy_stub__* via R_X86_64_GLOB_DAT, and statically patches entry+skip.
+                              `--update` fetches the LATEST agy (sha512-verified) and prints the new pins;
+                              `--wsl1` applies the tcmalloc MAP_FIXED_NOREPLACE fix on its own (a
+                              conversion applies it automatically when running on WSL1).
+    gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (declarations + static
+                              .agy_trampolines stubs); `--hooks` → pyagy/agy_process/hooks.py
+    symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, skips, prologues}
   src/
     antigravity.cpp         ← main() entrypoint + agy_init() + getaddrinfo interposer
     gomod.cpp / gocall.cpp  ← synthetic Go moduledata + static cgocall trampoline handlers & stack unwinder
@@ -462,9 +469,15 @@ pixi caches the package build, so **after an agy update** rebuild the shim expli
 the pixi tasks:
 
 ```bash
-pixi run shim-symbols   # after an agy update: re-resolve symbols.json + recompile
-pixi run build-shim     # a plain recompile (configure fetches the vendored deps on first run)
+pixi run shim-agy-update  # fetch the LATEST agy, convert it, print the new CMakeLists pins
+pixi run shim-symbols     # after an agy update: re-resolve symbols.json + recompile
+pixi run shim-hooks       # after editing src/procdef.h: regen pyagy's HOOKS mirror
+pixi run build-shim       # a plain recompile (configure fetches the vendored deps on first run)
 ```
+
+Bumping agy is `shim-agy-update` (it prints the `AGY_VERSION`/`AGY_URL`/`AGY_SHA512` lines to paste
+into `CMakeLists.txt`) followed by `shim-symbols`; commit `symbols.json` and `CMakeLists.txt`
+together, since the build-id guard ties them to one upstream build.
 
 **libpython / Python version.** The shim embeds the **pixi env's libpython 3.15**
 (`$(CONDA_PREFIX)/bin/python3-config`), unified with the pixi-3.15 driver so the

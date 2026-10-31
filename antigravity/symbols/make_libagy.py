@@ -2,102 +2,108 @@
 """Convert Google's PIE `agy` (Antigravity) Go executable into `libagy.so` with
 bidirectional static `ld` binding:
   - Exports `agy_rt0_go` (`runtime.rt0_go`), `agy_firstmoduledata` (`runtime.firstmoduledata`),
-    and all 41 Go hook target functions (`agy_go__*`) in `libagy.so`'s `.dynsym`.
+    and every Go hook target (`agy_go__*`) in `libagy.so`'s `.dynsym`.
   - Imports each active static trampoline stub (`agy_stub__<ID>`, defined in `vendor/agy`'s
     `.agy_trampolines` section) via `R_X86_64_GLOB_DAT` relocations in `agy_tramp_slots[]`
     and statically patches each hooked Go function's `entry + skip` prologue in `libagy.so`
     with `jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`), so `ld.so` binds both
     directions at load time with zero runtime code patching or `mprotect`.
 
-Usage:  python3 make_libagy.py <in-agy-binary> <out-libagy.so>
+The hook list and the pclntab/prologue arithmetic come from `agyelf.py`, shared with
+`build_symbols.py`: the offset this tool patches and the offset the generated stub resumes at
+are computed by the same code.
+
+Usage:
+    python3 make_libagy.py <in-agy-binary> <out-libagy.so>
+    python3 make_libagy.py --update [<out-libagy.so>]   # fetch the LATEST agy, convert, print pins
+    python3 make_libagy.py --wsl1 [<agy>]               # only the WSL1 mmap-flag patch, in place
 """
+import hashlib
+import json
 import os
 import shutil
 import struct
 import sys
+import tarfile
+import tempfile
+import urllib.request
 
 import lief
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from build_symbols import (  # noqa: E402
+from agyelf import (  # noqa: E402
     ELF,
-    NOSPLIT_TARGETS,
-    PROC_TARGETS,
-    R_X86_64_RELATIVE,
+    ENTRY_TARGET,
+    GoImage,
+    active_rows,
     c_sym_name,
-    find_pclntab,
+    hook_targets,
+    load_procdef,
+    prologue_skip,
 )
-from gen_hooks_py import parse as parse_procdef  # noqa: E402
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(_HERE, ".."))          # antigravity/
+DEFAULT_OUT = os.path.join(ROOT, "vendor", "libagy.so")
+
+MANIFEST_BASE = os.environ.get(
+    "AGY_MANIFEST_BASE",
+    "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app")
 
 
-def prologue_skip(elf: ELF, data: bytes, addr: int) -> int:
-    try:
-        b = data[elf.v2o(addr):elf.v2o(addr) + 48]
-    except ValueError:
-        return 0
-    for k in range(40):
-        if (b[k] & 0xFB) == 0x49 and b[k + 1] == 0x3B and (b[k + 2] & 0xC7) == 0x46 and b[k + 3] == 0x10:
-            j = k + 4
-            if b[j] == 0x0F and b[j + 1] in (0x82, 0x83, 0x86, 0x87):
-                return j + 6
-            if b[j] in (0x72, 0x73, 0x76, 0x77):
-                return j + 2
-            return j
-    return 0
+def is_wsl1():
+    """WSL1 needs the mmap patch below. `AGY_WSL1=0/1` overrides the kernel sniff."""
+    if "AGY_WSL1" in os.environ:
+        return os.environ["AGY_WSL1"] == "1"
+    return "Microsoft" in os.uname().release
 
 
-def resolve_exports(data: bytes) -> tuple[int, dict[str, int]]:
-    elf = ELF(data)
-    B = find_pclntab(data)
-    u32, i32, u64 = elf.u32, elf.i32, elf.u64
-    nfunc = u64(B + 8)
-    funcnametab = u64(B + 32)
-    pcln_off = u64(B + 64)
-    FT = B + pcln_off
-    FUNCBASE = B + pcln_off
-
-    rela = elf.sec(".rela.dyn")
-    if not rela:
-        raise SystemExit("no .rela.dyn in agy binary")
-    md_vaddr = None
-    rbase, rcnt = rela["off"], rela["size"] // 24
-    for i in range(rcnt):
-        o = rbase + i * 24
-        if u64(o + 16) == B and (u64(o + 8) & 0xFFFFFFFF) == R_X86_64_RELATIVE:
-            md_vaddr = u64(o)
-            break
-    if md_vaddr is None:
-        raise SystemExit("could not find moduledata in agy binary")
-
-    relwin = {}
-    for i in range(rcnt):
-        o = rbase + i * 24
-        roff = u64(o)
-        if md_vaddr <= roff < md_vaddr + 0x400 and (u64(o + 8) & 0xFFFFFFFF) == R_X86_64_RELATIVE:
-            relwin[roff] = u64(o + 16)
-    text_base = relwin.get(md_vaddr + 0xB0)
-    text_sec = elf.sec(".text")
-    if text_base is None or not (text_sec["addr"] <= text_base < text_sec["addr"] + 0x1000):
-        cands = sorted({v for v in relwin.values()
-                        if text_sec["addr"] <= v < text_sec["addr"] + 0x1000})
-        text_base = cands[0] if cands else text_sec["addr"]
-
-    wanted = set(PROC_TARGETS) | set(NOSPLIT_TARGETS) | {"runtime.rt0_go"}
-    found: dict[str, int] = {}
-    for i in range(nfunc):
-        eo = u32(FT + i * 8)
-        fo = u32(FT + i * 8 + 4)
-        noff = i32(FUNCBASE + fo + 4)
-        o = B + funcnametab + noff
-        nm = data[o:data.index(b"\0", o)].decode("utf-8", "replace")
-        if nm in wanted and nm not in found:
-            found[nm] = text_base + eo
-    if "runtime.rt0_go" not in found:
-        raise SystemExit("runtime.rt0_go not found in .gopclntab")
-    return md_vaddr, found
+# agy bundles Google tcmalloc, which reserves its arenas with
+# MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE (0x100022). MAP_FIXED_NOREPLACE is Linux 4.17+;
+# WSL1's 4.4 kernel emulation *rejects* it instead of ignoring it like a genuinely old kernel, so
+# tcmalloc's MmapAligned() fails and agy dies with SIGABRT before main — every subcommand.
+# Clearing the bit degrades the call to a plain hinted mmap (0x22), and WSL1 does honour high mmap
+# hints, so tcmalloc gets its tagged region. Same length, so addresses and the build-id survive.
+WSL1_MMAP_FLAGS = 0x100022
+_MOV_R32_IMM32 = frozenset(range(0xB8, 0xC0))   # b8..bf: mov eXX/r8d-r15d, imm32
 
 
-def patch_static_hooks(elf_path: str, active_rows: list[dict]) -> int:
+def patch_wsl1(data: bytearray) -> int:
+    """Clear MAP_FIXED_NOREPLACE in every `mov r32, 0x100022` in `data`; returns the site count.
+
+    Only real instructions are touched — the immediate must follow a b8..bf opcode byte. The same
+    four bytes occur ~100 times in agy's data tables, and patching those would corrupt it.
+    """
+    imm = struct.pack("<I", WSL1_MMAP_FLAGS)
+    sites, i = [], data.find(imm)
+    while i != -1:
+        if data[i - 1] in _MOV_R32_IMM32:
+            sites.append(i + 2)                 # the 0x10 byte (bit 0x100000) of the LE immediate
+        i = data.find(imm, i + 1)
+    bad = [s for s in sites if data[s] != 0x10]
+    if bad:
+        raise SystemExit(f"[wsl1] abort: {len(bad)} site(s) not 0x10 where expected; agy layout changed")
+    if not sites:
+        raise SystemExit("[wsl1] no `mov r32, 0x100022` sites found — already patched, or agy changed")
+    for s in sites:
+        data[s] = 0x00
+    return len(sites)
+
+
+def patch_wsl1_file(path: str) -> None:
+    """Apply `patch_wsl1` to `path` in place, keeping a one-time `.orig` backup."""
+    data = bytearray(open(path, "rb").read())
+    n = patch_wsl1(data)
+    bak = path + ".orig"
+    if not os.path.exists(bak):
+        shutil.copy2(path, bak)
+        print(f"[wsl1] backed up original -> {bak}")
+    open(path, "wb").write(bytes(data))
+    os.chmod(path, 0o755)
+    print(f"[wsl1] cleared MAP_FIXED_NOREPLACE at {n} site(s) in {path}")
+
+
+def patch_static_hooks(elf_path: str, rows: list[dict]) -> int:
     """Statically patch each active hooked Go function in `elf_path` at `entry + skip`
     with `FF 25 <disp32>` (`jmp *agy_tramp_slots[slot](%rip)`) + 1-byte marker (`0x81`/`0x83`)
     at byte 6 so `ld.so` routes every call directly to `agy_stub__<ID>` in `vendor/agy`."""
@@ -110,10 +116,10 @@ def patch_static_hooks(elf_path: str, active_rows: list[dict]) -> int:
     slots_base = slots_sym.value
 
     with open(elf_path, "r+b") as f:
-        raw = bytearray(f.read())
+        raw = f.read()                 # read-only here; the patches go out through `f` itself
         elf = ELF(raw)
         n_patched = 0
-        for slot, r in enumerate(active_rows):
+        for slot, r in enumerate(rows):
             sym_name = c_sym_name(r["symbol"])
             sym = post_bin.get_symbol(sym_name)
             if sym is None or sym.value == 0:
@@ -144,16 +150,13 @@ def patch_static_hooks(elf_path: str, active_rows: list[dict]) -> int:
     return n_patched
 
 
-def main() -> None:
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: make_libagy.py <in-agy-binary> <out-libagy.so>")
-    in_path, out_path = sys.argv[1], sys.argv[2]
-    procdef_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "procdef.h")
-    rows = parse_procdef(open(procdef_path).read())
-    active_rows = [r for r in rows if r["mech"] in ("fullcgo", "asmcgo")]
+def convert(in_path: str, out_path: str) -> None:
+    rows = load_procdef()
+    rows_active = active_rows(rows)
+    targets = hook_targets(rows)
 
     data = open(in_path, "rb").read()
-    bin_ = lief.parse(in_path)
+    bin_ = lief.parse(data)
     if bin_ is None:
         raise SystemExit(f"lief failed to parse {in_path}")
 
@@ -163,7 +166,7 @@ def main() -> None:
         bin_.has_symbol("agy_rt0_go")
         and bin_.has_symbol("agy_firstmoduledata")
         and bin_.has_symbol("agy_tramp_slots")
-        and all(bin_.has_symbol(f"agy_stub__{r['id']}") for r in active_rows)
+        and all(bin_.has_symbol(f"agy_stub__{r['id']}") for r in rows_active)
         and bin_.has(lief.ELF.DynamicEntry.TAG.SONAME)
         and (flags1 is None or (flags1.value & pie_flag) == 0)
     )
@@ -174,12 +177,26 @@ def main() -> None:
         print(f"{out_path}: already converted to libagy.so")
         return
 
-    md_vaddr, funcs = resolve_exports(data)
+    # WSL1 cannot run the stock binary at all, so patch before converting: the fix is
+    # length-preserving, so every address and the build-id survive into libagy.so.
+    if is_wsl1():
+        buf = bytearray(data)
+        n_wsl1 = patch_wsl1(buf)
+        data = bytes(buf)
+        bin_ = lief.parse(data)
+        if bin_ is None:
+            raise SystemExit("lief failed to re-parse the WSL1-patched agy")
+        print(f"[wsl1] cleared MAP_FIXED_NOREPLACE at {n_wsl1} site(s) before conversion")
+
+    img = GoImage(data)
+    funcs = img.resolve(list(targets) + [ENTRY_TARGET])
+    if ENTRY_TARGET not in funcs:
+        raise SystemExit(f"{ENTRY_TARGET} not found in .gopclntab")
     if flags1 is not None:
         flags1.value &= ~pie_flag
 
-    bin_.add_exported_function(funcs["runtime.rt0_go"], "agy_rt0_go")
-    md_sym = bin_.add_exported_function(md_vaddr, "agy_firstmoduledata")
+    bin_.add_exported_function(funcs[ENTRY_TARGET], "agy_rt0_go")
+    md_sym = bin_.add_exported_function(img.md_vaddr, "agy_firstmoduledata")
     md_sym.type = lief.ELF.Symbol.TYPE.OBJECT
     md_sym.size = 568
 
@@ -202,12 +219,14 @@ def main() -> None:
     slots_sym.type = lief.ELF.Symbol.TYPE.OBJECT
     slots_sym.size = slots_size
 
-    for slot, r in enumerate(active_rows):
+    for slot, r in enumerate(rows_active):
         stub_sym = lief.ELF.Symbol()
         stub_sym.name = f"agy_stub__{r['id']}"
         stub_sym.type = lief.ELF.Symbol.TYPE.FUNC
         stub_sym.binding = lief.ELF.Symbol.BINDING.GLOBAL
-        stub_sym.visibility = lief.ELF.Symbol.Symbol.VISIBILITY.DEFAULT if hasattr(lief.ELF.Symbol, "Symbol") else lief.ELF.Symbol.VISIBILITY.DEFAULT
+        stub_sym.visibility = (lief.ELF.Symbol.Symbol.VISIBILITY.DEFAULT
+                               if hasattr(lief.ELF.Symbol, "Symbol")
+                               else lief.ELF.Symbol.VISIBILITY.DEFAULT)
         stub_sym.shndx = 0
         stub_sym.value = 0
         stub_sym.size = 0
@@ -222,24 +241,89 @@ def main() -> None:
         bin_.add_dynamic_relocation(rel)
 
     n_exported = 0
-    for nm in PROC_TARGETS + NOSPLIT_TARGETS:
+    for nm in targets:
         if nm in funcs:
             bin_.add_exported_function(funcs[nm], c_sym_name(nm))
             n_exported += 1
+    missing = [nm for nm in targets if nm not in funcs]
+    if missing:
+        raise SystemExit(f"hook targets not found in .gopclntab: {missing}")
 
     if not bin_.has(lief.ELF.DynamicEntry.TAG.SONAME):
         bin_.add(lief.ELF.DynamicSharedObject("libagy.so"))
 
     tmp_path = f"{out_path}.tmp.{os.getpid()}"
     bin_.write(tmp_path)
-    n_patched = patch_static_hooks(tmp_path, active_rows)
+    n_patched = patch_static_hooks(tmp_path, rows_active)
     os.chmod(tmp_path, 0o755)
     os.replace(tmp_path, out_path)
     print(
-        f"wrote {out_path} (agy_rt0_go={funcs['runtime.rt0_go']:#x}, "
-        f"agy_firstmoduledata={md_vaddr:#x}, {n_exported} Go symbols exported, "
+        f"wrote {out_path} (agy_rt0_go={funcs[ENTRY_TARGET]:#x}, "
+        f"agy_firstmoduledata={img.md_vaddr:#x}, {n_exported} Go symbols exported, "
         f"{n_patched} static hook jumps + GLOB_DAT relocations bound)"
     )
+
+
+def update(out_path: str) -> None:
+    """Fetch the LATEST agy from the official updater manifest, convert it, and print the pin
+    values for antigravity/CMakeLists.txt. The build-id WILL change, so follow with
+    `pixi run shim-symbols` and commit symbols.json + CMakeLists.txt together. Reproducible
+    builds use the pinned AGY_URL in CMakeLists.txt; this is the deliberate bump."""
+    arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(os.uname().machine, os.uname().machine)
+    url = f"{MANIFEST_BASE}/manifests/linux_{arch}.json"
+    print(f"[agy-update] querying {url}")
+    with urllib.request.urlopen(url, timeout=60) as r:          # noqa: S310 (fixed https host)
+        man = json.load(r)
+    ver, tgz_url, sha = man["version"], man["url"], man["sha512"]
+    print(f"[agy-update] latest = {ver}")
+
+    with tempfile.TemporaryDirectory(prefix="agy-update-") as td:
+        tgz = os.path.join(td, "agy.tar.gz")
+        with urllib.request.urlopen(tgz_url, timeout=300) as r, open(tgz, "wb") as f:  # noqa: S310
+            shutil.copyfileobj(r, f)
+        digest = hashlib.sha512()
+        with open(tgz, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != sha:
+            raise SystemExit("[agy-update] FATAL: sha512 mismatch")
+        with tarfile.open(tgz) as tar:
+            member = tar.getmember("antigravity")
+            tar.extract(member, td, filter="data")
+        raw = os.path.join(td, "antigravity")
+        os.chmod(raw, 0o755)
+        convert(raw, out_path)          # applies the WSL1 patch itself when needed
+
+    build_id = ""
+    b = lief.parse(out_path)
+    for note in getattr(b, "notes", []):
+        if getattr(note, "type", None) == lief.ELF.Note.TYPE.GNU_BUILD_ID:
+            build_id = bytes(note.description).hex()
+    print(f"[agy-update] vendored libagy.so {ver} ({build_id}). Update the pins in CMakeLists.txt:")
+    print(f'    set(AGY_VERSION "{ver}")')
+    print(f'    set(AGY_URL     "{tgz_url}")')
+    print(f'    set(AGY_SHA512  "{sha}")')
+    print("[agy-update] then: pixi run shim-symbols   (re-resolve + commit symbols.json + CMakeLists.txt)")
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--update":
+        if len(argv) > 2:
+            raise SystemExit("usage: make_libagy.py --update [<out-libagy.so>]")
+        update(argv[1] if len(argv) == 2 else DEFAULT_OUT)
+        return
+    if argv and argv[0] == "--wsl1":
+        if len(argv) > 2:
+            raise SystemExit("usage: make_libagy.py --wsl1 [<agy>]")
+        patch_wsl1_file(os.path.expanduser(argv[1] if len(argv) == 2
+                                           else "~/.local/bin/agy"))
+        return
+    if len(argv) != 2:
+        raise SystemExit("usage: make_libagy.py <in-agy-binary> <out-libagy.so>\n"
+                         "       make_libagy.py --update [<out-libagy.so>]\n"
+                         "       make_libagy.py --wsl1 [<agy>]")
+    convert(argv[0], argv[1])
 
 
 if __name__ == "__main__":
