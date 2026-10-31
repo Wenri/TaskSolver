@@ -175,13 +175,12 @@ if(UAPI_INC)
   target_compile_options(agy PRIVATE -idirafter "${UAPI_INC}")
 endif()
 # GCC LTO across the host TUs and the bridge (TASKSOLVER_LTO is defined by wirecap/native above).
-# The C symbols the toplevel trampoline asm calls are marked AGY_ASM_REFERENCED (gocall.h).
+# The handler table named only in asm is marked used and externally_visible.
 if(TASKSOLVER_LTO)
   target_compile_options(agy PRIVATE -flto=auto)
   target_link_options(agy PRIVATE -flto=auto)
-  # ...except goframe.cpp. Its naked bodies are basic asm whose `.org` directives are resolved
-  # against a label emitted by a toplevel asm in the same TU, and LTO does not guarantee the order
-  # of toplevel asm against functions. There is nothing to optimise in it either.
+  # ...except goframe.cpp. Its naked asm stubs must retain their slot order and padding;
+  # keep LTO from merging or moving them. See test_agy_stubs.py for compiler checks.
   set_source_files_properties(src/goframe.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 endif()
 target_include_directories(agy PRIVATE "${CONDA_PREFIX}/include")

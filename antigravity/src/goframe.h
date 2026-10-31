@@ -17,8 +17,8 @@
 #define AGY_TRAMP_SECTION "agy_trampolines"   /* a C identifier, so ld defines __start_/__stop_ */
 
 /* Where in a slot the frame is live (after the subq, up to the addq), for the synthetic pcsp. */
-#define AGY_FRAME_LO      17
-#define AGY_FRAME_HI     179
+#define AGY_FRAME_LO      20
+#define AGY_FRAME_HI     178
 
 #define AGY_OFF_FN         0   /* cgocall arg 0: the C handler */
 #define AGY_OFF_ARG        8   /* cgocall arg 1: &block */

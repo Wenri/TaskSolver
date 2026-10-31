@@ -221,9 +221,9 @@ instrumentation layer; Claude uses its SDK protocol directly:
     16 MB-stack worker thread; linked into the agy shim, the codex binary, and the kimi-code addon.
     The bridge, the agy host and the kimi addon build with GCC LTO (`TASKSOLVER_LTO`, default on, in
     `wirecap/native/CMakeLists.txt`). The bridge archive holds fat LTO objects, because codex's Rust
-    link cannot read GCC bytecode and uses their machine code. C symbols that only the agy trampoline
-    asm references must carry `AGY_ASM_REFERENCED` (`antigravity/src/gocall.h`), or LTO may drop them,
-    rename them, or change their calling convention.
+    link cannot read GCC bytecode and uses their machine code. Keep `g_agy_on` marked `used`
+    and `externally_visible`: LTO cannot see the table loads in basic asm. Keep `goframe.cpp`
+    compiled with `-fno-lto`.
 - **`antigravity/`** → the `pyagy` package: Google's Go `agy` CLI converted into `vendor/libagy.so`
   (`symbols/make_libagy.py`, exporting `agy_rt0_go`, `agy_firstmoduledata`, `agy_tramp_slots`, and
   all 41 `agy_go__<id>` hook targets in `.dynsym` (keyed by the procdef.h row id, mirroring
@@ -233,6 +233,14 @@ instrumentation layer; Claude uses its SDK protocol directly:
   `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<id>`) in
   `agy_trampolines`, binds both directions via `ld` / `ld.so`, and splices its synthetic
   `moduledata` (`md->bad = 1`) onto `agy_firstmoduledata.next` before calling `agy_rt0_go`.
+  `g_agy_on` is a zero-initialized handler pointer table. Before Go starts, `agy_enable_hooks`
+  in `gocall.cpp` selects each enabled row's handler; disabled rows, including `file_open`
+  when conversation-id capture is off, remain `nullptr`. Each `naked` stub uses basic asm
+  to load its entry once into `r12`, skips the hook if null, and otherwise passes that same
+  pointer with `&block` through the row's Go gateway (`runtime.cgocall` or `runtime.asmcgocall`).
+  Preserve that Go→C transition. `BOOKS` stores hook metadata only. Keep `-fno-lto` and run
+  `test_scripts/test_agy_stubs.py` after stub or toolchain changes: it checks frame geometry,
+  the nullable gate, and native startup with disabled hooks and the conversation-id toggle.
   `symbols/` is a source build package: its tools use relative `.agyelf` imports and run as
   `python3 -m symbols.<tool>` (`make_libagy`, `build_symbols`, `gen_sources`) from
   `antigravity/`. CMake and the `shim-hooks` Pixi task set that cwd explicitly, so the tools

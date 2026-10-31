@@ -1,5 +1,5 @@
-/* gocall.cpp — the C side of the trampoline stubs (src/goframe.cpp): agy_dispatch and the
- * per-row handlers (`agy_on_*`), the per-row gate, and the frame-pointer stack unwinder.
+/* gocall.cpp — the C side of the trampoline stubs (src/goframe.cpp): the per-row handlers
+ * (`agy_on_*`), the per-row gate, and the frame-pointer stack unwinder.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -20,9 +20,20 @@
 #define GHLOG(...) do { std::fprintf(stderr, "[antigravity/gohook] " __VA_ARGS__); \
                         std::fputc('\n', stderr); std::fflush(stderr); } while (0)
 
-AGY_ASM_REFERENCED uint8_t g_agy_on[BK_COUNT];
+/* The stub asm names this table. It stays null until agy_init enables hooks, before Go starts. */
+__attribute__((used, externally_visible)) agy_book_fn g_agy_on[BK_COUNT];
 
-extern "C" AGY_ASM_REFERENCED void agy_dispatch(agy_block *b) { BOOKS[b->book].handler(b); }
+static agy_book_fn agy_handler_for(std::string_view id) {
+    if (id == "fh_update")       return &agy_on_fh_update;
+    if (id == "resp")            return &agy_on_resp;
+    if (id == "tls_write")       return &agy_on_tls_write;
+    if (id == "file_open")       return &agy_on_file_open;
+    if (id == "http_rt")         return &agy_on_http_rt;
+    if (id == "exit")            return &agy_on_exit;
+    if (id == "resp_chunk")      return &agy_on_resp_chunk;
+    if (id == "readlink_filter") return &agy_on_readlink_filter;
+    return &agy_on_generic;
+}
 
 /* The hooked row's id, which its events carry as their kind. */
 static const char *book_id(const agy_block *b) { return BOOKS[b->book].id.data(); }
@@ -336,8 +347,11 @@ void agy_enable_hooks(uint64_t base, bool conv_id)
     int n_tramp = 0, n_asm = 0;
     for (int i = 0; i < BK_COUNT; i++) {
         const auto &h = BOOKS[i];
-        if (h.mech == AGY_OFF || (i == bk("file_open") && !conv_id)) continue;
-        g_agy_on[i] = 1;
+        if (h.mech == AGY_OFF || (i == bk("file_open") && !conv_id)) {
+            g_agy_on[i] = nullptr;
+            continue;
+        }
+        g_agy_on[i] = agy_handler_for(h.id);
         n_tramp++;
         n_asm += (h.mech == AGY_ASMCGO);
         GHLOG("cgo-trampoline %.*s", (int)h.id.size(), h.id.data());

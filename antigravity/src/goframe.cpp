@@ -2,19 +2,22 @@
  *
  * make_libagy.py patches each hooked function's `entry + skip` with `jmp *agy_tramp_slots[slot]`,
  * and ld.so points the slot at agy_stub__<id>, which runs on the goroutine's stack with the Go
- * register-ABI arguments live. While its row is on (g_agy_on), a stub saves them into the
- * goframe.h frame, runs agy_dispatch through runtime.cgocall or runtime.asmcgocall and restores
- * them. It then runs the displaced prologue and resumes the function, or returns if the handler
- * set block.action.
+ * register-ABI arguments live. A stub loads g_agy_on[book] once into the Go scratch register
+ * R12; null skips the handler. Otherwise it saves the arguments into the goframe.h frame,
+ * calls that handler through runtime.cgocall or runtime.asmcgocall, and restores the registers.
+ * It runs the displaced prologue and resumes the function, or returns if the handler set block.action.
  * X15 is re-zeroed after C code, as Go's ABI requires.
  *
- * Naked, because the body has no C equivalent; that allows only basic asm, so the C symbols it
- * names carry AGY_ASM_REFERENCED (gocall.h). __builtin_unreachable() stops GCC appending a ud2
- * past the slot, and -fno-lto (CMakeLists.txt) keeps LTO from merging or moving stubs.
+ * Naked functions use basic asm. The table it names carries used and externally_visible;
+ * __builtin_unreachable() stops GCC appending a ud2 past the slot, and -fno-lto keeps stubs ordered.
+ * test_agy_stubs.py checks the generated instructions, frame PCs and native startup.
  */
 #include "goframe.h"
+#include "gocall.h"
 #include "procdef.h"
 #include "symbols_gen.h"
+
+static_assert(sizeof(agy_book_fn) == 8, "stub table indexing requires 8-byte handler pointers");
 
 #define TO_STRING_IMPL(x) #x
 #define TO_STRING(x) TO_STRING_IMPL(x)
@@ -27,7 +30,8 @@
                               aligned(AGY_SLOT_SIZE), section(AGY_TRAMP_SECTION)))           \
     void agy_stub__##id() {                                                                  \
         __asm__(                                                                             \
-            "cmpb   $0, g_agy_on+" #book "(%rip)\n\t"                                        \
+            "movq   g_agy_on+8*" #book "(%rip), %r12\n\t"                                   \
+            "testq  %r12, %r12\n\t"                                                          \
             "je     1f\n\t"                                                                  \
             "subq   $" TO_STRING(AGY_FRAME) ", %rsp\n\t"                                     \
             "movq   %rax, " TO_STRING(AGY_OFF_RAX) "(%rsp)\n\t"                              \
@@ -45,7 +49,7 @@
             "xorl   %eax, %eax\n\t"                                                          \
             "movq   %rax, " TO_STRING(AGY_OFF_ACTION) "(%rsp)\n\t"                           \
             "leaq   " TO_STRING(AGY_OFF_BLOCK) "(%rsp), %rbx\n\t"                            \
-            "leaq   agy_dispatch(%rip), %rax\n\t"                                            \
+            "movq   %r12, %rax\n\t"                                                         \
             "movq   %rax, " TO_STRING(AGY_OFF_FN) "(%rsp)\n\t"                               \
             "movq   %rbx, " TO_STRING(AGY_OFF_ARG) "(%rsp)\n\t"                              \
             "xorps  %xmm15, %xmm15\n\t"                                                      \

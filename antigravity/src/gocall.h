@@ -1,5 +1,5 @@
-/* gocall.h — the C side of the trampoline stubs (src/goframe.cpp): agy_dispatch, the per-row
- * handlers (`agy_on_*`), the per-row gate, and the frame-pointer stack unwinder (`gocall.cpp`).
+/* gocall.h — the C side of the trampoline stubs (src/goframe.cpp): the per-row handlers
+ * (`agy_on_*`), the per-row gate, and the frame-pointer stack unwinder (`gocall.cpp`).
  */
 #ifndef AGY_GOCALL_H
 #define AGY_GOCALL_H
@@ -9,16 +9,11 @@
 
 using agy_book_fn = void (*)(agy_block *);
 
-/* For the C definitions the stub asm (goframe.cpp) names: LTO can't see those references, so
- * `used` keeps them and `externally_visible` keeps their names and ABI. */
-#define AGY_ASM_REFERENCED __attribute__((used, externally_visible))
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern uint8_t g_agy_on[];             /* per BOOKS row: nonzero while its stub calls out */
-void agy_dispatch(agy_block *b);        /* every stub's handler: runs BOOKS[b->book].handler */
+extern agy_book_fn g_agy_on[];         /* per BOOKS row: handler, or nullptr when disabled */
 
 void agy_on_generic(agy_block *b);
 void agy_on_fh_update(agy_block *b);

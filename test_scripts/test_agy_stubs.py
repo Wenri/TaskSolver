@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Offline native checks for the built agy stubs; no provider calls.
+
+Run after ``pixi run build-shim`` with ``pixi run python test_scripts/test_agy_stubs.py``.
+Missing build artifacts produce an explicit skip, not a passing native check.
+"""
+import collections
+import json
+import os
+from pathlib import Path
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+
+import lief
+
+from pyagy import BOOKS, enabled_hooks
+from pyagy._env import instrumented_env, preload_argv
+
+
+ROOT = Path(__file__).resolve().parents[1]
+ANTI = ROOT / "antigravity"
+AGY = ANTI / "vendor/agy"
+OBJECT = ANTI / "build/CMakeFiles/agy.dir/src/goframe.cpp.o"
+
+
+class AgyStubTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        missing = [p for p in (AGY, OBJECT, ANTI / "vendor/libagy.so") if not p.is_file()]
+        if missing:
+            raise unittest.SkipTest(f"run pixi run build-shim; missing: {missing}")
+        lief.logging.disable()
+        cls.image = lief.parse(str(AGY))
+        cls.obj = lief.parse(str(OBJECT))
+        cls.symbols = {s.name: s for s in cls.image.symtab_symbols}
+        cls.stubs = {name: s for name, s in cls.symbols.items() if name.startswith("agy_stub__")}
+        cls.layout = {name: int(value) for name, value in re.findall(
+            r"^#define\s+(AGY_\w+)\s+(\d+)\b", (ANTI / "src/goframe.h").read_text(), re.M)}
+
+    def test_slot_and_frame_geometry(self):
+        expected = {"agy_stub__" + row["id"] for row in enabled_hooks()}
+        self.assertEqual(set(self.stubs), expected)
+        section = self.image.get_section("agy_trampolines")
+        stride = self.layout["AGY_SLOT_SIZE"]
+        self.assertEqual(section.size, len(expected) * stride)
+        frame = struct.pack("b", self.layout["AGY_FRAME"])
+        for index, stub in enumerate(sorted(self.stubs.values(), key=lambda s: s.value)):
+            with self.subTest(stub=stub.name):
+                self.assertEqual(stub.value, section.virtual_address + index * stride)
+                self.assertEqual(stub.value % stride, 0)
+                self.assertEqual(stub.size, stride)
+                code = bytes(self.image.get_content_from_virtual_address(stub.value, stub.size))
+                lo, hi = self.layout["AGY_FRAME_LO"], self.layout["AGY_FRAME_HI"]
+                self.assertEqual(code[lo - 4:lo], b"\x48\x83\xec" + frame)
+                self.assertEqual(code[hi:hi + 4], b"\x48\x83\xc4" + frame)
+
+    def test_nullable_handler_table(self):
+        for binary in (self.obj, self.image):
+            names = {s.name for s in binary.symtab_symbols}
+            self.assertNotIn("agy_dispatch", names)
+            self.assertFalse(any(name.startswith("agy_handler__") for name in names))
+        table = self.symbols["g_agy_on"]
+        self.assertEqual(table.size, len(BOOKS) * 8)
+        self.assertEqual(table.section.type, lief.ELF.Section.TYPE.NOBITS)
+        self.assertFalse(any(table.value <= r.address < table.value + table.size
+                             for r in self.image.relocations))
+        rows = {"agy_stub__" + row["id"]: (index, row) for index, row in enumerate(BOOKS)}
+        prologues = json.loads((ANTI / "symbols/symbols.json").read_text())["prologues"]
+        obj_stubs = {s.name: s for s in self.obj.symtab_symbols if s.name.startswith("agy_stub__")}
+        relocations = [r for r in self.obj.relocations if r.has_section and r.has_symbol
+                       and r.section.name == "agy_trampolines"]
+        self.assertFalse(any(r.symbol.name.startswith("agy_on_") for r in relocations))
+        loads = [r for r in relocations if r.symbol.name == "g_agy_on"]
+        self.assertEqual(len(loads), len(self.stubs))
+        for name, stub in obj_stubs.items():
+            with self.subTest(stub=name):
+                matches = [r for r in loads if stub.value <= r.address < stub.value + stub.size]
+                self.assertEqual(len(matches), 1)
+                rel = matches[0]
+                index, row = rows[name]
+                self.assertEqual(rel.type, lief.ELF.Relocation.TYPE.X86_64_PC32)
+                self.assertEqual(rel.address - stub.value, 3)
+                self.assertEqual(rel.addend, index * 8 - 4)
+                linked = self.stubs[name]
+                code = bytes(self.image.get_content_from_virtual_address(linked.value, linked.size))
+                self.assertEqual(code[:3], b"\x4c\x8b\x25")  # MOV table[row](%rip), %r12
+                target = linked.value + 7 + struct.unpack_from("<i", code, 3)[0]
+                self.assertEqual(target, table.value + index * 8)
+                self.assertEqual(code[7:12], b"\x4d\x85\xe4\x0f\x84")  # TEST %r12; JE original
+                original = 16 + struct.unpack_from("<i", code, 12)[0]
+                self.assertGreater(original, self.layout["AGY_FRAME_HI"])
+                prologue = bytes.fromhex(prologues[row["symbol"]])
+                self.assertEqual(code[original:original + len(prologue)], prologue)
+                body = code[self.layout["AGY_FRAME_LO"]:self.layout["AGY_FRAME_HI"]]
+                # FULLCGO takes fn in %rax; ASMCGO consumes the same fn from the stack.
+                self.assertEqual(body.count(b"\x4c\x89\xe0\x48\x89\x04\x24"), 1)
+
+    def run_version(self, extra_env=None):
+        with tempfile.TemporaryDirectory(prefix="agy-stub-test-") as directory:
+            capture, log = Path(directory) / "capture.jsonl", Path(directory) / "native.log"
+            base = {k: v for k, v in os.environ.items() if not k.startswith(("AGY_", "WIRE_"))}
+            env = instrumented_env(capture=str(capture), log=str(log), base=base,
+                                   extra_env={"PYTHONHOME": sys.prefix, "_AGY_SBOXSERVE": None,
+                                              **(extra_env or {})})
+            argv = preload_argv(str(AGY), ["--version"], env=env)
+            result = subprocess.run(argv, env=env, cwd=directory, capture_output=True,
+                                    text=True, timeout=30)
+            diagnostics = result.stdout + result.stderr + (log.read_text() if log.exists() else "")
+            self.assertEqual(result.returncode, 0, diagnostics)
+            self.assertRegex(result.stdout, r"\d+\.\d+\.\d+", diagnostics)
+            lines = capture.read_text().splitlines() if capture.exists() else []
+            return diagnostics, collections.Counter(json.loads(line).get("kind") for line in lines)
+
+    def test_instrumented_version(self):
+        for conv_id in (False, True):
+            with self.subTest(conversation_id=conv_id):
+                diagnostics, kinds = self.run_version({"AGY_PROC_CONV_ID": "1" if conv_id else None})
+                self.assertIn("build-id ok", diagnostics)
+                self.assertIn("-> RETURN", diagnostics)
+                installed = set(re.findall(r"^\[antigravity/gohook\] cgo-trampoline (\w+)$",
+                                           diagnostics, re.M))
+                expected = {row["id"] for row in enabled_hooks() if conv_id or row["id"] != "file_open"}
+                self.assertEqual(installed, expected)
+                # Generic ASMCGO and specialized FULLCGO/early-return paths run during startup.
+                self.assertGreater(kinds["smoke"], 0, diagnostics)
+                self.assertGreater(kinds["readlink_filter"], 0, diagnostics)
+
+    def test_hooks_disabled_version(self):
+        diagnostics, kinds = self.run_version({"AGY_PROC_ENABLE": None})
+        self.assertNotIn("cgocall-trampoline: installed", diagnostics)
+        self.assertNotIn("-> RETURN", diagnostics)
+        self.assertFalse(kinds, diagnostics)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

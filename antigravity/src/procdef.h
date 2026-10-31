@@ -12,34 +12,17 @@
 #define AGY_PROCDEF_H
 
 #include "wirecap.h"
-#include "gocall.h"
 #include <algorithm>
 #include <cstdint>
 #include <string_view>
 
 enum agy_mech_t { AGY_OFF = 0, AGY_FULLCGO, AGY_ASMCGO };
 
-consteval agy_book_fn agy_handler_for(std::string_view id) {
-    if (id == "fh_update")       return &agy_on_fh_update;
-    if (id == "resp")            return &agy_on_resp;
-    if (id == "tls_write")       return &agy_on_tls_write;
-    if (id == "file_open")       return &agy_on_file_open;
-    if (id == "http_rt")         return &agy_on_http_rt;
-    if (id == "exit")            return &agy_on_exit;
-    if (id == "resp_chunk")      return &agy_on_resp_chunk;
-    if (id == "readlink_filter") return &agy_on_readlink_filter;
-    return &agy_on_generic;
-}
-
 struct agy_book {
     std::string_view id;      /* views the row's literal, so NUL-terminated */
     wire_mode_t      mode;
     agy_mech_t       mech;
     int32_t          retcap;
-    agy_book_fn      handler; /* what agy_dispatch() runs when this row's stub fires */
-
-    consteval agy_book(std::string_view id_, wire_mode_t mode_, agy_mech_t mech_, int32_t retcap_)
-        : id(id_), mode(mode_), mech(mech_), retcap(retcap_), handler(agy_handler_for(id_)) {}
 };
 
 #define AGY_SYM(sym)   /* empty; the trailing comma it leaves is legal */

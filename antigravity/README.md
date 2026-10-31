@@ -33,11 +33,13 @@ linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` a
    function whose body is one `AGY_STUB` macro written out once, and `gen_sources.py` emits only
    the per-stub literals (`AGY_STUBS`) into `src/symbols_gen.h` — with a
    synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto `agy_firstmoduledata.next`
-   before `agy_rt0_go()` starts and each stub calling `agy_dispatch` via `ld`-bound
-   `runtime.cgocall`/`runtime.asmcgocall`, which runs its `BOOKS` row's C handler
+   before `agy_rt0_go()` starts. `agy_enable_hooks` in `gocall.cpp` fills the zero-initialized
+   `g_agy_on` handler pointer table for enabled rows; disabled entries remain `nullptr`.
+   Each stub loads its entry once, skips the hook if null, and otherwise passes that pointer
+   through the `ld`-bound `runtime.cgocall`/`runtime.asmcgocall` gateway to its C handler
    (`agy_on_fh_update`, `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`,
    `agy_on_http_rt`, `agy_on_exit`, `agy_on_resp_chunk`, `agy_on_readlink_filter`,
-   `agy_on_generic`). frida-gum has been completely removed.
+   `agy_on_generic`). `BOOKS` stores hook metadata only. frida-gum has been completely removed.
 
 Hook events are delivered to an **embedded CPython interpreter** running on a
 dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/`).
@@ -192,15 +194,16 @@ entirely. `make_libagy.py` statically patches the target — **past its stack-ch
 with `jmp *agy_tramp_slots[slot](%rip)` into a static assembly trampoline stub
 (`agy_stub__<id>` in `agy_trampolines` (section), bound by `ld.so` via
 `R_X86_64_GLOB_DAT`) that:
-1. snapshots the Go-ABI arg registers into a stack **block**,
-2. `CALL runtime.cgocall(fn=agy_dispatch, arg=&block)` — Go's own Go→C gateway, which switches
-   to the g0/system stack and runs `agy_dispatch`, which calls the hook's C handler from its
-   `BOOKS` row (`agy_on_fh_update`, `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`,
-   `agy_on_http_rt`, `agy_on_exit`, `agy_on_resp_chunk`, `agy_on_readlink_filter`, or
-   `agy_on_generic`) in a safe cgo context (`entersyscall`, P-handoff,
-   GC coordination); the handler copies + enqueues to the pyworker,
-3. restores the registers, runs the displaced original frame-setup prologue instructions, and
-   `jmp`s back into `agy_go__* + skip + ow` via `@GOTPCREL`.
+
+1. loads `g_agy_on[book]` into `r12`; a null entry skips straight to the displaced prologue,
+2. snapshots the Go-ABI arg registers into a stack **block**,
+3. passes the same handler pointer from `r12` to the row's Go→C gateway
+   with `fn=handler, arg=&block`. `runtime.cgocall` switches to the g0/system stack and
+   provides the safe cgo context (`entersyscall`, P-handoff, GC coordination);
+   `runtime.asmcgocall` is used for the non-parking rows. The gateway runs the handler
+   directly; the handler copies + enqueues to the pyworker,
+4. restores the registers and returns if the handler set `block.action`; otherwise it runs the
+   displaced original frame-setup prologue and `jmp`s back into `agy_go__* + skip + ow` via `@GOTPCREL`.
 
 Because the trampoline never rewrites *our* return address, parking/rescheduling is
 unaffected — the goroutine may resume on any M. A hook picks its Go→C gateway *per hook*
@@ -425,13 +428,13 @@ antigravity/
   src/
     goframe.h               ← the stub frame layout, shared by goframe.cpp and the rest of the
                               C++ (gomod.cpp static_asserts every offset against agy_block)
-    goframe.cpp             ← the cgocall trampoline stub body, once, as the AGY_STUB macro over
-                              `naked` functions; compiled -fno-lto (see the note in the file)
+    goframe.cpp             ← AGY_STUB emits each `naked` trampoline using basic asm to load
+                              and check its nullable handler pointer; compiled -fno-lto
     antigravity.cpp         ← main() entrypoint + agy_init() + getaddrinfo interposer
-    gomod.cpp / gocall.cpp  ← synthetic Go moduledata + static cgocall trampoline handlers & stack unwinder
+    gomod.cpp / gocall.cpp  ← synthetic Go moduledata + handler-table setup, C handlers & stack unwinder
     pybridge.cpp/.h         ← embed libpython (C++23); pyworker boost::thread, Boost.Python
                               object/call layer, queue, dispatch
-    procdef.h               ← BOOKS, the book table, + consteval bk(): { id, mode, mech, retcap, AGY_SYM(symbol) }
+    procdef.h               ← BOOKS metadata + consteval bk(): { id, mode, mech, retcap, AGY_SYM(symbol) }
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
     __init__.py             ← lazy exports (PEP 562): ask/Session/AgyResponse/specs,
                               AgyModel, write_mcp_config
@@ -512,9 +515,18 @@ multiprocessing/pickle wire between them is same-version (see *AgyProcess* below
 `-Wl,-rpath,$(CONDA_PREFIX)/lib` so agy finds `libpython3.15.so.1.0` at runtime (agy is always
 launched via `pyagy/_env.py` under the pixi env). Build with `pixi run build-shim`
 (needs `g++` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). The host and the bridge
-build with GCC LTO (`-DTASKSOLVER_LTO=OFF` disables it). LTO cannot see the references the generated
-trampoline asm makes to `agy_dispatch` and the `g_agy_on` gate, so their definitions carry
-`AGY_ASM_REFERENCED` (`used` + `externally_visible`); anything new the asm names needs it too. `pyagy.agy_process` needs `hpack`/`brotli` only for the
+build with GCC LTO (`-DTASKSOLVER_LTO=OFF` disables it). The `g_agy_on` handler table carries
+explicit `used` and `externally_visible` attributes because LTO cannot see its asm references.
+`agy_enable_hooks` selects handlers once before Go starts; `nullptr` disables a row,
+including `file_open` when conversation-id capture is off. The stub translation unit stays
+`-fno-lto` and uses basic asm: a single load from `g_agy_on+8*book` into `r12`, a null check,
+then that same pointer passed through the Go gateway.
+
+After stub or toolchain changes, run `pixi run python test_scripts/test_agy_stubs.py` to check
+frame geometry, the nullable gate, and instrumented startup with disabled hooks and the
+conversation-id toggle. These checks require built native artifacts and make no model calls.
+
+`pyagy.agy_process` needs `hpack`/`brotli` only for the
 HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
 Run agy under the hook via the launcher in `test_scripts/` — it enables the full working
