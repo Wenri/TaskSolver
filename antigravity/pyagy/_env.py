@@ -27,7 +27,7 @@ SHIM = LIBAGY
 
 def preload_argv(agy_bin, agy_args, shim=None, env=None):
     """Build the argv that runs ``agy_bin`` (linked directly against ``libagy.so``) and record
-    ``AGY_PROC_REAL_EXE`` in ``env`` for the ``READLINK_FILTER`` hook."""
+    ``AGY_PROC_REAL_EXE`` in ``env`` for the ``readlink_filter`` hook."""
     del shim
     env = os.environ if env is None else env
     env["AGY_PROC_REAL_EXE"] = os.path.abspath(agy_bin)
@@ -59,7 +59,7 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
         "WIRE_CAPTURE": os.path.abspath(capture),
         # install the os.OpenFile conversation-id probe (overlay) so instrumented runs learn
         # the exact conversation id in-process (agy doesn't expose it via env); newest-*.db-by-
-        # mtime is the fallback. The FILE_OPEN trampoline is installed only when this is set,
+        # mtime is the fallback. The file_open trampoline is installed only when this is set,
         # and its C-side path filter keeps it cheap (Python sees only conversation-store opens).
         "AGY_PROC_CONV_ID": "1",
         "GODEBUG": ("netdns=cgo," + env.get("GODEBUG", "")).rstrip(","),

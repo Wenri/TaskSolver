@@ -3,7 +3,7 @@
 bidirectional static `ld` binding:
   - Exports `agy_rt0_go` (`runtime.rt0_go`), `agy_firstmoduledata` (`runtime.firstmoduledata`),
     and every Go hook target (`agy_go__*`) in `libagy.so`'s `.dynsym`.
-  - Imports each active static trampoline stub (`agy_stub__<ID>`, defined in `vendor/agy`'s
+  - Imports each active static trampoline stub (`agy_stub__<id>`, defined in `vendor/agy`'s
     `agy_trampolines` section) via `R_X86_64_GLOB_DAT` relocations in `agy_tramp_slots[]`
     and statically patches each hooked Go function's `entry + skip` prologue in `libagy.so`
     with `jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`), so `ld.so` binds both
@@ -116,7 +116,7 @@ def patch_wsl1_file(path: str) -> None:
 def patch_static_hooks(elf_path: str, rows: list[dict]) -> int:
     """Statically patch each active hooked Go function in `elf_path` at `entry + skip`
     with `FF 25 <disp32>` (`jmp *agy_tramp_slots[slot](%rip)`) + 1-byte marker (`0x81`/`0x83`)
-    at byte 6 so `ld.so` routes every call directly to `agy_stub__<ID>` in `vendor/agy`."""
+    at byte 6 so `ld.so` routes every call directly to `agy_stub__<id>` in `vendor/agy`."""
     post_bin = lief.parse(elf_path)
     if post_bin is None:
         raise SystemExit(f"lief failed to re-parse {elf_path}")

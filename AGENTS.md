@@ -226,11 +226,11 @@ instrumentation layer; Claude uses its SDK protocol directly:
     rename them, or change their calling convention.
 - **`antigravity/`** → the `pyagy` package: Google's Go `agy` CLI converted into `vendor/libagy.so`
   (`symbols/make_libagy.py`, exporting `agy_rt0_go`, `agy_firstmoduledata`, `agy_tramp_slots`, and
-  all 41 `agy_go__<ID>` hook targets in `.dynsym` (keyed by the procdef.h row id, mirroring
-  `agy_stub__<ID>`), while statically patching each hooked function's
-  `entry + skip` with `jmp *agy_tramp_slots[slot](%rip)` and importing `agy_stub__<ID>` via
+  all 41 `agy_go__<id>` hook targets in `.dynsym` (keyed by the procdef.h row id, mirroring
+  `agy_stub__<id>`), while statically patching each hooked function's
+  `entry + skip` with `jmp *agy_tramp_slots[slot](%rip)` and importing `agy_stub__<id>` via
   `R_X86_64_GLOB_DAT`) and linked into a C++23 host executable (`vendor/agy`, built from
-  `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<ID>`) in
+  `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<id>`) in
   `agy_trampolines`, binds both directions via `ld` / `ld.so`, and splices its synthetic
   `moduledata` (`md->bad = 1`) onto `agy_firstmoduledata.next` before calling `agy_rt0_go`.
   See `antigravity/README.md`.

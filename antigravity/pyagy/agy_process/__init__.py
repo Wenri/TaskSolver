@@ -136,7 +136,7 @@ def on_exit(stream_id, data):
     return None
 
 
-# conversation-id capture (AGY_PROC_CONV_ID): the FILE_OPEN hook (os.OpenFile) is C-filtered to
+# conversation-id capture (AGY_PROC_CONV_ID): the file_open hook (os.OpenFile) is C-filtered to
 # conversation-store paths, so `data` is a path like `.../conversations/<uuid>.db` or
 # `.../brain/<uuid>/.../transcript.jsonl`. Extract the uuid and emit a `conversation_id` event
 # (deduped per process; the FIRST distinct id is the main/top-level conversation — subagents open
@@ -157,7 +157,7 @@ def on_file_open(stream_id, data):
 
 
 def on_readlink_filter(stream_id, data):
-    # The READLINK_FILTER hook (os.readlink) RETURN-substituted "/proc/self/exe" — which resolves to
+    # The readlink_filter hook (os.readlink) RETURN-substituted "/proc/self/exe" — which resolves to
     # the loader under `ld.so --preload` — with the real agy path (`data`, from AGY_PROC_REAL_EXE), so
     # os.Executable()/self-re-exec see agy, not ld.so. `data` is the substitute path we handed back.
     _rec.event({"kind": "readlink_filter", "requested": "/proc/self/exe",

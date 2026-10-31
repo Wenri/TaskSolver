@@ -14,8 +14,8 @@
 - `AgyModel`  : TaskSolver adapter (prepare_payload/ask/rough_guess/run_once/…),
                 mirroring tasksolver.claude_code.ClaudeCodeModel.
 - `agy_process` : in-process recorder imported by the preloaded shim.
-- `HOOKS`/`by_mech`/`by_kind`/`enabled_hooks`/`sync_capable`/`DERIVED_KINDS` : the
-                machine-readable hook→kind catalog (mirror of src/procdef.h), for
+- `BOOKS`/`by_mech`/`by_kind`/`enabled_hooks`/`sync_capable`/`DERIVED_KINDS` : the
+                machine-readable mirror of BOOKS, the book table in src/procdef.h, for
                 introspecting which hooks are installed (by mechanism) and which kinds
                 can rewrite egress.
 
@@ -54,8 +54,8 @@ _LAZY = {
     "write_mcp_servers": ".config",
     "remove_mcp_servers": ".config",
     "detect_config_path": ".config",
-    # hook catalog (stdlib-pure; safe under the embedded interpreter)
-    "HOOKS": ".agy_process.hooks",
+    # the BOOKS mirror (stdlib-pure; safe under the embedded interpreter)
+    "BOOKS": ".agy_process.hooks",
     "DERIVED_KINDS": ".agy_process.hooks",
     "by_mech": ".agy_process.hooks",
     "enabled_hooks": ".agy_process.hooks",

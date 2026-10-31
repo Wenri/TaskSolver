@@ -1,13 +1,13 @@
 /* gocall.h — static cgocall-trampoline hooks, per-hook C handlers (`agy_on_*`),
  * and the frame-pointer stack unwinder (`gocall.cpp`).
  *
- * All trampoline stubs (`agy_stub__<ID>`) are emitted at build time into
+ * All trampoline stubs (`agy_stub__<id>`) are emitted at build time into
  * `agy_trampolines` (section) (bounded by `agy_tramp_region_start`
  * and `agy_tramp_region_end`). `ld` and `ld-linux-x86-64.so.2` bind both directions
  * at link/load time via `R_X86_64_GLOB_DAT` relocations:
  *   - `libagy.so` statically jumps from each hooked Go function's `entry + skip`
- *     through `agy_tramp_slots[slot]` to `agy_stub__<ID>` in `vendor/agy`.
- *   - `agy_stub__<ID>` calls its dedicated C handler (`agy_on_*`) via `ld`-bound
+ *     through `agy_tramp_slots[slot]` to `agy_stub__<id>` in `vendor/agy`.
+ *   - `agy_stub__<id>` calls its dedicated C handler (`agy_on_*`) via `ld`-bound
  *     `runtime.cgocall` / `runtime.asmcgocall` and jumps back to `agy_go__* + skip + ow`.
  */
 #ifndef AGY_GOCALL_H
@@ -16,12 +16,10 @@
 #include <cstdint>
 #include "gomod.h"
 
-using agy_hook_fn = void (*)(agy_block *);
+using agy_book_fn = void (*)(agy_block *);
 
-/* Marks the C definitions that the toplevel trampoline asm (symbols_gen.h) references by name:
- * the agy_on_* handlers and the g_agy_* flags. LTO cannot see references from toplevel asm, so it
- * could drop the handlers, change their calling convention, or localize and rename the flags.
- * `used` keeps them; `externally_visible` keeps their names and ABI. ELF visibility stays hidden. */
+/* For the C definitions the stub asm (goframe.cpp) names: LTO can't see those references, so
+ * `used` keeps them and `externally_visible` keeps their names and ABI. */
 #define AGY_ASM_REFERENCED __attribute__((used, externally_visible))
 
 #ifdef __cplusplus
@@ -55,7 +53,7 @@ int  agy_backtrace(uint64_t rbp, uint64_t base, uint64_t *out, int max);
  * frame vaddrs from agy_backtrace(rbp,base). No-op-safe if rbp is bogus. */
 void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base);
 
-/* Set the real agy binary path (from AGY_PROC_REAL_EXE) the READLINK_FILTER hook returns for
+/* Set the real agy binary path (from AGY_PROC_REAL_EXE) the readlink_filter hook returns for
  * os.readlink("/proc/self/exe"). Called once at agy_init (before Go starts). */
 void agy_set_real_exe(const char *path);
 

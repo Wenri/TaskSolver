@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared parsing for the agy toolchain: the C hook table, ELF, and Go's pclntab.
+"""Shared parsing for the agy toolchain: the C book table, ELF, and Go's pclntab.
 
 `make_libagy.py` (raw agy -> libagy.so) and `build_symbols.py` (libagy.so -> symbols.json) both
 have to find Go's moduledata, walk its function table and compute the same prologue skips. They
@@ -9,7 +9,7 @@ differed between them would be patched at one offset and resumed at another. `ge
 here, so they cannot disagree.
 
 Every fact about a hook is read from `src/procdef.h` — the targets, the install mechanism and the
-handler each kind binds to — so that one C table stays the single source the host, the generated
+handler each id binds to — so that one C table stays the single source the host, the generated
 assembly and the Python mirror are all built from. Nothing here is specific to one agy release.
 """
 import os
@@ -32,7 +32,7 @@ def _load_lief():
         lief = _lief
 
 
-#: The one hook table. Every tool here reads it from this path unless given another.
+#: The one book table. Every tool here reads it from this path unless given another.
 PROCDEF_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "procdef.h"))
 
@@ -50,8 +50,8 @@ def c_sym_name(hook_id: str) -> str:
     """The C/ELF identifier libagy.so exports a hook's Go function under.
 
     Keyed by the row's short id, not by the Go symbol: ids are already valid C identifiers, and
-    it makes every synthetic name in the pair of binaries read the same way — `agy_go__<ID>` is
-    the Go side of exactly the row whose host side is `agy_stub__<ID>`. The Go symbol a row
+    it makes every synthetic name in the pair of binaries read the same way — `agy_go__<id>` is
+    the Go side of exactly the row whose host side is `agy_stub__<id>`. The Go symbol a row
     points at lives in procdef.h and symbols.json, which is where it is resolved.
 
     One Go function reached by two rows is exported once per id, as aliases on one address.
@@ -74,15 +74,14 @@ def export_map(rows):
 
 
 # --- src/procdef.h ------------------------------------------------------------------------------
-# A row: { "ID", <symbol>, WIRE_x, "kind", AGY_x, retcap },
-# <symbol> is either a quoted literal or a MACRO "suffix" concatenation (e.g. CAC "StreamGenerate").
+# A row: { "id", WIRE_x, AGY_x, retcap, AGY_SYM(<symbol>) }; <symbol> is a quoted literal or a
+# MACRO "suffix" concatenation (e.g. CAC "StreamGenerateContent").
 _ROW = re.compile(
-    r'\{\s*"(?P<id>[A-Z0-9_]+)"\s*,\s*'
-    r'(?P<sym>(?:[A-Z_][A-Z0-9_]*\s*)?"(?:[^"\\]|\\.)*")\s*,\s*'
+    r'\{\s*"(?P<id>[a-z0-9_]+)"\s*,\s*'
     r'(?P<mode>WIRE_\w+)\s*,\s*'
-    r'"(?P<kind>[^"]*)"\s*,\s*'
     r'(?P<mech>AGY_\w+)\s*,\s*'
-    r'(?P<retcap>-?\d+)\s*\}'
+    r'(?P<retcap>-?\d+)\s*,\s*'
+    r'AGY_SYM\(\s*(?P<sym>(?:[A-Z_][A-Z0-9_]*\s*)?"(?:[^"\\]|\\.)*")\s*\)\s*\}'
 )
 _MACRO_DEF = re.compile(r'^\s*#define\s+([A-Z_][A-Z0-9_]*)\s+("(?:[^"\\]|\\.)*")\s*$', re.M)
 
@@ -106,7 +105,6 @@ def parse_procdef(src_text):
             "id": m.group("id"),
             "symbol": prefix + _unquote(sym),
             "mode": "sync" if m.group("mode") == "WIRE_SYNC" else "async",
-            "kind": m.group("kind"),
             "mech": {"AGY_OFF": "off", "AGY_FULLCGO": "fullcgo",
                      "AGY_ASMCGO": "asmcgo"}.get(m.group("mech"), m.group("mech").lower()),
             "retcap": int(m.group("retcap")),
@@ -125,20 +123,16 @@ def load_procdef(path=None):
     return rows
 
 
-# `consteval agy_hook_fn agy_handler_for(kind)`: `if (kind == "x") return &agy_on_x;` … `return &d;`
+# `consteval agy_book_fn agy_handler_for(id)`: `if (id == "x") return &agy_on_x;` … `return &d;`
 _HANDLER_FN = re.compile(
-    r'consteval\s+agy_hook_fn\s+agy_handler_for\s*\([^)]*\)\s*\{(.*?)\n\}', re.S)
-_HANDLER_CASE = re.compile(r'kind\s*==\s*"([^"]*)"\s*\)\s*return\s*&\s*(\w+)\s*;')
+    r'consteval\s+agy_book_fn\s+agy_handler_for\s*\([^)]*\)\s*\{(.*?)\n\}', re.S)
+_HANDLER_CASE = re.compile(r'\bid\s*==\s*"([^"]*)"\s*\)\s*return\s*&\s*(\w+)\s*;')
 _HANDLER_DEFAULT = re.compile(r'^\s*return\s*&\s*(\w+)\s*;', re.M)
 
 
 def load_handlers(path=None):
-    """`({kind: C handler}, default handler)` parsed from procdef.h's `agy_handler_for`.
-
-    The generated trampoline stubs call the handler directly, and the C `agy_hook` rows carry the
-    same pointer in `.handler`. Parsing the C function keeps those two from drifting: a kind given
-    a dedicated handler in procdef.h gets it in the assembly too, with no second table to update.
-    """
+    """`({id: C handler}, default handler)` parsed from procdef.h's `agy_handler_for`, so the
+    generated stubs call the same handler the C rows name."""
     path = path or PROCDEF_PATH
     with open(path) as f:
         src = f.read()
@@ -160,7 +154,7 @@ def active_rows(rows):
 def hook_targets(rows):
     """Go symbols to resolve and export, in procdef order with the gateways last.
 
-    Inactive (`AGY_OFF`) rows are kept: the C `agy_hook` constructor resolves every row in the
+    Inactive (`AGY_OFF`) rows are kept: the C `agy_book` constructor resolves every row in the
     table at compile time, and keeping their addresses means re-enabling one is a procdef edit
     rather than an archaeology session.
     """

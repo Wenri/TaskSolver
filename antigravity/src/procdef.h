@@ -1,294 +1,127 @@
-/* procdef.h — the hook table as a plain constexpr array + a consteval index lookup.
+/* procdef.h — BOOKS, the book table: { "id", MODE, MECH, RETCAP, AGY_SYM("go.symbol") }
  *
- * No X-macro: HOOKS is ordinary data, and each hook is addressed by a compile-time
- * `hk("ID")` lookup instead of a generated HK_* enum (a typo is a compile error — the
- * consteval `hk` can't reach its throw for a real id). Each row's Go-symbol vaddr/skip
- * are RESOLVED AT COMPILE TIME by agy_hook's consteval constructor (agy_sym/agy_skip
- * from symbols_gen.h), so the runtime install loop reads baked fields and never does a
- * symbol lookup. HOOKS[hk("X")] is X's row.
- *
- *   { "ID", "go.symbol.Name", MODE, "kind", MECH, RETCAP }
- *
- * ID     short unique tag, used by hk("ID") at the call sites (was the HK_* enum name).
- * MODE   WIRE_ASYNC (log, non-blocking) or WIRE_SYNC (block for a modify verdict).
- * kind   string tag passed to Python dispatch(kind, stream_id, data).
- * MECH   how the hook is bound (see symbols/gen_sources.py and gocall.cpp):
- *          (There is no gum-attach mech any more. frida-gum was retired and removed completely.)
- *          AGY_FULLCGO = static cgocall trampoline (`agy_stub__<ID>` in `agy_trampolines`, gocall.cpp)
- *                        via full `runtime.cgocall` — for PARKING funcs (entersyscall + P handoff,
- *                        GC-safe). The default.
- *          AGY_ASMCGO  = static cgocall trampoline via `runtime.asmcgocall` — the lighter g0-switch
- *                        variant (no syscall transition), for HOT NON-parking funcs (os.Getenv,
- *                        tls_write): same 100% reliability, less per-fire overhead. NOT for parking
- *                        funcs (no P handoff → stall).
- *          AGY_OFF     = NOT hooked. The row is kept as documentation of a hook that stalls agy
- *                        or collides with another.
- *        `make_libagy.py` and `gen_sources.py` emit and bind every non-OFF hook via `ld` /
- *        `ld.so` `R_X86_64_GLOB_DAT` relocations. FULLCGO and ASMCGO hooks share one `agy_trampolines`
- *        section + synthetic moduledata (`gomod.cpp`).
- * RETCAP how a hook's RETURN value WOULD be captured. Historically this also selected the gum
- *        listener: any nonzero RETCAP meant intercepting the return, which costs a return-address
- *        rewrite Go's stack
- *        unwinder trips on — while the return points at gum's trampoline, a GC unwind of that
- *        goroutine hits an unknown PC → throw("unknown pc")/crash (empty turn, exit 2). A 2026-07-05
- *        per-hook bisect (each RETCAP≠0 hook flipped to a gum attach alone — that mech has since
- *        been removed — N turns via the full worker path) pinned the rule: crash probability
- *        scales with FIRES/TURN × P(GC-unwind in the window)
- *        — silent hooks that fire 0× on this agy build (SER_ROOT, MAR_PROMPT, PROTO_MARSHAL,
- *        GET_DELTA_*, RESP_TEXT/THINKING/VIEW — dead 1.0.16 paths; answer flows via gemini_coder →
- *        FH_UPDATE)
- *        = 0 crashes but 0 data; hot non-parking TLS_DECRYPT (per TLS record) = 74/80 ≈ 92%; parking
- *        TLS_READ (netpoll, resumes on another M) = 0/15 catastrophic (all-trampoline baseline: 80/80
- *        = 100%). So NO RETCAP≠0 hook is both safe AND useful — every one is AGY_OFF, and new captures
- *        read an ENTRY arg via the trampoline instead (see H2_PIPE_WRITE / the cgt_* app hooks, e.g.
- *        RESP_CHUNK replaced the TLS_DECRYPT response). NEVER hook runtime-special funcs (runtime.main,
- *        goroutine entries) — Go validates their return PC. Values:
- *           0   no return capture — don't intercept the return (every installed hook).
- *          <0  would need special-casing by ID plus entry-saved state (TLS_READ/TLS_DECRYPT: a
- *              buffer ptr / conn). -1 is the marker; the value is unused.
- *          >0  a "returns []byte/string" leaf getter: emit the RAX=ptr/RBX=len return (stream_id 0)
- *              when len >= RETCAP (256 skips tiny protos on the hot proto.Marshal; 1 = emit any
- *              non-empty).
- *        Every RETCAP≠0 hook is AGY_OFF, so none of this executes today — it is the recorded
- *        register contract for anyone re-deriving a return capture on the trampoline.
+ * id      the row's one name: bk() key, agy_stub__/agy_go__ suffix, and its events' kind.
+ * MODE    WIRE_ASYNC logs; WIRE_SYNC blocks for a verdict.
+ * MECH    AGY_FULLCGO for functions that may park; AGY_ASMCGO (cheaper) only for hot ones that
+ *         never park; AGY_OFF not hooked, the row's comment says why.
+ * RETCAP  return capture: 0 none, <0 special, >0 min bytes. Return hooks broke Go's GC unwinder,
+ *         so every RETCAP != 0 row is AGY_OFF; captures read entry args instead.
+ * AGY_SYM the hooked Go symbol, read by symbols/agyelf.py; empty in C++.
  */
 #ifndef AGY_PROCDEF_H
 #define AGY_PROCDEF_H
 
-#include "wirecap.h"      /* wire_mode_t (WIRE_ASYNC / WIRE_SYNC) */
-#include "gocall.h"       /* agy_hook_fn + per-hook C handlers (agy_on_*) */
-#include "symbols_gen.h"  /* consteval agy_fn / agy_skip / agy_ow / agy_stub / agy_slot */
+#include "wirecap.h"
+#include "gocall.h"
+#include "symbols_gen.h"
 #include <cstdint>
 #include <string_view>
 
-/* How each hook is installed. AGY_OFF must be 0 so a hook is only ever installed when explicitly
- * set. AGY_FULLCGO / AGY_ASMCGO are both cgocall-trampoline hooks (the Go→C gateway differs:
- * full runtime.cgocall vs the lighter runtime.asmcgocall); see the MECH doc above. */
 enum agy_mech_t { AGY_OFF = 0, AGY_FULLCGO, AGY_ASMCGO };
 
-/* Compile-time map from a hook's kind tag to its dedicated C handler function. */
-consteval agy_hook_fn agy_handler_for(std::string_view kind) {
-    if (kind == "fh_update")       return &agy_on_fh_update;
-    if (kind == "resp")            return &agy_on_resp;
-    if (kind == "tls_write")       return &agy_on_tls_write;
-    if (kind == "file_open")       return &agy_on_file_open;
-    if (kind == "http_rt")         return &agy_on_http_rt;
-    if (kind == "exit")            return &agy_on_exit;
-    if (kind == "resp_chunk")      return &agy_on_resp_chunk;
-    if (kind == "readlink_filter") return &agy_on_readlink_filter;
+/* symbols/agyelf.py parses this too: keep one `if (id == "x") return &h;` per line. */
+consteval agy_book_fn agy_handler_for(std::string_view id) {
+    if (id == "fh_update")       return &agy_on_fh_update;
+    if (id == "resp")            return &agy_on_resp;
+    if (id == "tls_write")       return &agy_on_tls_write;
+    if (id == "file_open")       return &agy_on_file_open;
+    if (id == "http_rt")         return &agy_on_http_rt;
+    if (id == "exit")            return &agy_on_exit;
+    if (id == "resp_chunk")      return &agy_on_resp_chunk;
+    if (id == "readlink_filter") return &agy_on_readlink_filter;
     return &agy_on_generic;
 }
 
-/* One table row. `fn`/`stub`/`handler`/`skip`/`ow`/`slot` are resolved at compile time by
- * the consteval constructor: `fn` is the ld-bound Go function pointer (`&agy_go__*`), `stub` is
- * the static `agy_trampolines` assembly stub (`&agy_stub__<ID>`), and `handler` is the dedicated
- * C hook function (`&agy_on_*`).
- *
- * Only `id`, `mech`, `skip`, `stub` and `slot` are read back at runtime (hk() and
- * agy_enable_hooks). Of the rest, `fn` is load-bearing for a reason that is not visible here —
- * see its comment below — while `mode`, `retcap`, `handler` and `ow` are inert: `handler` is bound
- * directly by the generated stub assembly, and `mode`/`retcap` record the row's intended contract
- * rather than drive anything. Keep that in mind before assuming a field has a consumer.
- *
- * The kind tag is NOT a field: each stub passes its own `agy_kind__<id>` to the handler, so the
- * table would only be holding a second pointer to the same string. `kind_` is still consumed at
- * compile time, by agy_handler_for(). */
-struct agy_hook {
-    std::string_view id;      /* short unique id, for hk() compile-time lookup */
-    wire_mode_t       mode;
+/* One row; everything but the id is resolved at compile time from symbols_gen.h. */
+struct agy_book {
+    std::string_view id;      /* views the row's literal, so NUL-terminated */
+    wire_mode_t      mode;
     agy_mech_t       mech;
-    int32_t          retcap;  /* return-capture policy: 0 none, <0 special-cased, >0 min bytes to emit */
-    /* Never read at runtime, and NOT removable: taking `&agy_go__*` here is the only reference
-     * that imports an AGY_OFF row's Go symbol into this binary (active rows are referenced by
-     * their stub assembly instead). That import is what makes `ld.so` fail loudly if a future agy
-     * drops or renames a function the table still lists. */
-    agy_go_fn_t      fn;      /* = agy_fn(id), ld-bound Go function pointer */
-    agy_go_fn_t      stub;    /* = agy_stub(id), static assembly trampoline stub */
-    agy_hook_fn      handler; /* = agy_handler_for(kind), statically bound C hook handler */
-    uint32_t         skip;    /* = agy_skip(id), baked at compile time */
-    uint32_t         ow;      /* = agy_ow(id), displaced frame-prologue byte length (8 or 11) */
-    int              slot;    /* = agy_slot(id), index in agy_tramp_slots[] (-1 if AGY_OFF) */
+    int32_t          retcap;
+    agy_go_fn_t      fn;      /* never read: imports AGY_OFF rows too, so ld.so rejects an agy missing one */
+    agy_go_fn_t      stub;
+    agy_book_fn      handler;
+    uint32_t         skip;    /* patch site: entry + skip */
+    uint32_t         ow;      /* displaced prologue bytes */
+    int              slot;    /* agy_tramp_slots[] index, -1 if AGY_OFF */
 
-    /* Every resolver keys on `id_`, the same primary key hk() uses: symbols_gen.h already did the
-     * id → Go symbol → address join at generation time. `name_` is therefore unused here, but it
-     * stays in the signature because each row literal below is where the Go symbol is *declared* —
-     * it is what build_symbols.py resolves and what pyagy's HOOKS mirror reports. */
-    consteval agy_hook(std::string_view id_, [[maybe_unused]] const char *name_, wire_mode_t mode_,
-                       const char *kind_, agy_mech_t mech_, int32_t retcap_)
+    consteval agy_book(std::string_view id_, wire_mode_t mode_, agy_mech_t mech_, int32_t retcap_)
         : id(id_), mode(mode_), mech(mech_),
           retcap(retcap_), fn(agy_fn(id_)), stub(agy_stub(id_)),
-          handler(agy_handler_for(kind_)),
+          handler(agy_handler_for(id_)),
           skip(agy_skip(id_)), ow(agy_ow(id_)), slot(agy_slot(id_)) {}
 };
 
-inline constexpr agy_hook HOOKS[] = {
-/* Safe ordinary startup function; fires many times, no auth/network needed. Liveness smoke.
- * Hot (~116 fires/turn) + non-parking → AGY_ASMCGO (the lighter trampoline; was gum, retired).
- * CGT_GETENV below (same os.Getenv entry) stays AGY_OFF to avoid double-patching. */
-{ "SMOKE_GETENV", "os.Getenv",                      WIRE_ASYNC, "smoke",     AGY_ASMCGO,  0 },
+#define AGY_SYM(sym)   /* empty; the trailing comma it leaves is legal */
 
-/* Clean end-of-capture marker. os.Exit(code) is the explicit clean-exit path — a crash/panic
- * won't fire it, which is correct (the capture then has no clean marker). Fires once; a normal Go
- * func (register ABI, spliceable prologue, live scheduler) → FULLCGO, unlike runtime.exit (tiny
- * teardown assembly). The "exit" branch in agy_cgo_hook reads code=rax and SYNC-emits it so the
- * worker writes {"kind":"exit","code":N} BEFORE agy's exit_group syscall. */
-{ "EXIT",         "os.Exit",                        WIRE_SYNC,  "exit",      AGY_FULLCGO, 0 },
-
-/* conversation-id capture (overlay, gated by AGY_PROC_CONV_ID — skipped unless that is set).
- * os.OpenFile: agy opens .../conversations/<uuid>.db and .../brain/<uuid>/.../transcript.jsonl,
- * so the uuid is in the path arg. AGY_FULLCGO — rare (gated) + does an openat syscall (wants the
- * P handoff), so NOT an asmcgo candidate (asmcgo is reserved for HOT non-parking funcs). The
- * "file_open" branch in agy_cgo_hook does the arg read (name.ptr=rax, name.len=rbx) + the path
- * filter, and install_hooks gates the trampoline on AGY_PROC_CONV_ID so an ordinary run installs
- * nothing here at all. */
-{ "FILE_OPEN",    "os.OpenFile",                     WIRE_ASYNC, "file_open", AGY_FULLCGO, 0 },
-
-/* /proc/self/exe correction via the trampoline FILTER mode. Under `ld.so --preload`, the kernel's
- * /proc/self/exe points at the loader, not agy — so os.Executable()/os-init readlink (and agy's
- * self-re-exec) misresolve. We hook os.readlink (the inner, loop-bearing impl — NOT os.Readlink,
- * which Go inlines so its symbol never fires; verified empirically). Signature is the same,
- * os.readlink(name string)(string,error): name.ptr=rax,name.len=rbx; returns string.ptr=rax,
- * string.len=rbx,err.tab=rcx,err.data=rdi. The agy_cgo_hook branch filters name=="/proc/self/exe":
- * for it, it writes the real agy path (from AGY_PROC_REAL_EXE) into the return regs + sets
- * block.action → RETURN (skips the body); every other readlink PASSes. FULLCGO — the PASS branch runs
- * a readlinkat syscall that can park (os.OpenFile precedent). Fires once/turn at os-init, so it's a
- * deterministic, login-independent liveness signal. */
-{ "READLINK_FILTER", "os.readlink",                  WIRE_ASYNC, "readlink_filter", AGY_FULLCGO, 0 },
-
-/* egress capture — the full model REQUEST. Non-parking + hot (~55 fires/turn) → AGY_ASMCGO
- * (lighter trampoline; was gum, retired). agy_cgo_hook reads the request bytes as an entry arg
- * (c=rax, b.ptr=rbx, b.len=rcx) — the reliable replacement for the retired gum on_enter read. */
-{ "TLS_WRITE",    "crypto/tls.(*Conn).Write",        WIRE_ASYNC, "tls_write", AGY_ASMCGO,  0 },
-/* http2 pipe.Write gets each de-framed response body chunk as []byte (receiver=RAX,
- * p.ptr=RBX, p.len=RCX). It PARKS under reader/writer mutex/cond contention, so a gum
- * attach stalls agy — hooked via the park-safe cgocall trampoline instead (the chunk is
- * an ENTRY arg, safe-read off the g0 stack in agy_cgo_hook). A more-direct HTTP/2 body
- * capture; overlaps the TLS_DECRYPT → h2reassemble path. */
-{ "H2_PIPE_WRITE","net/http/internal/http2.(*pipe).Write", WIRE_ASYNC, "resp",   AGY_FULLCGO, 0 },
-/* AGY_OFF — the ingress RESPONSE (decrypted inbound record) is an on_leave []byte. It FIRES and
- * carries real data, but per TLS record (hot) → a gum return hook accumulates GC-unwind windows:
- * measured 74/80 ≈ 92% (~8-12% hard crash) in the 2026-07-05 bisect — intermittently unsafe (see
- * header RETCAP). The wire RESPONSE is instead captured via the RESP_CHUNK entry-arg trampoline hook
- * (toStreamResponseChunk); genai_turn's response comes from there, the request from TLS_WRITE.
- * retcap<0: on_leave reads RAX=ptr/RBX=len but keys the event on the conn saved on_enter. */
-{ "TLS_DECRYPT",  "crypto/tls.(*halfConn).decrypt",   WIRE_ASYNC, "tls_read",  AGY_OFF,    -1 },
-/* AGY_OFF — Conn.Read PARKS on netpoll and resumes on another M, so a gum return hook here is
- * CATASTROPHIC: the return-rewrite window spans the park → 0/15 turns (every one exit-2/empty) in
- * the 2026-07-05 bisect. It's also trampoline-hookable ONLY via full cgocall, not asmcgo (tested):
- * asmcgo (no P handoff) stalled the model turn 0/3 while the baseline was 2/2; full cgocall
- * (entersyscall + P handoff) completed 4/6. The hot netpoll read path needs the P handed off
- * on each fire, so the usual "asmcgo for hot funcs" heuristic is INVERTED here. Left OFF
- * anyway: it yields NO data (the plaintext is the RETURN value the entry-only trampoline
- * can't read; the response is already captured via RESP_CHUNK), while full-cgo costs ~135
- * cgocalls/turn + as many _Gsyscall GC-scan windows on the read path — all for a bare fire marker.
- * retcap<0: on_leave uses the return count (RAX) + the buffer ptr saved on_enter. */
-{ "TLS_READ",     "crypto/tls.(*Conn).Read",         WIRE_ASYNC, "tls_read",  AGY_OFF,    -1 },
-/* RoundTrip(t=RAX, req=RBX) PARKS on the round-trip → cgocall trampoline, AGY_FULLCGO (parking →
- * needs the P handoff; asmcgo would risk a stall). Emits an http_rt marker keyed by the request
- * ptr; the response is a RETURN the trampoline can't read and the request is already captured via
- * TLS_WRITE, so this is a fire/timing marker more than new data. */
-{ "HTTP_RT",      "net/http.(*Transport).RoundTrip", WIRE_ASYNC, "http_rt",   AGY_FULLCGO, 0 },
-
-/* AGY_OFF — app-layer capture R&D (CPU-only funcs returning []byte). Retired: a gum return hook is
- * GC-unwind-unsafe (see header RETCAP). Moot regardless — the 2026-07-05 bisect confirmed all three
- * fire 0× on agy 1.0.16 (dead jetski model-package paths; the request goes out via the CloudCode
- * client → TLS_WRITE), so a gum return hook here was 100% safe ONLY because it never executes.
- * retcap>0 → the generic on_leave getter branch (emit the RAX/RBX return; 256 skips tiny protos). */
-{ "SER_ROOT",     "google3/third_party/jetski/cli/model/model.(*RootModel).Serialize",    WIRE_ASYNC, "serialize", AGY_OFF,   1 },
-{ "MAR_PROMPT",   "google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON", WIRE_ASYNC, "marshal",   AGY_OFF,   1 },
-{ "PROTO_MARSHAL","google3/third_party/golang/gogo/protobuf/proto/proto.Marshal",            WIRE_ASYNC, "proto_marshal", AGY_OFF, 256 },
-
-/* cgocall-TRAMPOLINE app-boundary hooks (Approach A — the robust general mechanism).
- * The parking targets (SendUserMessage/callbackStreamer.Send): we redirect them through
- * a static trampoline (gocall.cpp) + a synthetic moduledata so GC stack-unwind is safe.
- * MODE/retcap are advisory here — the trampoline reads args on the g0 stack and never
- * intercepts the return. Both PARK → AGY_FULLCGO (the P handoff; asmcgo would risk a stall). */
-{ "CGT_SEND_USER_MSG", "google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage", WIRE_ASYNC, "send_user_msg", AGY_FULLCGO, 0 },
-{ "CGT_STREAM_SEND",   "google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send",          WIRE_ASYNC, "stream_send",   AGY_FULLCGO, 0 },
-
-/* AGY_OFF — cgocall-trampoline validation probe on the BENIGN os.Getenv. Disabled because
- * os.Getenv is ALSO hooked by SMOKE_GETENV (gum) above; installing both would patch one
- * function entry with a gum inline hook AND a trampoline redirect (overlapping SMC → crash).
- * The trampoline mechanism is exercised by the real trampoline hooks; this validator is redundant. */
-{ "CGT_GETENV", "os.Getenv", WIRE_ASYNC, "cgt_getenv", AGY_OFF, 0 },
-
-/* AGY_OFF — model-TEXT leaf getters (gemini_coder pipeline): frameless nosplit getters that
- * RETURN the streamed assistant text (on_leave RAX=ptr,RBX=len). Retired: a gum return hook is
- * GC-unwind-unsafe (see header RETCAP), and being frameless they aren't trampoline-hookable
- * either (no prologue to relocate). Moot — the 2026-07-05 bisect confirmed both fire 0× on 1.0.16
- * (old api_server_pb/codeium_common surfaces); the answer is captured at FH_UPDATE (app_response). */
-{ "GET_DELTA_CCPA", "google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText", WIRE_ASYNC, "delta_ccpa", AGY_OFF,   1 },
-{ "GET_DELTA_CMPL", "google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText", WIRE_ASYNC, "delta_completion", AGY_OFF,   1 },
-/* AGY_OFF — RESPONSE getters (assembled assistant text + thinking as Go strings, on_leave
- * RAX=ptr,RBX=len). Retired: a gum return hook is GC-unwind-unsafe (see header RETCAP). The
- * 2026-07-05 bisect found them 30/30 safe but firing 0× on 1.0.16 (this cortex_go_proto surface is
- * dead on the gemini_coder path) — so they'd add nothing even if kept. Thinking, if wanted, is a
- * thought part in the RESP_CHUNK SSE stream, not here. */
-{ "RESP_TEXT",     "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse", WIRE_ASYNC, "resp_text",     AGY_OFF,   1 },
-{ "RESP_THINKING", "google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking", WIRE_ASYNC, "resp_thinking", AGY_OFF,   1 },
-{ "RESP_VIEW",     "google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response",   WIRE_ASYNC, "resp_view",     AGY_OFF,   1 },
-
-/* model-TEXT framework choke points (provider-agnostic). On the parking
- * stream-consumer path → cgocall trampoline; AGY_PROC_CGT_ARGS walks their args to
- * locate the accumulated/per-delta assistant text. finalize = full per-turn text. */
-{ "FH_FINALIZE", "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse", WIRE_ASYNC, "fh_finalize", AGY_FULLCGO, 0 },
-/* THE clean response consumer (Plan 7 probe winner): updateWithStep's RSI arg points
- * at the planner response; the assistant text is a Go string at +0x8/+0x10 — ONE
- * deref, the stable cortex proto layout. agy_cgo_hook decodes it directly to
- * `app_response` (far shallower than AppendStep/OnStepsChanged's 6-deep graphs). */
-{ "FH_UPDATE",   "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep",          WIRE_ASYNC, "fh_update",   AGY_FULLCGO, 0 },
-{ "FH_PROCESS",  "google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream",           WIRE_ASYNC, "fh_process",  AGY_FULLCGO, 0 },
-{ "CORE_PLANSTEP", "google3/third_party/oneharness/internal/core/core.createPlannerResponseStep",                                WIRE_ASYNC, "core_planstep", AGY_FULLCGO, 0 },
-/* consumer-entry hook for the RESPONSE (solves the return-value problem without
- * capturing a return): AppendStep/SetStep take the completed *Step — with the
- * assembled assistant text (GetPlannerResponse→GetResponse) — as an ENTRY arg.
- * Trampoline (they park committing to the trajectory); walk with AGY_PROC_CGT_ARGS. */
-{ "TRAJ_APPENDSTEP", "google3/third_party/oneharness/internal/core/integration/integration.(*ToolContextTrajectory).AppendStep", WIRE_ASYNC, "traj_appendstep", AGY_FULLCGO, 0 },
-{ "TRAJ_ADDSTEP",    "google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep",                                             WIRE_ASYNC, "traj_addstep",    AGY_FULLCGO, 0 },
-{ "TRAJ_ONSTEPS",    "google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged",     WIRE_ASYNC, "traj_onsteps",    AGY_FULLCGO, 0 },
-/* Plan 7 — the commit point one frame above OnStepsChanged (runExecution → AppendStep
- * → observers). Fires on the live --print path (unlike ToolContextTrajectory.AppendStep
- * above). Kept as a documented chain endpoint + stack anchor; the live probe found its
- * *Step text is 6 struct-hops deep (as fragile as OnStepsChanged), so the clean
- * `app_response` decode lives on FH_UPDATE, not here. */
-{ "TRAJ_APPENDSTEP_EXEC", "google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep",           WIRE_ASYNC, "traj_appendstep_exec", AGY_FULLCGO, 0 },
-
-/* CodeAssistClient RPC trace. (*CodeAssistClient).* is agy's single client
- * to the CloudCode backend — each method is one named RPC with typed proto args. They
- * park on the HTTP round-trip → cgocall trampoline. The kind is the RPC label (→ a
- * time-ordered app-level trace); AGY_PROC_STACK adds the call stack, AGY_PROC_CGT_ARGS
- * walks the request proto at entry. StreamGenerateContent is the model turn itself. */
+inline constexpr agy_book BOOKS[] = {
+/* Liveness smoke: hot, never parks. */
+{ "smoke", WIRE_ASYNC, AGY_ASMCGO, 0, AGY_SYM("os.Getenv") },
+/* Clean-exit marker, SYNC so it is written before the process exits. */
+{ "exit", WIRE_SYNC, AGY_FULLCGO, 0, AGY_SYM("os.Exit") },
+/* Conversation id from the opened path; only with AGY_PROC_CONV_ID. */
+{ "file_open", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("os.OpenFile") },
+/* Answers /proc/self/exe with the real agy path (os.Readlink is inlined, so hook os.readlink). */
+{ "readlink_filter", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("os.readlink") },
+/* The model request: hot, never parks. */
+{ "tls_write", WIRE_ASYNC, AGY_ASMCGO, 0, AGY_SYM("crypto/tls.(*Conn).Write") },
+/* Each HTTP/2 response body chunk. */
+{ "resp", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("net/http/internal/http2.(*pipe).Write") },
+/* Off: the plaintext is a return value; resp_chunk captures the response. */
+{ "tls_decrypt", WIRE_ASYNC, AGY_OFF, -1, AGY_SYM("crypto/tls.(*halfConn).decrypt") },
+{ "tls_read", WIRE_ASYNC, AGY_OFF, -1, AGY_SYM("crypto/tls.(*Conn).Read") },
+/* Round-trip timing marker. */
+{ "http_rt", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("net/http.(*Transport).RoundTrip") },
+/* Off: return-value getters that never fire on current agy. */
+{ "serialize", WIRE_ASYNC, AGY_OFF, 1, AGY_SYM("google3/third_party/jetski/cli/model/model.(*RootModel).Serialize") },
+{ "marshal", WIRE_ASYNC, AGY_OFF, 1, AGY_SYM("google3/third_party/jetski/cli/model/model.(*PromptModel).MarshalJSON") },
+{ "proto_marshal", WIRE_ASYNC, AGY_OFF, 256, AGY_SYM("google3/third_party/golang/gogo/protobuf/proto/proto.Marshal") },
+/* App boundary: the user message in, the streamed reply out. */
+{ "send_user_msg", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage") },
+{ "stream_send", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send") },
+/* Off: smoke already patches os.Getenv. */
+{ "cgt_getenv", WIRE_ASYNC, AGY_OFF, 0, AGY_SYM("os.Getenv") },
+/* Off: return-value getters that never fire on current agy. */
+{ "delta_ccpa", WIRE_ASYNC, AGY_OFF, 1, AGY_SYM("google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText") },
+{ "delta_completion", WIRE_ASYNC, AGY_OFF, 1, AGY_SYM("google3/third_party/jetski/codeium_common_pb/codeium_common_go_proto.(*CompletionDelta).GetDeltaText") },
+{ "resp_text", WIRE_ASYNC, AGY_OFF, 1, AGY_SYM("google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetResponse") },
+{ "resp_thinking", WIRE_ASYNC, AGY_OFF, 1, AGY_SYM("google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking") },
+{ "resp_view", WIRE_ASYNC, AGY_OFF, 1, AGY_SYM("google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response") },
+/* Response consumers; fh_update decodes the answer as app_response. */
+{ "fh_finalize", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse") },
+{ "fh_update", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep") },
+{ "fh_process", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream") },
+{ "core_planstep", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/oneharness/internal/core/core.createPlannerResponseStep") },
+/* Trajectory updates, each taking the completed step as an entry arg. */
+{ "traj_appendstep", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/oneharness/internal/core/integration/integration.(*ToolContextTrajectory).AppendStep") },
+{ "traj_addstep", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep") },
+{ "traj_onsteps", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged") },
+{ "traj_appendstep_exec", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM("google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep") },
+/* CloudCode RPCs, one row per method. */
 #define CAC "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient)."
-{ "RPC_STREAM_GEN",   CAC "StreamGenerateContent",            WIRE_ASYNC, "rpc_stream_generate",   AGY_FULLCGO, 0 },
-{ "RPC_GEN",          CAC "GenerateContent",                  WIRE_ASYNC, "rpc_generate",          AGY_FULLCGO, 0 },
-{ "RPC_LOAD_CA",      CAC "FetchLoadCodeAssistResponse",      WIRE_ASYNC, "rpc_load_code_assist",  AGY_FULLCGO, 0 },
-{ "RPC_USERINFO",     CAC "FetchUserInfo",                    WIRE_ASYNC, "rpc_fetch_userinfo",    AGY_FULLCGO, 0 },
-{ "RPC_MODELS",       CAC "FetchAvailableModels",             WIRE_ASYNC, "rpc_fetch_models",      AGY_FULLCGO, 0 },
-{ "RPC_EXPERIMENTS",  CAC "ListExperiments",                  WIRE_ASYNC, "rpc_list_experiments",  AGY_FULLCGO, 0 },
-{ "RPC_QUOTA",        CAC "RetrieveUserQuotaSummary",         WIRE_ASYNC, "rpc_quota",             AGY_FULLCGO, 0 },
-/* RecordConversationOffered was removed upstream by agy 1.2.11. */
-{ "RPC_REC_TRAJ",     CAC "RecordTrajectorySegmentAnalytics", WIRE_ASYNC, "rpc_record_trajectory", AGY_FULLCGO, 0 },
-{ "RPC_WRITE_ACLS",   CAC "WriteTrajectoryACLs",              WIRE_ASYNC, "rpc_write_acls",        AGY_FULLCGO, 0 },
+{ "rpc_stream_generate", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC "StreamGenerateContent") },
+{ "rpc_generate", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC "GenerateContent") },
+{ "rpc_load_code_assist", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC "FetchLoadCodeAssistResponse") },
+{ "rpc_fetch_userinfo", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC "FetchUserInfo") },
+{ "rpc_fetch_models", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC "FetchAvailableModels") },
+{ "rpc_list_experiments", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC "ListExperiments") },
+{ "rpc_quota", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC "RetrieveUserQuotaSummary") },
+{ "rpc_record_trajectory", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC "RecordTrajectorySegmentAnalytics") },
+{ "rpc_write_acls", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC "WriteTrajectoryACLs") },
 #undef CAC
-/* response-stream decode probes: the wire genai_turn RESPONSE (restores what TLS_DECRYPT
- * carried before retirement). HTTP/1.1 SSE is pull-based, so the decrypted read is a return
- * value with no entry-arg source; toStreamResponseChunk instead receives each DECODED SSE
- * `data:` line as an entry arg (line.ptr=rax, line.len=rbx) — read on the trampoline in
- * agy_cgo_hook. Parking response path → AGY_FULLCGO. sendUsageDelta carries model id + usage;
- * run with AGY_PROC_CGT_ARGS to walk its args. */
+/* The response stream: each decoded SSE line, and the usage. */
 #define CAC2 "google3/third_party/jetski/language_server/code_assist_client/codeassistclient."
-{ "RESP_CHUNK",  CAC2 "toStreamResponseChunk",                   WIRE_ASYNC, "resp_chunk",  AGY_FULLCGO, 0 },
-{ "USAGE_DELTA", CAC2 "(*streamResponseHandler).sendUsageDelta", WIRE_ASYNC, "usage_delta", AGY_FULLCGO, 0 },
+{ "resp_chunk", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC2 "toStreamResponseChunk") },
+{ "usage_delta", WIRE_ASYNC, AGY_FULLCGO, 0, AGY_SYM(CAC2 "(*streamResponseHandler).sendUsageDelta") },
 #undef CAC2
 };
 
-inline constexpr int HK_COUNT = (int)(sizeof(HOOKS) / sizeof(HOOKS[0]));
+inline constexpr int BK_COUNT = (int)(sizeof(BOOKS) / sizeof(BOOKS[0]));
 
-/* Compile-time hook index by id: HOOKS[hk("TLS_READ")] etc. A typo is a COMPILE error —
- * the throw is unreachable for a real id, but reaching it aborts constant evaluation. */
-consteval int hk(std::string_view id) {
-    for (int i = 0; i < HK_COUNT; i++)
-        if (HOOKS[i].id == id) return i;
+/* Row index by id; an unknown id fails compilation. */
+consteval int bk(std::string_view id) {
+    for (int i = 0; i < BK_COUNT; i++)
+        if (BOOKS[i].id == id) return i;
     throw "unknown hook id";
 }
 

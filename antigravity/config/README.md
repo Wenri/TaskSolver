@@ -15,7 +15,7 @@ Register it with `mcp.json` (template here). Steps:
 
 1. Substitute the placeholders:
    ```bash
-   sed -e "s#<AGYHOOK>#$(cd .. && pwd)#" -e "s#<TASKSOLVER>#$(cd ../.. && pwd)#" \
+   sed -e "s#<AGYBOOK>#$(cd .. && pwd)#" -e "s#<TASKSOLVER>#$(cd ../.. && pwd)#" \
        mcp.json > mcp.local.json
    ```
 2. Place `mcp.local.json`'s `mcpServers` block where your agy build reads MCP

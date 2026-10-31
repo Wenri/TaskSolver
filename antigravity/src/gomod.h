@@ -165,21 +165,16 @@ typedef struct {
     uint64_t rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11, rdx, rbp;
 } agy_go_regs;   /* 88 bytes; lives in the trampoline locals region (all-ones scanned) */
 
-/* The block the trampoline builds on its stack and passes to the C hook (RDI).
- * `kind` is a borrowed const char* (the procdef.h kind tag) baked into the
- * trampoline as an imm64; regs are the target's snapshotted arg registers.
- * `action` is the filter verdict the hook writes back: 0 = PASS (run the body,
- * the default), nonzero = RETURN (the hook has written the Go-ABI return values
- * into `regs`; the stub restores them and `ret`s to the caller, skipping the
- * body). It occupies the former frame pad (OFF_ACTION), so GH_FRAME is unchanged. */
-typedef struct { uint64_t kind; agy_go_regs regs; uint64_t action; } agy_block;
+/* The block a stub builds and hands its handler. `book` is the row's BOOKS index. `action` is
+ * the handler's verdict: 0 runs the body; nonzero returns the Go-ABI values it wrote into `regs`. */
+typedef struct { uint64_t book; agy_go_regs regs; uint64_t action; } agy_block;
 
 /* _func total stride in pclntable: 44-byte header + funcdata[2] (no pcdata). */
 #define AGY_FUNC_STRIDE 52
 
 /* The synthetic moduledata is a process singleton kept in STATIC (BSS) storage — no heap, nothing
  * to leak, no OOM path. These bound its fixed-size tables; agy_gomod_prepare rejects (rc<0) anything
- * larger, and antigravity.cpp static_asserts HK_COUNT <= AGY_GOMOD_MAX_SLOTS so the hook table can
+ * larger, and antigravity.cpp static_asserts BK_COUNT <= AGY_GOMOD_MAX_SLOTS so BOOKS can
  * never outgrow it (bump the cap if you add that many hooks). MAX_MAPBYTES bounds the locals bitmap:
  * mapbytes = ((frame-8)/8 + 7)/8, which is 2 for the real frame (GH_FRAME = 120). */
 #define AGY_GOMOD_MAX_SLOTS    64

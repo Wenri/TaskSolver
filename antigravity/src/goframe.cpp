@@ -1,64 +1,26 @@
-/* The static cgocall trampoline stubs — the Go→C bridge, written once as a macro.
+/* The cgocall trampoline stubs: the Go→C bridge, written once as AGY_STUB.
  *
- * libagy.so's hooked Go functions are statically patched (by symbols/make_libagy.py) at
- * `entry + skip` with `jmp *agy_tramp_slots[slot](%rip)`, and ld.so fills each slot with the
- * address of the matching `agy_stub__<ID>` below. A stub therefore runs ON the hooked goroutine's
- * stack, in Go's register ABI, with the original arguments still live in registers.
+ * make_libagy.py patches each hooked function's `entry + skip` with `jmp *agy_tramp_slots[slot]`,
+ * and ld.so points the slot at agy_stub__<id>, which runs on the goroutine's stack with the Go
+ * register-ABI arguments live. When its flag is set, a stub saves them into the goframe.h frame,
+ * runs the handler through runtime.cgocall or runtime.asmcgocall and restores them. It then runs
+ * the displaced prologue and resumes the function, or returns if the handler set block.action.
+ * X15 is re-zeroed after C code, as Go's ABI requires.
  *
- * Each stub:
- *   1. bails straight to the displaced prologue when its enable flag is clear (zero added cost
- *      once hooks are off),
- *   2. otherwise saves the Go register ABI's argument/scratch registers into the frame described
- *      by goframe.h, hands `&block` to the dedicated C handler through runtime.cgocall /
- *      runtime.asmcgocall, and restores them,
- *   3. runs the frame-setup instructions it displaced, then jumps back into the hooked function
- *      just past them — unless the handler asked to return early (`action` non-zero), in which
- *      case it returns with the handler's values in place.
- *
- * `xorps %xmm15, %xmm15` before the gateway call and before `ret`: Go's ABI requires X15 to be
- * zero, and the C handler may have clobbered it.
- *
- * WHY NAKED FUNCTIONS, AND WHAT THAT COSTS
- * A stub has no C-expressible body: it runs in Go's register ABI, must not touch the stack before
- * it has saved those registers, splices instruction bytes displaced out of another function, and
- * leaves by jumping into the middle of one. `naked` is what buys that — the compiler emits no
- * prologue, no epilogue and no frame — and a naked body may contain only *basic* asm, so there are
- * no operand constraints and every symbol is named directly. Three consequences worth knowing:
- *
- *   - `__builtin_unreachable()` after each body is load-bearing, not decoration. Without it GCC
- *     appends a `ud2` after the asm, which lands past this stub's `.org` padding and pushes the
- *     next stub off its slot boundary.
- *   - this file is compiled `-fno-lto` (see CMakeLists.txt). There is nothing here to optimise,
- *     and it keeps LTO from folding two stubs it considers identical or moving them out of the
- *     section, either of which would break the one-stub-per-slot layout.
- *   - the C handlers and flags named in the asm are invisible to the optimiser, so they carry
- *     AGY_ASM_REFERENCED (gocall.h).
- *
- * The per-hook parameters (which handler, which gateway, which enable flag, how far to resume,
- * and which prologue bytes were displaced) come from symbols/gen_sources.py as one AGY_STUB line
- * per hook in goframe_gen.h. Nothing here is specific to an agy release; the numbers all derive
- * from src/procdef.h plus symbols/symbols.json.
- *
- * Slots are a fixed stride apart so src/gomod.cpp can describe the whole region to Go's runtime
- * as one synthetic function; unused tail bytes are NOP-padded.
+ * Naked, because the body has no C equivalent; that allows only basic asm, so the C symbols it
+ * names carry AGY_ASM_REFERENCED (gocall.h). __builtin_unreachable() stops GCC appending a ud2
+ * past the slot, and -fno-lto (CMakeLists.txt) keeps LTO from merging or moving stubs.
  */
 #include "goframe.h"
-#include "gocall.h"
-#include "symbols_gen.h"
+#include "procdef.h"
 
 #define AGY_S_(x)   #x
 #define AGY_S(x)    AGY_S_(x)
 
-/* ---- one stub ---------------------------------------------------------------------------------
- * id          hook id; defines agy_stub__<id>, resumes into agy_go__<id>, and takes its kind
- *             tag from agy_kind__<id> (goframe_gen.h)
- * enable      byte flag gating the hook (g_agy_enabled, or g_agy_conv_id for FILE_OPEN)
- * handler     dedicated C handler (agy_on_*), called via the gateway
- * gateway     agy_go__CGOCALL (parking, GC-safe) or agy_go__ASMCGOCALL (lighter g0 switch)
- * resume_off  skip + ow: where to re-enter the hooked function, past the displaced prologue
- * ...         the displaced frame-setup bytes themselves (8 or 11 of them)
- */
-#define AGY_STUB(id, enable, handler, gateway, resume_off, ...)                              \
+/* id: the row id; book: its BOOKS index, stored in block.book; enable: the gating flag;
+ * gateway: agy_go__CGOCALL or agy_go__ASMCGOCALL; resume_off: skip + ow; ...: the displaced bytes. */
+#define AGY_STUB(id, book, enable, handler, gateway, resume_off, ...)                        \
+    static_assert(bk(#id) == (book), "goframe_gen.h is out of step with BOOKS");             \
     extern "C" __attribute__((naked, used, visibility("default"),                            \
                               aligned(AGY_SLOT_SIZE), section(AGY_TRAMP_SECTION)))           \
     void agy_stub__##id() {                                                                  \
@@ -77,8 +39,7 @@
             "movq   %r11, " AGY_S(AGY_OFF_R11) "(%rsp)\n\t"                                  \
             "movq   %rdx, " AGY_S(AGY_OFF_RDX) "(%rsp)\n\t"                                  \
             "movq   %rbp, " AGY_S(AGY_OFF_RBP) "(%rsp)\n\t"                                  \
-            "leaq   agy_kind__" #id "(%rip), %rax\n\t"                                       \
-            "movq   %rax, " AGY_S(AGY_OFF_KIND) "(%rsp)\n\t"                                 \
+            "movq   $" #book ", " AGY_S(AGY_OFF_BOOK) "(%rsp)\n\t"                           \
             "xorl   %eax, %eax\n\t"                                                          \
             "movq   %rax, " AGY_S(AGY_OFF_ACTION) "(%rsp)\n\t"                               \
             "leaq   " AGY_S(AGY_OFF_BLOCK) "(%rsp), %rbx\n\t"                                \
@@ -111,19 +72,9 @@
             "xorps  %xmm15, %xmm15\n\t"                                                      \
             "ret\n\t"                                                                        \
             ".balign " AGY_S(AGY_SLOT_SIZE) ", 0x90");                                       \
-        __builtin_unreachable();   /* suppress GCC's trailing ud2 — see the note above */     \
+        __builtin_unreachable();                                                             \
     }
 
-/* goframe_gen.h is generated beside symbols_gen.h: the per-hook kind strings, then one AGY_STUB
- * per installed hook.
- *
- * Placement needs no anchor and no region label. Each stub is `aligned` to the slot stride and
- * pads its own tail with `.balign`, so the stubs tile the section exactly and the linker's
- * __start_/__stop_ symbols (goframe.h) are the true bounds.
- *
- * A stub outgrowing its slot would silently widen the stride, and it cannot be caught here: the
- * body's forward branches are not sized until relaxation, so `.` is not a constant the assembler
- * can test. agy_init() checks the aggregate instead — the section must measure exactly
- * nslots * stride — which fails for exactly the same reason, at startup, with a clear message. */
+/* One AGY_STUB per installed hook. Each is slot-aligned and pads itself, so they tile the section;
+ * one outgrowing its slot is caught by agy_init(), as branch sizes aren't known here. */
 #include "goframe_gen.h"
-

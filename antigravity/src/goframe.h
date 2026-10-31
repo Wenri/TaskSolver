@@ -1,14 +1,10 @@
-/* The stub frame layout — the one place the assembly and the C++ agree on it.
- *
- * src/goframe.cpp builds this frame on the hooked goroutine's stack and hands `&block` to a C
- * handler; gocall.cpp reads it back as `agy_block` (src/gomod.h). A naked function's body is basic assembly and cannot
- * use `offsetof`, so the offsets below are literals; gomod.cpp static_asserts every one of them
- * against the real struct. Add or reorder a field in `agy_go_regs` and the build stops here rather than
- * silently writing registers to the wrong slots.
+/* The stub frame layout, shared by goframe.cpp's asm and the C++ that reads it as agy_block
+ * (src/gomod.h). Basic asm can't use offsetof, so the offsets are literals, and gomod.cpp
+ * static_asserts each one against agy_block.
  *
  *   rsp+0    handler fn      \ the two words runtime.cgocall / runtime.asmcgocall consume
  *   rsp+8    &block          /
- *   rsp+16   block.kind      <- agy_block starts here
+ *   rsp+16   block.book      <- agy_block starts here
  *   rsp+24   block.regs.rax .. rsp+104 block.regs.rbp   (Go's register ABI, 11 words)
  *   rsp+112  block.action    <- 0 = PASS (run the body), nonzero = RETURN
  *   rsp+120  (caller)
@@ -16,23 +12,20 @@
 #ifndef AGY_GOFRAME_H
 #define AGY_GOFRAME_H
 
-#define AGY_FRAME        120   /* total bytes the stub subtracts from rsp */
-#define AGY_SLOT_SIZE    256   /* stride between stubs in agy_trampolines */
-/* No leading dot: a section whose name is a valid C identifier makes the linker
- * define __start_/__stop_ for it, which is where the region bounds below come from. */
-#define AGY_TRAMP_SECTION "agy_trampolines"
+#define AGY_FRAME        120   /* bytes the stub subtracts from rsp */
+#define AGY_SLOT_SIZE    256   /* stride between stubs */
+#define AGY_TRAMP_SECTION "agy_trampolines"   /* a C identifier, so ld defines __start_/__stop_ */
 
-/* Offsets of the live frame within a slot, for the synthetic moduledata's locals bitmap:
- * the region where the frame is established, so Go's GC scans it conservatively. */
+/* Where in a slot the frame is live (after the subq, up to the addq), for the synthetic pcsp. */
 #define AGY_FRAME_LO      17
-#define AGY_FRAME_HI     182
+#define AGY_FRAME_HI     179
 
-#define AGY_OFF_FN         0   /* cgocall arg 0: the C handler to run on g0 */
+#define AGY_OFF_FN         0   /* cgocall arg 0: the C handler */
 #define AGY_OFF_ARG        8   /* cgocall arg 1: &block */
-#define AGY_OFF_BLOCK     16   /* agy_block itself */
+#define AGY_OFF_BLOCK     16
 
-#define AGY_OFF_KIND      16   /* block.kind   — borrowed const char* (procdef kind tag) */
-#define AGY_OFF_RAX       24   /* block.regs.* — Go register ABI argument order */
+#define AGY_OFF_BOOK      16   /* block.book: the row's BOOKS index */
+#define AGY_OFF_RAX       24   /* block.regs.*, in Go register ABI order */
 #define AGY_OFF_RBX       32
 #define AGY_OFF_RCX       40
 #define AGY_OFF_RDI       48
@@ -43,11 +36,9 @@
 #define AGY_OFF_R11       88
 #define AGY_OFF_RDX       96
 #define AGY_OFF_RBP      104
-#define AGY_OFF_ACTION   112   /* block.action — the hook's PASS/RETURN verdict */
+#define AGY_OFF_ACTION   112   /* block.action */
 
-/* The trampoline region, straight from the linker. `ld` defines these for any output section
- * whose name is a valid C identifier, so the bounds are whatever was actually emitted — no label
- * to keep in sync, and no assumption about which stub the compiler placed first. */
+/* The trampoline region, bounded by the linker. */
 #ifdef __cplusplus
 extern "C" {
 #endif

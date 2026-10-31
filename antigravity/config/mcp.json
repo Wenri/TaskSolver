@@ -1,11 +1,11 @@
 {
-  "_comment": "Template: register the antigravity TaskSolver-backed MCP server with agy. agy 1.0.16 reads ~/.gemini/config/mcp_config.json (schema {\"mcpServers\": {name: {command, args, env}}}). Replace <AGYHOOK> with the absolute path to this repo's antigravity/ dir and <TASKSOLVER> with the TaskSolver repo root. pyagy.config.write_mcp_config() generates this for you (rendering tools/context to a spec and pointing AGY_MCP_SPEC at it); this file is the manual equivalent.",
+  "_comment": "Template: register the antigravity TaskSolver-backed MCP server with agy. agy 1.0.16 reads ~/.gemini/config/mcp_config.json (schema {\"mcpServers\": {name: {command, args, env}}}). Replace <AGYBOOK> with the absolute path to this repo's antigravity/ dir and <TASKSOLVER> with the TaskSolver repo root. pyagy.config.write_mcp_config() generates this for you (rendering tools/context to a spec and pointing AGY_MCP_SPEC at it); this file is the manual equivalent.",
   "mcpServers": {
     "antigravity-tasksolver": {
       "command": "python3",
-      "args": ["<AGYHOOK>/pyagy/agy_mcp_server.py"],
+      "args": ["<AGYBOOK>/pyagy/agy_mcp_server.py"],
       "env": {
-        "PYTHONPATH": "<AGYHOOK>:<TASKSOLVER>"
+        "PYTHONPATH": "<AGYBOOK>:<TASKSOLVER>"
       }
     }
   }

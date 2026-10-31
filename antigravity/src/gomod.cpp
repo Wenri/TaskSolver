@@ -31,7 +31,7 @@
  * agy_block puts them. Add or reorder a field in agy_go_regs and the build stops here. */
 #define AGY_CHK(f, off) static_assert(AGY_OFF_BLOCK + offsetof(agy_block, f) == (off), \
                                       "trampoline frame offset drifted from agy_block::" #f)
-AGY_CHK(kind,     AGY_OFF_KIND);    AGY_CHK(regs.rax, AGY_OFF_RAX);
+AGY_CHK(book,     AGY_OFF_BOOK);    AGY_CHK(regs.rax, AGY_OFF_RAX);
 AGY_CHK(regs.rbx, AGY_OFF_RBX);     AGY_CHK(regs.rcx, AGY_OFF_RCX);
 AGY_CHK(regs.rdi, AGY_OFF_RDI);     AGY_CHK(regs.rsi, AGY_OFF_RSI);
 AGY_CHK(regs.r8,  AGY_OFF_R8);      AGY_CHK(regs.r9,  AGY_OFF_R9);

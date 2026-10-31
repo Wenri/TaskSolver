@@ -9,11 +9,11 @@ It does this by converting the upstream PIE `agy` binary into `antigravity/vendo
 (`make_libagy.py`: clears `DF_1_PIE`, sets `DT_SONAME = "libagy.so"`, exports
 `runtime.rt0_go` as `agy_rt0_go`, `runtime.firstmoduledata` as `agy_firstmoduledata`,
 `agy_tramp_slots` (`512` bytes in `.bss`), and all 41 Go hook target functions as
-`agy_go__<ID>` in `.dynsym` — keyed by the hook row's id, so the Go side of a row reads as the
-mirror of its host side `agy_stub__<ID>` (a function two rows name is exported under both ids,
+`agy_go__<id>` in `.dynsym` — keyed by the hook row's id, so the Go side of a row reads as the
+mirror of its host side `agy_stub__<id>` (a function two rows name is exported under both ids,
 and the two cgocall gateways use the synthetic ids `CGOCALL`/`ASMCGOCALL`) — statically patches
 each hooked Go function's `entry + skip` with
-`jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`), and imports all 28 `agy_stub__<ID>`
+`jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`), and imports all 28 `agy_stub__<id>`
 symbols via `R_X86_64_GLOB_DAT` relocations, while retaining `PT_TLS` inside `libagy.so`) and
 linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` as its first
 `DT_NEEDED` dependency (so `ld-linux-x86-64.so.2` assigns `libagy.so` static TLS slot 1 at
@@ -25,7 +25,7 @@ linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` a
      `R_X86_64_GLOB_DAT`) of `agy_rt0_go`, `agy_firstmoduledata`, and every `agy_go__*`
      target function (plus libc `getaddrinfo` interposition for cgo DNS).
    - `libagy.so` → `vendor/agy`: `ld.so` populates `agy_tramp_slots[slot]` in `libagy.so`
-     with the address of each static trampoline stub `agy_stub__<ID>` in `vendor/agy` at
+     with the address of each static trampoline stub `agy_stub__<id>` in `vendor/agy` at
      process load time — zero runtime code patching or `mprotect`.
 2. **Static cgocall trampolines (`src/goframe.cpp` + `src/gocall.cpp` + `src/gomod.cpp`)**
    emitted at build time into the `agy_trampolines` section — named without a leading dot so the
@@ -178,9 +178,9 @@ worker load (~15%). Both cgocall-trampoline variants are **100% across 55+ turns
 `os.OpenFile`, which does an openat syscall and wants the P handoff)
 — and capture is done via **entry-arg trampoline reads** (`agy_cgo_hook` reads args off the g0
 stack: the `tls_write` request, the h2 `resp` chunk, the app boundary). The gum `leave=1` hooks
-that read *return* values are `AGY_OFF` (`TLS_DECRYPT`, the leaf getters, the R&D marshalers); the
-decoded answer still arrives via the `FH_UPDATE` trampoline as `app_response`. The one capture that
-was return-only — the wire `genai_turn` **response** (`TLS_DECRYPT`) — is recaptured entry-arg on
+that read *return* values are `AGY_OFF` (`tls_decrypt`, the leaf getters, the R&D marshalers); the
+decoded answer still arrives via the `fh_update` trampoline as `app_response`. The one capture that
+was return-only — the wire `genai_turn` **response** (`tls_decrypt`) — is recaptured entry-arg on
 the trampoline: `codeassistclient.toStreamResponseChunk(line string)` gets each raw SSE line
 (`data: {"response": {...}}`) in `rax`/`rbx`, emitted as `resp_chunk` (and `sendUsageDelta` carries
 model/usage). Reassembling those chunks into `genai_turn` is DONE — `BaseCorrelator.feed_chunk`
@@ -189,7 +189,7 @@ model/usage). Reassembling those chunks into `genai_turn` is DONE — `BaseCorre
 **Approach A (`src/gocall.cpp` + `src/gomod.cpp`)** avoids gum's return-tracking
 entirely. `make_libagy.py` statically patches the target — **past its stack-check prologue** —
 with `jmp *agy_tramp_slots[slot](%rip)` into a static assembly trampoline stub
-(`agy_stub__<ID>` in `agy_trampolines` (section), bound by `ld.so` via
+(`agy_stub__<id>` in `agy_trampolines` (section), bound by `ld.so` via
 `R_X86_64_GLOB_DAT`) that:
 1. snapshots the Go-ABI arg registers into a stack **block**,
 2. `CALL runtime.cgocall(fn=handler, arg=&block)` — Go's own Go→C gateway, which switches
@@ -221,7 +221,7 @@ trampoline-frame window.
 **The GH_SPILL geometry (the fix that made the cgocall variant correct).** `runtime.cgocall`
 uses Go's internal ABI and spills its two register args (`fn`, `arg`) into **caller-provided
 slots at `[S]` and `[S+8]`** (`S` = rsp at the `call`). So the block must **not** sit at `S`,
-or cgocall overwrites `block.kind`(@`[S]`) and `block.regs.rax`(@`[S+8]`) before the hook reads
+or cgocall overwrites `block.hook`(@`[S]`) and `block.regs.rax`(@`[S+8]`) before the hook reads
 them — the symptom was `os.Getenv` returning `""` → `$HOME is not defined` at startup. The fix
 reserves **16 dead bytes (`GH_SPILL`) below the block**, baked into the **fixed** frame
 (`GH_FRAME = 16 + 96 block + 8 pad = 120`), *not* a transient `sub` around the call — a
@@ -406,7 +406,7 @@ antigravity/
   CMakeLists.txt            ← the build: generates symbols_gen.h + links vendor/agy against vendor/libagy.so
   vendor/                   ← libagy.so (164 MB) + built vendor/agy host executable
   symbols/
-    agyelf.py               ← shared parsing: procdef.h rows, hook targets and the kind→handler map
+    agyelf.py               ← shared parsing: procdef.h rows, hook targets and the id→handler map
                               (read from `agy_handler_for`), ELF (lief) + Go pclntab/moduledata,
                               prologue skip/extract. The three tools below cannot disagree about
                               an offset. lief loads lazily, so --hooks needs no binary library.
@@ -430,7 +430,7 @@ antigravity/
     gomod.cpp / gocall.cpp  ← synthetic Go moduledata + static cgocall trampoline handlers & stack unwinder
     pybridge.cpp/.h         ← embed libpython (C++23); pyworker boost::thread, Boost.Python
                               object/call layer, queue, dispatch
-    procdef.h                ← constexpr hook table + consteval hk() (id, symbol, mode, kind, mech, …)
+    procdef.h               ← BOOKS, the book table, + consteval bk(): { id, mode, mech, retcap, AGY_SYM(symbol) }
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
     __init__.py             ← lazy exports (PEP 562): ask/Session/AgyResponse/specs,
                               AgyModel, write_mcp_config
@@ -482,7 +482,7 @@ the pixi tasks:
 ```bash
 pixi run shim-agy-update  # fetch the LATEST agy, convert it, print the new CMakeLists pins
 pixi run shim-symbols     # after an agy update: re-resolve symbols.json + recompile
-pixi run shim-hooks       # after editing src/procdef.h: regen pyagy's HOOKS mirror
+pixi run shim-hooks       # after editing src/procdef.h: regen pyagy's BOOKS mirror
 pixi run build-shim       # a plain recompile (configure fetches the vendored deps on first run)
 ```
 
@@ -567,7 +567,7 @@ The cgocall-trampoline path was re-verified end-to-end on a **real-kernel** clou
 - ✅ **gdb direct root-cause proof** (impossible on WSL1, where gdb couldn't run): breaking
   inside `runtime.cgocall` for our invocation shows its prologue spilling `fn→[S]`, `arg→[S+8]`
   (`mov %rax,0x38(%rsp)`/`mov %rbx,0x40(%rsp)`); with the fix `&block − S == 16`, so after the
-  spill `block.kind`(→`"cgt_getenv"`) and `block.regs.rax` are byte-for-byte intact — the two
+  spill the block's first word (then the `"cgt_getenv"` tag pointer) and `block.regs.rax` are byte-for-byte intact — the two
   spill slots land entirely in the dead `GH_SPILL` scratch. Pre-fix (`&block==S`) they'd be
   clobbered.
 - ℹ️ **Headless login in a cloud container:** agy's Google OAuth uses an out-of-band
@@ -677,7 +677,7 @@ capture that kind (e.g. no `rpc_*` events):
   never costs the others, and `.stacks` loads the funcmap only when touched). Also
   `.transcript`, `.exit_status`, `.instrumented` (+`.instrumented_reason`). `.stacks` needs
   `symbols/funcmap.tsv.gz` (`pixi run shim-symbols`); pass `funcmap=` to override it.
-- **Introspect the capture surface**: `from pyagy import HOOKS, by_mech, enabled_hooks,
+- **Introspect the capture surface**: `from pyagy import BOOKS, by_mech, enabled_hooks,
   by_kind, sync_capable, DERIVED_KINDS` — the machine-readable mirror of `src/procdef.h`
   (which hooks are installed, by mechanism, and which kinds rewrite egress).
 - **Env knobs** (set for you by the kwargs above; also usable with `run-agy.sh`):
@@ -743,7 +743,7 @@ print(pyagy.read_transcript(cid))                    # stored turns (also s.hist
 - **How the id is captured:** instrumented runs read it *exactly, in-process* — agy doesn't put
   `ANTIGRAVITY_CONVERSATION_ID` in its own env (it's per-conversation, injected only into child
   processes), and it isn't in any RPC/`SendUserMessage` entry-arg graph, but agy opens
-  `conversations/<uuid>.db` / `brain/<uuid>/…`, so the **`FILE_OPEN` hook** (`os.OpenFile`,
+  `conversations/<uuid>.db` / `brain/<uuid>/…`, so the **`file_open` hook** (`os.OpenFile`,
   an overlay enabled by `AGY_PROC_CONV_ID`) reads the uuid straight from the path and
   emits a `conversation_id` event. If a run's capture lacks that event, resolution falls back
   to newest-`*.db`-by-mtime. (`capture_conversation_id` prefers the event; verified event == mtime.)

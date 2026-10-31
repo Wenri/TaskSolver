@@ -34,7 +34,7 @@
 static_assert(AGY_TRAMP_FRAME == AGY_FRAME && AGY_TRAMP_SLOT_SIZE == AGY_SLOT_SIZE
               && AGY_TRAMP_FRAME_LO == AGY_FRAME_LO && AGY_TRAMP_FRAME_HI == AGY_FRAME_HI,
               "symbols_gen.h and goframe.h disagree about the trampoline frame");
-static_assert(HK_COUNT <= AGY_GOMOD_MAX_SLOTS,
+static_assert(BK_COUNT <= AGY_GOMOD_MAX_SLOTS,
               "more hooks than the static synthetic-moduledata holds — bump AGY_GOMOD_MAX_SLOTS in gomod.h");
 
 /* ---- logging -------------------------------------------------------------- */

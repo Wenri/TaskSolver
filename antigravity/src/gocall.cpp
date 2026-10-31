@@ -1,12 +1,12 @@
 /* gocall.cpp — static cgocall-trampoline hooks, per-hook C handlers (`agy_on_*`),
  * and the frame-pointer stack unwinder.
  *
- * Every trampoline stub (`agy_stub__<ID>`) is assembled at build time into
+ * Every trampoline stub (`agy_stub__<id>`) is assembled at build time into
  * `agy_trampolines` (section) (emitted from `src/goframe.cpp` +
  * `symbols_gen.h`) with all Go targets (`agy_go__*`), gateways (`runtime.cgocall`,
  * `runtime.asmcgocall`), and per-hook C handlers (`agy_on_*`) bound by `ld`.
  * `libagy.so` statically patches each hooked Go function's `entry + skip` with
- * `jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`) and imports `agy_stub__<ID>`
+ * `jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`) and imports `agy_stub__<id>`
  * via `R_X86_64_GLOB_DAT`, so `ld-linux-x86-64.so.2` binds both directions at
  * process load time with zero runtime code patching or `mprotect`.
  */
@@ -31,6 +31,9 @@
 
 AGY_ASM_REFERENCED uint8_t g_agy_enabled = 0;
 AGY_ASM_REFERENCED uint8_t g_agy_conv_id = 0;
+
+/* The hooked row's id, which its events carry as their kind. */
+static const char *book_id(const agy_block *b) { return BOOKS[b->book].id.data(); }
 
 long agy_safe_read(uint64_t addr, void *dst, unsigned long n)
 {
@@ -157,7 +160,7 @@ static void cgt_diag(agy_block *b)
     static const char *nm[10] = { "rax", "rbx", "rcx", "rdi", "rsi",
                                   "r8", "r9", "r10", "r11", "rdx" };
     o += std::snprintf(rep + o, sizeof(rep) - o, "kind=%s recv=0x%llx\n",
-                  (const char *)b->kind, (unsigned long long)r[0]);
+                  book_id(b), (unsigned long long)r[0]);
     for (int i = 0; i < 10 && o < sizeof(rep) - 80; i++) {
         unsigned char s[24];
         char asc[25];
@@ -239,13 +242,13 @@ static inline void cgt_common(agy_block *b)
 {
     if (g_cgt_args) cgt_diag(b);
     if (g_cgt_stack)
-        agy_emit_stack((const char *)b->kind, b->regs.rbp, g_gh_base);
+        agy_emit_stack(book_id(b), b->regs.rbp, g_gh_base);
 }
 
 extern "C" AGY_ASM_REFERENCED void agy_on_generic(agy_block *b)
 {
     cgt_common(b);
-    wire_event_t ev = { .kind = (const char *)b->kind,
+    wire_event_t ev = { .kind = book_id(b),
                        .stream_id = b->regs.rax, .mode = WIRE_ASYNC };
     wire_emit(&ev);
 }
@@ -254,7 +257,7 @@ extern "C" AGY_ASM_REFERENCED void agy_on_fh_update(agy_block *b)
 {
     cgt_common(b);
     cgt_response_emit(b);
-    wire_event_t ev = { .kind = (const char *)b->kind,
+    wire_event_t ev = { .kind = book_id(b),
                        .stream_id = b->regs.rax, .mode = WIRE_ASYNC };
     wire_emit(&ev);
 }
@@ -262,13 +265,13 @@ extern "C" AGY_ASM_REFERENCED void agy_on_fh_update(agy_block *b)
 extern "C" AGY_ASM_REFERENCED void agy_on_resp(agy_block *b)
 {
     cgt_common(b);
-    cgt_bytes_emit((const char *)b->kind, b->regs.rax, b->regs.rbx, b->regs.rcx, true);
+    cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rbx, b->regs.rcx, true);
 }
 
 extern "C" AGY_ASM_REFERENCED void agy_on_tls_write(agy_block *b)
 {
     cgt_common(b);
-    cgt_bytes_emit((const char *)b->kind, b->regs.rax, b->regs.rbx, b->regs.rcx, true);
+    cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rbx, b->regs.rcx, true);
 }
 
 extern "C" AGY_ASM_REFERENCED void agy_on_file_open(agy_block *b)
@@ -278,7 +281,7 @@ extern "C" AGY_ASM_REFERENCED void agy_on_file_open(agy_block *b)
     size_t len = (size_t)b->regs.rbx;
     if (p && len > 0 && len < 4096 &&
         (mem_has(p, len, "conversations/") || mem_has(p, len, "/brain/"))) {
-        wire_event_t ev = { .kind = (const char *)b->kind, .stream_id = 0,
+        wire_event_t ev = { .kind = book_id(b), .stream_id = 0,
                            .data = (const uint8_t *)p, .len = len, .mode = WIRE_ASYNC };
         wire_emit(&ev);
     }
@@ -287,14 +290,14 @@ extern "C" AGY_ASM_REFERENCED void agy_on_file_open(agy_block *b)
 extern "C" AGY_ASM_REFERENCED void agy_on_http_rt(agy_block *b)
 {
     cgt_common(b);
-    wire_event_t rt = { .kind = (const char *)b->kind, .stream_id = b->regs.rbx, .mode = WIRE_ASYNC };
+    wire_event_t rt = { .kind = book_id(b), .stream_id = b->regs.rbx, .mode = WIRE_ASYNC };
     wire_emit(&rt);
 }
 
 extern "C" AGY_ASM_REFERENCED void agy_on_exit(agy_block *b)
 {
     cgt_common(b);
-    wire_event_t ev = { .kind = (const char *)b->kind, .stream_id = b->regs.rax, .mode = WIRE_SYNC };
+    wire_event_t ev = { .kind = book_id(b), .stream_id = b->regs.rax, .mode = WIRE_SYNC };
     wire_emit(&ev);
     wire_shutdown();
 }
@@ -302,7 +305,7 @@ extern "C" AGY_ASM_REFERENCED void agy_on_exit(agy_block *b)
 extern "C" AGY_ASM_REFERENCED void agy_on_resp_chunk(agy_block *b)
 {
     cgt_common(b);
-    cgt_bytes_emit((const char *)b->kind, b->regs.rax, b->regs.rax, b->regs.rbx, false);
+    cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rax, b->regs.rbx, false);
 }
 
 extern "C" AGY_ASM_REFERENCED void agy_on_readlink_filter(agy_block *b)
@@ -325,7 +328,7 @@ extern "C" AGY_ASM_REFERENCED void agy_on_readlink_filter(agy_block *b)
             kr[n > 0 ? n : 0] = 0;
             GHLOG("os.readlink(/proc/self/exe): kernel=%s -> RETURN %s", kr, g_real_exe);
         }
-        wire_event_t ev = { .kind = (const char *)b->kind, .stream_id = nptr,
+        wire_event_t ev = { .kind = book_id(b), .stream_id = nptr,
                            .data = (const uint8_t *)g_real_exe, .len = g_real_exe_len,
                            .mode = WIRE_ASYNC };
         wire_emit(&ev);
@@ -339,10 +342,10 @@ void agy_enable_hooks(uint64_t base, bool conv_id)
     g_cgt_stack = std::getenv("AGY_PROC_STACK") != nullptr;
 
     int n_tramp = 0, n_asm = 0;
-    for (int i = 0; i < HK_COUNT; i++) {
-        const auto &h = HOOKS[i];
+    for (int i = 0; i < BK_COUNT; i++) {
+        const auto &h = BOOKS[i];
         if (h.mech != AGY_FULLCGO && h.mech != AGY_ASMCGO) continue;
-        if (i == hk("FILE_OPEN") && !conv_id) continue;
+        if (i == bk("file_open") && !conv_id) continue;
         n_tramp++;
         n_asm += (h.mech == AGY_ASMCGO);
         GHLOG("cgo-trampoline %.*s @ +%u -> %p (ld-bound static slot %d)",
