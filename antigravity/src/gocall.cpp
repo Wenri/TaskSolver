@@ -2,7 +2,7 @@
  * and the frame-pointer stack unwinder.
  *
  * Every trampoline stub (`agy_stub__<ID>`) is assembled at build time into
- * `.section .agy_trampolines,"ax",@progbits` (via `AGY_EMIT_STATIC_TRAMPOLINES` in
+ * `.section .agy_trampolines,"ax",@progbits` (assembled from `src/trampolines.S` +
  * `symbols_gen.h`) with all Go targets (`agy_go__*`), gateways (`runtime.cgocall`,
  * `runtime.asmcgocall`), and per-hook C handlers (`agy_on_*`) bound by `ld`.
  * `libagy.so` statically patches each hooked Go function's `entry + skip` with
@@ -13,7 +13,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#define AGY_EMIT_STATIC_TRAMPOLINES
 #include "gomod.h"
 #include "gocall.h"
 #include "procdef.h"

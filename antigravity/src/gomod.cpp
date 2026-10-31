@@ -11,6 +11,8 @@
  * `runtime.modulesinit()` to skip our synthetic module while `findfunc` still walks
  * `agy_firstmoduledata.next`.
  */
+#include <cstddef>
+#include "agy_frame.h"
 #include "gomod.h"
 #include "wirecap.h"
 #include <cstdio>
@@ -25,6 +27,20 @@
 /* go1.26: FuncTabBucketSize = 256*MINFUNC, MINFUNC = 16. */
 #define GO_FUNCTAB_BUCKET 4096
 
+/* src/trampolines.S writes the registers at these literal offsets; prove they are still where
+ * agy_block puts them. Add or reorder a field in agy_go_regs and the build stops here. */
+#define AGY_CHK(f, off) static_assert(AGY_OFF_BLOCK + offsetof(agy_block, f) == (off), \
+                                      "trampoline frame offset drifted from agy_block::" #f)
+AGY_CHK(kind,     AGY_OFF_KIND);    AGY_CHK(regs.rax, AGY_OFF_RAX);
+AGY_CHK(regs.rbx, AGY_OFF_RBX);     AGY_CHK(regs.rcx, AGY_OFF_RCX);
+AGY_CHK(regs.rdi, AGY_OFF_RDI);     AGY_CHK(regs.rsi, AGY_OFF_RSI);
+AGY_CHK(regs.r8,  AGY_OFF_R8);      AGY_CHK(regs.r9,  AGY_OFF_R9);
+AGY_CHK(regs.r10, AGY_OFF_R10);     AGY_CHK(regs.r11, AGY_OFF_R11);
+AGY_CHK(regs.rdx, AGY_OFF_RDX);     AGY_CHK(regs.rbp, AGY_OFF_RBP);
+AGY_CHK(action,   AGY_OFF_ACTION);
+#undef AGY_CHK
+static_assert(AGY_OFF_BLOCK + sizeof(agy_block) == AGY_FRAME,
+              "the stub frame must be exactly the cgocall arg pair plus agy_block");
 static_assert(sizeof(go_func) == 44, "go_func header must be 44 bytes");
 static_assert(sizeof(go_functab) == 8, "functab must be 8 bytes");
 static_assert(sizeof(go_findfuncbucket) == 20, "findfuncbucket must be 20 bytes");
