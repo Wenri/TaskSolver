@@ -50,15 +50,15 @@
 #define AGY_S(x)    AGY_S_(x)
 
 /* ---- one stub ---------------------------------------------------------------------------------
- * id          hook id; defines agy_stub__<id> and resumes into agy_go__<id>
- * slot        index in agy_tramp_slots[]; also fixes this stub's offset in the region
+ * id          hook id; defines agy_stub__<id>, resumes into agy_go__<id>, and takes its kind
+ *             tag from agy_kind__<id> (goframe_gen.h)
  * enable      byte flag gating the hook (g_agy_enabled, or g_agy_conv_id for FILE_OPEN)
  * handler     dedicated C handler (agy_on_*), called via the gateway
  * gateway     agy_go__CGOCALL (parking, GC-safe) or agy_go__ASMCGOCALL (lighter g0 switch)
  * resume_off  skip + ow: where to re-enter the hooked function, past the displaced prologue
  * ...         the displaced frame-setup bytes themselves (8 or 11 of them)
  */
-#define AGY_STUB(id, slot, enable, handler, gateway, resume_off, ...)                        \
+#define AGY_STUB(id, enable, handler, gateway, resume_off, ...)                              \
     extern "C" __attribute__((naked, used, visibility("default"),                            \
                               aligned(AGY_SLOT_SIZE), section(AGY_TRAMP_SECTION)))           \
     void agy_stub__##id() {                                                                  \
@@ -77,7 +77,7 @@
             "movq   %r11, " AGY_S(AGY_OFF_R11) "(%rsp)\n\t"                                  \
             "movq   %rdx, " AGY_S(AGY_OFF_RDX) "(%rsp)\n\t"                                  \
             "movq   %rbp, " AGY_S(AGY_OFF_RBP) "(%rsp)\n\t"                                  \
-            "leaq   .Lkind__" #slot "(%rip), %rax\n\t"                                       \
+            "leaq   agy_kind__" #id "(%rip), %rax\n\t"                                       \
             "movq   %rax, " AGY_S(AGY_OFF_KIND) "(%rsp)\n\t"                                 \
             "xorl   %eax, %eax\n\t"                                                          \
             "movq   %rax, " AGY_S(AGY_OFF_ACTION) "(%rsp)\n\t"                               \
