@@ -91,7 +91,16 @@ def patch_wsl1(data: bytearray) -> int:
 
 
 def patch_wsl1_file(path: str) -> None:
-    """Apply `patch_wsl1` to `path` in place, keeping a one-time `.orig` backup."""
+    """Apply `patch_wsl1` to `path` in place, keeping a one-time `.orig` backup.
+
+    For patching an agy you run directly (`--wsl1 ~/.local/bin/agy`); re-run after each upgrade,
+    since the installer redownloads the binary. WSL1 also needs agy launched through the system
+    loader (WSL1 issue #38788):
+
+        agy() { /lib64/ld-linux-x86-64.so.2 "$HOME/.local/bin/agy" "$@"; }
+
+    None of this applies to the vendored libagy.so, which `convert()` patches on its own.
+    """
     data = bytearray(open(path, "rb").read())
     n = patch_wsl1(data)
     bak = path + ".orig"

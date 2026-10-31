@@ -12,7 +12,7 @@
  * ID     short unique tag, used by hk("ID") at the call sites (was the HK_* enum name).
  * MODE   WIRE_ASYNC (log, non-blocking) or WIRE_SYNC (block for a modify verdict).
  * kind   string tag passed to Python dispatch(kind, stream_id, data).
- * MECH   how the hook is bound (see gen_symbols_header.py and gocall.cpp):
+ * MECH   how the hook is bound (see symbols/gen_sources.py and gocall.cpp):
  *          (There is no gum-attach mech any more. frida-gum was retired and removed completely.)
  *          AGY_FULLCGO = static cgocall trampoline (`agy_stub__<ID>` in `.agy_trampolines`, gocall.cpp)
  *                        via full `runtime.cgocall` — for PARKING funcs (entersyscall + P handoff,
@@ -23,7 +23,7 @@
  *                        funcs (no P handoff → stall).
  *          AGY_OFF     = NOT hooked. The row is kept as documentation of a hook that stalls agy
  *                        or collides with another.
- *        `make_libagy.py` and `gen_symbols_header.py` emit and bind every non-OFF hook via `ld` /
+ *        `make_libagy.py` and `gen_sources.py` emit and bind every non-OFF hook via `ld` /
  *        `ld.so` `R_X86_64_GLOB_DAT` relocations. FULLCGO and ASMCGO hooks share one `.agy_trampolines`
  *        section + synthetic moduledata (`gomod.cpp`).
  * RETCAP how a hook's RETURN value WOULD be captured. Historically this also selected the gum

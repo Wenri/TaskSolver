@@ -184,7 +184,7 @@ const HAZARDS = [
   'Double interpreter / import: the shim embedded interp importing multiprocessing + pyagy while agy also uses cgo/threads — any C-global or locale/env clash; and pickle needs pyagy classes importable identically in both interps.',
   'Is this actually SIMPLER than the current PTY+JSONL? Attack the premise: enumerate the added moving parts vs the "easier data passing" benefit; when does it NOT pay off.',
   'The cgocall-trampoline hooks already run Python (agy_py_emit) on agy goroutines via g0; adding a multiprocessing endpoint thread — reentrancy/GIL ordering between hook-driven emits and the endpoint drain.',
-  'agy auto-relaunch / re-exec: does agy ever re-exec itself (e.g. after the shim, or the loader shim /lib64/ld-linux launch trick)? A re-exec would drop the shim/fds. Verify the launch path (the ld.so wrapper noted in patch_agy_wsl1).',
+  'agy auto-relaunch / re-exec: does agy ever re-exec itself (e.g. after the shim, or the loader shim /lib64/ld-linux launch trick)? A re-exec would drop the shim/fds. Verify the launch path (the ld.so wrapper noted in make_libagy.py's patch_wsl1_file).',
 ]
 
 const SYNTH = [
