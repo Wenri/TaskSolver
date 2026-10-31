@@ -57,7 +57,7 @@
 
 #include "wirecap.h"      /* wire_mode_t (WIRE_ASYNC / WIRE_SYNC) */
 #include "gocall.h"       /* agy_hook_fn + per-hook C handlers (agy_on_*) */
-#include "symbols_gen.h"  /* consteval agy_fn / agy_sym / agy_skip / agy_ow / agy_stub / agy_slot */
+#include "symbols_gen.h"  /* consteval agy_fn / agy_skip / agy_ow / agy_stub / agy_slot */
 #include <cstdint>
 #include <string_view>
 
@@ -79,7 +79,7 @@ consteval agy_hook_fn agy_handler_for(std::string_view kind) {
     return &agy_on_generic;
 }
 
-/* One table row. `fn`/`stub`/`handler`/`vaddr`/`skip`/`ow`/`slot` are resolved at compile time by
+/* One table row. `fn`/`stub`/`handler`/`skip`/`ow`/`slot` are resolved at compile time by
  * the consteval constructor: `fn` is the ld-bound Go function pointer (`&agy_go__*`), `stub` is
  * the static `.agy_trampolines` assembly stub (`&agy_stub__<ID>`), and `handler` is the dedicated
  * C hook function (`&agy_on_*`). */
@@ -96,7 +96,6 @@ struct agy_hook {
     agy_go_fn_t      fn;      /* = agy_fn(id), ld-bound Go function pointer */
     agy_go_fn_t      stub;    /* = agy_stub(id), static assembly trampoline stub */
     agy_hook_fn      handler; /* = agy_handler_for(kind), statically bound C hook handler */
-    uint64_t         vaddr;   /* = agy_sym(id), baked at compile time */
     uint32_t         skip;    /* = agy_skip(id), baked at compile time */
     uint32_t         ow;      /* = agy_ow(id), displaced frame-prologue byte length (8 or 11) */
     int              slot;    /* = agy_slot(id), index in agy_tramp_slots[] (-1 if AGY_OFF) */
@@ -109,7 +108,7 @@ struct agy_hook {
                        const char *kind_, agy_mech_t mech_, int32_t retcap_)
         : id(id_), mode(mode_), kind(kind_), mech(mech_),
           retcap(retcap_), fn(agy_fn(id_)), stub(agy_stub(id_)),
-          handler(agy_handler_for(kind_)), vaddr(agy_sym(id_)),
+          handler(agy_handler_for(kind_)),
           skip(agy_skip(id_)), ow(agy_ow(id_)), slot(agy_slot(id_)) {}
 };
 

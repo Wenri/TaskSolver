@@ -14,7 +14,7 @@
      to its dedicated C handler (`agy_on_*`), `runtime.cgocall`/`runtime.asmcgocall`,
      displaced Go frame-setup prologue bytes, and `agy_go__*` resume target.
   3. `AGY_SYMS`, one row per procdef.h row keyed by that row's short id, and the `consteval`
-     resolvers over it (`agy_fn`, `agy_stub`, `agy_sym`, `agy_skip`, `agy_ow`, `agy_slot`). The
+     resolvers over it (`agy_fn`, `agy_stub`, `agy_skip`, `agy_ow`, `agy_slot`). The
      id -> Go symbol -> address join happens here, so no long Go symbol string reaches the C++.
 
 `pyagy/agy_process/hooks.py` is the stdlib-pure mirror behind the public `pyagy.HOOKS`
@@ -150,7 +150,6 @@ def gen_header(symbols_path: str, out_path: str) -> None:
         w("    std::string_view id;\n")
         w("    agy_go_fn_t fn;     /* &agy_go__<symbol> */\n")
         w("    agy_go_fn_t stub;   /* &agy_stub__<id>, nullptr when the row is AGY_OFF */\n")
-        w("    uint64_t vaddr;\n")
         w("    uint32_t skip;\n")
         w("    uint32_t ow;\n")
         w("    int slot;           /* index in agy_tramp_slots[], -1 when AGY_OFF */\n")
@@ -161,8 +160,8 @@ def gen_header(symbols_path: str, out_path: str) -> None:
             slot = slot_of.get(r["id"], -1)
             fn = "&" + c_sym_name(r["id"]) if nm in hooks else "nullptr"
             stub = f'&agy_stub__{r["id"]}' if slot >= 0 else "nullptr"
-            w('    { "%s", %s, %s, 0x%xULL, %d, %d, %d },\n'
-              % (r["id"], fn, stub, hooks.get(nm, 0), skips.get(nm, 0),
+            w('    { "%s", %s, %s, %d, %d, %d },\n'
+              % (r["id"], fn, stub, skips.get(nm, 0),
                  len(prologues.get(nm, "")) // 2, slot))
         w("};\n\n")
 
@@ -173,8 +172,6 @@ def gen_header(symbols_path: str, out_path: str) -> None:
         w("    auto r = agy_row(id); return r ? r->fn : nullptr;\n}\n\n")
         w("consteval agy_go_fn_t agy_stub(std::string_view id) {\n")
         w("    auto r = agy_row(id); return r ? r->stub : nullptr;\n}\n\n")
-        w("consteval uint64_t agy_sym(std::string_view id) {\n")
-        w("    auto r = agy_row(id); return r ? r->vaddr : 0;\n}\n\n")
         w("consteval uint32_t agy_skip(std::string_view id) {\n")
         w("    auto r = agy_row(id); return r ? r->skip : 0;\n}\n\n")
         w("consteval uint32_t agy_ow(std::string_view id) {\n")
