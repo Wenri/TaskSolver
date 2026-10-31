@@ -80,7 +80,7 @@ verification. The rebuilt shim passes an instrumented `agy --version` startup ch
         │           │ enqueue (+ block if SYNC)                              │
         │           ▼                                                        │
         │   ┌───────────────────────────────────────────┐                   │
-        │   │ pyworker boost::thread (LARGE 16MB stack)   │  ← libpython3.13  │
+        │   │ pyworker boost::thread (LARGE 16MB stack)   │  ← libpython3.15  │
         │   │  Py_InitializeEx(0); import pyagy.agy_process │    lives only     │
         │   │  loop: pop req → PyGILState_Ensure →        │    here (one      │
         │   │        call on_tls_write/read/http/tool →   │    PyThreadState) │
@@ -466,10 +466,10 @@ pixi run shim-symbols   # after an agy update: re-resolve symbols.json + recompi
 pixi run build-shim     # a plain recompile (configure fetches the vendored deps on first run)
 ```
 
-**libpython / Python version.** The shim embeds the **pixi env's libpython 3.13**
-(`$(CONDA_PREFIX)/bin/python3-config`), unified with the pixi-3.13 driver so the
+**libpython / Python version.** The shim embeds the **pixi env's libpython 3.15**
+(`$(CONDA_PREFIX)/bin/python3-config`), unified with the pixi-3.15 driver so the
 multiprocessing/pickle wire between them is same-version (see *AgyProcess* below). It links
-`-Wl,-rpath,$(CONDA_PREFIX)/lib` so agy finds `libpython3.13.so.1.0` at runtime (agy is always
+`-Wl,-rpath,$(CONDA_PREFIX)/lib` so agy finds `libpython3.15.so.1.0` at runtime (agy is always
 launched via `pyagy/_env.py` under the pixi env). Build with `pixi run build-shim`
 (needs `g++` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). `pyagy.agy_process` needs `hpack`/`brotli` only for the
 HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
@@ -805,7 +805,7 @@ p = AgyProcess(target=work, args=(q, 41)); p.start(); q._writer.close(); print(q
   `sys.exit` and the `is_forking(argv)` assert.
 - The PTY stays **parent-owned** (`_service` answers agy's terminal-capability queries as it
   drains); persistent mode types prompts in and uses PTY-idle as the turn/ready boundary.
-- **Python 3.13 both ends** (shim embeds pixi's `libpython3.13`), so parent↔child pickle is
+- **Python 3.15 both ends** (shim embeds pixi's `libpython3.15`), so parent↔child pickle is
   same-version and `pyagy` classes round-trip via the shared `PYTHONPATH`.
 
 **Channel:** a spawn `SimpleQueue` — a `Pipe` (fd + pickle) plus two named `SemLock`s (POSIX

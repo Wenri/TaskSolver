@@ -61,7 +61,7 @@ def case_roundtrip():
     # parent_alive/ppid exercise the parent-death sentinel: parent_process() sees the controlling
     # process (our pid) and reports it alive (the boot pipe only EOFs when we die).
     ok = obj is not None and obj.get("wire_mp") == "ok" and list(obj.get("args", ())) == ["hi", 7] \
-        and obj.get("py", "").startswith("3.13") and done \
+        and obj.get("py", "").startswith(f"{sys.version_info[0]}.{sys.version_info[1]}.") and done \
         and obj.get("parent_alive") is True and obj.get("ppid") == os.getpid()
     print(f"  {'ok  ' if ok else 'FAIL'} round-trip: native object + clean exitcode + parent sentinel  got={got}")
     if not ok:

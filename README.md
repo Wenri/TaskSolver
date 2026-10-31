@@ -21,7 +21,7 @@ One `Agent`, many backends — selected by the `vision_model` id. Provider adapt
 | Gemini | `gemini-3-pro`, `gemini-3-flash`, `gemini-2.0-flash` | Google GenAI SDK |
 | Local HuggingFace | `qwen`, `intern`, `minicpm`, `phi`, `llama` | in-process via `transformers` (needs the `local` extra) |
 
-The agy/codex/kimi-code native artifacts embed CPython (the shim's interpreter, codex's libpython, the `wirecap_node` addon's libpython): a consuming environment must run the **same Python minor version** as the env they were built in (this repo pins 3.13) — a version-mismatched consumer is an unsupported configuration.
+The agy/codex/kimi-code native artifacts embed CPython (the shim's interpreter, codex's libpython, the `wirecap_node` addon's libpython): a consuming environment must run the **same Python minor version** as the env they were built in (this repo pins 3.15) — a version-mismatched consumer is an unsupported configuration.
 
 The agent runtime sources and binaries are pinned separately from TaskSolver's Python
 dependencies:
@@ -35,7 +35,7 @@ dependencies:
 
 ## Install
 
-TaskSolver uses [pixi](https://pixi.sh) for a managed Python 3.13 environment:
+TaskSolver uses [pixi](https://pixi.sh) for a managed Python 3.15 environment:
 
 ```bash
 pixi install                                              # build + install the default env
@@ -43,9 +43,9 @@ pixi run python test_scripts/text_only.py --model claude-code
 pixi shell                                                # drop into the environment
 ```
 
-The pixi workspace is configured in `pyproject.toml`: it pins Python 3.13 and Node.js 26 and builds TaskSolver as a Linux x86-64 package via the `pixi-build` backend. The package build compiles the Antigravity shim, Rust Codex binary, and Kimi Code bundle plus native addon. It also packages the checked-in Claude and Codex Python SDKs and fetches the pinned Claude Code executable after verifying its size and SHA256.
+The pixi workspace is configured in `pyproject.toml`: it pins Python 3.15 and Node.js 26 and builds TaskSolver as a Linux x86-64 package via the `pixi-build` backend. The package build compiles the Antigravity shim, Rust Codex binary, and Kimi Code bundle plus native addon. It also packages the checked-in Claude and Codex Python SDKs and fetches the pinned Claude Code executable after verifying its size and SHA256.
 
-The workspace defines **two** environments: the **default** env (`pixi install`) carries the core API / CLI backends plus the UI/plotting tools — **no GPU required**; the **`cuda`** env (`pixi install -e cuda`) adds the local HuggingFace + torch (cu130) adapters and **flash-attn**, so it needs a CUDA 13 GPU and builds flash-attn from source on first run (uv caches the wheel afterward). Node.js 26 is also pinned in the package's build environment because Kimi's frozen dependency graph excludes Node.js 25.
+The workspace defines **two** environments: the **default** env (`pixi install`) carries the core API / CLI backends plus the UI/plotting tools — **no GPU required**; the **`cuda`** env (`pixi install -e cuda`) adds the local HuggingFace + torch (cu134) adapters and **flash-attn**, with the CUDA 13.4 toolkit (nvcc + headers) from conda-forge, so it needs an NVIDIA GPU whose driver supports CUDA 13.4 but no host CUDA toolkit, and builds flash-attn from source on first run (uv caches the wheel afterward). Node.js 26 is also pinned in the package's build environment because Kimi's frozen dependency graph excludes Node.js 25.
 
 After editing adapters or updating vendored sources, refresh the installed package in the workspace that consumes it:
 
@@ -55,7 +55,7 @@ pixi reinstall --locked tasksolver
 
 This rebuilds and recopies the bundled artifacts as needed. Omit `--locked` when dependency changes require a new lockfile. A consuming workspace's noneditable path dependency is an installed snapshot; source edits alone do not refresh its wheel.
 
-For à-la-carte use, the same groups are portable `[project.optional-dependencies]` extras — `tasksolver[local]` (torch + HuggingFace adapters, **including flash-attn**) and `tasksolver[app]` (UI/plotting) — so the package stays installable as a dependency by uv and pixi (a consumer points at its own torch index). Core dependency versions are resolved by the consuming workspace, with compatibility bounds for the agent SDKs and native capture dependencies; `flash-attn` has no prebuilt wheels for new Pythons and builds from source, so `tasksolver[local]` needs CUDA.
+For à-la-carte use, the same groups are portable `[project.optional-dependencies]` extras — `tasksolver[local]` (torch + HuggingFace adapters, **including flash-attn**) and `tasksolver[app]` (UI/plotting) — so the package stays installable as a dependency by uv and pixi (a consumer points at its own torch index). Core dependency versions are resolved by the consuming workspace, with compatibility bounds for the agent SDKs and native capture dependencies; `flash-attn` has no prebuilt wheels for new Pythons and builds from source, so `tasksolver[local]` needs CUDA. Its newest PyPI release (2.8.3.post2) also compiles with C++17 and fails against torch >= 2.13, whose headers need C++20; TaskSolver's `cuda` env therefore forces C++20 for that build (`tools/cxx20-g++` plus `NVCC_APPEND_FLAGS`), as upstream's unreleased `main` does.
 
 Credentials are supplied via a `KeyChain` (loading files like `system/credentials/openai_api.txt`) or environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `VLLM_API_KEY`, `MOONSHOT_API_KEY`).
 

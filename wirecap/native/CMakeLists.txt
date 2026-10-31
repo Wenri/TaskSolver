@@ -5,7 +5,7 @@
 # propagate to whatever links it, so a consumer just does target_link_libraries(... wirecap_bridge).
 #
 # Like the shim, this MUST be built with the conda toolchain (CXX=x86_64-conda-linux-gnu-c++) so it
-# links the conda glibc + libpython3.13 — configure inside the pixi env.
+# links the conda glibc + libpython3.15 — configure inside the pixi env.
 cmake_minimum_required(VERSION 3.19)
 project(wirecap_bridge CXX)
 

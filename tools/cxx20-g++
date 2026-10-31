@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# CXX for the pixi `cuda` env ([tool.pixi.feature.local.activation.env] in pyproject.toml):
+# the conda g++ with -std=c++17 rewritten to -std=c++20.
+#
+# flash-attn 2.8.3.post2, the newest release on PyPI, compiles flash_api.cpp with -std=c++17,
+# but torch >= 2.13's headers need C++20 (std::strong_ordering / operator<=> in
+# c10/util/intrusive_ptr.h). torch's cpp_extension compiles .cpp files with $CXX and puts the
+# extension's own flags last, so only the compiler itself can change the standard. nvcc gets
+# the same fix from NVCC_APPEND_FLAGS. Upstream fixed it in setup.py alone
+# (Dao-AILab/flash-attention#2879, #2899): delete this file, the CXX override and
+# NVCC_APPEND_FLAGS once a flash-attn release after 2.8.3.post2 is on PyPI.
+exec "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++" "${@/#-std=c++17/-std=c++20}"

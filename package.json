@@ -5,5 +5,8 @@
   "description": "Node.js dependencies for TaskSolver",
   "dependencies": {
     "pymport": "^1.5.1"
+  },
+  "allowScripts": {
+    "pymport": true
   }
 }

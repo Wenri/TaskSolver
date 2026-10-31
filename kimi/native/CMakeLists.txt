@@ -28,7 +28,7 @@ find_path(NODE_API_INC node_api.h HINTS "${CONDA_PREFIX}/include/node" REQUIRED)
 
 # The libpython the bridge embeds — promoted to RTLD_GLOBAL at start() so the interpreter's
 # stdlib C extensions resolve the Python C-API. Build the shared name from LDVERSION
-# (libpython3.13.so, a symlink to the versioned .so.1.0 the addon already NEEDs): this conda
+# (libpython3.15.so, a symlink to the versioned .so.1.0 the addon already NEEDs): this conda
 # build sets INSTSONAME/LDLIBRARY to the static archive, so query neither. The addon dlopen()s
 # it RTLD_NOLOAD, which matches the already-resident object by resolved path.
 execute_process(

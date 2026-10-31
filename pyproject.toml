@@ -91,15 +91,15 @@ claude_agent_sdk = ["py.typed", "_bundled/claude"]
 # pixi-build-python backend, and the workspace depends on it by path. The
 # package's runtime deps are read from [project.dependencies] above. The heavy
 # `local` extra stays out of the DEFAULT environment (its ML stack may lag new Python
-# releases, and it needs a CUDA 13 GPU); it has its own `cuda` environment — see
+# releases, and it needs an NVIDIA driver for CUDA 13.4); it has its own `cuda` environment — see
 # [tool.pixi.environments] at the bottom.
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = [{ platform = "linux-64", cuda = "13.0" }]
+platforms = [{ platform = "linux-64", cuda = "13.4" }]
 preview = ["pixi-build"]
 
 [tool.pixi.dependencies]
-python = "3.13.*"
+python = "3.15.*"
 tasksolver = { path = "." }
 # jiter (anthropic/openai's Rust JSON core): take the conda build, not the pypi wheel the SDKs
 # would pull, so it matches the 3D-CoT consumer's conda jiter.
@@ -131,12 +131,16 @@ gxx_linux-64 = ">=13,<13.3"
 # runtime libboost_thread.so, found at runtime via the shim's -rpath $CONDA_PREFIX/lib).
 libboost-devel = ">=1.88"
 # Boost.Python for the pybridge CPython embedding (bp::object/import/extract over the raw
-# C-API). Python-version-specific: the py313 build matches the embedded libpython3.13.
+# C-API). Python-version-specific: the py315 build matches the embedded libpython3.15.
 libboost-python-devel = ">=1.88"
+# libpython3.15.so for the natives that embed CPython (the wirecap bridge in vendor/agy, codex,
+# the kimi addon). From Python 3.15 on conda-forge ships it in its own `libpython` package;
+# `python` alone no longer provides it, so `pixi run build-shim` could not link -lpython3.15.
+libpython = "*"
 # antigravity HTTP/2 response decoding (h2reassemble.py) — from conda-forge, not pip.
 hpack = ">=4"
 brotli-python = ">=1.1"
-gdb = ">=17.2,<18"
+gdb = ">=18.1,<19"
 # binutils is NOT pinned: it comes from the gcc/gxx wrapper, which exact-pins the
 # binutils_linux-64 build it was made against (gcc-13.2's wrapper -> binutils 2.40).
 # Forcing binutils >=2.45 here would exclude gcc 13.2 and drop the toolchain to gcc 12.4.
@@ -147,11 +151,11 @@ paramiko = ">=5.0.0,<6"
 # build_py hook (during `pixi install`) and the manual `pixi run build-shim`.
 cmake = ">=4.3.4,<5"
 ninja = ">=1.11"
-patchelf = ">=0.17.2,<0.18"
-py-lief = ">=0.17.6,<0.18"
-rust = ">=1.96.1,<1.97"
-clang = ">=22.1.8,<23"
-libclang = ">=22.1.8,<23"
+patchelf = ">=0.19.2,<0.20"
+py-lief = ">=1.0.0,<2"
+rust = ">=1.99.1,<2"
+clang = ">=23.1.4,<24"
+libclang = ">=23.1.4,<24"
 libcap = ">=2.78,<3"
 pygit2 = ">=1.19.3,<2"
 htop = ">=3.5.1,<4"
@@ -182,23 +186,24 @@ noarch = false
 # compiles against $CONDA_PREFIX's sysroot, so the headers must live in *this* (host) env, not
 # just the default one.
 [tool.pixi.package.host-dependencies]
-python = "3.13.*"
+python = "3.15.*"
 pip = "*"
 setuptools = ">=61"
 cmake = ">=4.3.4,<5"          # drives the shim build (antigravity/CMakeLists.txt) in build_py
 ninja = ">=1.11"             # cmake generator for the shim build
-py-lief = ">=0.17.6,<0.18"   # make_libagy.py converts the upstream agy binary into libagy.so
+py-lief = ">=1.0.0,<2"   # make_libagy.py converts the upstream agy binary into libagy.so
 kernel-headers_linux-64 = ">=6"   # -> sysroot 2.39 (matches 3D-CoT; relaxing binutils would otherwise drop it to 2.28/kh-4.18)
 gcc_linux-64 = ">=13,<13.3"   # pulled by gxx; conda toolchain, not the Nix gcc on PATH
 gxx_linux-64 = ">=13,<13.3"   # all shim TUs are C++23 (Boost.Thread/Boost.Python) → conda g++
 libboost-devel = ">=1.88"     # Boost.Thread (headers + libboost_thread) for the pybridge worker
-libboost-python-devel = ">=1.88"   # Boost.Python (embedding) — py313 build matches libpython3.13
+libboost-python-devel = ">=1.88"   # Boost.Python (embedding) — py315 build matches libpython3.15
+libpython = "*"               # libpython3.15.so to link the embedded interpreter (split out of `python` in 3.15)
 # codex build (build_py also compiles the vendored codex CLI, gnu-dynamic, linking the shared
 # wirecap bridge + libpython): the Rust toolchain + aws-lc-rs/rustls' bindgen (clang/libclang) +
 # openssl-sys + the linux-sandbox crate (libcap). Required — the build has no skip/opt-out.
-rust = ">=1.96.1,<1.97"
-clang = ">=22.1.8,<23"
-libclang = ">=22.1.8,<23"
+rust = ">=1.99.1,<2"
+clang = ">=23.1.4,<24"
+libclang = ">=23.1.4,<24"
 openssl = "*"
 libcap = ">=2.78,<3"
 # kimi build (build_py also bundles the vendored kimi-code CLI with tsdown and compiles the
@@ -235,27 +240,64 @@ shim-hooks = "python3 antigravity/symbols/gen_hooks_py.py"   # regen pyagy's HOO
 # The `local` and `app` features auto-map to the same-named
 # [project.optional-dependencies] extras above. They are NOT merged into one environment:
 # [tool.pixi.environments] below defines `default` (= app only, GPU-free) and `cuda`
-# (= local + app). The PyTorch cu130 wheel index and the flash-attn
-# build toolchain all live in the `local` feature; the CUDA 13 requirement is a
+# (= local + app). The PyTorch cu134 wheel index, the CUDA toolkit and the flash-attn
+# build toolchain all live in the `local` feature; the CUDA 13.4 driver requirement is a
 # virtual package on the workspace `platforms` above. Consumers never see any of it.
 #
 # flash-attn builds from source: no-build-isolation so it can import torch at build
-# time; the cmake/ninja/gxx deps + CUDA_HOME/compiler env below complete the
-# toolchain (system gcc 15 is too new for CUDA 13's nvcc).
+# time. nvcc and the CUDA headers come from conda-forge (below), so the host needs
+# only the NVIDIA driver, no CUDA toolkit; nvcc compiles host code with the conda
+# gcc 13.2 (torch's cpp_extension passes `-ccbin $CC`).
 [tool.pixi.feature.local.pypi-options]
-extra-index-urls = ["https://download.pytorch.org/whl/cu130"]
+extra-index-urls = ["https://download.pytorch.org/whl/cu134"]
 index-strategy = "unsafe-best-match"
 no-build-isolation = ["flash-attn"]
+
+# torch/torchvision/torchaudio come from the cu134 index explicitly: pypi.org's default torch 2.15
+# wheels are CUDA 13.2 builds, and the shared solve group picks pypi.org's file over the extra index
+# (the old lock did the same with cu130). The CUDA 13.4 builds match the conda toolkit flash-attn is
+# compiled with, so the extension and torch's runtime libraries are one CUDA minor version.
+[tool.pixi.feature.local.pypi-dependencies]
+torch = { version = "*", index = "https://download.pytorch.org/whl/cu134" }
+torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu134" }
+torchaudio = { version = "*", index = "https://download.pytorch.org/whl/cu134" }
 
 [tool.pixi.feature.local.dependencies]
 cmake = ">=4"
 ninja = "*"
 gxx_linux-64 = ">=13,<13.3"
+# CUDA toolkit for the flash-attn build, at the CUDA minor version of the torch wheels
+# (cu134). nvcc plus the cudart/driver headers are all flash-attn's sources include:
+# torch's CUDAContextLight.h would also need the cuBLAS/cuSPARSE/cuSOLVER headers, but
+# flash-attn never includes it (checked with `g++ -M` against torch's headers).
+cuda-version = "13.4.*"
+cuda-nvcc = "*"
+cuda-cudart-dev = "*"
 
 [tool.pixi.feature.local.activation.env]
-CUDA_HOME = "/usr/local/cuda-13.0"
+# conda-forge installs nvcc in $CONDA_PREFIX/bin but the CUDA headers only under
+# targets/x86_64-linux/include, and the cuda-nvcc activation script sets neither
+# variable: flash-attn runs $CUDA_HOME/bin/nvcc, and torch's cpp_extension adds
+# CUDA_INC_PATH for the .cpp files g++ compiles. Both override a host CUDA_HOME
+# (e.g. a Nix-store toolkit), so the build never mixes toolkits.
+CUDA_HOME = "$CONDA_PREFIX"
+CUDA_INC_PATH = "$CONDA_PREFIX/targets/x86_64-linux/include"
 CC = "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc"
-CXX = "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++"
+# flash-attn 2.8.3.post2 (newest on PyPI) compiles with -std=c++17, but torch >= 2.13's headers
+# need C++20. tools/cxx20-g++ is the conda g++ with -std=c++17 rewritten to -std=c++20 (torch
+# compiles .cpp files with $CXX), and NVCC_APPEND_FLAGS does the same for nvcc, whose last -std
+# wins. Upstream main fixed setup.py alone; flash-attn from git cannot be locked here, because
+# its setup.py imports torch at metadata time and PyPI torch is not installed during resolution.
+# Remove both overrides (and tools/cxx20-g++) once a release after 2.8.3.post2 is on PyPI.
+CXX = "$PIXI_PROJECT_ROOT/tools/cxx20-g++"
+NVCC_APPEND_FLAGS = "-std=c++20"
+# The cuda-nvcc activation puts `-ccbin=<g++>` here, and torch adds `-ccbin $CC` itself,
+# so nvcc would warn "incompatible redefinition for option 'compiler-bindir'" per .cu file.
+NVCC_PREPEND_FLAGS = ""
+# NixOS keeps the driver's libcuda.so.1 in /run/opengl-driver/lib, on neither the loader
+# path nor nix-ld's, so torch.cuda.is_available() was False. nix-ld adds this list to the
+# library path of the conda/pip binaries it launches; other hosts ignore the variable.
+NIX_LD_LIBRARY_PATH = "/run/opengl-driver/lib:${NIX_LD_LIBRARY_PATH:-/run/current-system/sw/share/nix-ld/lib}"
 # flash-attn build tuning (its setup.py reads these exact names):
 #  - FLASH_ATTN_CUDA_ARCHS: which SM archs to compile. "80" = Ampere (covers this
 #    sm_86 RTX 3080) and avoids the default "80;90;100;120" fat binary (~4x work).
@@ -270,9 +312,9 @@ NVCC_THREADS = "1"
 
 # Two environments:
 #   default — core + app (lightweight, no CUDA/torch dependency)
-#   cuda    — core + local (torch cu130 + flash-attn) + app (UI)
+#   cuda    — core + local (torch cu134 + CUDA 13.4 toolkit + flash-attn) + app (UI)
 # `pixi install` resolves the default env; use `pixi install -e cuda` (or
-# `pixi run -e cuda …`) to get the full GPU stack. The CUDA 13 requirement
+# `pixi run -e cuda …`) to get the full GPU stack. The CUDA 13.4 driver requirement
 # (workspace platform virtual package) only matters for `cuda`. The PEP 621
 # `local` / `app` extras stay separate, so consumers still install à la carte.
 [tool.pixi.environments]

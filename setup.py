@@ -44,20 +44,49 @@ class BinaryDistribution(Distribution):
         return True
 
 
+def native_build_env():
+    """Environment for the native build steps.
+
+    The CMake and Cargo builds take python3, python3-config, Boost, libclang and the N-API
+    headers from $CONDA_PREFIX. A conda-style package build (pixi-build runs rattler-build,
+    which sets CONDA_BUILD=1) activates the host env and then the build env, so CONDA_PREFIX
+    names the build env, which is empty here: every toolchain piece is a host-dependency and
+    lives in $PREFIX. Point CONDA_PREFIX at the host env for those builds."""
+    env = dict(os.environ)
+    if env.get("CONDA_BUILD") == "1" and env.get("PREFIX"):
+        env["CONDA_PREFIX"] = env["PREFIX"]
+    return env
+
+
+def cmake_python_args(env):
+    """Name the embedded interpreter on every configure. The CMake build dirs are shared with
+    `pixi run build-shim`, and a PY3CONFIG cached from another env would embed that env's
+    libpython (a different minor version after a Python bump)."""
+    cfg = os.path.join(env.get("CONDA_PREFIX", ""), "bin", "python3-config")
+    return [f"-DPY3CONFIG={cfg}"] if os.path.isfile(cfg) else []
+
+
 class BuildPyNative(build_py):
     def run(self):
         root = os.path.dirname(os.path.abspath(__file__))
-        # Both agent SDKs ship from checked-in source. Claude's closed CLI is
-        # fetched by version/hash into that source package before build_py copies it.
-        subprocess.run([sys.executable, os.path.join(root, "claude", "build_cli.py")],
-                       cwd=root, check=True)
-        super().run()
-        self._build_antigravity_shim(root)   # builds wirecap_bridge + antigravity.so
-        self._build_codex(root)              # links the bridge from the shim step → must follow it
-        self._build_kimi(root)               # independent: kimi/native builds its own bridge copy
-        self._bundle_artifacts(root)         # copy (+strip codex) into the wheel under py* pkgs
+        env = native_build_env()
+        try:
+            # Both agent SDKs ship from checked-in source. Claude's closed CLI is
+            # fetched by version/hash into that source package before build_py copies it.
+            subprocess.run([sys.executable, os.path.join(root, "claude", "build_cli.py")],
+                           cwd=root, check=True)
+            super().run()
+            self._build_antigravity_shim(root, env)   # builds wirecap_bridge + antigravity.so
+            self._build_codex(root, env)              # links the bridge from the shim step → must follow it
+            self._build_kimi(root, env)               # independent: kimi/native builds its own bridge copy
+            self._bundle_artifacts(root)              # copy (+strip codex) into the wheel under py* pkgs
+        except Exception as exc:
+            # An editable install (what pixi-build's python backend runs) calls build_py inside
+            # `except Exception` and only warns, which would install the package without its
+            # natives. SystemExit is not an Exception, so the build fails loudly as documented.
+            raise SystemExit(f"[setup] native build failed: {exc}") from exc
 
-    def _build_antigravity_shim(self, root):
+    def _build_antigravity_shim(self, root, env):
         if not os.path.isdir(os.path.join(root, "antigravity")):
             return  # antigravity/ absent (degenerate checkout with the source tree missing)
         # CMake + Ninja (both pixi host-dependencies) run the whole chain: configure fetches agy
@@ -65,11 +94,12 @@ class BuildPyNative(build_py):
         # symbols_gen.h from the committed symbols.json and compiles wirecap_bridge + the shim.
         # All idempotent; picks up conda's g++/python3-config from the env ($CXX / $CONDA_PREFIX).
         build = os.path.join("antigravity", "build")
-        subprocess.run(["cmake", "-S", "antigravity", "-B", build, "-G", "Ninja"], cwd=root, check=True)
-        subprocess.run(["cmake", "--build", build], cwd=root, check=True)
+        subprocess.run(["cmake", "-S", "antigravity", "-B", build, "-G", "Ninja", *cmake_python_args(env)],
+                       cwd=root, env=env, check=True)
+        subprocess.run(["cmake", "--build", build], cwd=root, env=env, check=True)
         sys.stderr.write("[setup] vendor/agy + vendor/libagy.so + wirecap_bridge built\n")
 
-    def _build_codex(self, root):
+    def _build_codex(self, root, env):
         codex_rs = os.path.join(root, "codex", "vendor", "codex-rs")
         if not os.path.isdir(codex_rs):
             return  # codex-rs absent (degenerate checkout with the source tree missing)
@@ -77,7 +107,7 @@ class BuildPyNative(build_py):
         # glibc — NOT the static-musl release target, which can't embed the pixi libpython). Its
         # build.rs links the wirecap_bridge produced above + libpython. LIBCLANG_PATH lets
         # aws-lc-rs/rustls' bindgen find libclang. Idempotent: cargo no-ops when nothing changed.
-        env = dict(os.environ)
+        env = dict(env)
         conda = env.get("CONDA_PREFIX")
         if conda and not env.get("LIBCLANG_PATH"):
             env["LIBCLANG_PATH"] = os.path.join(conda, "lib")
@@ -85,7 +115,7 @@ class BuildPyNative(build_py):
                        cwd=codex_rs, env=env, check=True)
         sys.stderr.write("[setup] codex built (gnu-dynamic, wirecap-patched)\n")
 
-    def _build_kimi(self, root):
+    def _build_kimi(self, root, env):
         vendor = os.path.join(root, "kimi", "vendor", "kimi-code")
         if not os.path.isdir(vendor):
             return  # kimi-code absent (degenerate checkout with the source tree missing)
@@ -107,17 +137,23 @@ class BuildPyNative(build_py):
             pin = json.load(f).get("packageManager", "pnpm@10").split("+")[0]
         pnpm = ["npx", "-y", pin]
         app = os.path.join(vendor, "apps", "kimi-code")
-        subprocess.run([*pnpm, "install", "--frozen-lockfile"], cwd=vendor, check=True)
-        subprocess.run([*pnpm, "exec", "tsdown"], cwd=app, check=True)
+        # A build has no TTY, so pnpm must relink node_modules without asking (it aborts instead).
+        install = [*pnpm, "install", "--frozen-lockfile", "--config.confirm-modules-purge=false"]
+        if env.get("CONDA_BUILD") == "1":
+            # rattler-build points HOME at each build's own work dir, which would move pnpm's
+            # default store ($HOME/.local/share/pnpm) and relink node_modules on every build.
+            install.append("--store-dir=" + os.path.join(root, ".pixi", "pnpm-store"))
+        subprocess.run(install, cwd=vendor, env=env, check=True)
+        subprocess.run([*pnpm, "exec", "tsdown"], cwd=app, env=env, check=True)
         subprocess.run([*pnpm, "exec", "tsdown", "--config", "tsdown.dist-worker.config.ts"],
-                       cwd=app, check=True)
+                       cwd=app, env=env, check=True)
         # 2) The N-API addon hosting the wirecap bridge (embedded CPython). Builds its own copy
         #    of libwirecap_bridge.a (kimi/native adds ../../wirecap/native as a subdirectory), so
         #    it does not depend on the antigravity build tree.
         build = os.path.join("kimi", "native", "build")
-        subprocess.run(["cmake", "-S", os.path.join("kimi", "native"), "-B", build, "-G", "Ninja"],
-                       cwd=root, check=True)
-        subprocess.run(["cmake", "--build", build], cwd=root, check=True)
+        subprocess.run(["cmake", "-S", os.path.join("kimi", "native"), "-B", build, "-G", "Ninja",
+                        *cmake_python_args(env)], cwd=root, env=env, check=True)
+        subprocess.run(["cmake", "--build", build], cwd=root, env=env, check=True)
         sys.stderr.write("[setup] kimi-code bundle + wirecap_node.node built\n")
 
     def _bundle_artifacts(self, root):
