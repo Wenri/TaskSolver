@@ -2,7 +2,7 @@
  * and the frame-pointer stack unwinder.
  *
  * Every trampoline stub (`agy_stub__<ID>`) is assembled at build time into
- * `.section .agy_trampolines,"ax",@progbits` (emitted from `src/goframe.cpp` +
+ * `agy_trampolines` (section) (emitted from `src/goframe.cpp` +
  * `symbols_gen.h`) with all Go targets (`agy_go__*`), gateways (`runtime.cgocall`,
  * `runtime.asmcgocall`), and per-hook C handlers (`agy_on_*`) bound by `ld`.
  * `libagy.so` statically patches each hooked Go function's `entry + skip` with

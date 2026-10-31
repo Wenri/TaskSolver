@@ -2,7 +2,7 @@
  * and the frame-pointer stack unwinder (`gocall.cpp`).
  *
  * All trampoline stubs (`agy_stub__<ID>`) are emitted at build time into
- * `.section .agy_trampolines,"ax",@progbits` (bounded by `agy_tramp_region_start`
+ * `agy_trampolines` (section) (bounded by `agy_tramp_region_start`
  * and `agy_tramp_region_end`). `ld` and `ld-linux-x86-64.so.2` bind both directions
  * at link/load time via `R_X86_64_GLOB_DAT` relocations:
  *   - `libagy.so` statically jumps from each hooked Go function's `entry + skip`

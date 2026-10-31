@@ -1,5 +1,5 @@
 /* gomod.cpp — build + register a synthetic go1.27 runtime.moduledata that covers
- * the `.agy_trampolines` section (`[agy_tramp_region_start, agy_tramp_region_end)`),
+ * the `agy_trampolines` section (`[agy_tramp_region_start, agy_tramp_region_end)`),
  * so the Go GC's stack scanner (findfunc -> findmoduledatap, walking the
  * firstmoduledata linked list) resolves our static trampoline PCs instead of
  * throw("unknown pc"). See gomod.h.

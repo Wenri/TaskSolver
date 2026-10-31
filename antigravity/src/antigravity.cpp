@@ -1,5 +1,5 @@
 /* antigravity.cpp — host executable for `libagy.so`: splice the synthetic Go
- * `moduledata` covering `.agy_trampolines` onto `agy_firstmoduledata.next`,
+ * `moduledata` covering `agy_trampolines` onto `agy_firstmoduledata.next`,
  * start the embedded CPython worker (when `AGY_PROC_ENABLE=1`), enable the
  * `ld`-bound static trampoline stubs, and transfer control to `agy_rt0_go(argc, argv)`.
  *
@@ -24,6 +24,7 @@
 #include "symbols_gen.h"
 #include "gocall.h"
 #include "procdef.h"
+#include <cstddef>
 #include "goframe.h"
 #include "gomod.h"
 
@@ -100,8 +101,17 @@ int getaddrinfo(const char *node, const char *service,
 /* ---- initialization + entrypoint ------------------------------------------ */
 static void agy_init(void)
 {
-    /* Register the synthetic Go moduledata covering `.agy_trampolines` unconditionally
+    /* Register the synthetic Go moduledata covering `agy_trampolines` unconditionally
      * before Go starts, since `libagy.so` statically jumps through `agy_stub__*`. */
+    /* The stubs tile the section by alignment, so a stub that outgrew its slot shows up here as
+     * a section wider than nslots * stride. Nothing earlier can catch it (see goframe.cpp). */
+    const size_t tramp_bytes = (size_t)(agy_tramp_region_end - agy_tramp_region_start);
+    if (tramp_bytes != (size_t)AGY_TRAMP_NSLOTS * AGY_TRAMP_SLOT_SIZE) {
+        std::fprintf(stderr, "[antigravity] FATAL: trampoline region is %zu bytes, expected %d*%d;"
+                             " a stub body outgrew its slot\n",
+                     tramp_bytes, AGY_TRAMP_NSLOTS, AGY_TRAMP_SLOT_SIZE);
+        std::abort();
+    }
     agy_gomod_register((uintptr_t)agy_tramp_region_start,
                        (uintptr_t)agy_tramp_region_end,
                        AGY_TRAMP_SLOT_SIZE, AGY_TRAMP_NSLOTS,

@@ -4,7 +4,7 @@ bidirectional static `ld` binding:
   - Exports `agy_rt0_go` (`runtime.rt0_go`), `agy_firstmoduledata` (`runtime.firstmoduledata`),
     and every Go hook target (`agy_go__*`) in `libagy.so`'s `.dynsym`.
   - Imports each active static trampoline stub (`agy_stub__<ID>`, defined in `vendor/agy`'s
-    `.agy_trampolines` section) via `R_X86_64_GLOB_DAT` relocations in `agy_tramp_slots[]`
+    `agy_trampolines` section) via `R_X86_64_GLOB_DAT` relocations in `agy_tramp_slots[]`
     and statically patches each hooked Go function's `entry + skip` prologue in `libagy.so`
     with `jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`), so `ld.so` binds both
     directions at load time with zero runtime code patching or `mprotect`.

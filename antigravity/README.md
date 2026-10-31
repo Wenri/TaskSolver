@@ -28,7 +28,8 @@ linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` a
      with the address of each static trampoline stub `agy_stub__<ID>` in `vendor/agy` at
      process load time — zero runtime code patching or `mprotect`.
 2. **Static cgocall trampolines (`src/goframe.cpp` + `src/gocall.cpp` + `src/gomod.cpp`)**
-   emitted at build time into `.section .agy_trampolines,"ax",@progbits` — each stub is a `naked`
+   emitted at build time into the `agy_trampolines` section — named without a leading dot so the
+   linker defines `__start_`/`__stop_` for it, which is where the region bounds come from — each stub is a `naked`
    function whose body is one `AGY_STUB` macro written out once, and `gen_sources.py` emits only
    the per-hook parameters into `src/goframe_gen.h` — with a
    synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto `agy_firstmoduledata.next`
@@ -53,7 +54,7 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | `pcHeader.textStart == 0`; real base is a PIE-relocated `moduledata.text` (`0x4eb5080`, `0x80` past the ELF `.text` addr) | Stdlib `debug/gosym` mis-resolves (uses `textStart`, returns morestack trailers) and **GoReSym can't even locate the pclntab**. We resolve directly: find `moduledata` via the reloc whose addend is the pclntab vaddr, read `moduledata.text`, then `addr = text + func.entryoff`. `textsectmap` has one entry (code is one contiguous Go text section), so the mapping is linear — and every hooked address is **prologue-verified**. |
 | Backend is `google.cloud.businessaicode` (Gemini); env overrides exist: **`BAICODE_ENDPOINT_URL`**, `CLOUD_CODE_URL` | Pure *redirection* may need no hook at all — just an env var. |
 | Speaks **MCP as a client** (`mcp.json`/`mcpServers`, `GetPluginMCPSpecs`, `SetMcpManager`) and supports **custom agents** | Custom **tools** and **mcp_context** can largely be delivered *natively* by config (the hybrid path); hooks are reserved for what config can't express. |
-| Runs on **WSL1** (syscall-translation layer, not a real kernel) | `ptrace` injection is unreliable here. We statically patch `libagy.so` on disk and bind our `.agy_trampolines` stubs via `ld` / `ld.so` `R_X86_64_GLOB_DAT` relocations — no `ptrace` and no runtime `mprotect`. |
+| Runs on **WSL1** (syscall-translation layer, not a real kernel) | `ptrace` injection is unreliable here. We statically patch `libagy.so` on disk and bind our `agy_trampolines` stubs via `ld` / `ld.so` `R_X86_64_GLOB_DAT` relocations — no `ptrace` and no runtime `mprotect`. |
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
 `85d3425a18a809e545747dcb9d87c03c`, agy **1.4.11**). The shim refuses to install hooks if
@@ -188,7 +189,7 @@ model/usage). Reassembling those chunks into `genai_turn` is DONE — `BaseCorre
 **Approach A (`src/gocall.cpp` + `src/gomod.cpp`)** avoids gum's return-tracking
 entirely. `make_libagy.py` statically patches the target — **past its stack-check prologue** —
 with `jmp *agy_tramp_slots[slot](%rip)` into a static assembly trampoline stub
-(`agy_stub__<ID>` in `.section .agy_trampolines,"ax",@progbits`, bound by `ld.so` via
+(`agy_stub__<ID>` in `agy_trampolines` (section), bound by `ld.so` via
 `R_X86_64_GLOB_DAT`) that:
 1. snapshots the Go-ABI arg registers into a stack **block**,
 2. `CALL runtime.cgocall(fn=handler, arg=&block)` — Go's own Go→C gateway, which switches
@@ -501,7 +502,7 @@ trampoline asm makes to `agy_on_*` handlers and `g_agy_*` flags, so their defini
 HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
 Run agy under the hook via the launcher in `test_scripts/` — it enables the full working
-hook union (all 28 static `.agy_trampolines` stubs bound via `ld` / `ld.so`, each hook's cgo
+hook union (all 28 static `agy_trampolines` stubs bound via `ld` / `ld.so`, each hook's cgo
 gateway chosen per the `procdef.h` `MECH` column); the GC-safe synthetic moduledata is
 always on:
 

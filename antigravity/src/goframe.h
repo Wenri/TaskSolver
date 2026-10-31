@@ -17,8 +17,10 @@
 #define AGY_GOFRAME_H
 
 #define AGY_FRAME        120   /* total bytes the stub subtracts from rsp */
-#define AGY_SLOT_SIZE    256   /* stride between stubs in .agy_trampolines */
-#define AGY_TRAMP_SECTION ".agy_trampolines"
+#define AGY_SLOT_SIZE    256   /* stride between stubs in agy_trampolines */
+/* No leading dot: a section whose name is a valid C identifier makes the linker
+ * define __start_/__stop_ for it, which is where the region bounds below come from. */
+#define AGY_TRAMP_SECTION "agy_trampolines"
 
 /* Offsets of the live frame within a slot, for the synthetic moduledata's locals bitmap:
  * the region where the frame is established, so Go's GC scans it conservatively. */
@@ -42,5 +44,20 @@
 #define AGY_OFF_RDX       96
 #define AGY_OFF_RBP      104
 #define AGY_OFF_ACTION   112   /* block.action — the hook's PASS/RETURN verdict */
+
+/* The trampoline region, straight from the linker. `ld` defines these for any output section
+ * whose name is a valid C identifier, so the bounds are whatever was actually emitted — no label
+ * to keep in sync, and no assumption about which stub the compiler placed first. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern const unsigned char __start_agy_trampolines[];
+extern const unsigned char __stop_agy_trampolines[];
+#ifdef __cplusplus
+}
+#endif
+
+#define agy_tramp_region_start __start_agy_trampolines
+#define agy_tramp_region_end   __stop_agy_trampolines
 
 #endif /* AGY_GOFRAME_H */

@@ -9,8 +9,8 @@
      and the static trampoline stubs exported by `vendor/agy` (`agy_stub__<ID>`) so
      `ld` / `ld.so` bind both directions at link/load time via ELF relocations.
   2. Static assembly cgocall/asmcgocall trampoline stubs (`agy_stub__<ID>`) in
-     `.section .agy_trampolines,"ax",@progbits` (256-byte slots bounded by
-     `agy_tramp_region_start` .. `agy_tramp_region_end`), each statically bound via `ld`
+     `agy_trampolines` (section) (256-byte slots bounded by
+     bounded by the linker's `__start_`/`__stop_` symbols), each statically bound via `ld`
      to its dedicated C handler (`agy_on_*`), `runtime.cgocall`/`runtime.asmcgocall`,
      displaced Go frame-setup prologue bytes, and `agy_go__*` resume target.
   3. `AGY_SYMS`, one row per procdef.h row keyed by that row's short id, and the `consteval`
@@ -84,8 +84,6 @@ def gen_header(symbols_path: str, out_path: str) -> None:
             w("void %s();   /* %s */\n" % (c_sym_name(hid), nm))
         for r in rows:
             w('__attribute__((visibility("default"))) void agy_stub__%s();\n' % r["id"])
-        w("extern const uint8_t agy_tramp_region_start[];\n")
-        w("extern const uint8_t agy_tramp_region_end[];\n")
         w("}\n\n")
 
         w("using agy_go_fn_t = void (*)();\n")
@@ -140,13 +138,6 @@ def gen_header(symbols_path: str, out_path: str) -> None:
             sym = r["symbol"]
             f.write(stub_line(slot, r, handlers.get(r["kind"], default_handler),
                               skips[sym], prologues[sym]) + "\n")
-        f.write("\n/* The region's end. Defined by arithmetic, not as a label after the last\n"
-                " * stub: GCC emits toplevel asm ahead of the functions, so such a label lands at\n"
-                " * the region START. Every stub .org-pads to its slot, so this is exact. */\n")
-        f.write('__asm__(".globl  agy_tramp_region_end\\n"\n'
-                '        ".hidden agy_tramp_region_end\\n"\n'
-                f'        ".set    agy_tramp_region_end, agy_tramp_region_start + '
-                f'{len(rows) * SLOT_SIZE}");\n')
         f.write("\n#endif /* AGY_GOFRAME_GEN_H */\n")
 
     print("wrote %s + %s (%d symbols, %d stubs, build-id %s)"

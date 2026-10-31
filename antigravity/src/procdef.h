@@ -14,7 +14,7 @@
  * kind   string tag passed to Python dispatch(kind, stream_id, data).
  * MECH   how the hook is bound (see symbols/gen_sources.py and gocall.cpp):
  *          (There is no gum-attach mech any more. frida-gum was retired and removed completely.)
- *          AGY_FULLCGO = static cgocall trampoline (`agy_stub__<ID>` in `.agy_trampolines`, gocall.cpp)
+ *          AGY_FULLCGO = static cgocall trampoline (`agy_stub__<ID>` in `agy_trampolines`, gocall.cpp)
  *                        via full `runtime.cgocall` — for PARKING funcs (entersyscall + P handoff,
  *                        GC-safe). The default.
  *          AGY_ASMCGO  = static cgocall trampoline via `runtime.asmcgocall` — the lighter g0-switch
@@ -24,7 +24,7 @@
  *          AGY_OFF     = NOT hooked. The row is kept as documentation of a hook that stalls agy
  *                        or collides with another.
  *        `make_libagy.py` and `gen_sources.py` emit and bind every non-OFF hook via `ld` /
- *        `ld.so` `R_X86_64_GLOB_DAT` relocations. FULLCGO and ASMCGO hooks share one `.agy_trampolines`
+ *        `ld.so` `R_X86_64_GLOB_DAT` relocations. FULLCGO and ASMCGO hooks share one `agy_trampolines`
  *        section + synthetic moduledata (`gomod.cpp`).
  * RETCAP how a hook's RETURN value WOULD be captured. Historically this also selected the gum
  *        listener: any nonzero RETCAP meant intercepting the return, which costs a return-address
@@ -81,7 +81,7 @@ consteval agy_hook_fn agy_handler_for(std::string_view kind) {
 
 /* One table row. `fn`/`stub`/`handler`/`skip`/`ow`/`slot` are resolved at compile time by
  * the consteval constructor: `fn` is the ld-bound Go function pointer (`&agy_go__*`), `stub` is
- * the static `.agy_trampolines` assembly stub (`&agy_stub__<ID>`), and `handler` is the dedicated
+ * the static `agy_trampolines` assembly stub (`&agy_stub__<ID>`), and `handler` is the dedicated
  * C hook function (`&agy_on_*`).
  *
  * Only `id`, `kind`, `mech`, `skip`, `stub` and `slot` are read back at runtime (hk() and

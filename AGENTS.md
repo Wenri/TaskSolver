@@ -231,7 +231,7 @@ instrumentation layer; Claude uses its SDK protocol directly:
   `entry + skip` with `jmp *agy_tramp_slots[slot](%rip)` and importing `agy_stub__<ID>` via
   `R_X86_64_GLOB_DAT`) and linked into a C++23 host executable (`vendor/agy`, built from
   `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<ID>`) in
-  `.agy_trampolines`, binds both directions via `ld` / `ld.so`, and splices its synthetic
+  `agy_trampolines`, binds both directions via `ld` / `ld.so`, and splices its synthetic
   `moduledata` (`md->bad = 1`) onto `agy_firstmoduledata.next` before calling `agy_rt0_go`.
   See `antigravity/README.md`.
 - **`codex/`** → the `pycodex` package: OpenAI's Rust codex, built from a vendored source tree with

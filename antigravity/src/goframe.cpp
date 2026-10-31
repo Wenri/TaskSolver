@@ -28,9 +28,9 @@
  *   - `__builtin_unreachable()` after each body is load-bearing, not decoration. Without it GCC
  *     appends a `ud2` after the asm, which lands past this stub's `.org` padding and pushes the
  *     next stub off its slot boundary.
- *   - this file is compiled `-fno-lto` (see CMakeLists.txt). The `.org` directives below are
- *     resolved against `agy_tramp_region_start`, which a top-level asm emits, and LTO does not
- *     guarantee the order of top-level asm against functions.
+ *   - this file is compiled `-fno-lto` (see CMakeLists.txt). There is nothing here to optimise,
+ *     and it keeps LTO from folding two stubs it considers identical or moving them out of the
+ *     section, either of which would break the one-stub-per-slot layout.
  *   - the C handlers and flags named in the asm are invisible to the optimiser, so they carry
  *     AGY_ASM_REFERENCED (gocall.h).
  *
@@ -49,15 +49,6 @@
 #define AGY_S_(x)   #x
 #define AGY_S(x)    AGY_S_(x)
 
-/* The region opens here so every stub's `.org` has a base to pad against, and so gomod.cpp can
- * describe [start, end) to Go as one synthetic function. */
-__asm__(".pushsection " AGY_TRAMP_SECTION ",\"ax\",@progbits\n"
-        ".p2align 8\n"
-        ".globl  agy_tramp_region_start\n"
-        ".hidden agy_tramp_region_start\n"
-        "agy_tramp_region_start:\n"
-        ".popsection");
-
 /* ---- one stub ---------------------------------------------------------------------------------
  * id          hook id; defines agy_stub__<id> and resumes into agy_go__<id>
  * slot        index in agy_tramp_slots[]; also fixes this stub's offset in the region
@@ -69,7 +60,7 @@ __asm__(".pushsection " AGY_TRAMP_SECTION ",\"ax\",@progbits\n"
  */
 #define AGY_STUB(id, slot, enable, handler, gateway, resume_off, ...)                        \
     extern "C" __attribute__((naked, used, visibility("default"),                            \
-                              section(AGY_TRAMP_SECTION)))                                   \
+                              aligned(AGY_SLOT_SIZE), section(AGY_TRAMP_SECTION)))           \
     void agy_stub__##id() {                                                                  \
         __asm__(                                                                             \
             "cmpb   $0, " #enable "(%rip)\n\t"                                               \
@@ -119,16 +110,20 @@ __asm__(".pushsection " AGY_TRAMP_SECTION ",\"ax\",@progbits\n"
             "2:\n\t"                                                                         \
             "xorps  %xmm15, %xmm15\n\t"                                                      \
             "ret\n\t"                                                                        \
-            ".org   agy_tramp_region_start + (" #slot " + 1) * "                             \
-                    AGY_S(AGY_SLOT_SIZE) ", 0x90");                                          \
+            ".balign " AGY_S(AGY_SLOT_SIZE) ", 0x90");                                       \
         __builtin_unreachable();   /* suppress GCC's trailing ud2 — see the note above */     \
     }
 
-/* goframe_gen.h is generated beside symbols_gen.h: the per-hook kind strings, one AGY_STUB per
- * installed hook in slot order, and `agy_tramp_region_end`.
+/* goframe_gen.h is generated beside symbols_gen.h: the per-hook kind strings, then one AGY_STUB
+ * per installed hook.
  *
- * That end marker is defined by arithmetic (`.set`, start + nslots * stride) rather than as a
- * label placed after the last stub, because GCC emits every toplevel asm statement ahead of the
- * functions in the TU: a label written after this include still landed at the region start. */
+ * Placement needs no anchor and no region label. Each stub is `aligned` to the slot stride and
+ * pads its own tail with `.balign`, so the stubs tile the section exactly and the linker's
+ * __start_/__stop_ symbols (goframe.h) are the true bounds.
+ *
+ * A stub outgrowing its slot would silently widen the stride, and it cannot be caught here: the
+ * body's forward branches are not sized until relaxation, so `.` is not a constant the assembler
+ * can test. agy_init() checks the aggregate instead — the section must measure exactly
+ * nslots * stride — which fails for exactly the same reason, at startup, with a clear message. */
 #include "goframe_gen.h"
 
