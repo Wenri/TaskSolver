@@ -85,11 +85,14 @@ consteval agy_hook_fn agy_handler_for(std::string_view kind) {
  * C hook function (`&agy_on_*`). */
 struct agy_hook {
     std::string_view id;      /* short unique id, for hk() compile-time lookup */
-    const char      *name;    /* Go symbol → agy_fn / agy_sym */
     wire_mode_t       mode;
     const char      *kind;    /* → dispatch(kind,…) / wire_event_t.kind */
     agy_mech_t       mech;
     int32_t          retcap;  /* return-capture policy: 0 none, <0 special-cased, >0 min bytes to emit */
+    /* Never read at runtime, and NOT removable: taking `&agy_go__*` here is the only reference
+     * that imports an AGY_OFF row's Go symbol into this binary (active rows are referenced by
+     * their stub assembly instead). That import is what makes `ld.so` fail loudly if a future agy
+     * drops or renames a function the table still lists. */
     agy_go_fn_t      fn;      /* = agy_fn(name), ld-bound Go function pointer */
     agy_go_fn_t      stub;    /* = agy_stub(id), static assembly trampoline stub */
     agy_hook_fn      handler; /* = agy_handler_for(kind), statically bound C hook handler */
@@ -98,9 +101,11 @@ struct agy_hook {
     uint32_t         ow;      /* = agy_ow(name), displaced frame-prologue byte length (8 or 11) */
     int              slot;    /* = agy_slot(id), index in agy_tramp_slots[] (-1 if AGY_OFF) */
 
+    /* `name_` is consumed at compile time by the resolvers below; the Go symbol itself is not
+     * stored, since nothing reads it back. symbols.json and pyagy's HOOKS mirror carry it. */
     consteval agy_hook(std::string_view id_, const char *name_, wire_mode_t mode_,
                        const char *kind_, agy_mech_t mech_, int32_t retcap_)
-        : id(id_), name(name_), mode(mode_), kind(kind_), mech(mech_),
+        : id(id_), mode(mode_), kind(kind_), mech(mech_),
           retcap(retcap_), fn(agy_fn(name_)), stub(agy_stub(id_)),
           handler(agy_handler_for(kind_)), vaddr(agy_sym(name_)),
           skip(agy_skip(name_)), ow(agy_ow(name_)), slot(agy_slot(id_)) {}
