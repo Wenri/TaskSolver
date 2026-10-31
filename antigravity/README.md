@@ -8,8 +8,11 @@ without a supported plugin API for what we need.
 It does this by converting the upstream PIE `agy` binary into `antigravity/vendor/libagy.so`
 (`make_libagy.py`: clears `DF_1_PIE`, sets `DT_SONAME = "libagy.so"`, exports
 `runtime.rt0_go` as `agy_rt0_go`, `runtime.firstmoduledata` as `agy_firstmoduledata`,
-`agy_tramp_slots` (`512` bytes in `.bss`), and all 41 Go hook target functions as `agy_go__*`
-in `.dynsym`, statically patches each hooked Go function's `entry + skip` with
+`agy_tramp_slots` (`512` bytes in `.bss`), and all 41 Go hook target functions as
+`agy_go__<ID>` in `.dynsym` — keyed by the hook row's id, so the Go side of a row reads as the
+mirror of its host side `agy_stub__<ID>` (a function two rows name is exported under both ids,
+and the two cgocall gateways use the synthetic ids `CGOCALL`/`ASMCGOCALL`) — statically patches
+each hooked Go function's `entry + skip` with
 `jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`), and imports all 28 `agy_stub__<ID>`
 symbols via `R_X86_64_GLOB_DAT` relocations, while retaining `PT_TLS` inside `libagy.so`) and
 linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` as its first

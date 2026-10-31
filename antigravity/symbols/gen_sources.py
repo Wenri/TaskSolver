@@ -28,7 +28,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from agyelf import active_rows, c_sym_name, load_handlers, load_procdef  # noqa: E402
+from agyelf import (active_rows, c_sym_name, export_map,  # noqa: E402
+                    load_handlers, load_procdef)
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 HOOKS_OUT = os.path.join(ROOT, "pyagy", "agy_process", "hooks.py")
@@ -43,7 +44,7 @@ FRAME_HI = 182
 def emit_stub_asm(slot: int, row: dict, handler: str, c_sym: str, skip: int, phex: str) -> list[str]:
     hid = row["id"]
     mech = row["mech"]
-    gw_sym = "agy_go__runtime_asmcgocall" if mech == "asmcgo" else "agy_go__runtime_cgocall"
+    gw_sym = c_sym_name("ASMCGOCALL" if mech == "asmcgo" else "CGOCALL")
     ow = len(phex) // 2
     if ow not in (8, 11):
         raise SystemExit(f"hook {hid} ({row['symbol']}): unexpected prologue hex {phex!r} (ow={ow})")
@@ -117,6 +118,7 @@ def gen_header(symbols_path: str, out_path: str) -> None:
     rows = active_rows(all_rows)
     slot_of = {r["id"]: i for i, r in enumerate(rows)}
     handlers, default_handler = load_handlers()
+    exports = {hid: nm for hid, nm in export_map(all_rows).items() if nm in hooks}
 
     with open(out_path, "w") as f:
         w = f.write
@@ -133,8 +135,8 @@ def gen_header(symbols_path: str, out_path: str) -> None:
         w("inline constexpr uint32_t AGY_TRAMP_FRAME_HI    = %d;\n\n" % FRAME_HI)
 
         w('extern "C" {\n')
-        for name in hooks:
-            w("void %s();\n" % c_sym_name(name))
+        for hid, nm in exports.items():
+            w("void %s();   /* %s */\n" % (c_sym_name(hid), nm))
         for r in rows:
             w('__attribute__((visibility("default"))) void agy_stub__%s();\n' % r["id"])
         w("extern const uint8_t agy_tramp_region_start[];\n")
@@ -157,7 +159,7 @@ def gen_header(symbols_path: str, out_path: str) -> None:
         for r in all_rows:
             nm = r["symbol"]
             slot = slot_of.get(r["id"], -1)
-            fn = "&" + c_sym_name(nm) if nm in hooks else "nullptr"
+            fn = "&" + c_sym_name(r["id"]) if nm in hooks else "nullptr"
             stub = f'&agy_stub__{r["id"]}' if slot >= 0 else "nullptr"
             w('    { "%s", %s, %s, 0x%xULL, %d, %d, %d },\n'
               % (r["id"], fn, stub, hooks.get(nm, 0), skips.get(nm, 0),
@@ -195,7 +197,7 @@ def gen_header(symbols_path: str, out_path: str) -> None:
         for slot, r in enumerate(rows):
             sym = r["symbol"]
             asm_lines.extend(emit_stub_asm(slot, r, handlers.get(r["kind"], default_handler),
-                                           c_sym_name(sym), skips[sym], prologues[sym]))
+                                           c_sym_name(r["id"]), skips[sym], prologues[sym]))
         asm_lines += [
             ".globl agy_tramp_region_end",
             ".hidden agy_tramp_region_end",

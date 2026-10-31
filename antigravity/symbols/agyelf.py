@@ -37,17 +37,40 @@ PROCDEF_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "procdef.h"))
 
 #: Go runtime entry points the static trampolines *call* (never hook): each stub hands its frame
-#: to the cgocall gateway. Resolved and exported like the hook targets, because the generated stub
-#: assembly references them as `agy_go__runtime_cgocall` / `agy_go__runtime_asmcgocall`.
-GATEWAY_TARGETS = ("runtime.cgocall", "runtime.asmcgocall")
+#: to the cgocall gateway. They carry synthetic ids so they are exported and referenced exactly
+#: like hook rows; the generated stub assembly calls `agy_go__CGOCALL` / `agy_go__ASMCGOCALL`.
+GATEWAYS = {"CGOCALL": "runtime.cgocall", "ASMCGOCALL": "runtime.asmcgocall"}
+GATEWAY_TARGETS = tuple(GATEWAYS.values())
 
 #: Exported so the C++ host can start the Go runtime itself (antigravity.cpp calls it last).
 ENTRY_TARGET = "runtime.rt0_go"
 
 
-def c_sym_name(go_name: str) -> str:
-    """Deterministic valid C/ELF identifier for a Go symbol exported in libagy.so."""
-    return "agy_go__" + re.sub(r"[^A-Za-z0-9_]", "_", go_name)
+def c_sym_name(hook_id: str) -> str:
+    """The C/ELF identifier libagy.so exports a hook's Go function under.
+
+    Keyed by the row's short id, not by the Go symbol: ids are already valid C identifiers, and
+    it makes every synthetic name in the pair of binaries read the same way — `agy_go__<ID>` is
+    the Go side of exactly the row whose host side is `agy_stub__<ID>`. The Go symbol a row
+    points at lives in procdef.h and symbols.json, which is where it is resolved.
+
+    One Go function reached by two rows is exported once per id, as aliases on one address.
+    """
+    return "agy_go__" + hook_id
+
+
+def export_map(rows):
+    """`{id: Go symbol}` for every name libagy.so must export as `agy_go__<id>`.
+
+    One entry per procdef row (so a disabled row keeps its export, and a function named by two
+    rows is aliased under both ids), plus the cgocall gateways under their synthetic ids.
+    """
+    out = {r["id"]: r["symbol"] for r in rows}
+    clash = set(out) & set(GATEWAYS)
+    if clash:
+        raise SystemExit(f"procdef hook id(s) collide with the gateway ids: {sorted(clash)}")
+    out.update(GATEWAYS)
+    return out
 
 
 # --- src/procdef.h ------------------------------------------------------------------------------

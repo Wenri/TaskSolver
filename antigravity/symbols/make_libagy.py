@@ -37,6 +37,7 @@ from agyelf import (  # noqa: E402
     GoImage,
     active_rows,
     c_sym_name,
+    export_map,
     hook_targets,
     load_procdef,
     prologue_skip,
@@ -129,7 +130,7 @@ def patch_static_hooks(elf_path: str, rows: list[dict]) -> int:
         elf = ELF(raw)
         n_patched = 0
         for slot, r in enumerate(rows):
-            sym_name = c_sym_name(r["symbol"])
+            sym_name = c_sym_name(r["id"])
             sym = post_bin.get_symbol(sym_name)
             if sym is None or sym.value == 0:
                 raise SystemExit(f"missing symbol {sym_name} in written libagy.so")
@@ -249,14 +250,13 @@ def convert(in_path: str, out_path: str) -> None:
         rel.addend = 0
         bin_.add_dynamic_relocation(rel)
 
-    n_exported = 0
-    for nm in targets:
-        if nm in funcs:
-            bin_.add_exported_function(funcs[nm], c_sym_name(nm))
-            n_exported += 1
-    missing = [nm for nm in targets if nm not in funcs]
+    exports = export_map(rows)
+    missing = sorted({nm for nm in exports.values() if nm not in funcs})
     if missing:
         raise SystemExit(f"hook targets not found in .gopclntab: {missing}")
+    for hid, nm in exports.items():
+        bin_.add_exported_function(funcs[nm], c_sym_name(hid))
+    n_exported = len(exports)
 
     if not bin_.has(lief.ELF.DynamicEntry.TAG.SONAME):
         bin_.add(lief.ELF.DynamicSharedObject("libagy.so"))
