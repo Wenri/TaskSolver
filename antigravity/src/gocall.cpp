@@ -30,8 +30,8 @@
 #define GHLOG(...) do { std::fprintf(stderr, "[antigravity/gohook] " __VA_ARGS__); \
                         std::fputc('\n', stderr); std::fflush(stderr); } while (0)
 
-uint8_t g_agy_enabled = 0;
-uint8_t g_agy_conv_id = 0;
+AGY_ASM_REFERENCED uint8_t g_agy_enabled = 0;
+AGY_ASM_REFERENCED uint8_t g_agy_conv_id = 0;
 
 long agy_safe_read(uint64_t addr, void *dst, unsigned long n)
 {
@@ -243,7 +243,7 @@ static inline void cgt_common(agy_block *b)
         agy_emit_stack((const char *)b->kind, b->regs.rbp, g_gh_base);
 }
 
-extern "C" void agy_on_generic(agy_block *b)
+extern "C" AGY_ASM_REFERENCED void agy_on_generic(agy_block *b)
 {
     cgt_common(b);
     wire_event_t ev = { .kind = (const char *)b->kind,
@@ -251,7 +251,7 @@ extern "C" void agy_on_generic(agy_block *b)
     wire_emit(&ev);
 }
 
-extern "C" void agy_on_fh_update(agy_block *b)
+extern "C" AGY_ASM_REFERENCED void agy_on_fh_update(agy_block *b)
 {
     cgt_common(b);
     cgt_response_emit(b);
@@ -260,19 +260,19 @@ extern "C" void agy_on_fh_update(agy_block *b)
     wire_emit(&ev);
 }
 
-extern "C" void agy_on_resp(agy_block *b)
+extern "C" AGY_ASM_REFERENCED void agy_on_resp(agy_block *b)
 {
     cgt_common(b);
     cgt_bytes_emit("resp", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
 }
 
-extern "C" void agy_on_tls_write(agy_block *b)
+extern "C" AGY_ASM_REFERENCED void agy_on_tls_write(agy_block *b)
 {
     cgt_common(b);
     cgt_bytes_emit("tls_write", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
 }
 
-extern "C" void agy_on_file_open(agy_block *b)
+extern "C" AGY_ASM_REFERENCED void agy_on_file_open(agy_block *b)
 {
     cgt_common(b);
     const char *p = (const char *)b->regs.rax;
@@ -285,14 +285,14 @@ extern "C" void agy_on_file_open(agy_block *b)
     }
 }
 
-extern "C" void agy_on_http_rt(agy_block *b)
+extern "C" AGY_ASM_REFERENCED void agy_on_http_rt(agy_block *b)
 {
     cgt_common(b);
     wire_event_t rt = { .kind = "http_rt", .stream_id = b->regs.rbx, .mode = WIRE_ASYNC };
     wire_emit(&rt);
 }
 
-extern "C" void agy_on_exit(agy_block *b)
+extern "C" AGY_ASM_REFERENCED void agy_on_exit(agy_block *b)
 {
     cgt_common(b);
     wire_event_t ev = { .kind = "exit", .stream_id = b->regs.rax, .mode = WIRE_SYNC };
@@ -300,13 +300,13 @@ extern "C" void agy_on_exit(agy_block *b)
     wire_shutdown();
 }
 
-extern "C" void agy_on_resp_chunk(agy_block *b)
+extern "C" AGY_ASM_REFERENCED void agy_on_resp_chunk(agy_block *b)
 {
     cgt_common(b);
     cgt_bytes_emit("resp_chunk", b->regs.rax, b->regs.rax, b->regs.rbx, false);
 }
 
-extern "C" void agy_on_readlink_filter(agy_block *b)
+extern "C" AGY_ASM_REFERENCED void agy_on_readlink_filter(agy_block *b)
 {
     cgt_common(b);
     uint64_t nptr = b->regs.rax, nlen = b->regs.rbx;

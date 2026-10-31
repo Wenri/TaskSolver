@@ -219,6 +219,11 @@ instrumentation layer; Claude uses its SDK protocol directly:
     `WirePtyPopen`/`WirePtyProcess`, git-workspace scoping, the vendored-artifact resolver.
   - `wirecap/native/` is the C ABI bridge (`libwirecap_bridge.a`) that embeds CPython on a
     16 MB-stack worker thread; linked into the agy shim, the codex binary, and the kimi-code addon.
+    The bridge, the agy host and the kimi addon build with GCC LTO (`TASKSOLVER_LTO`, default on, in
+    `wirecap/native/CMakeLists.txt`). The bridge archive holds fat LTO objects, because codex's Rust
+    link cannot read GCC bytecode and uses their machine code. C symbols that only the agy trampoline
+    asm references must carry `AGY_ASM_REFERENCED` (`antigravity/src/gocall.h`), or LTO may drop them,
+    rename them, or change their calling convention.
 - **`antigravity/`** → the `pyagy` package: Google's Go `agy` CLI converted into `vendor/libagy.so`
   (`symbols/make_libagy.py`, exporting `agy_rt0_go`, `agy_firstmoduledata`, `agy_tramp_slots`, and
   all 41 `agy_go__*` hook targets in `.dynsym`, while statically patching each hooked function's

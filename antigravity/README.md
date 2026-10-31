@@ -471,7 +471,10 @@ pixi run build-shim     # a plain recompile (configure fetches the vendored deps
 multiprocessing/pickle wire between them is same-version (see *AgyProcess* below). It links
 `-Wl,-rpath,$(CONDA_PREFIX)/lib` so agy finds `libpython3.15.so.1.0` at runtime (agy is always
 launched via `pyagy/_env.py` under the pixi env). Build with `pixi run build-shim`
-(needs `g++` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). `pyagy.agy_process` needs `hpack`/`brotli` only for the
+(needs `g++` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). The host and the bridge
+build with GCC LTO (`-DTASKSOLVER_LTO=OFF` disables it). LTO cannot see the references the generated
+trampoline asm makes to `agy_on_*` handlers and `g_agy_*` flags, so their definitions carry
+`AGY_ASM_REFERENCED` (`used` + `externally_visible`); a new handler or flag the asm touches needs it too. `pyagy.agy_process` needs `hpack`/`brotli` only for the
 HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
 Run agy under the hook via the launcher in `test_scripts/` — it enables the full working

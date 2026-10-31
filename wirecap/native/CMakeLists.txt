@@ -1,8 +1,9 @@
 # wirecap_bridge — the shared native bridge (embedded CPython worker) as a static library,
-# linked by both the antigravity LD_PRELOAD shim (antigravity/CMakeLists.txt add_subdirectory's
-# this) and the patched codex build (its build.rs links libwirecap_bridge.a). PUBLIC usage
-# requirements (the wirecap.h include dir + the libpython embed + boost link + the conda rpath)
-# propagate to whatever links it, so a consumer just does target_link_libraries(... wirecap_bridge).
+# linked into the agy host executable and the kimi N-API addon (antigravity/CMakeLists.txt and
+# kimi/native/CMakeLists.txt add_subdirectory this) and into the patched codex binary (its build.rs
+# links libwirecap_bridge.a from antigravity/build). PUBLIC usage requirements (the wirecap.h
+# include dir + the libpython embed + boost link + the conda rpath) propagate to whatever links it,
+# so a consumer just does target_link_libraries(... wirecap_bridge).
 #
 # Like the shim, this MUST be built with the conda toolchain (CXX=x86_64-conda-linux-gnu-c++) so it
 # links the conda glibc + libpython3.15 — configure inside the pixi env.
@@ -28,6 +29,19 @@ if(NOT PY_TAG)
   message(FATAL_ERROR "could not derive the python version tag from ${CONDA_PREFIX}/bin/python3")
 endif()
 
+# Link-time optimization for all of our C++: this bridge, the agy host and the kimi addon (the
+# consumers check TASKSOLVER_LTO too). GCC LTO for now; switching these targets to clang would let
+# the bridge also LTO with the Rust codex binary. The bridge ships *fat* LTO objects (GIMPLE plus
+# regular machine code): agy and the kimi addon link with -flto and optimize across it, while
+# codex's cargo/rustc link cannot read GCC bytecode and uses the machine code. gcc-ar indexes the
+# archive through the LTO plugin.
+option(TASKSOLVER_LTO "Build the native C++ (bridge, agy host, kimi addon) with link-time optimization" ON)
+if(TASKSOLVER_LTO AND CMAKE_CXX_COMPILER_AR AND CMAKE_CXX_COMPILER_RANLIB)
+  set(CMAKE_CXX_ARCHIVE_CREATE "\"${CMAKE_CXX_COMPILER_AR}\" qc <TARGET> <LINK_FLAGS> <OBJECTS>")
+  set(CMAKE_CXX_ARCHIVE_APPEND "\"${CMAKE_CXX_COMPILER_AR}\" q <TARGET> <LINK_FLAGS> <OBJECTS>")
+  set(CMAKE_CXX_ARCHIVE_FINISH "\"${CMAKE_CXX_COMPILER_RANLIB}\" <TARGET>")
+endif()
+
 add_library(wirecap_bridge STATIC pybridge.cpp)
 target_compile_features(wirecap_bridge PRIVATE cxx_std_23)
 # -Wno-deprecated-declarations: one std::auto_ptr warning from Boost.Python.
@@ -35,6 +49,10 @@ target_compile_features(wirecap_bridge PRIVATE cxx_std_23)
 target_compile_options(wirecap_bridge PRIVATE
   -O2 -g -fPIC -Wall -Wextra -Wno-deprecated-declarations -Wno-missing-field-initializers
   -fvisibility=hidden ${WIRE_PY_INCLUDES})
+if(TASKSOLVER_LTO)
+  target_compile_options(wirecap_bridge PRIVATE -flto=auto -ffat-lto-objects)
+  target_link_options(wirecap_bridge INTERFACE -flto=auto)   # CMake consumers LTO across the bridge
+endif()
 target_include_directories(wirecap_bridge PRIVATE "${CONDA_PREFIX}/include")
 target_include_directories(wirecap_bridge PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")   # wirecap.h
 

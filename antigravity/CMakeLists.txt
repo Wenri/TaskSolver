@@ -195,6 +195,12 @@ target_compile_options(agy PRIVATE
 if(UAPI_INC)
   target_compile_options(agy PRIVATE -idirafter "${UAPI_INC}")
 endif()
+# GCC LTO across the host TUs and the bridge (TASKSOLVER_LTO is defined by wirecap/native above).
+# The C symbols the toplevel trampoline asm calls are marked AGY_ASM_REFERENCED (gocall.h).
+if(TASKSOLVER_LTO)
+  target_compile_options(agy PRIVATE -flto=auto)
+  target_link_options(agy PRIVATE -flto=auto)
+endif()
 target_include_directories(agy PRIVATE "${CONDA_PREFIX}/include")
 
 # Link order is critical: vendor/libagy.so MUST be first so its PT_TLS segment receives the first

@@ -62,7 +62,8 @@ Built by **`pixi install`** (setup.py's `_build_kimi`, after the shim so the bri
    `vendor/kimi-code/apps/kimi-code/dist/main.mjs`. A second tsdown invocation with
    `tsdown.dist-worker.config.ts` builds the required sibling `dist/search-worker.mjs`;
    the minidb worker remains SEA-only.
-2. the addon — `cmake … kimi/native` → `native/build/wirecap_node.node`.
+2. the addon — `cmake … kimi/native` → `native/build/wirecap_node.node`, built with GCC LTO
+   across the addon and its bridge copy (`TASKSOLVER_LTO`, default on).
 
 All are bundled into the wheel at `pykimi/vendor/{main.mjs,search-worker.mjs,wirecap_node.node}` and resolved
 package-only (`wirecap.runtime.vendor.vendored`). The build is **required, with no skip/opt-out**.

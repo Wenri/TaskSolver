@@ -21,7 +21,9 @@ Low-level `pycodex.ask` and `pycodex.Session` keep the exec/PTY interfaces.
   separate `openai-codex-cli-bin` runtime.
 
 ## The patch (Phase 6)
-A new self-contained leaf crate `vendor/codex-rs/wirecap/` (FFI onto `libwirecap_bridge.a`) plus
+A new self-contained leaf crate `vendor/codex-rs/wirecap/` (FFI onto `libwirecap_bridge.a`, whose
+fat GCC LTO objects carry regular machine code that this Rust link uses; there is no cross-language
+LTO with the bridge yet) plus
 **three one-line emit sites** + `wire_start()` in `cli/src/main.rs`:
 - `core/src/client.rs` `build_responses_request()` → `codex_request` (the serialized `/v1/responses`).
 - `codex-api/src/sse/responses.rs` and `codex-api/src/endpoint/responses_websocket.rs` → `codex_event`

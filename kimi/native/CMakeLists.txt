@@ -40,6 +40,11 @@ add_library(wirecap_node SHARED wirecap_node.cc)
 set_target_properties(wirecap_node PROPERTIES PREFIX "" SUFFIX ".node")
 target_compile_features(wirecap_node PRIVATE cxx_std_23)
 target_compile_options(wirecap_node PRIVATE -O2 -g -fPIC -Wall -Wextra)
+# GCC LTO across the addon and its bridge copy (TASKSOLVER_LTO is defined by wirecap/native above).
+if(TASKSOLVER_LTO)
+  target_compile_options(wirecap_node PRIVATE -flto=auto)
+  target_link_options(wirecap_node PRIVATE -flto=auto)
+endif()
 target_compile_definitions(wirecap_node PRIVATE
   "WIRE_PYTHON_SONAME=\"${WIRE_PYTHON_SONAME}\"")
 target_include_directories(wirecap_node PRIVATE ${NODE_API_INC})

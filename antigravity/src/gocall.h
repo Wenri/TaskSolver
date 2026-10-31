@@ -18,6 +18,12 @@
 
 using agy_hook_fn = void (*)(agy_block *);
 
+/* Marks the C definitions that the toplevel trampoline asm (symbols_gen.h) references by name:
+ * the agy_on_* handlers and the g_agy_* flags. LTO cannot see references from toplevel asm, so it
+ * could drop the handlers, change their calling convention, or localize and rename the flags.
+ * `used` keeps them; `externally_visible` keeps their names and ABI. ELF visibility stays hidden. */
+#define AGY_ASM_REFERENCED __attribute__((used, externally_visible))
+
 #ifdef __cplusplus
 extern "C" {
 #endif
