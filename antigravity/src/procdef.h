@@ -82,7 +82,13 @@ consteval agy_hook_fn agy_handler_for(std::string_view kind) {
 /* One table row. `fn`/`stub`/`handler`/`skip`/`ow`/`slot` are resolved at compile time by
  * the consteval constructor: `fn` is the ld-bound Go function pointer (`&agy_go__*`), `stub` is
  * the static `.agy_trampolines` assembly stub (`&agy_stub__<ID>`), and `handler` is the dedicated
- * C hook function (`&agy_on_*`). */
+ * C hook function (`&agy_on_*`).
+ *
+ * Only `id`, `kind`, `mech`, `skip`, `stub` and `slot` are read back at runtime (hk() and
+ * agy_enable_hooks). Of the rest, `fn` is load-bearing for a reason that is not visible here —
+ * see its comment below — while `mode`, `retcap`, `handler` and `ow` are inert: `handler` is bound
+ * directly by the generated stub assembly, and `mode`/`retcap` record the row's intended contract
+ * rather than drive anything. Keep that in mind before assuming a field has a consumer. */
 struct agy_hook {
     std::string_view id;      /* short unique id, for hk() compile-time lookup */
     wire_mode_t       mode;
