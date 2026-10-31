@@ -262,13 +262,13 @@ extern "C" AGY_ASM_REFERENCED void agy_on_fh_update(agy_block *b)
 extern "C" AGY_ASM_REFERENCED void agy_on_resp(agy_block *b)
 {
     cgt_common(b);
-    cgt_bytes_emit("resp", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
+    cgt_bytes_emit((const char *)b->kind, b->regs.rax, b->regs.rbx, b->regs.rcx, true);
 }
 
 extern "C" AGY_ASM_REFERENCED void agy_on_tls_write(agy_block *b)
 {
     cgt_common(b);
-    cgt_bytes_emit("tls_write", b->regs.rax, b->regs.rbx, b->regs.rcx, true);
+    cgt_bytes_emit((const char *)b->kind, b->regs.rax, b->regs.rbx, b->regs.rcx, true);
 }
 
 extern "C" AGY_ASM_REFERENCED void agy_on_file_open(agy_block *b)
@@ -278,7 +278,7 @@ extern "C" AGY_ASM_REFERENCED void agy_on_file_open(agy_block *b)
     size_t len = (size_t)b->regs.rbx;
     if (p && len > 0 && len < 4096 &&
         (mem_has(p, len, "conversations/") || mem_has(p, len, "/brain/"))) {
-        wire_event_t ev = { .kind = "file_open", .stream_id = 0,
+        wire_event_t ev = { .kind = (const char *)b->kind, .stream_id = 0,
                            .data = (const uint8_t *)p, .len = len, .mode = WIRE_ASYNC };
         wire_emit(&ev);
     }
@@ -287,14 +287,14 @@ extern "C" AGY_ASM_REFERENCED void agy_on_file_open(agy_block *b)
 extern "C" AGY_ASM_REFERENCED void agy_on_http_rt(agy_block *b)
 {
     cgt_common(b);
-    wire_event_t rt = { .kind = "http_rt", .stream_id = b->regs.rbx, .mode = WIRE_ASYNC };
+    wire_event_t rt = { .kind = (const char *)b->kind, .stream_id = b->regs.rbx, .mode = WIRE_ASYNC };
     wire_emit(&rt);
 }
 
 extern "C" AGY_ASM_REFERENCED void agy_on_exit(agy_block *b)
 {
     cgt_common(b);
-    wire_event_t ev = { .kind = "exit", .stream_id = b->regs.rax, .mode = WIRE_SYNC };
+    wire_event_t ev = { .kind = (const char *)b->kind, .stream_id = b->regs.rax, .mode = WIRE_SYNC };
     wire_emit(&ev);
     wire_shutdown();
 }
@@ -302,7 +302,7 @@ extern "C" AGY_ASM_REFERENCED void agy_on_exit(agy_block *b)
 extern "C" AGY_ASM_REFERENCED void agy_on_resp_chunk(agy_block *b)
 {
     cgt_common(b);
-    cgt_bytes_emit("resp_chunk", b->regs.rax, b->regs.rax, b->regs.rbx, false);
+    cgt_bytes_emit((const char *)b->kind, b->regs.rax, b->regs.rax, b->regs.rbx, false);
 }
 
 extern "C" AGY_ASM_REFERENCED void agy_on_readlink_filter(agy_block *b)
@@ -325,7 +325,7 @@ extern "C" AGY_ASM_REFERENCED void agy_on_readlink_filter(agy_block *b)
             kr[n > 0 ? n : 0] = 0;
             GHLOG("os.readlink(/proc/self/exe): kernel=%s -> RETURN %s", kr, g_real_exe);
         }
-        wire_event_t ev = { .kind = "readlink_filter", .stream_id = nptr,
+        wire_event_t ev = { .kind = (const char *)b->kind, .stream_id = nptr,
                            .data = (const uint8_t *)g_real_exe, .len = g_real_exe_len,
                            .mode = WIRE_ASYNC };
         wire_emit(&ev);
@@ -345,8 +345,8 @@ void agy_enable_hooks(uint64_t base, bool conv_id)
         if (i == hk("FILE_OPEN") && !conv_id) continue;
         n_tramp++;
         n_asm += (h.mech == AGY_ASMCGO);
-        GHLOG("cgo-trampoline kind=%s @ +%u -> %p (ld-bound static slot %d)",
-              h.kind, h.skip, (void *)h.stub, h.slot);
+        GHLOG("cgo-trampoline %.*s @ +%u -> %p (ld-bound static slot %d)",
+              (int)h.id.size(), h.id.data(), h.skip, (void *)h.stub, h.slot);
     }
     g_agy_conv_id = conv_id ? 1 : 0;
     g_agy_enabled = 1;

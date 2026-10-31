@@ -129,7 +129,9 @@ def gen_header(symbols_path: str, out_path: str) -> None:
         f.write("#ifndef AGY_GOFRAME_GEN_H\n#define AGY_GOFRAME_GEN_H\n\n")
         f.write("/* The kind tag each stub hands its handler: an ordinary C++ object, so the\n"
                 " * compiler owns the bytes, the NUL, the escaping and the placement. Named by\n"
-                " * hook id like everything else, so AGY_STUB needs no kind argument. */\n")
+                " * hook id like everything else, so AGY_STUB needs no kind argument.\n"
+                " * One per INSTALLED row: its stub is the only reference, so a disabled\n"
+                " * row's tag would just be collected by --gc-sections. */\n")
         for r in rows:
             f.write(f'extern "C" const char agy_kind__{r["id"]}[] = "{r["kind"]}";\n')
         f.write("\n")

@@ -84,15 +84,18 @@ consteval agy_hook_fn agy_handler_for(std::string_view kind) {
  * the static `agy_trampolines` assembly stub (`&agy_stub__<ID>`), and `handler` is the dedicated
  * C hook function (`&agy_on_*`).
  *
- * Only `id`, `kind`, `mech`, `skip`, `stub` and `slot` are read back at runtime (hk() and
+ * Only `id`, `mech`, `skip`, `stub` and `slot` are read back at runtime (hk() and
  * agy_enable_hooks). Of the rest, `fn` is load-bearing for a reason that is not visible here —
  * see its comment below — while `mode`, `retcap`, `handler` and `ow` are inert: `handler` is bound
  * directly by the generated stub assembly, and `mode`/`retcap` record the row's intended contract
- * rather than drive anything. Keep that in mind before assuming a field has a consumer. */
+ * rather than drive anything. Keep that in mind before assuming a field has a consumer.
+ *
+ * The kind tag is NOT a field: each stub passes its own `agy_kind__<id>` to the handler, so the
+ * table would only be holding a second pointer to the same string. `kind_` is still consumed at
+ * compile time, by agy_handler_for(). */
 struct agy_hook {
     std::string_view id;      /* short unique id, for hk() compile-time lookup */
     wire_mode_t       mode;
-    const char      *kind;    /* → dispatch(kind,…) / wire_event_t.kind */
     agy_mech_t       mech;
     int32_t          retcap;  /* return-capture policy: 0 none, <0 special-cased, >0 min bytes to emit */
     /* Never read at runtime, and NOT removable: taking `&agy_go__*` here is the only reference
@@ -112,7 +115,7 @@ struct agy_hook {
      * it is what build_symbols.py resolves and what pyagy's HOOKS mirror reports. */
     consteval agy_hook(std::string_view id_, [[maybe_unused]] const char *name_, wire_mode_t mode_,
                        const char *kind_, agy_mech_t mech_, int32_t retcap_)
-        : id(id_), mode(mode_), kind(kind_), mech(mech_),
+        : id(id_), mode(mode_), mech(mech_),
           retcap(retcap_), fn(agy_fn(id_)), stub(agy_stub(id_)),
           handler(agy_handler_for(kind_)),
           skip(agy_skip(id_)), ow(agy_ow(id_)), slot(agy_slot(id_)) {}
