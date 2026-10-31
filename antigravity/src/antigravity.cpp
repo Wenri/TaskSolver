@@ -108,7 +108,7 @@ static void agy_init(void)
     }
     agy_gomod_register((uintptr_t)agy_tramp_region_start,
                        (uintptr_t)agy_tramp_region_end,
-                       AGY_SLOT_SIZE, BK_SLOTS, AGY_FRAME, AGY_FRAME_LO, AGY_FRAME_HI);
+                       AGY_SLOT_SIZE, BK_SLOTS, AGY_FRAME, AGY_FRAME_LO);
 
     if (!std::getenv("AGY_PROC_ENABLE")) return;          /* opt-in */
     if (std::getenv("_AGY_SBOXSERVE")) return;            /* skip sandbox-server children */

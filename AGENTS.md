@@ -238,7 +238,22 @@ instrumentation layer; Claude uses its SDK protocol directly:
   when conversation-id capture is off, remain `nullptr`. Each `naked` stub uses basic asm
   to load its entry once into `r12`, skips the hook if null, and otherwise passes that same
   pointer with `&block` through the row's Go gateway (`runtime.cgocall` or `runtime.asmcgocall`).
-  Preserve that Go→C transition. `BOOKS` stores hook metadata only. Keep `-fno-lto` and run
+  `AGY_STUB_FULLCGO` passes `fn`/`arg` in RAX/RBX; `AGY_STUB_ASMCGO` writes them to the stack.
+  The variants share save/restore text and each names its gateway directly. Generated
+  `AGY_STUBS(FULLCGO, ASMCGO)` preserves active `BOOKS` order.
+  Preserve that Go→C transition. The fixed 112-byte frame reserves 16 bytes for the gateway,
+  then packs `uint32_t book` and `action` before the 11 saved registers. A single qword store
+  initializes both fields; the pinned ASMCGO gateway's 32-bit result overwrites only `book`
+  after the handler returns. The epilogue compares `action` and restores `rsp` with `lea`
+  to preserve the branch flags; pcsp changes after each stack adjustment ends. Mark synthetic
+  functions `FuncFlagAsm` to prevent async preemption of partial frames and displaced prologues.
+  `gomod.cpp` emits two pcsp sequences using the variant-specific frame ends in `goframe.h`
+  and selects one per active `BOOKS` row; frame size and 256-byte slot size remain shared.
+  Zero X15 immediately after the gateway for both return paths.
+  `procdef.h` rows use `{id, mode, retcap, AGY_FULLGO(symbol)}` (or `AGY_ASMGO` / `AGY_OFF`).
+  The wrapper selects the mechanism; C++ discards its symbol argument, while the Python
+  parser reads both. `BOOKS` stores only `id`, `mode`, `retcap`, and `mech`.
+  Keep `-fno-lto` and run
   `test_scripts/test_agy_stubs.py` after stub or toolchain changes: it checks frame geometry,
   the nullable gate, and native startup with disabled hooks and the conversation-id toggle.
   `symbols/` is a source build package: its tools use relative `.agyelf` imports and run as

@@ -14,6 +14,7 @@
 #include <cstddef>
 #include "goframe.h"
 #include "gomod.h"
+#include "procdef.h"
 #include "wirecap.h"
 #include <cstdio>
 #include <cstdlib>
@@ -41,6 +42,8 @@ AGY_CHK(action,   AGY_OFF_ACTION);
 #undef AGY_CHK
 static_assert(AGY_OFF_BLOCK + sizeof(agy_block) == AGY_FRAME,
               "the stub frame must be exactly the cgocall arg pair plus agy_block");
+static_assert(AGY_OFF_RBP + sizeof(uint64_t) == AGY_FRAME,
+              "Go's unwinder expects the saved frame pointer at the top of the frame");
 static_assert(sizeof(go_func) == 44, "go_func header must be 44 bytes");
 static_assert(sizeof(go_functab) == 8, "functab must be 8 bytes");
 static_assert(sizeof(go_findfuncbucket) == 20, "findfuncbucket must be 20 bytes");
@@ -82,13 +85,13 @@ static struct {
     go_findfuncbucket fft[AGY_GOMOD_MAX_SLOTS + 1];    /* nbuckets ≤ nfunc/16+1, always ≤ this */
     alignas(uint32_t) uint8_t pcln[AGY_GOMOD_MAX_SLOTS * AGY_FUNC_STRIDE];   /* the _func records */
     uint8_t           names[32];   /* "\0agy_cgo_tramp\0" */
-    uint8_t           pctab[32];   /* dummy[0] + 3-region pcsp */
+    uint8_t           pctab[32];   /* dummy[0] + FULLCGO/ASMCGO 3-region pcsp tables */
     alignas(uint32_t) uint8_t smap[sizeof(go_stackmap) + AGY_GOMOD_MAX_MAPBYTES];  /* stackmap hdr+bits */
 } g_mod;
 
 int agy_gomod_register(uintptr_t region_base, uintptr_t region_end,
                        uint32_t slot_size, int nslots,
-                       uint32_t frame, uint32_t frame_lo, uint32_t frame_hi)
+                       uint32_t frame, uint32_t frame_lo)
 {
     int nfunc = nslots;
     uint32_t region_size = (uint32_t)(region_end - region_base);
@@ -121,29 +124,37 @@ int agy_gomod_register(uintptr_t region_base, uintptr_t region_end,
     uint32_t nameOff = 1;
 
     size_t po = 1;
-    po += put_step(pctab + po, /*dval*/ 0 - (-1),        /*dpc*/ frame_lo);
-    po += put_step(pctab + po, /*dval*/ (int32_t)frame,  /*dpc*/ frame_hi - frame_lo);
-    po += put_step(pctab + po, /*dval*/ -(int32_t)frame, /*dpc*/ slot_size - frame_hi);
-    pctab[po++] = 0;   /* terminator (uvdelta==0) */
-    uint32_t pcspOff = 1;
+    auto append_pcsp = [&](uint32_t frame_hi) {
+        uint32_t off = (uint32_t)po;
+        po += put_step(pctab + po, /*dval*/ 0 - (-1),        /*dpc*/ frame_lo);
+        po += put_step(pctab + po, /*dval*/ (int32_t)frame,  /*dpc*/ frame_hi - frame_lo);
+        po += put_step(pctab + po, /*dval*/ -(int32_t)frame, /*dpc*/ slot_size - frame_hi);
+        pctab[po++] = 0;   /* terminator (uvdelta==0) */
+        return off;
+    };
+    uint32_t full_pcsp = append_pcsp(AGY_FRAME_HI_FULLCGO);
+    uint32_t asm_pcsp = append_pcsp(AGY_FRAME_HI_ASMCGO);
 
     smap->n = 1;
     smap->nbit = nbit;
     std::memset(smap->bytedata, 0xff, mapbytes);
     if (nbit % 8) smap->bytedata[mapbytes - 1] = (uint8_t)((1u << (nbit % 8)) - 1);
 
-    for (int i = 0; i < nfunc; i++) {
+    int i = 0;
+    for (const auto &row : BOOKS) {
+        if (row.mech == AGY_OFF) continue;
         go_func *f = (go_func *)(pcln + (size_t)i * AGY_FUNC_STRIDE);
         f->entryOff  = (uint32_t)i * slot_size;
         f->nameOff   = (int32_t)nameOff;
         f->args      = 0;
-        f->pcsp      = pcspOff;
+        f->pcsp      = row.mech == AGY_ASMCGO ? asm_pcsp : full_pcsp;
         f->funcID    = 0;   /* normal — NOT asyncPreempt (unwinder injectedCall) */
-        f->flag      = 0;   /* NOT SPWrite (sub/add rsp is encoded in pcsp) */
+        f->flag      = GO_FUNCFLAG_ASM; /* no async preemption of partially saved/restored frames */
         f->nfuncdata = 2;
         uint32_t *fd = (uint32_t *)(pcln + (size_t)i * AGY_FUNC_STRIDE + 44);
         fd[GO_FUNCDATA_ArgsPointerMaps]   = 0xffffffffu;   /* nil */
         fd[GO_FUNCDATA_LocalsPointerMaps] = 0;             /* gofunc + 0 */
+        i++;
     }
 
     for (int i = 0; i < nfunc; i++) {
@@ -180,9 +191,9 @@ int agy_gomod_register(uintptr_t region_base, uintptr_t region_end,
 
     if (std::getenv("AGY_PROC_ENABLE") && !std::getenv("_AGY_SBOXSERVE")) {
         GLOG("registered synthetic moduledata on agy_firstmoduledata (%p): text=[%#lx,%#lx) %d funcs, "
-             "frame=%u (spdelta in [%u,%u)), nbit=%d",
+             "frame=%u (spdelta in [%u,%u) full, [%u,%u) asm), nbit=%d",
              (void *)fmd, (unsigned long)region_base, (unsigned long)region_end, nfunc, frame,
-             frame_lo, frame_hi, nbit);
+             frame_lo, AGY_FRAME_HI_FULLCGO, frame_lo, AGY_FRAME_HI_ASMCGO, nbit);
     }
     return 0;
 }

@@ -47,8 +47,9 @@
  *
  * FuncID must be 0 (normal): NOT FuncID_asyncPreempt/debugCallV2 — the unwinder
  * treats those as injectedCall (traceback.go:485) and misreads our frame. Flag
- * must be 0: NOT FuncFlagSPWrite (would stop the unwind) — our sub/add rsp IS
- * encoded in the pcsp table, so it's a normal frame.
+ * uses FuncFlagAsm to prevent async preemption during the register saves/restores and
+ * displaced prologue. NOT FuncFlagSPWrite (would stop the unwind): the fixed call frame
+ * is encoded in pcsp so synchronous gateway stack walks can unwind it normally.
  *
  * All facts verified against /usr/lib64/go1.26.4/go/src/runtime/{symtab.go,
  * runtime2.go,traceback.go,mgcmark.go,stkframe.go,asm_amd64.s,cgocall.go} and
@@ -95,7 +96,7 @@ typedef struct {
     uint32_t cuOffset;
     int32_t  startLine;
     uint8_t  funcID;       /* MUST be 0 (normal) */
-    uint8_t  flag;         /* MUST be 0 (no SPWrite/TopFrame) */
+    uint8_t  flag;         /* FuncFlagAsm only (no SPWrite/TopFrame) */
     uint8_t  pad[1];
     uint8_t  nfuncdata;    /* must be last; uint32-aligned boundary follows */
     /* uint32_t pcdata[npcdata];  uint32_t funcdata[nfuncdata]; */
@@ -155,19 +156,20 @@ typedef struct go_moduledata {
 #define GO_FUNCDATA_LocalsPointerMaps  1
 #define GO_PCDATA_UnsafePoint          0
 #define GO_PCDATA_StackMapIndex        1
+#define GO_FUNCFLAG_ASM               4
 #define GO_PCLNTAB_MAGIC_GO120         0xFFFFFFF1u   /* == CurrentPCLnTabMagic; copied from the live pcHeader, not hardcoded */
 
 /* Registers we snapshot into the trampoline frame (= the block the C hook reads).
  * Order is the Go internal register ABI arg order so the hook can name fields.
- * `rbp` is the 11th slot (OFF_RBP = GH_SPILL+88) — the trampoline already spills it;
+ * `rbp` is the 11th slot (AGY_OFF_RBP = 104), at the frame's saved-BP position;
  * naming it lets the stack unwinder read the caller frame pointer. */
 typedef struct {
     uint64_t rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11, rdx, rbp;
-} agy_go_regs;   /* 88 bytes; lives in the trampoline locals region (all-ones scanned) */
+} agy_go_regs;   /* 88 bytes; argument slots are scanned, final rbp slot is excluded */
 
 /* The block a stub builds and hands its handler. `book` is the row's BOOKS index. `action` is
  * the handler's verdict: 0 runs the body; nonzero returns the Go-ABI values it wrote into `regs`. */
-typedef struct { uint64_t book; agy_go_regs regs; uint64_t action; } agy_block;
+typedef struct { uint32_t book, action; agy_go_regs regs; } agy_block;
 
 /* _func total stride in pclntable: 44-byte header + funcdata[2] (no pcdata). */
 #define AGY_FUNC_STRIDE 52
@@ -176,7 +178,7 @@ typedef struct { uint64_t book; agy_go_regs regs; uint64_t action; } agy_block;
  * to leak, no OOM path. These bound its fixed-size tables; agy_gomod_prepare rejects (rc<0) anything
  * larger, and antigravity.cpp static_asserts BK_SLOTS <= AGY_GOMOD_MAX_SLOTS so BOOKS can
  * never outgrow it (bump the cap if you add that many hooks). MAX_MAPBYTES bounds the locals bitmap:
- * mapbytes = ((frame-8)/8 + 7)/8, which is 2 for the real frame (GH_FRAME = 120). */
+ * mapbytes = ((frame-8)/8 + 7)/8, which is 2 for the real frame (AGY_FRAME = 112). */
 #define AGY_GOMOD_MAX_SLOTS    64
 #define AGY_GOMOD_MAX_MAPBYTES 8
 
@@ -184,8 +186,9 @@ typedef struct { uint64_t book; agy_go_regs regs; uint64_t action; } agy_block;
  * after ld.so has already relocated libagy.so and bound `agy_firstmoduledata`):
  *
  * agy_gomod_register() — build a synthetic moduledata covering
- * [region_base, region_end) as `nslots` identical trampoline funcs (each
- * `slot_size` bytes, entry i at region_base + i*slot_size), mark `md->bad = 1`
+ * [region_base, region_end) as `nslots` trampoline funcs in active BOOKS order (each
+ * `slot_size` bytes, entry i at region_base + i*slot_size), select the FULLCGO/ASMCGO
+ * pcsp window from each row's mechanism, mark `md->bad = 1`
  * (so `runtime.modulesinit` skips it while `moduledataverify1` and `findfunc`
  * walk it), and splice it onto `agy_firstmoduledata.next`. */
 #ifdef __cplusplus
@@ -195,7 +198,7 @@ extern go_moduledata agy_firstmoduledata;
 
 int agy_gomod_register(uintptr_t region_base, uintptr_t region_end,
                        uint32_t slot_size, int nslots,
-                       uint32_t frame, uint32_t frame_lo, uint32_t frame_hi);
+                       uint32_t frame, uint32_t frame_lo);
 #ifdef __cplusplus
 }
 #endif

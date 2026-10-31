@@ -30,8 +30,9 @@ linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` a
 2. **Static cgocall trampolines (`src/goframe.cpp` + `src/gocall.cpp` + `src/gomod.cpp`)**
    emitted at build time into the `agy_trampolines` section — named without a leading dot so the
    linker defines `__start_`/`__stop_` for it, which is where the region bounds come from — each stub is a `naked`
-   function whose body is one `AGY_STUB` macro written out once, and `gen_sources.py` emits only
-   the per-stub literals (`AGY_STUBS`) into `src/symbols_gen.h` — with a
+   function emitted by `AGY_STUB_FULLCGO` or `AGY_STUB_ASMCGO`, sharing save/restore text.
+   `gen_sources.py` emits `AGY_STUBS(FULLCGO, ASMCGO)` and the per-stub literals into
+   `src/symbols_gen.h`, preserving active `BOOKS` order — with a
    synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto `agy_firstmoduledata.next`
    before `agy_rt0_go()` starts. `agy_enable_hooks` in `gocall.cpp` fills the zero-initialized
    `g_agy_on` handler pointer table for enabled rows; disabled entries remain `nullptr`.
@@ -176,8 +177,8 @@ ways it corrupts agy's Go runtime: (1) `on_leave` return-value interception rewr
 address, which the GC stack-unwinder trips on — **~40% turn failure**; (2) even *entry* gum hooks
 on hot funcs (`tls_write` ~55×/turn, `os.Getenv` ~116×/turn) fail the full AgyProcess path under
 worker load (~15%). Both cgocall-trampoline variants are **100% across 55+ turns** where gum is
-~60–85%. So **every hook is now a cgocall trampoline** — `AGY_ASMCGO` for hot non-parking funcs
-(the lighter g0-switch: `os.Getenv`/`tls_write`) and `AGY_FULLCGO` for parking funcs (and for
+~60–85%. So **every hook is now a cgocall trampoline** — `AGY_ASMGO(symbol)` for hot non-parking funcs
+(the lighter g0-switch: `os.Getenv`/`tls_write`) and `AGY_FULLGO(symbol)` for parking funcs (and for
 `os.OpenFile`, which does an openat syscall and wants the P handoff)
 — and capture is done via **entry-arg trampoline reads** (`agy_cgo_hook` reads args off the g0
 stack: the `tls_write` request, the h2 `resp` chunk, the app boundary). The gum `leave=1` hooks
@@ -202,16 +203,18 @@ with `jmp *agy_tramp_slots[slot](%rip)` into a static assembly trampoline stub
    provides the safe cgo context (`entersyscall`, P-handoff, GC coordination);
    `runtime.asmcgocall` is used for the non-parking rows. The gateway runs the handler
    directly; the handler copies + enqueues to the pyworker,
-4. restores the registers and returns if the handler set `block.action`; otherwise it runs the
+4. zeros X15, restores the registers, and returns if the handler set `block.action`; otherwise it runs the
    displaced original frame-setup prologue and `jmp`s back into `agy_go__* + skip + ow` via `@GOTPCREL`.
 
 Because the trampoline never rewrites *our* return address, parking/rescheduling is
-unaffected — the goroutine may resume on any M. A hook picks its Go→C gateway *per hook*
-via the `MECH` column: `AGY_FULLCGO` uses full `runtime.cgocall` (the robust default —
-`entersyscall` + P handoff, GC-safe); `AGY_ASMCGO` uses `runtime.asmcgocall`, a lighter
-variant (just the g0 stack switch, no `entersyscall`/`_Gsyscall`) for hot or
-syscall-at-entry-sensitive funcs. Both share one region + synthetic moduledata; the pcsp
-matches the full-cgo geometry, since only those slots are ever GC-unwound.
+unaffected — the goroutine may resume on any M. Each `procdef.h` row has the form
+`{id, mode, retcap, selector(symbol)}`: `AGY_FULLGO(symbol)` selects full `runtime.cgocall`
+(the robust default — `entersyscall` + P handoff, GC-safe); `AGY_ASMGO(symbol)` selects
+`runtime.asmcgocall`, a lighter variant (just the g0 stack switch, no `entersyscall`/`_Gsyscall`)
+for hot or syscall-at-entry-sensitive funcs; `AGY_OFF(symbol)` disables the hook. C++ keeps
+the wrapper's mechanism enum in `BOOKS` and discards the symbol; the Python parser reads both.
+Each stub variant names its gateway directly. Both share one region and synthetic moduledata,
+with a separate pcsp sequence for each variant.
 
 **Synthetic moduledata (`gomod.cpp`).** `cgocall`'s `entersyscall()` opens a GC-scannable window
 over our trampoline frame; if Go's unwinder can't `findfunc` the trampoline PCs it
@@ -220,30 +223,34 @@ over our trampoline frame; if Go's unwinder can't `findfunc` the trampoline PCs 
 `runtime.findfunc` validate and walk it) spliced synchronously onto the `ld`-bound
 `agy_firstmoduledata.next` before `agy_rt0_go()` starts. Its pclntab/pcsp cover the trampoline,
 so GC unwinds it cleanly — and the pcsp must report **one constant spdelta** across the whole
-trampoline-frame window.
+trampoline-frame window. `gomod.cpp` emits the two sequences once, then selects each `_func`'s
+pcsp offset while walking active `BOOKS` rows in stub order. Both use a 112-byte frame and
+256-byte slots; the live frame windows are `[20,167)` for FULLCGO and `[20,173)` for ASMCGO,
+ending after their respective stack-restore instructions (`goframe.h`).
 
-**The GH_SPILL geometry (the fix that made the cgocall variant correct).** `runtime.cgocall`
-uses Go's internal ABI and spills its two register args (`fn`, `arg`) into **caller-provided
-slots at `[S]` and `[S+8]`** (`S` = rsp at the `call`). So the block must **not** sit at `S`,
-or cgocall overwrites `block.hook`(@`[S]`) and `block.regs.rax`(@`[S+8]`) before the hook reads
-them — the symptom was `os.Getenv` returning `""` → `$HOME is not defined` at startup. The fix
-reserves **16 dead bytes (`GH_SPILL`) below the block**, baked into the **fixed** frame
-(`GH_FRAME = 16 + 96 block + 8 pad = 120`), *not* a transient `sub` around the call — a
-transient sub would make the real spdelta disagree with the synthetic pcsp inside the
-`_Gsyscall` window → `throw("unknown pc")`. cgocall always spills exactly 2 slots, so 16 bytes
-is exact and future-proof. (Directly confirmed under gdb — see Status.)
+**Fixed frame layout.** `runtime.cgocall` spills its two register args (`fn`, `arg`)
+into caller-provided slots at `[S]` and `[S+8]` (`S` = rsp at the call). The block starts at
+`S+16`, after those 16 reserved bytes. FULLCGO passes `fn`/`arg` in RAX/RBX and leaves the
+spill pair for `cgocall`; ASMCGO writes `fn` from R12 and `arg` from RAX into those stack slots.
+The block's `uint32_t book` and `uint32_t action` share the
+first qword, followed by the 11 saved registers: `AGY_FRAME = 16 + 96 = 112` bytes.
+`movq $book, 16(%rsp)` initializes the row index and clears `action` together. The pinned
+`runtime.asmcgocall` writes its 32-bit return value at `S+16` after the handler finishes;
+this overwrites the now-unused `book` while leaving `action` at `S+20` intact.
 
-These trampoline targets (`SendUserMessage`/`Send`, the framework consumers, and the
-`CodeAssistClient` RPCs) are marked `AGY_FULLCGO`/`AGY_ASMCGO` in `procdef.h` and installed as
-one set — `install_hooks` streams them through a **single** `AgyGoHook` builder (`begin`→`add`→
-`finalize`; the `gomod.cpp` singletons make a second builder unsafe). The GC-safe synthetic
-moduledata is always installed.
-`os.Getenv` was the benign CPU-only validator for this path during bring-up (a trampoline on
-it that answers cleanly proves the tool sound); it's now `AGY_OFF` because the gum `smoke`
-hook already covers `os.Getenv` and the real targets exercise the mechanism. (Two earlier
-bring-up rungs — a naive gum attach on the parking funcs, and a `runtime.cgocall` gateway
-probe — were removed once this path proved out; the trampoline is park-safe precisely because
-it never intercepts the return.)
+The frame stays fixed through the Go gateway so the real stack delta matches the synthetic
+pcsp throughout the `_Gsyscall` window. On return, `cmpl` tests `action` while the frame is
+live and `lea` restores `rsp` without changing the branch flags; the pcsp delta changes
+after the instruction ends. Synthetic functions carry `FuncFlagAsm` so Go cannot
+asynchronously preempt a partial register save/restore or the displaced prologue.
+Synchronous gateway stack walks still use the fixed frame's pcsp. X15 is zero on Go entry;
+the stub only touches integer registers before the gateway and zeros X15 immediately
+afterward, covering both the normal continuation and early return.
+
+The `AGY_FULLGO`/`AGY_ASMGO` rows in `procdef.h` generate the static stubs, and
+`agy_enable_hooks` selects their handlers before Go starts. `os.Getenv` remains enabled
+as the `smoke` ASMCGO hook used by the native startup checks. The synthetic moduledata
+covers the whole trampoline region.
 
 ### App-boundary text probe — why the wire (`http1sse`) wins for the response
 
@@ -421,20 +428,20 @@ antigravity/
                               `--update` fetches the LATEST agy (sha512-verified) and prints the new pins;
                               `--wsl1` applies the tcmalloc MAP_FIXED_NOREPLACE fix on its own (a
                               conversion applies it automatically when running on WSL1).
-    gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (the build id + AGY_STUBS,
+    gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (build id + AGY_STUBS(FULLCGO, ASMCGO),
                               one line of stub literals per installed hook); `--hooks` →
                               pyagy/agy_process/hooks.py
     symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, skips, prologues}
   src/
     goframe.h               ← the stub frame layout, shared by goframe.cpp and the rest of the
                               C++ (gomod.cpp static_asserts every offset against agy_block)
-    goframe.cpp             ← AGY_STUB emits each `naked` trampoline using basic asm to load
-                              and check its nullable handler pointer; compiled -fno-lto
+    goframe.cpp             ← AGY_STUB_FULLCGO / AGY_STUB_ASMCGO emit each `naked` trampoline
+                              with shared basic-asm save/restore text; compiled -fno-lto
     antigravity.cpp         ← main() entrypoint + agy_init() + getaddrinfo interposer
     gomod.cpp / gocall.cpp  ← synthetic Go moduledata + handler-table setup, C handlers & stack unwinder
     pybridge.cpp/.h         ← embed libpython (C++23); pyworker boost::thread, Boost.Python
                               object/call layer, queue, dispatch
-    procdef.h               ← BOOKS metadata + consteval bk(): { id, mode, mech, retcap, AGY_SYM(symbol) }
+    procdef.h               ← BOOKS metadata + consteval bk(): { id, mode, retcap, selector(symbol) }
   pyagy/                    ← the `pyagy` Python package (importable; ships in the pkg)
     __init__.py             ← lazy exports (PEP 562): ask/Session/AgyResponse/specs,
                               AgyModel, write_mcp_config
@@ -505,6 +512,9 @@ python3 -m symbols.gen_sources --hooks
 python3 -m symbols.gen_sources symbols/symbols.json src/symbols_gen.h
 ```
 
+To check the table parser and checked-in Python mirror, run
+`pixi run python -m unittest symbols.test_procdef` from `antigravity/`.
+
 Bumping agy is `shim-agy-update` (it prints the `AGY_VERSION`/`AGY_URL`/`AGY_SHA512` lines to paste
 into `CMakeLists.txt`) followed by `shim-symbols`; commit `symbols.json` and `CMakeLists.txt`
 together, since the build-id guard ties them to one upstream build.
@@ -531,7 +541,7 @@ HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
 Run agy under the hook via the launcher in `test_scripts/` — it enables the full working
 hook union (all 28 static `agy_trampolines` stubs bound via `ld` / `ld.so`, each hook's cgo
-gateway chosen per the `procdef.h` `MECH` column); the GC-safe synthetic moduledata is
+gateway chosen by the `procdef.h` target wrapper); the GC-safe synthetic moduledata is
 always on:
 
 ```bash
@@ -586,7 +596,7 @@ The cgocall-trampoline path was re-verified end-to-end on a **real-kernel** clou
 (not WSL1), agy 1.0.15 (`build 1d164dd9…`), with the shim built by the **system toolchain**:
 
 - ✅ **Builds + loads on a real kernel** — build-id verified, synthetic moduledata
-  (`frame=120`) prepared, trampoline installed. The `mprotect(PROT_EXEC|PROT_WRITE)` W^X
+  (the historical `frame=120` layout) prepared, trampoline installed. The `mprotect(PROT_EXEC|PROT_WRITE)` W^X
   concern did **not** materialize here.
 - ✅ **Live-turn matrix** (`agy --print` under a PTY): stage 9 (`os.Getenv`, 234 trampoline
   transitions) and stage 8 (`SendUserMessage`=1 + `callbackStreamer.Send`≈20) both **complete
@@ -596,7 +606,7 @@ The cgocall-trampoline path was re-verified end-to-end on a **real-kernel** clou
   inside `runtime.cgocall` for our invocation shows its prologue spilling `fn→[S]`, `arg→[S+8]`
   (`mov %rax,0x38(%rsp)`/`mov %rbx,0x40(%rsp)`); with the fix `&block − S == 16`, so after the
   spill the block's first word (then the `"cgt_getenv"` tag pointer) and `block.regs.rax` are byte-for-byte intact — the two
-  spill slots land entirely in the dead `GH_SPILL` scratch. Pre-fix (`&block==S`) they'd be
+  spill slots land entirely in the 16-byte scratch area. Pre-fix (`&block==S`) they'd be
   clobbered.
 - ℹ️ **Headless login in a cloud container:** agy's Google OAuth uses an out-of-band
   code-paste flow (`redirect_uri=antigravity.google/oauth-callback`), so sign-in needs no

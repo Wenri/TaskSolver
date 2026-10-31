@@ -6,9 +6,9 @@ The hook list is NOT repeated here: the targets, the ELF/pclntab parsing and the
 arithmetic all come from `agyelf.py`, so this tool and `make_libagy.py` cannot disagree about where
 a hook lands. Adding a hook is a `procdef.h` edit plus `pixi run shim-symbols`.
 
-Verification: every *installed* row (`AGY_FULLCGO`/`AGY_ASMCGO`) must resolve to something that
-disassembles as a Go function entry with a recoverable frame prologue, or this exits non-zero —
-that is the tripwire for an agy layout change. Retired (`AGY_OFF`) rows are resolved too (so
+Verification: every *installed* row (`AGY_FULLGO(symbol)`/`AGY_ASMGO(symbol)`) must resolve to a
+Go function entry with a recoverable frame prologue, or this exits non-zero —
+that is the tripwire for an agy layout change. Retired (`AGY_OFF(symbol)`) rows are resolved too (so
 re-enabling one is a procdef edit), but a stale address there only warns: several are frameless
 leaf getters that legitimately have no prologue.
 

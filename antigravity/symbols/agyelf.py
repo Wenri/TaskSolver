@@ -63,14 +63,13 @@ def export_map(rows):
 
 
 # --- src/procdef.h ------------------------------------------------------------------------------
-# A row: { "id", WIRE_x, AGY_x, retcap, AGY_SYM(<symbol>) }; <symbol> is a quoted literal or a
+# A row: { "id", WIRE_x, retcap, AGY_FULLGO/AGY_ASMGO/AGY_OFF(<symbol>) }; the symbol is a literal or
 # MACRO "suffix" concatenation (e.g. CAC "StreamGenerateContent").
 _ROW = re.compile(
     r'\{\s*"(?P<id>[a-z0-9_]+)"\s*,\s*'
     r'(?P<mode>WIRE_\w+)\s*,\s*'
-    r'(?P<mech>AGY_\w+)\s*,\s*'
     r'(?P<retcap>-?\d+)\s*,\s*'
-    r'AGY_SYM\(\s*(?P<sym>(?:[A-Z_][A-Z0-9_]*\s*)?"(?:[^"\\]|\\.)*")\s*\)\s*\}'
+    r'(?P<mech>AGY_\w+)\(\s*(?P<sym>(?:[A-Z_][A-Z0-9_]*\s*)?"(?:[^"\\]|\\.)*")\s*\)\s*\}'
 )
 _MACRO_DEF = re.compile(r'^\s*#define\s+([A-Z_][A-Z0-9_]*)\s+("(?:[^"\\]|\\.)*")\s*$', re.M)
 
@@ -94,8 +93,8 @@ def parse_procdef(src_text):
             "id": m.group("id"),
             "symbol": prefix + _unquote(sym),
             "mode": "sync" if m.group("mode") == "WIRE_SYNC" else "async",
-            "mech": {"AGY_OFF": "off", "AGY_FULLCGO": "fullcgo",
-                     "AGY_ASMCGO": "asmcgo"}.get(m.group("mech"), m.group("mech").lower()),
+            "mech": {"AGY_OFF": "off", "AGY_FULLGO": "fullcgo",
+                     "AGY_ASMGO": "asmcgo"}[m.group("mech")],
             "retcap": int(m.group("retcap")),
         })
     return rows

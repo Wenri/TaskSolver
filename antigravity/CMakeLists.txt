@@ -154,8 +154,8 @@ add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h")
 add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wirecap_bridge")
 
 # ---- the instrumented host executable: vendor/agy (links vendor/libagy.so first) --------------
-# src/goframe.cpp holds the cgocall trampoline stubs as one AGY_STUB macro over naked functions;
-# the generated src/symbols_gen.h supplies the per-stub literals (AGY_STUBS).
+# src/goframe.cpp emits FULLCGO/ASMCGO naked stubs with their own argument setup;
+# the generated src/symbols_gen.h selects the variant and supplies its literals (AGY_STUBS).
 add_executable(agy
   src/antigravity.cpp src/gomod.cpp src/gocall.cpp src/goframe.cpp)
 add_dependencies(agy gen_symbols)

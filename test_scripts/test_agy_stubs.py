@@ -40,6 +40,10 @@ class AgyStubTests(unittest.TestCase):
         cls.stubs = {name: s for name, s in cls.symbols.items() if name.startswith("agy_stub__")}
         cls.layout = {name: int(value) for name, value in re.findall(
             r"^#define\s+(AGY_\w+)\s+(\d+)\b", (ANTI / "src/goframe.h").read_text(), re.M)}
+        cls.rows = {"agy_stub__" + row["id"]: (index, row) for index, row in enumerate(BOOKS)}
+
+    def frame_hi(self, row):
+        return self.layout["AGY_FRAME_HI_" + row["mech"].upper()]
 
     def test_slot_and_frame_geometry(self):
         expected = {"agy_stub__" + row["id"] for row in enabled_hooks()}
@@ -54,9 +58,13 @@ class AgyStubTests(unittest.TestCase):
                 self.assertEqual(stub.value % stride, 0)
                 self.assertEqual(stub.size, stride)
                 code = bytes(self.image.get_content_from_virtual_address(stub.value, stub.size))
-                lo, hi = self.layout["AGY_FRAME_LO"], self.layout["AGY_FRAME_HI"]
+                lo, hi = self.layout["AGY_FRAME_LO"], self.frame_hi(self.rows[stub.name][1])
                 self.assertEqual(code[lo - 4:lo], b"\x48\x83\xec" + frame)
-                self.assertEqual(code[hi:hi + 4], b"\x48\x83\xc4" + frame)
+                self.assertEqual(code[hi - 5:hi], b"\x48\x8d\x64\x24" + frame)
+                # CMP survives the flag-preserving stack restore for either verdict.
+                action = self.layout["AGY_OFF_ACTION"]
+                self.assertEqual(code[hi - 10:hi - 5], b"\x83\x7c\x24" + bytes([action, 0]))
+                self.assertEqual(code[hi], 0x75)  # JNE RETURN; pcsp changes after LEA
 
     def test_nullable_handler_table(self):
         for binary in (self.obj, self.image):
@@ -68,7 +76,6 @@ class AgyStubTests(unittest.TestCase):
         self.assertEqual(table.section.type, lief.ELF.Section.TYPE.NOBITS)
         self.assertFalse(any(table.value <= r.address < table.value + table.size
                              for r in self.image.relocations))
-        rows = {"agy_stub__" + row["id"]: (index, row) for index, row in enumerate(BOOKS)}
         prologues = json.loads((ANTI / "symbols/symbols.json").read_text())["prologues"]
         obj_stubs = {s.name: s for s in self.obj.symtab_symbols if s.name.startswith("agy_stub__")}
         relocations = [r for r in self.obj.relocations if r.has_section and r.has_symbol
@@ -81,7 +88,7 @@ class AgyStubTests(unittest.TestCase):
                 matches = [r for r in loads if stub.value <= r.address < stub.value + stub.size]
                 self.assertEqual(len(matches), 1)
                 rel = matches[0]
-                index, row = rows[name]
+                index, row = self.rows[name]
                 self.assertEqual(rel.type, lief.ELF.Relocation.TYPE.X86_64_PC32)
                 self.assertEqual(rel.address - stub.value, 3)
                 self.assertEqual(rel.addend, index * 8 - 4)
@@ -92,12 +99,43 @@ class AgyStubTests(unittest.TestCase):
                 self.assertEqual(target, table.value + index * 8)
                 self.assertEqual(code[7:12], b"\x4d\x85\xe4\x0f\x84")  # TEST %r12; JE original
                 original = 16 + struct.unpack_from("<i", code, 12)[0]
-                self.assertGreater(original, self.layout["AGY_FRAME_HI"])
+                self.assertGreater(original, self.frame_hi(row))
                 prologue = bytes.fromhex(prologues[row["symbol"]])
                 self.assertEqual(code[original:original + len(prologue)], prologue)
-                body = code[self.layout["AGY_FRAME_LO"]:self.layout["AGY_FRAME_HI"]]
-                # FULLCGO takes fn in %rax; ASMCGO consumes the same fn from the stack.
-                self.assertEqual(body.count(b"\x4c\x89\xe0\x48\x89\x04\x24"), 1)
+                body = code[self.layout["AGY_FRAME_LO"]:self.frame_hi(row)]
+                # One qword initializes the adjacent uint32 book and action fields.
+                self.assertEqual(self.layout["AGY_OFF_ACTION"], self.layout["AGY_OFF_BOOK"] + 4)
+                init = b"\x48\xc7\x44\x24" + bytes([self.layout["AGY_OFF_BOOK"]])
+                self.assertEqual(body.count(init + struct.pack("<I", index)), 1)
+                gateway = [r for r in relocations if stub.value <= r.address < stub.value + stub.size
+                           and r.symbol.name in {"agy_go__CGOCALL", "agy_go__ASMCGOCALL"}]
+                self.assertEqual(len(gateway), 1)
+                call = gateway[0].address - stub.value - 2
+                self.assertEqual(code[call:call + 2], b"\xff\x15")
+                if row["mech"] == "fullcgo":
+                    self.assertEqual(gateway[0].symbol.name, "agy_go__CGOCALL")
+                    # Registers only: LEA block -> RBX; MOV handler -> RAX.
+                    prep = b"\x48\x8d\x5c\x24\x10\x4c\x89\xe0"
+                    for store in (b"\x4c\x89\x24\x24", b"\x48\x89\x04\x24",
+                                  b"\x48\x89\x44\x24\x08", b"\x48\x89\x5c\x24\x08"):
+                        self.assertNotIn(store, body)
+                else:
+                    self.assertEqual(gateway[0].symbol.name, "agy_go__ASMCGOCALL")
+                    # Stack only: MOV handler -> fn; LEA block -> RAX; MOV RAX -> arg.
+                    prep = b"\x4c\x89\x24\x24\x48\x8d\x44\x24\x10\x48\x89\x44\x24\x08"
+                    self.assertNotIn(b"\x4c\x89\xe0", body)  # no redundant handler -> RAX
+                self.assertEqual(code[call - len(prep):call], prep)
+                # ABI0 permits C to clobber X15; both PASS and RETURN need Go's zero value.
+                zero_x15 = b"\x45\x0f\x57\xff"
+                self.assertEqual(code[call + 6:call + 10], zero_x15)
+                self.assertEqual(code.count(zero_x15), 1)
+                for reg, rex, modrm in (("RAX", 0x48, 0x44), ("RBX", 0x48, 0x5c),
+                        ("RCX", 0x48, 0x4c), ("RDI", 0x48, 0x7c), ("RSI", 0x48, 0x74),
+                        ("R8", 0x4c, 0x44), ("R9", 0x4c, 0x4c), ("R10", 0x4c, 0x54),
+                        ("R11", 0x4c, 0x5c), ("RDX", 0x48, 0x54), ("RBP", 0x48, 0x6c)):
+                    offset = self.layout["AGY_OFF_" + reg]
+                    self.assertEqual(code[:call].count(bytes([rex, 0x89, modrm, 0x24, offset])), 1, reg)
+                    self.assertEqual(code[call + 10:].count(bytes([rex, 0x8b, modrm, 0x24, offset])), 1, reg)
 
     def run_version(self, extra_env=None):
         with tempfile.TemporaryDirectory(prefix="agy-stub-test-") as directory:
