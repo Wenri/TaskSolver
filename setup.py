@@ -76,7 +76,7 @@ class BuildPyNative(build_py):
             subprocess.run([sys.executable, os.path.join(root, "claude", "build_cli.py")],
                            cwd=root, check=True)
             super().run()
-            self._build_antigravity_shim(root, env)   # builds wirecap_bridge + antigravity.so
+            self._build_antigravity_shim(root, env)   # builds wirecap_bridge + vendor/agy + vendor/libagy.so
             self._build_codex(root, env)              # links the bridge from the shim step → must follow it
             self._build_kimi(root, env)               # independent: kimi/native builds its own bridge copy
             self._bundle_artifacts(root)              # copy (+strip codex) into the wheel under py* pkgs
@@ -89,9 +89,10 @@ class BuildPyNative(build_py):
     def _build_antigravity_shim(self, root, env):
         if not os.path.isdir(os.path.join(root, "antigravity")):
             return  # antigravity/ absent (degenerate checkout with the source tree missing)
-        # CMake + Ninja (both pixi host-dependencies) run the whole chain: configure fetches agy
-        # (sha512-verified) + the frida-gum devkit into vendor/, then the build generates
-        # symbols_gen.h from the committed symbols.json and compiles wirecap_bridge + the shim.
+        # CMake + Ninja (both pixi host-dependencies) run the whole chain: configure fetches the
+        # pinned agy (sha512-verified) and converts it into vendor/libagy.so, then the build
+        # generates symbols_gen.h from the committed symbols.json and links wirecap_bridge + the
+        # vendor/agy host.
         # All idempotent; picks up conda's g++/python3-config from the env ($CXX / $CONDA_PREFIX).
         build = os.path.join("antigravity", "build")
         subprocess.run(["cmake", "-S", "antigravity", "-B", build, "-G", "Ninja", *cmake_python_args(env)],

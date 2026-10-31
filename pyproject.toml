@@ -26,9 +26,8 @@ dependencies = [
     "typing-extensions>=4; python_version<'3.11'",
     "pydantic>=2.12", "packaging>=26.2", # official Codex Python SDK bundled from the pinned vendor tree
     "google-generativeai", # gemini adapter
-    "frida>=17.15.3,<18", "frida-tools>=14.10.4,<15",   # antigravity/pyagy: instrument the agy binary
     "pygit2",             # wirecap/runtime/workspace.py: scratch git workspace pyagy/pycodex run in
-    "lief",               # pyagy/_env.py _elf_interp: parse agy's PT_INTERP at launch time
+    "lief",               # make_libagy.py: a source build converts the pinned agy into libagy.so
 ]
 
 [project.optional-dependencies]
@@ -112,8 +111,8 @@ nodejs = ">=26,<27"
 # has no system make). The antigravity shim now builds with cmake+ninja (below), not make.
 make = ">=4"
 pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pymport)
-# Linux UAPI headers (linux/, asm/): glibc's <limits.h> (pulled in via frida-gum.h)
-# needs <linux/limits.h>, but this WSLackware host has none in /usr/include. The shim
+# Linux UAPI headers (linux/, asm/): glibc's <limits.h> needs <linux/limits.h>, but this
+# WSLackware host has none in /usr/include (and NixOS has no /usr/include at all). The shim
 # build points -idirafter at this package's sysroot in place — no copy — at
 # $CONDA_PREFIX/x86_64-conda-linux-gnu/sysroot/usr/include.
 kernel-headers_linux-64 = ">=6"   # -> sysroot 2.39 (matches 3D-CoT; relaxing binutils would otherwise drop it to 2.28/kh-4.18)
@@ -151,7 +150,6 @@ paramiko = ">=5.0.0,<6"
 # build_py hook (during `pixi install`) and the manual `pixi run build-shim`.
 cmake = ">=4.3.4,<5"
 ninja = ">=1.11"
-patchelf = ">=0.19.2,<0.20"
 py-lief = ">=1.0.0,<2"
 rust = ">=1.99.1,<2"
 clang = ">=23.1.4,<24"
@@ -175,8 +173,8 @@ version = "0.0.1"
 name = "pixi-build-python"
 version = "*"
 
-# The antigravity shim (antigravity/vendor/antigravity.so) is an x86-64 build and a
-# main target of this repo, so produce an arch-specific (linux-64) package, not noarch.
+# The natives (antigravity/vendor/agy + libagy.so, the codex binary, the kimi addon) are x86-64
+# builds and a main target of this repo, so produce an arch-specific (linux-64) package, not noarch.
 [tool.pixi.package.build.config]
 noarch = false
 

@@ -9,7 +9,7 @@
     "cmake.cmakePath": "${workspaceFolder}/.pixi/envs/default/bin/cmake",
     "cmake.useCMakePresets": "always",
     // Point the C/C++ tooling at the generated compile DB (antigravity/compile_commands.json is a
-    // symlink into the build dir) so it resolves frida-gum.h + the Gum* types in antigravity/src.
+    // symlink into the build dir) so it resolves the Boost and libpython headers in antigravity/src.
     // clangd.arguments applies if the clangd extension is installed; C_Cpp.* if using Microsoft
     // C/C++ — whichever is active picks it up, the other setting is ignored.
     "clangd.arguments": [

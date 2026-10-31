@@ -880,9 +880,10 @@ shell's `LD_PRELOAD`), otherwise it fails copying `_distutils_hack/__init__.py`.
   Validated on both WSL1 and a real cloud kernel (6.18.5) — see Status. The known WSL1
   0-byte-mmap bug is worked around on that host (see MEMORY); it does not apply to a real
   kernel.
-- **Cloud-container caveats**: `cmake configure` and `pixi`/`agy` installers fetch from GitHub
-  releases, which a locked-down egress policy may block (403) — vendor the frida-gum devkit
-  (and, if needed, the pixi binary) from a mirror instead. agy sign-in works headlessly via
+- **Cloud-container caveats**: `cmake configure` downloads the pinned agy and the `pixi`
+  installer fetches from GitHub releases; a locked-down egress policy may block either (403) —
+  point `-DAGY_BIN=` at a local copy of the pinned agy (and fetch the pixi binary from a mirror)
+  instead. agy sign-in works headlessly via
   its out-of-band OAuth code-paste flow (no in-container browser needed).
 - **agy updates** change offsets and may reorder text again → re-run
   `build_symbols.py` (`pixi run shim-symbols`). Names are stable; the build-id guard blocks
