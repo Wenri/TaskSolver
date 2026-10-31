@@ -174,7 +174,7 @@ typedef struct { uint64_t book; agy_go_regs regs; uint64_t action; } agy_block;
 
 /* The synthetic moduledata is a process singleton kept in STATIC (BSS) storage — no heap, nothing
  * to leak, no OOM path. These bound its fixed-size tables; agy_gomod_prepare rejects (rc<0) anything
- * larger, and antigravity.cpp static_asserts BK_COUNT <= AGY_GOMOD_MAX_SLOTS so BOOKS can
+ * larger, and antigravity.cpp static_asserts BK_SLOTS <= AGY_GOMOD_MAX_SLOTS so BOOKS can
  * never outgrow it (bump the cap if you add that many hooks). MAX_MAPBYTES bounds the locals bitmap:
  * mapbytes = ((frame-8)/8 + 7)/8, which is 2 for the real frame (GH_FRAME = 120). */
 #define AGY_GOMOD_MAX_SLOTS    64

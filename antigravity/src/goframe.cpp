@@ -2,9 +2,10 @@
  *
  * make_libagy.py patches each hooked function's `entry + skip` with `jmp *agy_tramp_slots[slot]`,
  * and ld.so points the slot at agy_stub__<id>, which runs on the goroutine's stack with the Go
- * register-ABI arguments live. When its flag is set, a stub saves them into the goframe.h frame,
- * runs the handler through runtime.cgocall or runtime.asmcgocall and restores them. It then runs
- * the displaced prologue and resumes the function, or returns if the handler set block.action.
+ * register-ABI arguments live. While its row is on (g_agy_on), a stub saves them into the
+ * goframe.h frame, runs agy_dispatch through runtime.cgocall or runtime.asmcgocall and restores
+ * them. It then runs the displaced prologue and resumes the function, or returns if the handler
+ * set block.action.
  * X15 is re-zeroed after C code, as Go's ABI requires.
  *
  * Naked, because the body has no C equivalent; that allows only basic asm, so the C symbols it
@@ -13,19 +14,20 @@
  */
 #include "goframe.h"
 #include "procdef.h"
+#include "symbols_gen.h"
 
 #define AGY_S_(x)   #x
 #define AGY_S(x)    AGY_S_(x)
 
-/* id: the row id; book: its BOOKS index, stored in block.book; enable: the gating flag;
+/* id: the row id; book: its BOOKS index, which gates the stub and goes in block.book;
  * gateway: agy_go__CGOCALL or agy_go__ASMCGOCALL; resume_off: skip + ow; ...: the displaced bytes. */
-#define AGY_STUB(id, book, enable, handler, gateway, resume_off, ...)                        \
-    static_assert(bk(#id) == (book), "goframe_gen.h is out of step with BOOKS");             \
+#define AGY_STUB(id, book, gateway, resume_off, ...)                                          \
+    static_assert(bk(#id) == (book), "symbols_gen.h is out of step with BOOKS");             \
     extern "C" __attribute__((naked, used, visibility("default"),                            \
                               aligned(AGY_SLOT_SIZE), section(AGY_TRAMP_SECTION)))           \
     void agy_stub__##id() {                                                                  \
         __asm__(                                                                             \
-            "cmpb   $0, " #enable "(%rip)\n\t"                                               \
+            "cmpb   $0, g_agy_on+" #book "(%rip)\n\t"                                        \
             "je     1f\n\t"                                                                  \
             "subq   $" AGY_S(AGY_FRAME) ", %rsp\n\t"                                         \
             "movq   %rax, " AGY_S(AGY_OFF_RAX) "(%rsp)\n\t"                                  \
@@ -43,7 +45,7 @@
             "xorl   %eax, %eax\n\t"                                                          \
             "movq   %rax, " AGY_S(AGY_OFF_ACTION) "(%rsp)\n\t"                               \
             "leaq   " AGY_S(AGY_OFF_BLOCK) "(%rsp), %rbx\n\t"                                \
-            "leaq   " #handler "(%rip), %rax\n\t"                                            \
+            "leaq   agy_dispatch(%rip), %rax\n\t"                                            \
             "movq   %rax, " AGY_S(AGY_OFF_FN) "(%rsp)\n\t"                                   \
             "movq   %rbx, " AGY_S(AGY_OFF_ARG) "(%rsp)\n\t"                                  \
             "xorps  %xmm15, %xmm15\n\t"                                                      \
@@ -75,6 +77,6 @@
         __builtin_unreachable();                                                             \
     }
 
-/* One AGY_STUB per installed hook. Each is slot-aligned and pads itself, so they tile the section;
+/* One stub per installed row. Each is slot-aligned and pads itself, so they tile the section;
  * one outgrowing its slot is caught by agy_init(), as branch sizes aren't known here. */
-#include "goframe_gen.h"
+AGY_STUBS(AGY_STUB)

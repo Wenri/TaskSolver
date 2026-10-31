@@ -28,13 +28,7 @@
 #include "goframe.h"
 #include "gomod.h"
 
-/* symbols_gen.h carries the frame numbers for the synthetic moduledata; goframe.h carries the
- * same numbers for the assembly. One source would be better, but they come from different
- * generators, so assert they agree. */
-static_assert(AGY_TRAMP_FRAME == AGY_FRAME && AGY_TRAMP_SLOT_SIZE == AGY_SLOT_SIZE
-              && AGY_TRAMP_FRAME_LO == AGY_FRAME_LO && AGY_TRAMP_FRAME_HI == AGY_FRAME_HI,
-              "symbols_gen.h and goframe.h disagree about the trampoline frame");
-static_assert(BK_COUNT <= AGY_GOMOD_MAX_SLOTS,
+static_assert(BK_SLOTS <= AGY_GOMOD_MAX_SLOTS,
               "more hooks than the static synthetic-moduledata holds — bump AGY_GOMOD_MAX_SLOTS in gomod.h");
 
 /* ---- logging -------------------------------------------------------------- */
@@ -106,16 +100,15 @@ static void agy_init(void)
     /* The stubs tile the section by alignment, so a stub that outgrew its slot shows up here as
      * a section wider than nslots * stride. Nothing earlier can catch it (see goframe.cpp). */
     const size_t tramp_bytes = (size_t)(agy_tramp_region_end - agy_tramp_region_start);
-    if (tramp_bytes != (size_t)AGY_TRAMP_NSLOTS * AGY_TRAMP_SLOT_SIZE) {
+    if (tramp_bytes != (size_t)BK_SLOTS * AGY_SLOT_SIZE) {
         std::fprintf(stderr, "[antigravity] FATAL: trampoline region is %zu bytes, expected %d*%d;"
                              " a stub body outgrew its slot\n",
-                     tramp_bytes, AGY_TRAMP_NSLOTS, AGY_TRAMP_SLOT_SIZE);
+                     tramp_bytes, BK_SLOTS, AGY_SLOT_SIZE);
         std::abort();
     }
     agy_gomod_register((uintptr_t)agy_tramp_region_start,
                        (uintptr_t)agy_tramp_region_end,
-                       AGY_TRAMP_SLOT_SIZE, AGY_TRAMP_NSLOTS,
-                       AGY_TRAMP_FRAME, AGY_TRAMP_FRAME_LO, AGY_TRAMP_FRAME_HI);
+                       AGY_SLOT_SIZE, BK_SLOTS, AGY_FRAME, AGY_FRAME_LO, AGY_FRAME_HI);
 
     if (!std::getenv("AGY_PROC_ENABLE")) return;          /* opt-in */
     if (std::getenv("_AGY_SBOXSERVE")) return;            /* skip sandbox-server children */

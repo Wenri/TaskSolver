@@ -13,13 +13,12 @@
 
 #include "wirecap.h"
 #include "gocall.h"
-#include "symbols_gen.h"
+#include <algorithm>
 #include <cstdint>
 #include <string_view>
 
 enum agy_mech_t { AGY_OFF = 0, AGY_FULLCGO, AGY_ASMCGO };
 
-/* symbols/agyelf.py parses this too: keep one `if (id == "x") return &h;` per line. */
 consteval agy_book_fn agy_handler_for(std::string_view id) {
     if (id == "fh_update")       return &agy_on_fh_update;
     if (id == "resp")            return &agy_on_resp;
@@ -32,24 +31,15 @@ consteval agy_book_fn agy_handler_for(std::string_view id) {
     return &agy_on_generic;
 }
 
-/* One row; everything but the id is resolved at compile time from symbols_gen.h. */
 struct agy_book {
     std::string_view id;      /* views the row's literal, so NUL-terminated */
     wire_mode_t      mode;
     agy_mech_t       mech;
     int32_t          retcap;
-    agy_go_fn_t      fn;      /* never read: imports AGY_OFF rows too, so ld.so rejects an agy missing one */
-    agy_go_fn_t      stub;
-    agy_book_fn      handler;
-    uint32_t         skip;    /* patch site: entry + skip */
-    uint32_t         ow;      /* displaced prologue bytes */
-    int              slot;    /* agy_tramp_slots[] index, -1 if AGY_OFF */
+    agy_book_fn      handler; /* what agy_dispatch() runs when this row's stub fires */
 
     consteval agy_book(std::string_view id_, wire_mode_t mode_, agy_mech_t mech_, int32_t retcap_)
-        : id(id_), mode(mode_), mech(mech_),
-          retcap(retcap_), fn(agy_fn(id_)), stub(agy_stub(id_)),
-          handler(agy_handler_for(id_)),
-          skip(agy_skip(id_)), ow(agy_ow(id_)), slot(agy_slot(id_)) {}
+        : id(id_), mode(mode_), mech(mech_), retcap(retcap_), handler(agy_handler_for(id_)) {}
 };
 
 #define AGY_SYM(sym)   /* empty; the trailing comma it leaves is legal */
@@ -117,6 +107,7 @@ inline constexpr agy_book BOOKS[] = {
 };
 
 inline constexpr int BK_COUNT = (int)(sizeof(BOOKS) / sizeof(BOOKS[0]));
+inline constexpr int BK_SLOTS = (int)std::ranges::count_if(BOOKS, [](auto &b) { return b.mech != AGY_OFF; });
 
 /* Row index by id; an unknown id fails compilation. */
 consteval int bk(std::string_view id) {

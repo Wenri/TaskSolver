@@ -31,13 +31,13 @@ linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` a
    emitted at build time into the `agy_trampolines` section — named without a leading dot so the
    linker defines `__start_`/`__stop_` for it, which is where the region bounds come from — each stub is a `naked`
    function whose body is one `AGY_STUB` macro written out once, and `gen_sources.py` emits only
-   the per-hook parameters into `src/goframe_gen.h` — with a
+   the per-stub literals (`AGY_STUBS`) into `src/symbols_gen.h` — with a
    synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto `agy_firstmoduledata.next`
-   before `agy_rt0_go()` starts and each stub statically calling its dedicated C hook handler
+   before `agy_rt0_go()` starts and each stub calling `agy_dispatch` via `ld`-bound
+   `runtime.cgocall`/`runtime.asmcgocall`, which runs its `BOOKS` row's C handler
    (`agy_on_fh_update`, `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`,
    `agy_on_http_rt`, `agy_on_exit`, `agy_on_resp_chunk`, `agy_on_readlink_filter`,
-   `agy_on_generic`) via `ld`-bound `runtime.cgocall`/`runtime.asmcgocall`. frida-gum has been
-   completely removed.
+   `agy_on_generic`). frida-gum has been completely removed.
 
 Hook events are delivered to an **embedded CPython interpreter** running on a
 dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/`).
@@ -192,11 +192,11 @@ with `jmp *agy_tramp_slots[slot](%rip)` into a static assembly trampoline stub
 (`agy_stub__<id>` in `agy_trampolines` (section), bound by `ld.so` via
 `R_X86_64_GLOB_DAT`) that:
 1. snapshots the Go-ABI arg registers into a stack **block**,
-2. `CALL runtime.cgocall(fn=handler, arg=&block)` — Go's own Go→C gateway, which switches
-   to the g0/system stack and runs that hook's dedicated C handler (`agy_on_fh_update`,
-   `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`, `agy_on_http_rt`, `agy_on_exit`,
-   `agy_on_resp_chunk`, `agy_on_readlink_filter`, or `agy_on_generic`, bound at link time
-   by `ld`) in a safe cgo context (`entersyscall`, P-handoff,
+2. `CALL runtime.cgocall(fn=agy_dispatch, arg=&block)` — Go's own Go→C gateway, which switches
+   to the g0/system stack and runs `agy_dispatch`, which calls the hook's C handler from its
+   `BOOKS` row (`agy_on_fh_update`, `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`,
+   `agy_on_http_rt`, `agy_on_exit`, `agy_on_resp_chunk`, `agy_on_readlink_filter`, or
+   `agy_on_generic`) in a safe cgo context (`entersyscall`, P-handoff,
    GC coordination); the handler copies + enqueues to the pyworker,
 3. restores the registers, runs the displaced original frame-setup prologue instructions, and
    `jmp`s back into `agy_go__* + skip + ow` via `@GOTPCREL`.
@@ -406,8 +406,7 @@ antigravity/
   CMakeLists.txt            ← the build: generates symbols_gen.h + links vendor/agy against vendor/libagy.so
   vendor/                   ← libagy.so (164 MB) + built vendor/agy host executable
   symbols/
-    agyelf.py               ← shared parsing: procdef.h rows, hook targets and the id→handler map
-                              (read from `agy_handler_for`), ELF (lief) + Go pclntab/moduledata,
+    agyelf.py               ← shared parsing: procdef.h rows and hook targets, ELF (lief) + Go pclntab/moduledata,
                               prologue skip/extract. The three tools below cannot disagree about
                               an offset. lief loads lazily, so --hooks needs no binary library.
     build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
@@ -417,9 +416,9 @@ antigravity/
                               `--update` fetches the LATEST agy (sha512-verified) and prints the new pins;
                               `--wsl1` applies the tcmalloc MAP_FIXED_NOREPLACE fix on its own (a
                               conversion applies it automatically when running on WSL1).
-    gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (declarations + the
-                              id-keyed AGY_SYMS table) and goframe_gen.h (one AGY_STUB line per
-                              hook); `--hooks` → pyagy/agy_process/hooks.py
+    gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (the build id + AGY_STUBS,
+                              one line of stub literals per installed hook); `--hooks` →
+                              pyagy/agy_process/hooks.py
     symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, skips, prologues}
   src/
     goframe.h               ← the stub frame layout, shared by goframe.cpp and the rest of the
@@ -497,8 +496,8 @@ multiprocessing/pickle wire between them is same-version (see *AgyProcess* below
 launched via `pyagy/_env.py` under the pixi env). Build with `pixi run build-shim`
 (needs `g++` + `/usr/include/linux/limits.h` from the conda kernel-headers dep). The host and the bridge
 build with GCC LTO (`-DTASKSOLVER_LTO=OFF` disables it). LTO cannot see the references the generated
-trampoline asm makes to `agy_on_*` handlers and `g_agy_*` flags, so their definitions carry
-`AGY_ASM_REFERENCED` (`used` + `externally_visible`); a new handler or flag the asm touches needs it too. `pyagy.agy_process` needs `hpack`/`brotli` only for the
+trampoline asm makes to `agy_dispatch` and the `g_agy_on` gate, so their definitions carry
+`AGY_ASM_REFERENCED` (`used` + `externally_visible`); anything new the asm names needs it too. `pyagy.agy_process` needs `hpack`/`brotli` only for the
 HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
 Run agy under the hook via the launcher in `test_scripts/` — it enables the full working

@@ -1,14 +1,5 @@
-/* gocall.h — static cgocall-trampoline hooks, per-hook C handlers (`agy_on_*`),
- * and the frame-pointer stack unwinder (`gocall.cpp`).
- *
- * All trampoline stubs (`agy_stub__<id>`) are emitted at build time into
- * `agy_trampolines` (section) (bounded by `agy_tramp_region_start`
- * and `agy_tramp_region_end`). `ld` and `ld-linux-x86-64.so.2` bind both directions
- * at link/load time via `R_X86_64_GLOB_DAT` relocations:
- *   - `libagy.so` statically jumps from each hooked Go function's `entry + skip`
- *     through `agy_tramp_slots[slot]` to `agy_stub__<id>` in `vendor/agy`.
- *   - `agy_stub__<id>` calls its dedicated C handler (`agy_on_*`) via `ld`-bound
- *     `runtime.cgocall` / `runtime.asmcgocall` and jumps back to `agy_go__* + skip + ow`.
+/* gocall.h — the C side of the trampoline stubs (src/goframe.cpp): agy_dispatch, the per-row
+ * handlers (`agy_on_*`), the per-row gate, and the frame-pointer stack unwinder (`gocall.cpp`).
  */
 #ifndef AGY_GOCALL_H
 #define AGY_GOCALL_H
@@ -26,8 +17,8 @@ using agy_book_fn = void (*)(agy_block *);
 extern "C" {
 #endif
 
-extern uint8_t g_agy_enabled;
-extern uint8_t g_agy_conv_id;
+extern uint8_t g_agy_on[];             /* per BOOKS row: nonzero while its stub calls out */
+void agy_dispatch(agy_block *b);        /* every stub's handler: runs BOOKS[b->book].handler */
 
 void agy_on_generic(agy_block *b);
 void agy_on_fh_update(agy_block *b);

@@ -132,17 +132,16 @@ message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 # the SHARED bridge (wirecap/native), which does its own probe and carries the embed link flags.
 # ---- generate symbols_gen.h from the committed symbols.json + src/procdef.h -------------------
 add_custom_command(
-  OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h" "${CMAKE_SOURCE_DIR}/src/goframe_gen.h"
+  OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
   COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
                   "${CMAKE_SOURCE_DIR}/symbols/symbols.json" "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
   DEPENDS "${CMAKE_SOURCE_DIR}/symbols/symbols.json"
           "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
           "${CMAKE_SOURCE_DIR}/symbols/agyelf.py"
           "${CMAKE_SOURCE_DIR}/src/procdef.h"
-  COMMENT "gen src/symbols_gen.h + src/goframe_gen.h from symbols.json + src/procdef.h"
+  COMMENT "gen src/symbols_gen.h from symbols.json + src/procdef.h"
   VERBATIM)
-add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
-                                      "${CMAKE_SOURCE_DIR}/src/goframe_gen.h")
+add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h")
 
 # ---- the shared native bridge (embedded CPython worker) — the wire_* C ABI the shim calls.
 # Extracted to wirecap/native so the codex build links the same bridge; built as a static lib
@@ -152,7 +151,7 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wi
 
 # ---- the instrumented host executable: vendor/agy (links vendor/libagy.so first) --------------
 # src/goframe.cpp holds the cgocall trampoline stubs as one AGY_STUB macro over naked functions;
-# the generated src/goframe_gen.h supplies the per-hook parameters.
+# the generated src/symbols_gen.h supplies the per-stub literals (AGY_STUBS).
 add_executable(agy
   src/antigravity.cpp src/gomod.cpp src/gocall.cpp src/goframe.cpp)
 add_dependencies(agy gen_symbols)

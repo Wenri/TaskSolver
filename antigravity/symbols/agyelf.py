@@ -8,9 +8,9 @@ differed between them would be patched at one offset and resumed at another. `ge
 (procdef.h -> symbols_gen.h / hooks.py) is the third consumer. Everything any of them needs lives
 here, so they cannot disagree.
 
-Every fact about a hook is read from `src/procdef.h` — the targets, the install mechanism and the
-handler each id binds to — so that one C table stays the single source the host, the generated
-assembly and the Python mirror are all built from. Nothing here is specific to one agy release.
+Every fact about a hook is read from `src/procdef.h` — its targets and install mechanism — so that
+one C table stays the single source the host, the generated assembly and the Python mirror are all
+built from. Nothing here is specific to one agy release.
 """
 import os
 import re
@@ -123,29 +123,6 @@ def load_procdef(path=None):
     return rows
 
 
-# `consteval agy_book_fn agy_handler_for(id)`: `if (id == "x") return &agy_on_x;` … `return &d;`
-_HANDLER_FN = re.compile(
-    r'consteval\s+agy_book_fn\s+agy_handler_for\s*\([^)]*\)\s*\{(.*?)\n\}', re.S)
-_HANDLER_CASE = re.compile(r'\bid\s*==\s*"([^"]*)"\s*\)\s*return\s*&\s*(\w+)\s*;')
-_HANDLER_DEFAULT = re.compile(r'^\s*return\s*&\s*(\w+)\s*;', re.M)
-
-
-def load_handlers(path=None):
-    """`({id: C handler}, default handler)` parsed from procdef.h's `agy_handler_for`, so the
-    generated stubs call the same handler the C rows name."""
-    path = path or PROCDEF_PATH
-    with open(path) as f:
-        src = f.read()
-    m = _HANDLER_FN.search(src)
-    if not m:
-        raise SystemExit(f"could not find agy_handler_for() in {path}")
-    body = m.group(1)
-    default = _HANDLER_DEFAULT.findall(body)   # the bare trailing `return &…;`
-    if not default:
-        raise SystemExit(f"agy_handler_for() in {path} has no default return")
-    return dict(_HANDLER_CASE.findall(body)), default[-1]
-
-
 def active_rows(rows):
     """Rows installed as static trampolines — the ones whose addresses must be exact."""
     return [r for r in rows if r["mech"] in ("fullcgo", "asmcgo")]
@@ -154,9 +131,8 @@ def active_rows(rows):
 def hook_targets(rows):
     """Go symbols to resolve and export, in procdef order with the gateways last.
 
-    Inactive (`AGY_OFF`) rows are kept: the C `agy_book` constructor resolves every row in the
-    table at compile time, and keeping their addresses means re-enabling one is a procdef edit
-    rather than an archaeology session.
+    Inactive (`AGY_OFF`) rows are kept, so a conversion fails if agy drops one, and re-enabling one
+    is a procdef edit rather than an archaeology session.
     """
     names, seen = [], set()
     for r in rows:
