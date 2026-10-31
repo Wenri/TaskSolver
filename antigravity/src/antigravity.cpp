@@ -24,15 +24,15 @@
 #include "symbols_gen.h"
 #include "gocall.h"
 #include "procdef.h"
-#include "agy_frame.h"
+#include "goframe.h"
 #include "gomod.h"
 
-/* symbols_gen.h carries the frame numbers for the synthetic moduledata; agy_frame.h carries the
+/* symbols_gen.h carries the frame numbers for the synthetic moduledata; goframe.h carries the
  * same numbers for the assembly. One source would be better, but they come from different
  * generators, so assert they agree. */
 static_assert(AGY_TRAMP_FRAME == AGY_FRAME && AGY_TRAMP_SLOT_SIZE == AGY_SLOT_SIZE
               && AGY_TRAMP_FRAME_LO == AGY_FRAME_LO && AGY_TRAMP_FRAME_HI == AGY_FRAME_HI,
-              "symbols_gen.h and agy_frame.h disagree about the trampoline frame");
+              "symbols_gen.h and goframe.h disagree about the trampoline frame");
 static_assert(HK_COUNT <= AGY_GOMOD_MAX_SLOTS,
               "more hooks than the static synthetic-moduledata holds — bump AGY_GOMOD_MAX_SLOTS in gomod.h");
 

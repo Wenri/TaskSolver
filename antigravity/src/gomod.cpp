@@ -12,7 +12,7 @@
  * `agy_firstmoduledata.next`.
  */
 #include <cstddef>
-#include "agy_frame.h"
+#include "goframe.h"
 #include "gomod.h"
 #include "wirecap.h"
 #include <cstdio>
@@ -27,7 +27,7 @@
 /* go1.26: FuncTabBucketSize = 256*MINFUNC, MINFUNC = 16. */
 #define GO_FUNCTAB_BUCKET 4096
 
-/* src/trampolines.S writes the registers at these literal offsets; prove they are still where
+/* src/goframe.cpp writes the registers at these literal offsets; prove they are still where
  * agy_block puts them. Add or reorder a field in agy_go_regs and the build stops here. */
 #define AGY_CHK(f, off) static_assert(AGY_OFF_BLOCK + offsetof(agy_block, f) == (off), \
                                       "trampoline frame offset drifted from agy_block::" #f)

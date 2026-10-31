@@ -27,10 +27,10 @@ linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` a
    - `libagy.so` → `vendor/agy`: `ld.so` populates `agy_tramp_slots[slot]` in `libagy.so`
      with the address of each static trampoline stub `agy_stub__<ID>` in `vendor/agy` at
      process load time — zero runtime code patching or `mprotect`.
-2. **Static cgocall trampolines (`src/trampolines.S` + `src/gocall.cpp` + `src/gomod.cpp`)**
-   assembled at build time into `.section .agy_trampolines,"ax",@progbits` — the stub body is one
-   `.macro` written out once, and `gen_sources.py` emits only the per-hook parameters into
-   `src/trampolines_gen.inc` — with a
+2. **Static cgocall trampolines (`src/goframe.cpp` + `src/gocall.cpp` + `src/gomod.cpp`)**
+   emitted at build time into `.section .agy_trampolines,"ax",@progbits` — each stub is a `naked`
+   function whose body is one `AGY_STUB` macro written out once, and `gen_sources.py` emits only
+   the per-hook parameters into `src/goframe_gen.h` — with a
    synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto `agy_firstmoduledata.next`
    before `agy_rt0_go()` starts and each stub statically calling its dedicated C hook handler
    (`agy_on_fh_update`, `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`,
@@ -417,13 +417,14 @@ antigravity/
                               `--wsl1` applies the tcmalloc MAP_FIXED_NOREPLACE fix on its own (a
                               conversion applies it automatically when running on WSL1).
     gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (declarations + the
-                              id-keyed AGY_SYMS table) and trampolines_gen.inc (one AGY_STUB line
-                              per hook); `--hooks` → pyagy/agy_process/hooks.py
+                              id-keyed AGY_SYMS table) and goframe_gen.h (one AGY_STUB line per
+                              hook); `--hooks` → pyagy/agy_process/hooks.py
     symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, skips, prologues}
   src/
-    agy_frame.h             ← the stub frame layout, shared by trampolines.S and the C++
-                              (gomod.cpp static_asserts every offset against agy_block)
-    trampolines.S           ← the cgocall trampoline stub body, once, as an AGY_STUB .macro
+    goframe.h               ← the stub frame layout, shared by goframe.cpp and the rest of the
+                              C++ (gomod.cpp static_asserts every offset against agy_block)
+    goframe.cpp             ← the cgocall trampoline stub body, once, as the AGY_STUB macro over
+                              `naked` functions; compiled -fno-lto (see the note in the file)
     antigravity.cpp         ← main() entrypoint + agy_init() + getaddrinfo interposer
     gomod.cpp / gocall.cpp  ← synthetic Go moduledata + static cgocall trampoline handlers & stack unwinder
     pybridge.cpp/.h         ← embed libpython (C++23); pyworker boost::thread, Boost.Python

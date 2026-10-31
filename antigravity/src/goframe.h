@@ -1,10 +1,9 @@
 /* The stub frame layout — the one place the assembly and the C++ agree on it.
  *
- * src/trampolines.S builds this frame on the hooked goroutine's stack and hands `&block` to a C
- * handler; gocall.cpp reads it back as `agy_block` (src/gomod.h). The assembly cannot use
- * `offsetof`, so the offsets below are literals — but because a `.S` runs through the C
- * preprocessor, both sides include this header, and gomod.cpp static_asserts every offset against
- * the real struct. Add or reorder a field in `agy_go_regs` and the build stops here rather than
+ * src/goframe.cpp builds this frame on the hooked goroutine's stack and hands `&block` to a C
+ * handler; gocall.cpp reads it back as `agy_block` (src/gomod.h). A naked function's body is basic assembly and cannot
+ * use `offsetof`, so the offsets below are literals; gomod.cpp static_asserts every one of them
+ * against the real struct. Add or reorder a field in `agy_go_regs` and the build stops here rather than
  * silently writing registers to the wrong slots.
  *
  *   rsp+0    handler fn      \ the two words runtime.cgocall / runtime.asmcgocall consume
@@ -14,11 +13,12 @@
  *   rsp+112  block.action    <- 0 = PASS (run the body), nonzero = RETURN
  *   rsp+120  (caller)
  */
-#ifndef AGY_FRAME_H
-#define AGY_FRAME_H
+#ifndef AGY_GOFRAME_H
+#define AGY_GOFRAME_H
 
 #define AGY_FRAME        120   /* total bytes the stub subtracts from rsp */
 #define AGY_SLOT_SIZE    256   /* stride between stubs in .agy_trampolines */
+#define AGY_TRAMP_SECTION ".agy_trampolines"
 
 /* Offsets of the live frame within a slot, for the synthetic moduledata's locals bitmap:
  * the region where the frame is established, so Go's GC scans it conservatively. */
@@ -43,4 +43,4 @@
 #define AGY_OFF_RBP      104
 #define AGY_OFF_ACTION   112   /* block.action — the hook's PASS/RETURN verdict */
 
-#endif /* AGY_FRAME_H */
+#endif /* AGY_GOFRAME_H */

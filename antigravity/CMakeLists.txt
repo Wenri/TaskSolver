@@ -11,7 +11,7 @@
 # Configure-time "setup": fetch the pinned agy (sha512-verified) and convert it into
 # vendor/libagy.so (idempotent; guarded by existence), then the build compiles the three C++23 TUs.
 cmake_minimum_required(VERSION 3.19)
-project(antigravity CXX ASM)
+project(antigravity CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # for clangd (symlinked to the source root below)
 
@@ -132,17 +132,17 @@ message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 # the SHARED bridge (wirecap/native), which does its own probe and carries the embed link flags.
 # ---- generate symbols_gen.h from the committed symbols.json + src/procdef.h -------------------
 add_custom_command(
-  OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h" "${CMAKE_SOURCE_DIR}/src/trampolines_gen.inc"
+  OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h" "${CMAKE_SOURCE_DIR}/src/goframe_gen.h"
   COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
                   "${CMAKE_SOURCE_DIR}/symbols/symbols.json" "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
   DEPENDS "${CMAKE_SOURCE_DIR}/symbols/symbols.json"
           "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
           "${CMAKE_SOURCE_DIR}/symbols/agyelf.py"
           "${CMAKE_SOURCE_DIR}/src/procdef.h"
-  COMMENT "gen src/symbols_gen.h + src/trampolines_gen.inc from symbols.json + src/procdef.h"
+  COMMENT "gen src/symbols_gen.h + src/goframe_gen.h from symbols.json + src/procdef.h"
   VERBATIM)
 add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
-                                      "${CMAKE_SOURCE_DIR}/src/trampolines_gen.inc")
+                                      "${CMAKE_SOURCE_DIR}/src/goframe_gen.h")
 
 # ---- the shared native bridge (embedded CPython worker) — the wire_* C ABI the shim calls.
 # Extracted to wirecap/native so the codex build links the same bridge; built as a static lib
@@ -151,11 +151,10 @@ add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
 add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wirecap_bridge")
 
 # ---- the instrumented host executable: vendor/agy (links vendor/libagy.so first) --------------
-# src/trampolines.S holds the cgocall trampoline stubs as one .macro; the generated
-# src/trampolines_gen.inc supplies the per-hook parameters. They used to be ~1500 lines of asm
-# emitted as C string literals inside symbols_gen.h.
+# src/goframe.cpp holds the cgocall trampoline stubs as one AGY_STUB macro over naked functions;
+# the generated src/goframe_gen.h supplies the per-hook parameters.
 add_executable(agy
-  src/antigravity.cpp src/gomod.cpp src/gocall.cpp src/trampolines.S)
+  src/antigravity.cpp src/gomod.cpp src/gocall.cpp src/goframe.cpp)
 add_dependencies(agy gen_symbols)
 set_target_properties(agy PROPERTIES
   OUTPUT_NAME "agy"
@@ -177,6 +176,10 @@ endif()
 if(TASKSOLVER_LTO)
   target_compile_options(agy PRIVATE -flto=auto)
   target_link_options(agy PRIVATE -flto=auto)
+  # ...except goframe.cpp. Its naked bodies are basic asm whose `.org` directives are resolved
+  # against a label emitted by a toplevel asm in the same TU, and LTO does not guarantee the order
+  # of toplevel asm against functions. There is nothing to optimise in it either.
+  set_source_files_properties(src/goframe.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 endif()
 target_include_directories(agy PRIVATE "${CONDA_PREFIX}/include")
 
