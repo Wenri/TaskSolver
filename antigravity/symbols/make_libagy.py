@@ -13,10 +13,10 @@ The hook list and the pclntab/prologue arithmetic come from `agyelf.py`, shared 
 `build_symbols.py`: the offset this tool patches and the offset the generated stub resumes at
 are computed by the same code.
 
-Usage:
-    python3 make_libagy.py <in-agy-binary> <out-libagy.so>
-    python3 make_libagy.py --update [<out-libagy.so>]   # fetch the LATEST agy, convert, print pins
-    python3 make_libagy.py --wsl1 [<agy>]               # only the WSL1 mmap-flag patch, in place
+Usage (from antigravity/):
+    python3 -m symbols.make_libagy <in-agy-binary> <out-libagy.so>
+    python3 -m symbols.make_libagy --update [<out-libagy.so>]  # fetch latest, convert, print pins
+    python3 -m symbols.make_libagy --wsl1 [<agy>]             # only the WSL1 mmap patch, in place
 """
 import hashlib
 import json
@@ -30,8 +30,7 @@ import urllib.request
 
 import lief
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from agyelf import (  # noqa: E402
+from .agyelf import (
     ELF,
     ENTRY_TARGET,
     GoImage,
@@ -319,19 +318,19 @@ def main() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "--update":
         if len(argv) > 2:
-            raise SystemExit("usage: make_libagy.py --update [<out-libagy.so>]")
+            raise SystemExit("usage: python3 -m symbols.make_libagy --update [<out-libagy.so>]")
         update(argv[1] if len(argv) == 2 else DEFAULT_OUT)
         return
     if argv and argv[0] == "--wsl1":
         if len(argv) > 2:
-            raise SystemExit("usage: make_libagy.py --wsl1 [<agy>]")
+            raise SystemExit("usage: python3 -m symbols.make_libagy --wsl1 [<agy>]")
         patch_wsl1_file(os.path.expanduser(argv[1] if len(argv) == 2
                                            else "~/.local/bin/agy"))
         return
     if len(argv) != 2:
-        raise SystemExit("usage: make_libagy.py <in-agy-binary> <out-libagy.so>\n"
-                         "       make_libagy.py --update [<out-libagy.so>]\n"
-                         "       make_libagy.py --wsl1 [<agy>]")
+        raise SystemExit("usage: python3 -m symbols.make_libagy <in-agy-binary> <out-libagy.so>\n"
+                         "       python3 -m symbols.make_libagy --update [<out-libagy.so>]\n"
+                         "       python3 -m symbols.make_libagy --wsl1 [<agy>]")
     convert(argv[0], argv[1])
 
 

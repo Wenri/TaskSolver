@@ -233,6 +233,12 @@ instrumentation layer; Claude uses its SDK protocol directly:
   `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<id>`) in
   `agy_trampolines`, binds both directions via `ld` / `ld.so`, and splices its synthetic
   `moduledata` (`md->bad = 1`) onto `agy_firstmoduledata.next` before calling `agy_rt0_go`.
+  `symbols/` is a source build package: its tools use relative `.agyelf` imports and run as
+  `python3 -m symbols.<tool>` (`make_libagy`, `build_symbols`, `gen_sources`) from
+  `antigravity/`. CMake and the `shim-hooks` Pixi task set that cwd explicitly, so the tools
+  work before TaskSolver is installed. LIEF is required and supplied by the Pixi default
+  and build host environments; `symbols` is excluded from the runtime wheel. Keep these
+  build imports separate from the embedded runtime's stdlib-only modules.
   See `antigravity/README.md`.
 - **`codex/`** → the `pycodex` package: OpenAI's Rust codex, built from a vendored source tree with
   the bridge compiled in (no preload needed). See `codex/README.md`.

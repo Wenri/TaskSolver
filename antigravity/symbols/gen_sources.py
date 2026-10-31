@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Generate the sources derived from BOOKS, the book table in `src/procdef.h`.
 
-    gen_sources.py <symbols.json> <symbols_gen.h>   # the C++ header (build step; gitignored)
-    gen_sources.py --hooks [<hooks.py>]             # the Python mirror (checked in; `pixi run shim-hooks`)
+Run from antigravity/:
+    python3 -m symbols.gen_sources <symbols.json> <symbols_gen.h>   # C++ header (gitignored)
+    python3 -m symbols.gen_sources --hooks [<hooks.py>]             # Python mirror (checked in)
 
 `src/symbols_gen.h` holds only what the C++ can't take from BOOKS: this build's id, and
 `AGY_STUBS`, the literals each installed row's stub asm needs (expanded by `src/goframe.cpp`).
@@ -15,8 +16,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from agyelf import active_rows, c_sym_name, load_procdef  # noqa: E402
+from .agyelf import active_rows, c_sym_name, load_procdef
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BOOKS_OUT = os.path.join(ROOT, "pyagy", "agy_process", "hooks.py")
@@ -127,12 +127,12 @@ def main() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "--hooks":
         if len(argv) > 2:
-            raise SystemExit("usage: gen_sources.py --hooks [<hooks.py>]")
+            raise SystemExit("usage: python3 -m symbols.gen_sources --hooks [<hooks.py>]")
         gen_hooks(argv[1] if len(argv) == 2 else BOOKS_OUT)
         return
     if len(argv) != 2:
-        raise SystemExit("usage: gen_sources.py <symbols.json> <symbols_gen.h>\n"
-                         "       gen_sources.py --hooks [<hooks.py>]")
+        raise SystemExit("usage: python3 -m symbols.gen_sources <symbols.json> <symbols_gen.h>\n"
+                         "       python3 -m symbols.gen_sources --hooks [<hooks.py>]")
     gen_header(argv[0], argv[1])
 
 

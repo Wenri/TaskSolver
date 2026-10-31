@@ -73,8 +73,9 @@ elseif(AGY_BIN AND EXISTS "${AGY_BIN}")
   file(COPY_FILE "${AGY_BIN}" "${CMAKE_BINARY_DIR}/antigravity.raw")
   message(STATUS "[setup] vendoring libagy.so from ${AGY_BIN}")
   execute_process(
-    COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
+    COMMAND python3 -m symbols.make_libagy
             "${CMAKE_BINARY_DIR}/antigravity.raw" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     RESULT_VARIABLE _mk_rc)
   file(REMOVE "${CMAKE_BINARY_DIR}/antigravity.raw")
   if(NOT _mk_rc EQUAL 0)
@@ -101,8 +102,9 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
     message(FATAL_ERROR "agy extract failed")
   endif()
   execute_process(
-    COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
+    COMMAND python3 -m symbols.make_libagy
             "${CMAKE_BINARY_DIR}/antigravity" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     RESULT_VARIABLE _mk_rc)
   file(REMOVE "${CMAKE_BINARY_DIR}/antigravity")
   if(NOT _mk_rc EQUAL 0)
@@ -133,9 +135,11 @@ message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 # ---- generate symbols_gen.h from the committed symbols.json + src/procdef.h -------------------
 add_custom_command(
   OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
-  COMMAND python3 "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
+  COMMAND python3 -m symbols.gen_sources
                   "${CMAKE_SOURCE_DIR}/symbols/symbols.json" "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   DEPENDS "${CMAKE_SOURCE_DIR}/symbols/symbols.json"
+          "${CMAKE_SOURCE_DIR}/symbols/__init__.py"
           "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
           "${CMAKE_SOURCE_DIR}/symbols/agyelf.py"
           "${CMAKE_SOURCE_DIR}/src/procdef.h"
@@ -196,12 +200,12 @@ target_link_options(agy PRIVATE
 # ---- maintenance targets ----------------------------------------------------------------------
 add_custom_target(symbols
   # Run from the source dir with RELATIVE paths so the recorded agy_path stays "vendor/libagy.so".
-  COMMAND python3 symbols/build_symbols.py vendor/libagy.so symbols/symbols.json
+  COMMAND python3 -m symbols.build_symbols vendor/libagy.so symbols/symbols.json
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "re-resolve symbols.json from vendor/libagy.so (after an agy update)"
   VERBATIM USES_TERMINAL)
 add_custom_target(agy-update
-  COMMAND python3 symbols/make_libagy.py --update
+  COMMAND python3 -m symbols.make_libagy --update
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "fetch the LATEST agy + print new pin values for this CMakeLists"
   VERBATIM USES_TERMINAL)

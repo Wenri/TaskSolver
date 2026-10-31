@@ -16,20 +16,9 @@ import os
 import re
 import struct
 
-lief = None
+import lief
 
-
-def _load_lief():
-    """Import lief on first ELF use, and only then.
-
-    The procdef/codegen half of this module parses C text, so `gen_sources.py` must stay runnable
-    under a plain interpreter; only the binary-reading half needs lief.
-    """
-    global lief
-    if lief is None:
-        import lief as _lief
-        _lief.logging.disable()   # agy's layout makes lief chatty; the parse itself is fine
-        lief = _lief
+lief.logging.disable()   # agy's layout makes lief chatty; the parse itself is fine
 
 
 #: The one book table. Every tool here reads it from this path unless given another.
@@ -153,7 +142,6 @@ class ELF:
     """
 
     def __init__(self, data):
-        _load_lief()
         self.d = data
         # lief takes bytes, not bytearray; callers that patch bytes keep their own mutable copy.
         self.bin = lief.parse(data if isinstance(data, bytes) else bytes(data))

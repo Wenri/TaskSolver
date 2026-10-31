@@ -16,8 +16,8 @@
 #include "procdef.h"
 #include "symbols_gen.h"
 
-#define AGY_S_(x)   #x
-#define AGY_S(x)    AGY_S_(x)
+#define TO_STRING_IMPL(x) #x
+#define TO_STRING(x) TO_STRING_IMPL(x)
 
 /* id: the row id; book: its BOOKS index, which gates the stub and goes in block.book;
  * gateway: agy_go__CGOCALL or agy_go__ASMCGOCALL; resume_off: skip + ow; ...: the displaced bytes. */
@@ -29,40 +29,40 @@
         __asm__(                                                                             \
             "cmpb   $0, g_agy_on+" #book "(%rip)\n\t"                                        \
             "je     1f\n\t"                                                                  \
-            "subq   $" AGY_S(AGY_FRAME) ", %rsp\n\t"                                         \
-            "movq   %rax, " AGY_S(AGY_OFF_RAX) "(%rsp)\n\t"                                  \
-            "movq   %rbx, " AGY_S(AGY_OFF_RBX) "(%rsp)\n\t"                                  \
-            "movq   %rcx, " AGY_S(AGY_OFF_RCX) "(%rsp)\n\t"                                  \
-            "movq   %rdi, " AGY_S(AGY_OFF_RDI) "(%rsp)\n\t"                                  \
-            "movq   %rsi, " AGY_S(AGY_OFF_RSI) "(%rsp)\n\t"                                  \
-            "movq   %r8,  " AGY_S(AGY_OFF_R8)  "(%rsp)\n\t"                                  \
-            "movq   %r9,  " AGY_S(AGY_OFF_R9)  "(%rsp)\n\t"                                  \
-            "movq   %r10, " AGY_S(AGY_OFF_R10) "(%rsp)\n\t"                                  \
-            "movq   %r11, " AGY_S(AGY_OFF_R11) "(%rsp)\n\t"                                  \
-            "movq   %rdx, " AGY_S(AGY_OFF_RDX) "(%rsp)\n\t"                                  \
-            "movq   %rbp, " AGY_S(AGY_OFF_RBP) "(%rsp)\n\t"                                  \
-            "movq   $" #book ", " AGY_S(AGY_OFF_BOOK) "(%rsp)\n\t"                           \
+            "subq   $" TO_STRING(AGY_FRAME) ", %rsp\n\t"                                     \
+            "movq   %rax, " TO_STRING(AGY_OFF_RAX) "(%rsp)\n\t"                              \
+            "movq   %rbx, " TO_STRING(AGY_OFF_RBX) "(%rsp)\n\t"                              \
+            "movq   %rcx, " TO_STRING(AGY_OFF_RCX) "(%rsp)\n\t"                              \
+            "movq   %rdi, " TO_STRING(AGY_OFF_RDI) "(%rsp)\n\t"                              \
+            "movq   %rsi, " TO_STRING(AGY_OFF_RSI) "(%rsp)\n\t"                              \
+            "movq   %r8,  " TO_STRING(AGY_OFF_R8)  "(%rsp)\n\t"                              \
+            "movq   %r9,  " TO_STRING(AGY_OFF_R9)  "(%rsp)\n\t"                              \
+            "movq   %r10, " TO_STRING(AGY_OFF_R10) "(%rsp)\n\t"                              \
+            "movq   %r11, " TO_STRING(AGY_OFF_R11) "(%rsp)\n\t"                              \
+            "movq   %rdx, " TO_STRING(AGY_OFF_RDX) "(%rsp)\n\t"                              \
+            "movq   %rbp, " TO_STRING(AGY_OFF_RBP) "(%rsp)\n\t"                              \
+            "movq   $" #book ", " TO_STRING(AGY_OFF_BOOK) "(%rsp)\n\t"                       \
             "xorl   %eax, %eax\n\t"                                                          \
-            "movq   %rax, " AGY_S(AGY_OFF_ACTION) "(%rsp)\n\t"                               \
-            "leaq   " AGY_S(AGY_OFF_BLOCK) "(%rsp), %rbx\n\t"                                \
+            "movq   %rax, " TO_STRING(AGY_OFF_ACTION) "(%rsp)\n\t"                           \
+            "leaq   " TO_STRING(AGY_OFF_BLOCK) "(%rsp), %rbx\n\t"                            \
             "leaq   agy_dispatch(%rip), %rax\n\t"                                            \
-            "movq   %rax, " AGY_S(AGY_OFF_FN) "(%rsp)\n\t"                                   \
-            "movq   %rbx, " AGY_S(AGY_OFF_ARG) "(%rsp)\n\t"                                  \
+            "movq   %rax, " TO_STRING(AGY_OFF_FN) "(%rsp)\n\t"                               \
+            "movq   %rbx, " TO_STRING(AGY_OFF_ARG) "(%rsp)\n\t"                              \
             "xorps  %xmm15, %xmm15\n\t"                                                      \
             "call   *" #gateway "@GOTPCREL(%rip)\n\t"                                        \
-            "movq   " AGY_S(AGY_OFF_RAX) "(%rsp), %rax\n\t"                                  \
-            "movq   " AGY_S(AGY_OFF_RBX) "(%rsp), %rbx\n\t"                                  \
-            "movq   " AGY_S(AGY_OFF_RCX) "(%rsp), %rcx\n\t"                                  \
-            "movq   " AGY_S(AGY_OFF_RDI) "(%rsp), %rdi\n\t"                                  \
-            "movq   " AGY_S(AGY_OFF_RSI) "(%rsp), %rsi\n\t"                                  \
-            "movq   " AGY_S(AGY_OFF_R8)  "(%rsp), %r8\n\t"                                   \
-            "movq   " AGY_S(AGY_OFF_R9)  "(%rsp), %r9\n\t"                                   \
-            "movq   " AGY_S(AGY_OFF_R10) "(%rsp), %r10\n\t"                                  \
-            "movq   " AGY_S(AGY_OFF_R11) "(%rsp), %r11\n\t"                                  \
-            "movq   " AGY_S(AGY_OFF_RDX) "(%rsp), %rdx\n\t"                                  \
-            "movq   " AGY_S(AGY_OFF_RBP) "(%rsp), %rbp\n\t"                                  \
-            "movq   " AGY_S(AGY_OFF_ACTION) "(%rsp), %r12\n\t"                               \
-            "addq   $" AGY_S(AGY_FRAME) ", %rsp\n\t"                                         \
+            "movq   " TO_STRING(AGY_OFF_RAX) "(%rsp), %rax\n\t"                              \
+            "movq   " TO_STRING(AGY_OFF_RBX) "(%rsp), %rbx\n\t"                              \
+            "movq   " TO_STRING(AGY_OFF_RCX) "(%rsp), %rcx\n\t"                              \
+            "movq   " TO_STRING(AGY_OFF_RDI) "(%rsp), %rdi\n\t"                              \
+            "movq   " TO_STRING(AGY_OFF_RSI) "(%rsp), %rsi\n\t"                              \
+            "movq   " TO_STRING(AGY_OFF_R8)  "(%rsp), %r8\n\t"                               \
+            "movq   " TO_STRING(AGY_OFF_R9)  "(%rsp), %r9\n\t"                               \
+            "movq   " TO_STRING(AGY_OFF_R10) "(%rsp), %r10\n\t"                              \
+            "movq   " TO_STRING(AGY_OFF_R11) "(%rsp), %r11\n\t"                              \
+            "movq   " TO_STRING(AGY_OFF_RDX) "(%rsp), %rdx\n\t"                              \
+            "movq   " TO_STRING(AGY_OFF_RBP) "(%rsp), %rbp\n\t"                              \
+            "movq   " TO_STRING(AGY_OFF_ACTION) "(%rsp), %r12\n\t"                           \
+            "addq   $" TO_STRING(AGY_FRAME) ", %rsp\n\t"                                     \
             "testq  %r12, %r12\n\t"                                                          \
             "jne    2f\n"                                                                    \
             "1:\n\t"                                                                         \
@@ -73,7 +73,7 @@
             "2:\n\t"                                                                         \
             "xorps  %xmm15, %xmm15\n\t"                                                      \
             "ret\n\t"                                                                        \
-            ".balign " AGY_S(AGY_SLOT_SIZE) ", 0x90");                                       \
+            ".balign " TO_STRING(AGY_SLOT_SIZE) ", 0x90");                                   \
         __builtin_unreachable();                                                             \
     }
 

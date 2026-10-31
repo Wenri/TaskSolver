@@ -12,20 +12,19 @@ that is the tripwire for an agy layout change. Retired (`AGY_OFF`) rows are reso
 re-enabling one is a procdef edit), but a stale address there only warns: several are frameless
 leaf getters that legitimately have no prologue.
 
-Usage:  python3 build_symbols.py <agy-binary> <out.json>
+Usage (from antigravity/):  python3 -m symbols.build_symbols <agy-binary> <out.json>
 """
 import gzip
 import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from agyelf import GoImage, active_rows, hook_targets, load_procdef  # noqa: E402
+from .agyelf import GoImage, active_rows, hook_targets, load_procdef
 
 
 def main():
     if len(sys.argv) != 3:
-        raise SystemExit("usage: build_symbols.py <agy-binary> <out.json>")
+        raise SystemExit("usage: python3 -m symbols.build_symbols <agy-binary> <out.json>")
     binpath, outpath = sys.argv[1], sys.argv[2]
 
     rows = load_procdef()
