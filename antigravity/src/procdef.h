@@ -93,22 +93,24 @@ struct agy_hook {
      * that imports an AGY_OFF row's Go symbol into this binary (active rows are referenced by
      * their stub assembly instead). That import is what makes `ld.so` fail loudly if a future agy
      * drops or renames a function the table still lists. */
-    agy_go_fn_t      fn;      /* = agy_fn(name), ld-bound Go function pointer */
+    agy_go_fn_t      fn;      /* = agy_fn(id), ld-bound Go function pointer */
     agy_go_fn_t      stub;    /* = agy_stub(id), static assembly trampoline stub */
     agy_hook_fn      handler; /* = agy_handler_for(kind), statically bound C hook handler */
-    uint64_t         vaddr;   /* = agy_sym(name), baked at compile time */
-    uint32_t         skip;    /* = agy_skip(name), baked at compile time */
-    uint32_t         ow;      /* = agy_ow(name), displaced frame-prologue byte length (8 or 11) */
+    uint64_t         vaddr;   /* = agy_sym(id), baked at compile time */
+    uint32_t         skip;    /* = agy_skip(id), baked at compile time */
+    uint32_t         ow;      /* = agy_ow(id), displaced frame-prologue byte length (8 or 11) */
     int              slot;    /* = agy_slot(id), index in agy_tramp_slots[] (-1 if AGY_OFF) */
 
-    /* `name_` is consumed at compile time by the resolvers below; the Go symbol itself is not
-     * stored, since nothing reads it back. symbols.json and pyagy's HOOKS mirror carry it. */
-    consteval agy_hook(std::string_view id_, const char *name_, wire_mode_t mode_,
+    /* Every resolver keys on `id_`, the same primary key hk() uses: symbols_gen.h already did the
+     * id → Go symbol → address join at generation time. `name_` is therefore unused here, but it
+     * stays in the signature because each row literal below is where the Go symbol is *declared* —
+     * it is what build_symbols.py resolves and what pyagy's HOOKS mirror reports. */
+    consteval agy_hook(std::string_view id_, [[maybe_unused]] const char *name_, wire_mode_t mode_,
                        const char *kind_, agy_mech_t mech_, int32_t retcap_)
         : id(id_), mode(mode_), kind(kind_), mech(mech_),
-          retcap(retcap_), fn(agy_fn(name_)), stub(agy_stub(id_)),
-          handler(agy_handler_for(kind_)), vaddr(agy_sym(name_)),
-          skip(agy_skip(name_)), ow(agy_ow(name_)), slot(agy_slot(id_)) {}
+          retcap(retcap_), fn(agy_fn(id_)), stub(agy_stub(id_)),
+          handler(agy_handler_for(kind_)), vaddr(agy_sym(id_)),
+          skip(agy_skip(id_)), ow(agy_ow(id_)), slot(agy_slot(id_)) {}
 };
 
 inline constexpr agy_hook HOOKS[] = {

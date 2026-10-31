@@ -13,7 +13,9 @@
      `agy_tramp_region_start` .. `agy_tramp_region_end`), each statically bound via `ld`
      to its dedicated C handler (`agy_on_*`), `runtime.cgocall`/`runtime.asmcgocall`,
      displaced Go frame-setup prologue bytes, and `agy_go__*` resume target.
-  3. `consteval` resolvers (`agy_fn`, `agy_sym`, `agy_skip`, `agy_ow`, `agy_stub`, `agy_slot`).
+  3. `AGY_SYMS`, one row per procdef.h row keyed by that row's short id, and the `consteval`
+     resolvers over it (`agy_fn`, `agy_stub`, `agy_sym`, `agy_skip`, `agy_ow`, `agy_slot`). The
+     id -> Go symbol -> address join happens here, so no long Go symbol string reaches the C++.
 
 `pyagy/agy_process/hooks.py` is the stdlib-pure mirror behind the public `pyagy.HOOKS`
 introspection surface. It used to be maintained by hand and drifted three rows behind procdef.h,
@@ -111,7 +113,9 @@ def gen_header(symbols_path: str, out_path: str) -> None:
     hooks = d["hooks"]
     skips = d.get("skips", {})
     prologues = d.get("prologues", {})
-    rows = active_rows(load_procdef())
+    all_rows = load_procdef()
+    rows = active_rows(all_rows)
+    slot_of = {r["id"]: i for i, r in enumerate(rows)}
     handlers, default_handler = load_handlers()
 
     with open(out_path, "w") as f:
@@ -138,39 +142,43 @@ def gen_header(symbols_path: str, out_path: str) -> None:
         w("}\n\n")
 
         w("using agy_go_fn_t = void (*)();\n")
-        w("struct agy_symrec { std::string_view name; agy_go_fn_t fn; uint64_t vaddr; uint32_t skip; uint32_t ow; };\n")
+        w("/* One row per src/procdef.h row, keyed by the same short id hk() uses. The Go symbol\n")
+        w(" * is resolved here, at generation time, so no long symbol string reaches the C++. */\n")
+        w("struct agy_symrec {\n")
+        w("    std::string_view id;\n")
+        w("    agy_go_fn_t fn;     /* &agy_go__<symbol> */\n")
+        w("    agy_go_fn_t stub;   /* &agy_stub__<id>, nullptr when the row is AGY_OFF */\n")
+        w("    uint64_t vaddr;\n")
+        w("    uint32_t skip;\n")
+        w("    uint32_t ow;\n")
+        w("    int slot;           /* index in agy_tramp_slots[], -1 when AGY_OFF */\n")
+        w("};\n")
         w("inline constexpr agy_symrec AGY_SYMS[] = {\n")
-        for name, addr in hooks.items():
-            esc = name.replace("\\", "\\\\").replace('"', '\\"')
-            ow = len(prologues.get(name, "")) // 2
-            w('    { "%s", &%s, 0x%xULL, %d, %d },\n'
-              % (esc, c_sym_name(name), addr, skips.get(name, 0), ow))
+        for r in all_rows:
+            nm = r["symbol"]
+            slot = slot_of.get(r["id"], -1)
+            fn = "&" + c_sym_name(nm) if nm in hooks else "nullptr"
+            stub = f'&agy_stub__{r["id"]}' if slot >= 0 else "nullptr"
+            w('    { "%s", %s, %s, 0x%xULL, %d, %d, %d },\n'
+              % (r["id"], fn, stub, hooks.get(nm, 0), skips.get(nm, 0),
+                 len(prologues.get(nm, "")) // 2, slot))
         w("};\n\n")
 
-        w("struct agy_stubrec { std::string_view id; agy_go_fn_t stub; int slot; };\n")
-        w("inline constexpr agy_stubrec AGY_STUBS[] = {\n")
-        for slot, r in enumerate(rows):
-            w('    { "%s", &agy_stub__%s, %d },\n' % (r["id"], r["id"], slot))
-        w("};\n\n")
-
-        w("consteval agy_go_fn_t agy_fn(std::string_view name) {\n")
-        w("    for (auto &s : AGY_SYMS) if (s.name == name) return s.fn;\n")
+        w("consteval const agy_symrec *agy_row(std::string_view id) {\n")
+        w("    for (auto &s : AGY_SYMS) if (s.id == id) return &s;\n")
         w("    return nullptr;\n}\n\n")
-        w("consteval uint64_t agy_sym(std::string_view name) {\n")
-        w("    for (auto &s : AGY_SYMS) if (s.name == name) return s.vaddr;\n")
-        w("    return 0;\n}\n\n")
-        w("consteval uint32_t agy_skip(std::string_view name) {\n")
-        w("    for (auto &s : AGY_SYMS) if (s.name == name) return s.skip;\n")
-        w("    return 0;\n}\n\n")
-        w("consteval uint32_t agy_ow(std::string_view name) {\n")
-        w("    for (auto &s : AGY_SYMS) if (s.name == name) return s.ow;\n")
-        w("    return 0;\n}\n\n")
+        w("consteval agy_go_fn_t agy_fn(std::string_view id) {\n")
+        w("    auto r = agy_row(id); return r ? r->fn : nullptr;\n}\n\n")
         w("consteval agy_go_fn_t agy_stub(std::string_view id) {\n")
-        w("    for (auto &s : AGY_STUBS) if (s.id == id) return s.stub;\n")
-        w("    return nullptr;\n}\n\n")
+        w("    auto r = agy_row(id); return r ? r->stub : nullptr;\n}\n\n")
+        w("consteval uint64_t agy_sym(std::string_view id) {\n")
+        w("    auto r = agy_row(id); return r ? r->vaddr : 0;\n}\n\n")
+        w("consteval uint32_t agy_skip(std::string_view id) {\n")
+        w("    auto r = agy_row(id); return r ? r->skip : 0;\n}\n\n")
+        w("consteval uint32_t agy_ow(std::string_view id) {\n")
+        w("    auto r = agy_row(id); return r ? r->ow : 0;\n}\n\n")
         w("consteval int agy_slot(std::string_view id) {\n")
-        w("    for (auto &s : AGY_STUBS) if (s.id == id) return s.slot;\n")
-        w("    return -1;\n}\n\n")
+        w("    auto r = agy_row(id); return r ? r->slot : -1;\n}\n\n")
 
         asm_lines = ['.pushsection .rodata.agy_trampolines,"a",@progbits']
         for slot, r in enumerate(rows):
