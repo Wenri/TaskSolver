@@ -1,17 +1,28 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
 
 import { Emitter, Event } from '#/_base/event';
 import type { ISessionScopeHandle } from '#/_base/di/scope';
 import type { ISessionIndex } from '#/app/sessionIndex/sessionIndex';
+import type { ServicesAccessor } from '#/_base/di/instantiation';
+import { Error2 } from '#/_base/errors/errors';
+import { ISessionManager } from '#/app/sessionManager/sessionManager';
+import { reloadOnStale } from '#/app/sessionManager/sessionLookup';
 import { SessionManager } from '#/app/sessionManager/sessionManagerService';
+import { ErrorCodes } from '#/errors';
+import { IAgentCronService } from '#/features/cron/cronService';
+import { InMemorySessionLockService } from '#/persistence/backends/memory/sessionLockService';
 import { Program } from '#/program/program';
 import type { ProgramSessionControllerInput } from '#/program/programDependencies';
 import { FakeRuntime } from '#/runtime/fakeRuntime';
 import { RuntimeRegistry } from '#/runtime/runtimeRegistry';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { ISessionActivityView } from '#/session/sessionActivity/sessionActivity';
 import type {
   SessionArchivedEvent,
+  SessionCloseReason,
   SessionClosedEvent,
   SessionCreatedEvent,
+  SessionCreateSource,
   SessionWillCreateEvent,
 } from '#/workspace/sessionLifecycle/sessionLifecycle';
 import type { SessionLifecycleService } from '#/workspace/sessionLifecycle/sessionLifecycleService';
@@ -49,6 +60,30 @@ function controller(sessionId = 'session-1'): {
     dispose: () => {},
   } as unknown as SessionLifecycleService;
   return { service, handle };
+}
+
+type WorkspaceLease = Awaited<ReturnType<IWorkspaceInstanceManager['acquire']>>;
+
+function workspaceManager(workspace: WorkspaceInstance): IWorkspaceInstanceManager & {
+  readonly leases: readonly WorkspaceLease[];
+} {
+  const leases: WorkspaceLease[] = [];
+  return {
+    acquire: vi.fn(async () => {
+      let disposed = false;
+      const lease = {
+        instance: workspace,
+        dispose: vi.fn(() => {
+          if (disposed) return;
+          disposed = true;
+        }),
+      };
+      leases.push(lease);
+      return lease;
+    }),
+    get: (workspaceId: string) => workspaceId === workspace.id ? workspace : undefined,
+    leases,
+  } as unknown as IWorkspaceInstanceManager & { readonly leases: readonly WorkspaceLease[] };
 }
 
 async function drainMicrotasks(ticks = 50): Promise<void> {
@@ -97,14 +132,11 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = {
       get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }),
     } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
 
     const resumePromise = manager.resume('session-1');
     const section = manager.withLifecycleSerialization('session-1', async () => {
@@ -125,14 +157,11 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => fake.service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = {
       get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }),
     } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
 
     let releaseSection!: () => void;
     const sectionGate = new Promise<void>((resolve) => {
@@ -166,14 +195,11 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => fake.service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = {
       get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }),
     } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
 
     let releaseSection!: () => void;
     const sectionGate = new Promise<void>((resolve) => {
@@ -204,14 +230,11 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => fake.service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = {
       get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }),
     } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
 
     let releaseSection!: () => void;
     const sectionGate = new Promise<void>((resolve) => {
@@ -242,14 +265,11 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => fake.service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = {
       get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }),
     } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
 
     let releaseSection!: () => void;
     const sectionGate = new Promise<void>((resolve) => {
@@ -280,14 +300,11 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => fake.service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = {
       get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }),
     } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
 
     let releaseSection!: () => void;
     const sectionGate = new Promise<void>((resolve) => {
@@ -318,14 +335,11 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => fake.service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = {
       get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }),
     } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
 
     let releaseSection!: () => void;
     const sectionGate = new Promise<void>((resolve) => {
@@ -355,14 +369,11 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => fake.service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = {
       get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }),
     } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
 
     let releaseSection!: () => void;
     const sectionGate = new Promise<void>((resolve) => {
@@ -393,14 +404,11 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => fake.service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = {
       get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }),
     } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
 
     await expect(manager.resume('session-1')).rejects.toThrow('boom');
     await expect(manager.whenResumeSettled('session-1')).rejects.toThrow('boom');
@@ -417,12 +425,9 @@ describe('SessionManager', () => {
       id: 'workspace-1',
       program: { sessionControllerGeneration: 'generation-1', createSessionController: () => fake.service },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: (workspaceId: string) => workspaceId === workspace.id ? workspace : undefined,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const index = { get: async () => undefined } as unknown as ISessionIndex;
-    const manager = new SessionManager(workspaces, index);
+    const manager = new SessionManager(workspaces, index, new InMemorySessionLockService());
     const created = await manager.create({ workDir: '/workspace' });
     expect(created).toBe(fake.handle);
     expect(manager.get('session-1')).toBe(fake.handle);
@@ -444,13 +449,11 @@ describe('SessionManager', () => {
         createSessionController: () => generation === 'generation-1' ? first.service : second.service,
       },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const manager = new SessionManager(
       workspaces,
       { get: async () => undefined } as unknown as ISessionIndex,
+      new InMemorySessionLockService(),
     );
 
     expect(await manager.create({ workDir: '/workspace' })).toBe(first.handle);
@@ -461,10 +464,14 @@ describe('SessionManager', () => {
     await manager.close('session-1');
     expect(manager.get('session-1')).toBeUndefined();
     expect(manager.get('session-2')).toBe(second.handle);
+    expect(workspaces.leases).toHaveLength(2);
+    expect(workspaces.leases[0]!.dispose).toHaveBeenCalledTimes(1);
+    expect(workspaces.leases[1]!.dispose).not.toHaveBeenCalled();
     manager.dispose();
+    expect(workspaces.leases[1]!.dispose).toHaveBeenCalledTimes(1);
   });
 
-  it('retires a superseded controller that never came to own a session', async () => {
+  it('retires a failed controller as soon as its operation ends', async () => {
     const first = controller('session-1');
     const second = controller('session-2');
     (first.service as { create: unknown }).create = async () => {
@@ -480,23 +487,181 @@ describe('SessionManager', () => {
         createSessionController: () => generation === 'generation-1' ? first.service : second.service,
       },
     } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: () => workspace,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     const manager = new SessionManager(
       workspaces,
       { get: async () => undefined } as unknown as ISessionIndex,
+      new InMemorySessionLockService(),
     );
 
     await expect(manager.create({ workDir: '/workspace' })).rejects.toThrow('boom');
-    expect(disposeFirst).not.toHaveBeenCalled();
+    expect(disposeFirst).toHaveBeenCalledTimes(1);
+    expect(workspaces.leases).toHaveLength(1);
+    expect(workspaces.leases[0]!.dispose).toHaveBeenCalledTimes(1);
     generation = 'generation-2';
     expect(await manager.create({ workDir: '/workspace' })).toBe(second.handle);
     expect(disposeFirst).toHaveBeenCalledTimes(1);
     expect(manager.get('session-2')).toBe(second.handle);
     manager.dispose();
     expect(disposeFirst).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionManager closeIfIdle', () => {
+  interface Guards {
+    readonly busy?: boolean;
+    readonly pending?: 'none' | 'approval' | 'question';
+    readonly cronTasks?: number;
+  }
+
+  const managers: SessionManager[] = [];
+
+  function setup(guards: Guards = {}) {
+    const didCreate = new Emitter<SessionCreatedEvent>();
+    const didClose = new Emitter<SessionClosedEvent>();
+    const locks = new InMemorySessionLockService();
+    const state = {
+      busy: false,
+      pending: 'none' as const,
+      cronTasks: 0,
+      activeAt: Date.now(),
+      ...guards,
+    };
+    const agent = {
+      accessor: {
+        get: (token: unknown) => token === IAgentCronService
+          ? { list: () => Array.from({ length: state.cronTasks }) }
+          : undefined,
+      },
+    };
+    const handle = {
+      id: 'session-1',
+      accessor: {
+        get: (token: unknown) => {
+          if (token === ISessionActivityView) {
+            return {
+              state: () => ({ busy: state.busy, mainTurnActive: false, pendingInteraction: state.pending }),
+              lastActiveAt: () => state.activeAt,
+            };
+          }
+          if (token === IAgentLifecycleService) {
+            return { list: () => [{ agentId: 'main' }], handleOf: () => agent };
+          }
+          return undefined;
+        },
+      },
+    } as unknown as ISessionScopeHandle;
+    let manager: SessionManager;
+    const resume = vi.fn(async (
+      sessionId: string,
+      _options: unknown,
+      source: SessionCreateSource = 'resume',
+    ) => {
+      if (manager.get(sessionId) === undefined) didCreate.fire({ sessionId, handle, source });
+      return handle;
+    });
+    const close = vi.fn(async (sessionId: string, _reason: SessionCloseReason = 'exit') => {
+      didClose.fire({ sessionId });
+    });
+    const service = {
+      onWillCreateSession: Event.None,
+      onDidCreateSession: didCreate.event,
+      onWillCloseSession: Event.None,
+      onDidCloseSession: didClose.event,
+      onDidArchiveSession: Event.None,
+      onDidForkSession: Event.None,
+      create: async () => {
+        didCreate.fire({ sessionId: 'session-1', handle, source: 'startup' });
+        return handle;
+      },
+      resume,
+      close,
+      dispose: () => {},
+    } as unknown as SessionLifecycleService;
+    const workspace = {
+      id: 'workspace-1',
+      program: { sessionControllerGeneration: 'generation-1', createSessionController: () => service },
+    } as unknown as WorkspaceInstance;
+    manager = new SessionManager(
+      workspaceManager(workspace),
+      { get: async () => ({ workspaceId: 'workspace-1', cwd: '/workspace' }) } as unknown as ISessionIndex,
+      locks,
+    );
+    managers.push(manager);
+    return { manager, handle, resume, close, locks };
+  }
+
+  const create = (fake: ReturnType<typeof setup>): Promise<ISessionScopeHandle> =>
+    fake.manager.create({ sessionId: 'session-1', workDir: '/workspace' } as never);
+
+  beforeEach(() => vi.useFakeTimers());
+
+  afterEach(() => {
+    for (const manager of managers) manager.dispose();
+    managers.length = 0;
+    vi.useRealTimers();
+  });
+
+  it('reclaims after the activity idle timeout and reloads only once', async () => {
+    const fake = setup();
+    expect(await fake.manager.closeIfIdle('session-1', 0)).toBe(false);
+    await create(fake);
+    vi.setSystemTime(Date.now() + 999);
+    expect(await fake.manager.closeIfIdle('session-1', 1000)).toBe(false);
+    await fake.manager.resume('session-1');
+    vi.setSystemTime(Date.now() + 1);
+    expect(await fake.manager.closeIfIdle('session-1', 1000)).toBe(true);
+    expect(fake.manager.get('session-1')).toBeUndefined();
+    await fake.manager.resume('session-1');
+    await fake.manager.close('session-1');
+    await fake.manager.resume('session-1');
+    expect(fake.close.mock.calls[0]?.[1]).toBe('reclaim');
+    expect(fake.resume.mock.calls.map((call) => call[2])).toEqual(['resume', 'reclaimed', 'resume']);
+  });
+
+  const eligibilityCases: Array<[string, Guards]> = [
+    ['a busy turn', { busy: true }],
+    ['a pending approval', { pending: 'approval' }],
+    ['a pending question', { pending: 'question' }],
+    ['pending cron tasks', { cronTasks: 1 }],
+  ];
+
+  it.each(eligibilityCases)('retains sessions with %s', async (_label, guards) => {
+    const fake = setup(guards);
+    await create(fake);
+    expect(await fake.manager.closeIfIdle('session-1', 0)).toBe(false);
+    expect(fake.manager.get('session-1')).toBeDefined();
+  });
+
+  it('releases the lease when the close path fails', async () => {
+    const fake = setup();
+    fake.close.mockRejectedValue(new Error('boom'));
+    await create(fake);
+    await expect(fake.manager.closeIfIdle('session-1', 0)).rejects.toThrow('boom');
+    expect(fake.locks.held('session-1')).toBe(false);
+    expect(fake.manager.get('session-1')).toBeDefined();
+  });
+
+  it('serializes a reclaim with a racing resume', async () => {
+    const fake = setup();
+    await create(fake);
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const close = fake.close.getMockImplementation();
+    fake.close.mockImplementation(async (id, reason) => {
+      await closeGate;
+      await close?.(id, reason);
+    });
+    const reclaim = fake.manager.closeIfIdle('session-1', 0);
+    const resumed = fake.manager.resume('session-1');
+    await drainMicrotasks();
+    expect(fake.resume).not.toHaveBeenCalled();
+    releaseClose();
+    expect(await reclaim).toBe(true);
+    expect(await resumed).toBe(fake.handle);
+    expect(fake.manager.get('session-1')).toBe(fake.handle);
   });
 });
 
@@ -632,13 +797,11 @@ describe('SessionManager controller retirement', () => {
 
   function managerFor(program: Program): SessionManager {
     const workspace = { id: 'workspace', program } as unknown as WorkspaceInstance;
-    const workspaces = {
-      getOrCreate: async () => workspace,
-      get: (workspaceId: string) => workspaceId === workspace.id ? workspace : undefined,
-    } as unknown as IWorkspaceInstanceManager;
+    const workspaces = workspaceManager(workspace);
     return new SessionManager(
       workspaces,
       { get: async () => undefined } as unknown as ISessionIndex,
+      new InMemorySessionLockService(),
     );
   }
 
@@ -666,7 +829,7 @@ describe('SessionManager controller retirement', () => {
     manager.dispose();
     expect(controllers[0]!.dispose).toHaveBeenCalledTimes(1);
     expect(controllers[1]!.dispose).toHaveBeenCalledTimes(1);
-    program.dispose();
+    await program.dispose();
     await registry.dispose();
   });
 
@@ -687,7 +850,76 @@ describe('SessionManager controller retirement', () => {
 
     manager.dispose();
     expect(controllers[1]!.dispose).toHaveBeenCalledTimes(1);
-    program.dispose();
+    await program.dispose();
     await registry.dispose();
+  });
+});
+
+describe('reloadOnStale', () => {
+  function staleAccessor(): {
+    readonly accessor: ServicesAccessor;
+    readonly order: string[];
+    readonly reloaded: ISessionScopeHandle;
+  } {
+    const order: string[] = [];
+    const reloaded = { id: 'session-1' } as unknown as ISessionScopeHandle;
+    const manager = {
+      close: async () => {
+        order.push('close');
+      },
+      resume: async () => {
+        order.push('resume');
+        return reloaded;
+      },
+    };
+    const accessor = {
+      get: (id: unknown) => {
+        if (id === ISessionManager) return manager;
+        throw new Error('unexpected service');
+      },
+    } as unknown as ServicesAccessor;
+    return { accessor, order, reloaded };
+  }
+
+  it('reloads the session and retries once after a stale rejection', async () => {
+    const { accessor, order, reloaded } = staleAccessor();
+    const run = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error2(ErrorCodes.SESSION_STALE, 'stale'))
+      .mockResolvedValue('done');
+    const onReloaded = vi.fn(async (session: ISessionScopeHandle) => {
+      order.push(`reloaded:${session === reloaded}`);
+    });
+
+    await expect(reloadOnStale(accessor, 'session-1', run, { onReloaded })).resolves.toBe('done');
+
+    expect(order).toEqual(['close', 'resume', 'reloaded:true']);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('reloads but rethrows the stale rejection when retry is off', async () => {
+    const { accessor, order } = staleAccessor();
+    const stale = new Error2(ErrorCodes.SESSION_STALE, 'stale');
+    const run = vi.fn(async () => {
+      throw stale;
+    });
+
+    await expect(reloadOnStale(accessor, 'session-1', run, { retry: false })).rejects.toBe(stale);
+
+    expect(order).toEqual(['close', 'resume']);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes other failures through without reloading', async () => {
+    const { accessor, order } = staleAccessor();
+    const occupied = new Error2(ErrorCodes.SESSION_OCCUPIED, 'occupied');
+
+    await expect(
+      reloadOnStale(accessor, 'session-1', async () => {
+        throw occupied;
+      }),
+    ).rejects.toBe(occupied);
+
+    expect(order).toEqual([]);
   });
 });

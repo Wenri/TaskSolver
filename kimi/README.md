@@ -8,8 +8,8 @@ binary we compile), the embedded-CPython bridge rides an **N-API addon** the pat
 startup. All three share the `wirecap` package (decode + the embedded-CPython native bridge).
 
 ## Layout
-- `vendor/kimi-code/` — the Kimi Code monorepo, git-subtree'd at tag
-  **`@moonshot-ai/kimi-code@2.1.1`** (`f67e6398`; MIT; `LICENSE` preserved). Kept pristine except
+- `vendor/kimi-code/` — the Kimi Code monorepo, vendored at tag
+  **`@moonshot-ai/kimi-code@2.4.1`** (`2c73f3f5`; MIT; `LICENSE` preserved). Kept pristine except
   our wiretap patch (below); `node_modules/`, `dist/`, and the build-time `vis-web-asset.ts` stub
   are gitignored. The engine is `packages/agent-core-v2`; upstream removed the old v1 engine.
 - `native/` — `wirecap_node.cc` + `CMakeLists.txt`: the N-API addon that links
@@ -18,7 +18,9 @@ startup. All three share the `wirecap` package (decode + the embedded-CPython na
   `wirecap` shim: static-literal kinds, an atomic turn counter, ASYNC-only emits.
 - `pykimi/` — the Python wrapper: `ask()`/`KimiResponse`/`KimiCodeModel` + the in-process decode
   side `kimi_process` (the `WIRE_MODULE` the embedded interpreter loads) + the ModelRequestEvent
-  turn decoder `kimi_decode`.
+  turn decoder `kimi_decode`. Kimi 2.4+ appends harness context (date, permission mode) after the
+  prompt as extra `<system-reminder>` user messages; the request summary's `first_user_text`
+  skips them so it still reports the prompt.
 
 ## The patch
 A new self-contained emitter `packages/agent-core-v2/src/wiretap/wiretap.ts` (loads the addon
@@ -31,17 +33,24 @@ no-op-safe) plus **three one-line emit sites**:
 - `wire/wireService.ts` `appendRecordLow()` → `kimi_wire` (every appended wire-journal record
   + its agent scope; reading/restoring the journal does not emit records).
 
-The ESM build config also bundles `ws` and `qrcode` and embeds the CLI version so the
-wheel runs without the source tree's `node_modules` or `package.json`.
+The ESM build config also bundles the CLI's runtime dependencies (`ws`, `qrcode`, `chokidar`; tsdown
+otherwise leaves `package.json` dependencies external) and embeds the CLI version, so the wheel
+runs without the source tree's `node_modules` or `package.json`. After an update, add any new
+`apps/kimi-code/package.json` dependency to `alwaysBundle`; `test_kimi_bundle.py` catches a miss.
 
 The wiretap helper is separate from upstream code. Preserve the three emit sites and the
-ESM packaging config when updating the source:
+ESM packaging config when updating the source. The tree is no longer a usable git subtree (its
+only squash commit records 0.34.0, so `git subtree pull` merges against the wrong base); replace
+the tracked files instead, keeping the gitignored build output:
 
-    git fetch --depth 1 https://github.com/MoonshotAI/kimi-code '+refs/tags/@moonshot-ai/kimi-code@<X.Y.Z>'
-    git subtree pull --prefix kimi/vendor/kimi-code FETCH_HEAD --squash
+    git clone --depth 1 --branch '@moonshot-ai/kimi-code@<X.Y.Z>' https://github.com/MoonshotAI/kimi-code /tmp/kimi-code
+    rsync -a --delete --exclude=.git --exclude=node_modules --exclude=/apps/kimi-code/dist/ \
+          --exclude=/apps/kimi-code/src/generated/vis-web-asset.ts /tmp/kimi-code/ kimi/vendor/kimi-code/
+    git checkout HEAD -- kimi/vendor/kimi-code/packages/agent-core-v2/src/wiretap
 
-then re-apply the three emit edits if they drifted, and re-run `pixi install` (which rebuilds the
-bundle + addon).
+then re-apply the three emit edits and the `tsdown.config.ts` packaging edits (the previous
+commit's diff against the old upstream tag shows them), and run
+`pixi reinstall --locked tasksolver`, which rebuilds the bundle and addon.
 
 ## Build + run
 Built by **`pixi install`** (setup.py's `_build_kimi`, after the shim so the bridge exists):
@@ -150,7 +159,8 @@ Offline, no node/bundle needed (`python3 test_scripts/<f>.py`):
   `mcp_json` PYTHONHOME unwrap, and the session-store readers (index fold, tombstones, cwd
   filter, relocated home).
 - `test_kimi_decode.py` — the `kimi_turn` decode (finish-message authoritative, streamed-delta
-  fallback, usage normalization, request pairing) + the `python3 -S` import-purity probe for
+  fallback, usage normalization, request pairing, skipped `<system-reminder>` messages) + the
+  `python3 -S` import-purity probe for
   `pykimi.kimi_process`.
 - `test_kimi_process.py` — stub `#!/bin/sh` binaries through the real launch machinery (prompt
   delivery, timeout → `timed_out`, group sweep, no fd leak).

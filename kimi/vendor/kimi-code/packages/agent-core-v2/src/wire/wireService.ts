@@ -11,6 +11,8 @@ import {
   IAppendLogStore,
 } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService, StorageError, StorageErrors } from '#/persistence/interface/storage';
+import { ISessionLockService } from '#/persistence/interface/sessionLock';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
 
 import { IWireService, type WireRestoreChains } from './wire';
 import { WireError, WireErrors } from './errors';
@@ -64,6 +66,7 @@ export class WireService extends Service implements IWireService, IAgentJournal 
   private pendingRepair:
     | { readonly records: WireRecord[]; readonly truncation: AppendLogTruncation }
     | undefined;
+  private pendingRewrite: WireRecord[] | undefined;
   private persistError: Error | undefined;
   private treeSnapshot: WireTree | undefined;
   private writeGeneration = 0;
@@ -77,11 +80,18 @@ export class WireService extends Service implements IWireService, IAgentJournal 
     @IFileSystemStorageService private readonly storage: IFileSystemStorageService,
     @ILogService private readonly logger: ILogService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
+    @ISessionLockService private readonly sessionLocks: ISessionLockService,
+    @ISessionContext private readonly sessionContext: ISessionContext,
   ) {
     super();
     this.wireScope = scopeContext.scope();
     this.agentId = scopeContext.agentId;
     this._register(this.log.acquire(this.wireScope, AGENT_WIRE_RECORD_KEY));
+    this._register(
+      this.log.bindWriteGuard(this.wireScope, AGENT_WIRE_RECORD_KEY, () =>
+        this.sessionLocks.tryHold(this.sessionContext.sessionId),
+      ),
+    );
   }
 
   async seal(): Promise<void> {
@@ -96,12 +106,14 @@ export class WireService extends Service implements IWireService, IAgentJournal 
   appendRecord(record: WireRecord, dehydrate?: RecordDehydrator): void {
     if (
       this.pendingRepair === undefined &&
+      this.pendingRewrite === undefined &&
       dehydrate === undefined &&
       this.persistQueue === undefined
     ) {
       try {
         this.appendRecordLow(record);
       } catch (error) {
+        this.logger.error('wire append failed', { agentId: this.agentId, error });
         onUnexpectedError(error);
       }
       return;
@@ -115,10 +127,16 @@ export class WireService extends Service implements IWireService, IAgentJournal 
         if (this.pendingRepair !== undefined) {
           await this.repairPendingJournal();
         }
+        if (this.pendingRewrite !== undefined) {
+          await this.rewritePendingJournal();
+        }
         const output = dehydrate === undefined ? record : await dehydrate(record, transform);
         this.appendRecordLow(output);
       })
-      .catch((error: unknown) => onUnexpectedError(error));
+      .catch((error: unknown) => {
+        this.logger.error('wire append failed', { agentId: this.agentId, error });
+        onUnexpectedError(error);
+      });
     this.persistQueue = queued;
     void queued.then(() => {
       if (this.persistQueue === queued) this.persistQueue = undefined;
@@ -394,12 +412,12 @@ export class WireService extends Service implements IWireService, IAgentJournal 
       rewrittenRecords = [createWireMetadataRecord()];
     }
     if (truncation !== undefined) {
+      this.pendingRewrite = undefined;
       await this.repairJournal(truncation, rewrittenRecords);
     } else if (rewrittenRecords !== undefined) {
-      await this.log.rewrite(this.wireScope, AGENT_WIRE_RECORD_KEY, rewrittenRecords);
-      this.writeGeneration += 1;
-      this.lines = rewrittenRecords.length;
-      this.lastClearLine = lastContextClearLineOf(rewrittenRecords);
+      if (!(await this.rewriteMigratedJournal(rewrittenRecords))) {
+        this.pendingRewrite = rewrittenRecords;
+      }
     }
     this.mergeModeTwoEntries(modeTwoEntries, this.modeTwoEntries.slice(modeTwoLengthAtStart), lineCount);
     this.lastReadLineCount = lineCount;
@@ -432,6 +450,37 @@ export class WireService extends Service implements IWireService, IAgentJournal 
     return this.storage.pathFor(this.wireScope, AGENT_WIRE_RECORD_KEY);
   }
 
+  externallyModified(): boolean {
+    return this.log.externallyModified(this.wireScope, AGENT_WIRE_RECORD_KEY);
+  }
+
+  private async rewriteMigratedJournal(records: WireRecord[]): Promise<boolean> {
+    if (
+      !this.sessionLocks.tryHold(this.sessionContext.sessionId) ||
+      this.externallyModified()
+    ) {
+      return false;
+    }
+    await this.log.rewrite(this.wireScope, AGENT_WIRE_RECORD_KEY, records);
+    this.pendingRewrite = undefined;
+    this.writeGeneration += 1;
+    this.lines = records.length;
+    this.lastClearLine = lastContextClearLineOf(records);
+    return true;
+  }
+
+  private async rewritePendingJournal(): Promise<void> {
+    const pending = this.pendingRewrite;
+    if (pending === undefined || (await this.rewriteMigratedJournal(pending))) return;
+    const error = new WireError(
+      WireErrors.codes.RECORDS_WRITE_FAILED,
+      'Wire journal migration did not complete; record was not appended',
+      { details: { scope: this.wireScope, key: AGENT_WIRE_RECORD_KEY } },
+    );
+    this.persistError = error;
+    throw error;
+  }
+
   private async repairJournal(
     truncation: AppendLogTruncation,
     rewrittenRecords: WireRecord[] | undefined,
@@ -446,6 +495,13 @@ export class WireService extends Service implements IWireService, IAgentJournal 
       )) {
         records.push(record);
       }
+    }
+    if (
+      !this.sessionLocks.tryHold(this.sessionContext.sessionId) ||
+      this.externallyModified()
+    ) {
+      this.pendingRepair = { records, truncation };
+      return;
     }
     const outcome = await repairWireJournal(
       {

@@ -347,6 +347,31 @@ export const WIRE_RENDERERS: RendererMap = {
     headline: () => ({ main: <Dim>session forked</Dim> }),
   },
 
+  'changeNotifier.snapshot': {
+    tone: 'meta',
+    label: 'notify',
+    headline: (r) => {
+      const parts: string[] = [];
+      if (r.agentsMdFiles !== null && r.agentsMdFiles !== undefined) {
+        parts.push(`${Object.keys(r.agentsMdFiles).length} agents.md`);
+      }
+      if (r.skillsHash !== null && r.skillsHash !== undefined) parts.push('skills');
+      if (r.subagentNames !== null && r.subagentNames !== undefined) {
+        parts.push(`${r.subagentNames.length} profiles`);
+      }
+      if (r.modelPool !== null && r.modelPool !== undefined) {
+        parts.push(`${Object.keys(r.modelPool.models).length} pool models`);
+      }
+      return {
+        main: (
+          <span className="truncate text-fg-0">
+            {parts.length === 0 ? <Dim>(empty beliefs)</Dim> : parts.join(' · ')}
+          </span>
+        ),
+      };
+    },
+  },
+
   'config.update': {
     tone: 'config',
     label: 'config',
@@ -1141,6 +1166,38 @@ export const WIRE_RENDERERS: RendererMap = {
         ) : null}
       </div>
     ),
+  },
+
+  'mcp.server_failed': {
+    tone: 'error',
+    label: 'mcp✗',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2 min-w-0">
+          <Mono>{r.serverName}</Mono>
+          <Dim>{r.transport}</Dim>
+          {r.error !== undefined ? (
+            <span className="truncate text-fg-3" title={r.error}>
+              {truncate(r.error, 80)}
+            </span>
+          ) : null}
+        </span>
+      ),
+    }),
+  },
+
+  'mcp.server_failure_resolved': {
+    tone: 'tools',
+    label: 'mcp✓',
+    headline: (r) => ({
+      main: (
+        <span className="flex items-center gap-2 min-w-0">
+          <Mono>{r.serverName}</Mono>
+          <Dim>{r.transport}</Dim>
+          <Dim>{r.resolution}</Dim>
+        </span>
+      ),
+    }),
   },
 
   'mcp.tools_discovered': {

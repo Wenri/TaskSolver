@@ -31,6 +31,8 @@ Deleting a server from the configuration does not interrupt open sessions: the s
 
 When Kimi Code finds project-level MCP servers in an untrusted folder, it shows each server's transport and launch target in the workspace trust prompt. The prompt defaults to `Trust this folder`; review the listed command and arguments or remote URL before confirming. Trusting the folder enables the project-level MCP servers for that workspace.
 
+Headless runs (for example `kimi -p` in CI) cannot show the trust prompt, so project-level MCP servers stay disabled there unless the workspace is already trusted. Set [`KIMI_CODE_TRUST_WORKSPACE`](../configuration/env-vars.md#runtime-switches) to `1` to trust the workspace for that process.
+
 Structure of `mcp.json`:
 
 ```json
@@ -62,13 +64,15 @@ Optional fields:
 | `headers` | `Record<string, string>` | HTTP, SSE | Static request headers appended to every request |
 | `bearerTokenEnvVar` | `string` | HTTP, SSE | Name of an environment variable that contains a bearer token |
 | `enabled` | `boolean` | All | Set to `false` to disable this server |
-| `deferred` | `boolean` | All | Experimental: set to `true` to let the model load this server's tools on demand. Defaults to `false` (always exposed inline). Prerequisites and behavior: [Loading tools on demand](#loading-tools-on-demand) |
+| `deferred` | `boolean` | All | Experimental: set to `true` to let the model load this server's tools on demand. Defaults to the global `default_deferred` value (`false` when unset). Prerequisites and behavior: [Loading tools on demand](#loading-tools-on-demand) |
 | `startupTimeoutMs` | `number` | All | Connection timeout from `1` to `2147483647` milliseconds; default `30000` |
 | `toolTimeoutMs` | `number` | All | Timeout from `1` to `2147483647` milliseconds for a single tool call |
 | `enabledTools` | `string[]` | All | Tool allowlist |
 | `disabledTools` | `string[]` | All | Tool blocklist |
 
 You do not have to set the connection timeout or the single tool-call timeout per server: `[mcp] startup_timeout_ms` / `[mcp] tool_timeout_ms` in `config.toml` or the `KIMI_MCP_STARTUP_TIMEOUT_MS` / `KIMI_MCP_TOOL_TIMEOUT_MS` environment variables change the global defaults. Precedence is: per-server field > environment variable > `config.toml` > built-in default. See [Configuration files](../configuration/config-files.md#mcp).
+
+When a workspace-level MCP server cannot be reached at startup or drops unexpectedly, it reconnects on its own with exponential backoff (the wait between attempts doubles each time): the first retry happens after `[mcp] reconnect_initial_delay_ms` (default `5000`) and the wait never exceeds `[mcp] reconnect_max_delay_ms` (default `300000`), adjustable via `config.toml` or the `KIMI_MCP_RECONNECT_INITIAL_DELAY_MS` / `KIMI_MCP_RECONNECT_MAX_DELAY_MS` environment variables. Its tools come back automatically once the server is reachable again. Servers that cannot recover on their own — an unknown command, an invalid configuration, or static credentials the server rejects — are not retried and stay `failed`, and session-scoped ephemeral servers are not retried either.
 
 HTTP and SSE servers support providing static credentials via `headers` or `bearerTokenEnvVar`. When OAuth is needed, run `/mcp-config login <server-name>` to complete browser-based authorization.
 
@@ -100,7 +104,9 @@ With both prerequisites met, set `deferred: true` on the server entry in `mcp.js
 }
 ```
 
-Servers without `deferred` are unaffected and always exposed inline; when a prerequisite is missing, the field is ignored with the same result. The authentication tool exposed by an OAuth server before authorization completes follows the same field.
+Servers without `deferred` take the global default (`false` unless changed); when a prerequisite is missing, the field is ignored with the same result. The authentication tool exposed by an OAuth server before authorization completes follows the same field.
+
+To defer every server by default instead of marking them one by one, set `default_deferred = true` under `[mcp]` in `config.toml` — see [Configuration files](../configuration/config-files.md#mcp). A server can still opt out with `deferred: false`; the per-server field always wins over the global default. The value is captured when a server connects, so changing it later does not reshape tools in a running session — reconnect the server or restart the process to apply it.
 
 ## Tool Naming and Permissions
 

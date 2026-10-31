@@ -88,6 +88,15 @@ def test_request_summary():
           "model/provider/protocol")
     check(s["tools"] == ["read_file", "shell"] and s["num_input"] == 3, "tools + message count")
     check(s["first_user_text"] == "what is 2+2?", "LAST user message is the prompt")
+    # kimi-code 2.4+ appends harness context after the prompt as extra <system-reminder> user
+    # messages (captured from a real 2.4.1 request); the prompt must still win.
+    def user(text):
+        return {"role": "user", "content": [{"type": "text", "text": text}], "toolCalls": []}
+    req = dict(REQ, messages=[user("what is 2+2?"),
+                              user("<system-reminder>\nToday's date is 2026-10-31.\n</system-reminder>"),
+                              user("<system-reminder>\nAuto permission mode is active.\n</system-reminder>")])
+    check(summarize_request(req)["first_user_text"] == "what is 2+2?",
+          "trailing <system-reminder> user messages are skipped")
 
 
 def test_turn_assembly():

@@ -312,14 +312,16 @@ describe('AgentTranscriptProjector', () => {
       turnId: 0,
       promptId: 'prompt-1',
       origin: { kind: 'user' },
-      prompt: 'fix the bug',
+      prompt: '<hook_result hook_event="UserPromptSubmit">\nliteral user text\n</hook_result>fix the bug',
     }));
     feed(ev({ type: 'assistant.delta', turnId: 0, delta: 'on it' }));
     feed(ev({ type: 'turn.ended', turnId: 0, reason: 'completed' }));
 
     const turn = turnOps('t0', tx.getItems());
     expect(turn.triggerPromptId).toBe('prompt-1');
-    expect(turn.prompt).toBe('fix the bug');
+    expect(turn.prompt).toBe(
+      '<hook_result hook_event="UserPromptSubmit">\nliteral user text\n</hook_result>fix the bug',
+    );
     expect(turn.state).toBe('completed');
   });
 
@@ -2066,6 +2068,38 @@ describe('AgentTranscriptProjector', () => {
     expect(tx.listPendingInteractions()).toEqual([]);
   });
 
+  it('marks a question cancelled by the engine as cancelled, not answered', () => {
+    const projector = new AgentTranscriptProjector('main', TEST_SESSION_ID);
+    const tx = new AgentTranscript('main');
+
+    tx.apply(
+      projector.mapInteractionRequested({
+        id: 'q1',
+        kind: 'question',
+        payload: { questions: [{ question: 'Pick', options: [] }] },
+        createdAt: 1000,
+      }),
+    );
+    tx.apply(projector.mapInteractionResolved('q1', { cancelled: true, reason: 'turn_ended' }));
+    expect(tx.getInteraction('q1')).toMatchObject({ state: 'cancelled' });
+  });
+
+  it('keeps an answer keyed by a question named cancelled as answered', () => {
+    const projector = new AgentTranscriptProjector('main', TEST_SESSION_ID);
+    const tx = new AgentTranscript('main');
+
+    tx.apply(
+      projector.mapInteractionRequested({
+        id: 'q2',
+        kind: 'question',
+        payload: { questions: [{ question: 'cancelled', options: [] }] },
+        createdAt: 1000,
+      }),
+    );
+    tx.apply(projector.mapInteractionResolved('q2', { cancelled: true }));
+    expect(tx.getInteraction('q2')).toMatchObject({ state: 'answered' });
+  });
+
   it('projects question requests onto the wire shape with stable question/option ids', () => {
     const projector = new AgentTranscriptProjector('main', TEST_SESSION_ID);
     const tx = new AgentTranscript('main');
@@ -3153,6 +3187,53 @@ describe('AgentTranscriptProjector', () => {
       await write([boundary, user, assistant]);
       const dangling = await coldTranscriptService(home).readColdSnapshot('s1', 'main');
       expect(dangling!.meta.activity).toBe('idle');
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('readColdSnapshot realigns turn ordinals to wire ids and marks the wedged turn', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'transcript-cold-wedged-'));
+    try {
+      const wireDir = join(home, 'sessions', 'ws', 's1', 'agents', 'main');
+      await mkdir(wireDir, { recursive: true });
+      const userTurn = (turnId: number, promptId: string, text: string, time: number) => [
+        { type: 'turn.prompt', turnId, promptId, origin: { kind: 'user' }, time },
+        { type: 'agent.turn.started', turnId, time: time + 1 },
+        { type: 'context.append_message', message: { id: promptId, role: 'user', content: [{ type: 'text', text }], toolCalls: [], origin: { kind: 'user' } }, time },
+        { type: 'context.append_message', message: { role: 'assistant', content: [{ type: 'text', text: `answer ${turnId}` }], toolCalls: [] }, time: time + 2 },
+      ];
+      const foldedNotification = (turnId: number, taskId: string, time: number) => [
+        { type: 'turn.prompt', turnId, promptId: `n${turnId}`, origin: { kind: 'task_notification', taskId }, time },
+        { type: 'context.append_message', message: { id: `n${turnId}`, role: 'user', content: [{ type: 'text', text: `<notification>done ${turnId}</notification>` }], toolCalls: [], origin: { kind: 'task_notification', taskId } }, time },
+      ];
+      const records = [
+        ...userTurn(3, 'u3', 'before the gap', 1000),
+        { type: 'turn.ended', turnId: 3, reason: 'completed', time: 1100 },
+        ...foldedNotification(4, 'bg-4', 2000),
+        ...foldedNotification(5, 'bg-5', 2100),
+        ...userTurn(6, 'u6', 'wedged prompt', 3000),
+        ...userTurn(7, 'u7', 'after restart', 4000),
+        { type: 'turn.ended', turnId: 7, reason: 'completed', time: 4100 },
+      ];
+      await writeFile(
+        join(wireDir, 'wire.jsonl'),
+        records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+      );
+      const snapshot = await coldTranscriptService(home).readColdSnapshot('s1', 'main');
+      const turns = (snapshot?.items ?? []).filter((item) => item.kind === 'turn');
+      expect(turns.map((turn) => [turn.turnId, turn.ordinal, turn.state])).toEqual([
+        ['t3', 3, 'completed'],
+        ['t6', 6, 'failed'],
+        ['t7', 7, 'completed'],
+      ]);
+      const wedged = turns[1];
+      if (wedged?.kind !== 'turn') throw new Error('expected turn');
+      expect(wedged.wedged).toBe(true);
+      expect(wedged.prompt).toBe('wedged prompt');
+      expect(wedged.startedAt).toBe(new Date(3001).toISOString());
+      expect(wedged.endedAt).toBeUndefined();
+      expect(wedged.steps[0]?.stepId).toBe('t6.1');
     } finally {
       await rm(home, { recursive: true, force: true });
     }

@@ -33,18 +33,20 @@ import type {
   ExportSessionManifest,
   FileHistoryCheckpointed,
   FileHistoryTracked,
+  Forked,
   FullCompactionBegin,
   FullCompactionCancel,
   FullCompactionComplete,
   GoalClear,
   GoalCreate,
-  GoalForked,
   GoalUpdate,
   InteractionRequestEvent,
   InteractionResolvedEvent,
   InterruptionReminderRecorded,
   LlmRequest,
   LlmToolsSnapshot,
+  McpServerFailed,
+  McpServerFailureResolved,
   McpToolsDiscovered,
   PlanModeCancel,
   PlanModeEnter,
@@ -86,6 +88,7 @@ import type {
   ToolsResetActiveTools,
   ToolsSetActiveTools,
 } from '@moonshot-ai/agent-core-v2/agent/profile/profileOps';
+import type { ChangeNotifierSnapshotEvent } from '@moonshot-ai/agent-core-v2/agent/changeNotifier/changeNotifierOps';
 import type { PermissionSetMode } from '@moonshot-ai/agent-core-v2/agent/permissionMode/permissionModeOps';
 import type { PermissionRecordApprovalResult } from '@moonshot-ai/agent-core-v2/agent/permissionRules/permissionRulesOps';
 import type { RuntimeSetBinding } from '@moonshot-ai/agent-core-v2/agent/runtimeBinding/runtimeBindingOps';
@@ -163,6 +166,7 @@ export interface WireMetadataHeader {
  */
 export type AgentRecord =
   | WireMetadataHeader
+  | WireRecordOf<'changeNotifier.snapshot', ChangeNotifierSnapshotEvent>
   | WireRecordOf<'config.update', ConfigUpdate>
   | WireRecordOf<'context.append_loop_event', ContextAppendLoopEvent>
   | WireRecordOf<'context.append_message', ContextAppendMessage>
@@ -174,7 +178,7 @@ export type AgentRecord =
   | WireRecordOf<'cron.delete', CronDeletePayload>
   | WireRecordOf<'file_history.checkpoint', FileHistoryCheckpointed>
   | WireRecordOf<'file_history.tracked', FileHistoryTracked>
-  | WireRecordOf<'forked', GoalForked>
+  | WireRecordOf<'forked', Forked>
   | WireRecordOf<'full_compaction.begin', FullCompactionBegin>
   | WireRecordOf<'full_compaction.cancel', FullCompactionCancel>
   | WireRecordOf<'full_compaction.complete', FullCompactionComplete>
@@ -186,6 +190,8 @@ export type AgentRecord =
   | WireRecordOf<'interruptionReminder.recorded', InterruptionReminderRecorded>
   | WireRecordOf<'llm.request', LlmRequest>
   | WireRecordOf<'llm.tools_snapshot', LlmToolsSnapshot>
+  | WireRecordOf<'mcp.server_failed', McpServerFailed>
+  | WireRecordOf<'mcp.server_failure_resolved', McpServerFailureResolved>
   | WireRecordOf<'mcp.tools_discovered', McpToolsDiscovered>
   | WireRecordOf<'permission.record_approval_result', PermissionRecordApprovalResult>
   | WireRecordOf<'permission.set_mode', PermissionSetMode>

@@ -23,7 +23,6 @@ import {
 } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
-import { stripDynamicToolContext } from '#/agent/toolSelect/dynamicTools';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentTodoService } from '#/features/todo/todoService';
 import { renderTodoList } from '#/features/todo/todoItem';
@@ -45,6 +44,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ErrorCodes, Error2, isCodedError, isError2, toKimiErrorPayload, unwrapErrorCause } from "#/errors";
 import { AgentErrorEvent } from '#/agent/mcp/mcpEvents';
 import { IEventDispatcher } from '#/state/eventDispatcher';
+import { ISessionRunGate } from '#/session/sessionActivity/sessionRunGate';
 import { renderCompactionInstruction } from './compactionInstruction';
 import { renderContextRecoveryPointer } from './contextRecovery';
 import {
@@ -76,6 +76,7 @@ import { OrderedHookSlot } from '#/hooks';
 export const MAX_COMPACTION_RETRY_ATTEMPTS = 5;
 const DEFAULT_COMPACTION_MAX_COMPLETION_TOKENS = 128 * 1024;
 const OVERFLOW_CONTEXT_SAFETY_RATIO = 0.85;
+const COMPLETION_BUDGET_ESTIMATE_MARGIN_RATIO = 0.02;
 const OVERFLOW_STATUS_RECOVERY_RATIO = 0.5;
 const MAX_COMPACTION_OVERFLOW_SHRINK_ATTEMPTS = 3;
 const COMPACTION_OVERFLOW_SHRINK_RATIOS = [0.7, 0.5, 0.35] as const;
@@ -156,6 +157,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     @IAgentLoopService private readonly loopService: IAgentLoopService,
     @IAgentStateService private readonly states: IAgentStateService,
     @IWireService private readonly wire: IWireService,
+    @ISessionRunGate private readonly runGate: ISessionRunGate,
   ) {
     super();
     this.states.contributeState(fullCompactionKey);
@@ -333,6 +335,9 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
   begin(input: FullCompactionInput): boolean {
     if (this._compacting) return false;
     const data: CompactionBeginData = { source: input.source, instruction: input.instruction };
+    if (data.source === 'manual') {
+      this.runGate.begin();
+    }
     if (!this.reserveCompactionSlot(data.source)) return false;
 
     const tokenCount = this.validateCompactionStart(data.source);
@@ -643,10 +648,11 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
 
       const maxAttempts = resolvedModel.compactionMaxAttempts ?? MAX_COMPACTION_RETRY_ATTEMPTS;
       let attempt: CompactionAttemptResult | undefined;
-      let historyForModel: readonly ContextMessage[] = stripDynamicToolContext(originalHistory);
+      let historyForModel: readonly ContextMessage[] = originalHistory;
       let droppedCount = 0;
       let overflowShrinkCount = 0;
       let requestAttempts = 0;
+      let cacheProbePending = true;
       const preShrunkHistory = this.preShrinkHistoryToWindowBudget(
         historyForModel,
         instruction,
@@ -658,6 +664,12 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         const messagesToCompact = historyForModel;
         const messages: Message[] = [...messagesToCompact, createUserMessage(instruction)];
         const estimatedCompactionRequestTokens = this.requestTokens(messages);
+        const effectiveMaxTokens = this.getEffectiveMaxContextTokens();
+        const usedContextTokens =
+          effectiveMaxTokens > 0
+            ? estimatedCompactionRequestTokens +
+              Math.ceil(effectiveMaxTokens * COMPLETION_BUDGET_ESTIMATE_MARGIN_RATIO)
+            : undefined;
         requestAttempts += 1;
 
         try {
@@ -666,6 +678,8 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
               {
                 messages,
                 maxOutputSize: compactionMaxOutputSize,
+                usedContextTokens,
+                promptCacheProbe: cacheProbePending ? 'compaction' : undefined,
                 source: {
                   type: 'operation',
                   turnId: active.originTurnId,
@@ -684,6 +698,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
             runRequest,
             signal,
           );
+          cacheProbePending = false;
           attempt = collectSummary(result);
           break;
         } catch (error) {
@@ -826,13 +841,15 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
       compactionMaxOutputSize === undefined
         ? Math.floor(effectiveMaxTokens / 8)
         : Math.min(compactionMaxOutputSize, Math.floor(effectiveMaxTokens / 8));
-    const messageBudget =
-      Math.floor((effectiveMaxTokens - outputReserve) * OVERFLOW_CONTEXT_SAFETY_RATIO) -
-      this.requestTokens([]);
+    const inputLimit = effectiveMaxTokens - outputReserve;
+    const overheadTokens = this.requestTokens([]);
     const estimatedMessagesTokens =
       this.tokenCounting.estimateMessages(history) +
       this.tokenCounting.estimateMessage(createUserMessage(instruction));
-    if (messageBudget <= 0 || estimatedMessagesTokens <= messageBudget) return history;
+    if (estimatedMessagesTokens + overheadTokens <= inputLimit) return history;
+    const messageBudget =
+      Math.floor(inputLimit * OVERFLOW_CONTEXT_SAFETY_RATIO) - overheadTokens;
+    if (messageBudget <= 0) return history;
     const preShrunk = takeRecentMessagesWithinTokenBudget(
       history,
       messageBudget,

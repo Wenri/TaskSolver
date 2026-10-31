@@ -1,3 +1,6 @@
+import type { TowerExitReason } from '#/features/tower/tower';
+import type { SessionCloseReason } from '#/workspace/sessionLifecycle/sessionLifecycle';
+
 import type { TelemetryPrimitive } from './telemetry';
 
 export interface TelemetryEventMeta {
@@ -86,14 +89,20 @@ export interface TurnEndedEvent {
 }
 
 export interface PromptCacheProbeEvent {
-  source: 'fork';
-  turn_id: number;
+  source: 'fork' | 'compaction';
+  turn_id?: number;
   provider_type?: string;
   protocol?: string;
   input_tokens: number;
   input_cache_read: number;
   input_cache_creation: number;
   output_tokens: number;
+  model_match?: boolean;
+  tools_match?: boolean;
+  system_prompt_match?: boolean;
+  history_prefix_match?: boolean;
+  parent_input_tokens?: number;
+  parent_request_gap_ms?: number;
 }
 
 export type ToolCallOutcome = 'success' | 'error' | 'cancelled';
@@ -191,14 +200,9 @@ export interface PlanResolvedEvent {
     | 'dismissed'
     | 'rejected_and_exited'
     | 'revise'
-    | 'rejected'
-    | 'auto_approved';
+    | 'rejected';
   chosen_option?: string;
   has_feedback?: boolean;
-}
-
-export interface PlanEnterResolvedEvent {
-  outcome: 'auto_approved';
 }
 
 export interface TowerModeEnterEvent {
@@ -207,7 +211,7 @@ export interface TowerModeEnterEvent {
 }
 
 export interface TowerModeExitEvent {
-  reason: 'user' | 'takeover' | 'foreign-reconcile';
+  reason: TowerExitReason;
 }
 
 export interface SwarmModeTransitionEvent {
@@ -387,6 +391,44 @@ export interface AgentsMdReminderShownEvent {
   trace_id?: string;
 }
 
+export interface NotifyUserNudgeShownEvent {
+  turn_id?: number;
+  rounds_since_notify: number;
+  nudge_index: number;
+}
+
+export interface NotifyUserSentEvent {
+  turn_id: number;
+  rounds_since_notify: number;
+  after_nudge: boolean;
+  title_chars: number;
+  message_chars: number;
+  displayed: boolean;
+}
+
+export interface TodoListWrittenEvent {
+  turn_id: number;
+  item_count: number;
+  open_count: number;
+  steps_since_write?: number;
+  after_reminder: boolean;
+}
+
+export interface TodoReminderShownEvent {
+  turn_id?: number;
+  steps_since_write: number;
+  item_count: number;
+  open_count: number;
+}
+
+export interface TodoTurnEndedEvent {
+  turn_id: number;
+  reason: 'completed' | 'cancelled' | 'failed' | 'blocked';
+  item_count: number;
+  open_count: number;
+  updated_in_turn: boolean;
+}
+
 export interface GrepToolRgFallbackEvent {
   source?: 'share-bin-cached' | 'vendor' | 'share-bin-downloaded';
   outcome: 'resolved' | 'failed';
@@ -550,7 +592,7 @@ export interface AgentCreateFailedEvent {
 }
 
 export interface SessionEndedEvent {
-  reason: 'exit' | 'archive';
+  reason: SessionCloseReason;
 }
 
 export interface WebFetchFallbackEvent {
@@ -655,16 +697,27 @@ export const telemetryEventDefinitions = {
   prompt_cache_probe: defineAgentTelemetryEvent<PromptCacheProbeEvent>({
     owner: 'kimi-code',
     comment:
-      'An agent whose first request is expected to hit the prompt cache reports that request\'s cache usage.',
+      'A request expected to reuse an earlier prompt cache reports its cache usage and how its provider-visible prefix compares with the baseline turn request.',
     properties: {
       source: 'Why a cache hit was expected for this request',
-      turn_id: 'Per-agent turn index of the probed request',
+      turn_id: 'Per-agent turn index of the probed request; absent for manual compaction between turns',
       provider_type: 'Provider protocol type',
       protocol: 'Request protocol',
       input_tokens: 'Total input tokens of the probed request (other + cache read + cache creation)',
       input_cache_read: 'Cache-read input tokens of the probed request',
       input_cache_creation: 'Cache-creation input tokens of the probed request',
       output_tokens: 'Output tokens of the probed request',
+      model_match: 'Whether the baseline and probed requests use the same model; absent without a baseline',
+      tools_match:
+        'Whether the provider-visible tool table hash equals the baseline request; absent without a usable baseline or when the model or context revision differs',
+      system_prompt_match:
+        'Whether the system prompt hash equals the baseline request; absent without a usable baseline or when the model or context revision differs',
+      history_prefix_match:
+        'For compaction, whether the projected messages start with the exact baseline history; absent for fork or without a usable baseline',
+      parent_input_tokens:
+        'Total input tokens of the baseline turn request (the parent before fork, or the previous turn before compaction); absent without a usable baseline on the same model',
+      parent_request_gap_ms:
+        'Milliseconds from the baseline turn request finishing to the probed request starting; absent without a usable baseline or when the model or context revision differs',
     },
   }),
   tool_call: defineAgentTelemetryEvent<ToolCallEvent>({
@@ -792,13 +845,6 @@ export const telemetryEventDefinitions = {
       outcome: 'How the plan was resolved',
       chosen_option: 'Label of the option the user chose',
       has_feedback: 'Whether the user attached revision feedback',
-    },
-  }),
-  plan_enter_resolved: defineAgentTelemetryEvent<PlanEnterResolvedEvent>({
-    owner: 'kimi-code',
-    comment: 'A request to enter plan mode is resolved.',
-    properties: {
-      outcome: 'How the request was resolved',
     },
   }),
   tower_mode_enter: defineAgentTelemetryEvent<TowerModeEnterEvent>({
@@ -1073,6 +1119,59 @@ export const telemetryEventDefinitions = {
       reminded_count: 'Number of AGENTS.md paths listed in the reminder',
       trace_id:
         'Trace id of the LLM request that produced the tool call; absent for non-Kimi protocols',
+    },
+  }),
+  notify_user_nudge_shown: defineAgentTelemetryEvent<NotifyUserNudgeShownEvent>({
+    owner: 'kimi-code',
+    comment: 'A reminder asking the agent to post a NotifyUser update is queued for context injection.',
+    properties: {
+      turn_id: 'Per-agent turn index (main or subagent); pair with agent_id to locate a turn within a session; omitted when no turn is active',
+      rounds_since_notify: 'Tool-call rounds (assistant steps with tool calls) since the turn started or the last NotifyUser call',
+      nudge_index: 'Position of this reminder within the current silent stretch; 1 for the first, higher when earlier reminders went unanswered',
+    },
+  }),
+  notify_user_sent: defineAgentTelemetryEvent<NotifyUserSentEvent>({
+    owner: 'kimi-code',
+    comment: 'The agent posted a NotifyUser progress update.',
+    properties: {
+      turn_id: 'Per-agent turn index (main or subagent); pair with agent_id to locate a turn within a session',
+      rounds_since_notify: 'Tool-call rounds (assistant steps with tool calls) before this update since the turn started or the previous NotifyUser call',
+      after_nudge: 'Whether a NotifyUser reminder was injected since the turn started or the previous NotifyUser call',
+      title_chars: 'Length of the update title in UTF-16 code units; the title text itself is not recorded',
+      message_chars: 'Length of the update message in UTF-16 code units; the message text itself is not recorded',
+      displayed: 'Whether the update was shown to the user; false when the feature was turned off mid-session or the host cannot display updates',
+    },
+  }),
+  todo_list_written: defineAgentTelemetryEvent<TodoListWrittenEvent>({
+    owner: 'kimi-code',
+    comment: 'The agent replaced or cleared its todo list through the TodoList tool.',
+    properties: {
+      turn_id: 'Per-agent turn index (main or subagent); pair with agent_id to locate a turn within a session',
+      item_count: 'Number of items in the list after the write; 0 when the list was cleared',
+      open_count: 'Number of items still pending or in_progress after the write',
+      steps_since_write: 'Assistant steps between the previous TodoList write in context and this one; omitted when no earlier write is in context',
+      after_reminder: 'Whether a stale todo list reminder was injected since the previous TodoList write',
+    },
+  }),
+  todo_reminder_shown: defineAgentTelemetryEvent<TodoReminderShownEvent>({
+    owner: 'kimi-code',
+    comment: 'A reminder that the todo list still has open items and has not been updated recently is queued for context injection.',
+    properties: {
+      turn_id: 'Per-agent turn index (main or subagent); pair with agent_id to locate a turn within a session; omitted when no turn is active',
+      steps_since_write: 'Assistant steps since the last TodoList write in context',
+      item_count: 'Number of items in the list',
+      open_count: 'Number of items still pending or in_progress',
+    },
+  }),
+  todo_turn_ended: defineAgentTelemetryEvent<TodoTurnEndedEvent>({
+    owner: 'kimi-code',
+    comment: 'A main-agent turn ended while the todo list was non-empty or had changed during the turn.',
+    properties: {
+      turn_id: 'Per-agent turn index (main or subagent); pair with agent_id to locate a turn within a session',
+      reason: 'How the turn ended',
+      item_count: 'Number of items in the list when the turn ended; 0 when the list was cleared during the turn',
+      open_count: 'Number of items still pending or in_progress when the turn ended',
+      updated_in_turn: 'Whether the list changed during this turn',
     },
   }),
   grep_tool_rg_fallback: defineAgentTelemetryEvent<GrepToolRgFallbackEvent>({
@@ -1353,7 +1452,7 @@ export const telemetryEventDefinitions = {
   }),
   workspace_trust_read_failed: defineTelemetryEvent<WorkspaceTrustReadFailedEvent>({
     owner: 'kimi-code',
-    comment: 'Reading the workspace trust record fails and the workspace silently falls back to untrusted.',
+    comment: 'Reading the workspace trust record fails and the error is propagated to the caller.',
     properties: { error_type: 'Classified error category' },
   }),
 } as const;

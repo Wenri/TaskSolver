@@ -498,7 +498,19 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
   it('groups flat messages into turns with folded tool results', () => {
     const snapshot = groupMessagesIntoSnapshot([
       { role: 'system', content: [{ type: 'text', text: 'sys' }] },
-      { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [], origin: { kind: 'user' } },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '<hook_result hook_event="UserPromptSubmit">\nnoise\n</hook_result>',
+            meta: { contentType: 'text/xml', source: 'user prompt submit hook' },
+          },
+          { type: 'text', text: 'hello' },
+        ],
+        toolCalls: [],
+        origin: { kind: 'user' },
+      },
       {
         role: 'assistant',
         content: [{ type: 'think', think: 'hmm' }, { type: 'text', text: 'checking' }],
@@ -521,15 +533,19 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
     ]);
 
     const kinds = snapshot.items.map((i) => i.kind);
-    expect(kinds).toEqual(['turn', 'turn', 'marker', 'turn']);
-    const firstTurn = snapshot.items[0];
+    expect(kinds).toEqual(['marker', 'turn', 'turn', 'marker', 'turn']);
+    const hookMarker = snapshot.items[0];
+    if (hookMarker?.kind !== 'marker') throw new Error('expected marker');
+    expect(hookMarker.marker).toBe('hook');
+    expect(hookMarker.payload).toEqual({ hookEvent: 'UserPromptSubmit', content: 'noise' });
+    const firstTurn = snapshot.items[1];
     if (firstTurn?.kind !== 'turn') throw new Error('expected turn');
     expect(firstTurn.prompt).toBe('hello');
     expect(firstTurn.steps).toHaveLength(2);
     const tool = firstTurn.steps[0]?.frames.find((f) => f.kind === 'tool');
     expect(tool?.kind === 'tool' && tool.output).toBe('file body');
     expect(tool?.kind === 'tool' && tool.input).toEqual({ path: '/a' });
-    const marker = snapshot.items[2];
+    const marker = snapshot.items[3];
     expect(marker?.kind === 'marker' && marker.marker).toBe('compaction');
   });
 
@@ -641,12 +657,27 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
       [
         { role: 'user', content: [{ type: 'text', text: 'active' }], toolCalls: [], origin: { kind: 'user' } },
         { role: 'assistant', content: [{ type: 'text', text: 'working' }], toolCalls: [] },
-        { role: 'user', content: [{ type: 'text', text: 'steered in' }], toolCalls: [], origin: { kind: 'user' } },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: '<hook_result hook_event="UserPromptSubmit">\nnoise\n</hook_result>',
+              meta: { contentType: 'text/xml', source: 'user prompt submit hook' },
+            },
+            { type: 'text', text: 'steered in' },
+          ],
+          toolCalls: [],
+          origin: { kind: 'user' },
+        },
       ],
       { steeredContents: new Map([[JSON.stringify([{ type: 'text', text: 'steered in' }]), new Map([['user', 1]])]]) },
     );
 
-    expect(snapshot.items.map((i) => i.kind)).toEqual(['turn']);
+    expect(snapshot.items.map((i) => i.kind)).toEqual(['turn', 'marker']);
+    const hookMarker = snapshot.items[1];
+    if (hookMarker?.kind !== 'marker') throw new Error('expected marker');
+    expect(hookMarker.marker).toBe('hook');
     const turn = snapshot.items[0];
     if (turn?.kind !== 'turn') throw new Error('expected turn');
     const lastStep = turn.steps.at(-1);
@@ -748,7 +779,7 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
     expect(frame).toMatchObject({ text: 'Background question answered\nThe user answered "Which database?".' });
   });
 
-  it('buffers a folded notification that arrives before the first step into that step', () => {
+  it('buffers a folded notification into the next step, or drops it when no turn is open yet', () => {
     const xml = [
       '<notification id="task:task-9:completed" category="task" type="task.completed" source_kind="background_task" source_id="task-9">',
       'Title: Background agent completed',
@@ -775,10 +806,8 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
       text: 'Background agent completed\nearly done.',
       taskId: 'task-9',
     });
-  });
 
-  it('drops a folded notification when no turn is open yet', () => {
-    const snapshot = groupMessagesIntoSnapshot(
+    const orphan = groupMessagesIntoSnapshot(
       [
         {
           role: 'user',
@@ -789,7 +818,7 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
       ],
       { taskOriginTurnTaskIds: new Set() },
     );
-    expect(snapshot.items).toHaveLength(0);
+    expect(orphan.items).toHaveLength(0);
   });
 
   it('keeps body lines that start with an angle bracket but are not output blocks', () => {
@@ -873,42 +902,56 @@ describe('groupMessagesIntoSnapshot (cold path)', () => {
   });
 
   it('expands a bundled prompt into per-skill markers and a caller-text turn', () => {
-    const snapshot = groupMessagesIntoSnapshot([
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: 'rendered review block' },
-          { type: 'text', text: 'rendered security block' },
-          { type: 'text', text: 'please /skill:review and /skill:security' },
-        ],
-        toolCalls: [],
-        origin: {
-          kind: 'user',
-          skillActivations: [
-            { activationId: 'act-1', skillName: 'review' },
-            { activationId: 'act-2', skillName: 'security', skillArgs: 'src/app.ts' },
-          ],
-        } as { kind: string },
-      },
-      { role: 'assistant', content: [{ type: 'text', text: 'done' }], toolCalls: [] },
-    ]);
+    const origin = {
+      kind: 'user',
+      skillActivations: [
+        { activationId: 'act-1', skillName: 'review' },
+        { activationId: 'act-2', skillName: 'security', skillArgs: 'src/app.ts' },
+      ],
+    } as { kind: string };
+    const variants: readonly (readonly HistoryContentPart[])[] = [
+      [
+        { type: 'text', text: 'rendered review block' },
+        { type: 'text', text: 'rendered security block' },
+        { type: 'text', text: 'please /skill:review and /skill:security' },
+      ],
+      [
+        {
+          type: 'text',
+          text: 'rendered review block',
+          meta: { source: 'skill activation', activationId: 'act-1' },
+        },
+        {
+          type: 'text',
+          text: 'rendered security block',
+          meta: { source: 'skill activation', activationId: 'act-2' },
+        },
+        { type: 'text', text: 'please /skill:review and /skill:security' },
+      ],
+    ];
+    for (const content of variants) {
+      const snapshot = groupMessagesIntoSnapshot([
+        { role: 'user', content, toolCalls: [], origin },
+        { role: 'assistant', content: [{ type: 'text', text: 'done' }], toolCalls: [] },
+      ]);
 
-    expect(snapshot.items.map((item) => item.kind)).toEqual(['marker', 'marker', 'turn']);
-    const first = snapshot.items[0];
-    expect(first?.kind === 'marker' && first.marker).toBe('skill');
-    expect(first?.kind === 'marker' && first.payload).toMatchObject({
-      text: 'rendered review block',
-      origin: { kind: 'skill_activation', trigger: 'user-slash', skillName: 'review' },
-    });
-    const second = snapshot.items[1];
-    expect(second?.kind === 'marker' && second.payload).toMatchObject({
-      text: 'rendered security block',
-      origin: { skillName: 'security', skillArgs: 'src/app.ts' },
-    });
-    const turn = snapshot.items[2];
-    if (turn?.kind !== 'turn') throw new Error('expected turn');
-    expect(turn.prompt).toBe('please /skill:review and /skill:security');
-    expect(turn.steps).toHaveLength(1);
+      expect(snapshot.items.map((item) => item.kind)).toEqual(['marker', 'marker', 'turn']);
+      const first = snapshot.items[0];
+      expect(first?.kind === 'marker' && first.marker).toBe('skill');
+      expect(first?.kind === 'marker' && first.payload).toMatchObject({
+        text: 'rendered review block',
+        origin: { kind: 'skill_activation', trigger: 'user-slash', skillName: 'review' },
+      });
+      const second = snapshot.items[1];
+      expect(second?.kind === 'marker' && second.payload).toMatchObject({
+        text: 'rendered security block',
+        origin: { skillName: 'security', skillArgs: 'src/app.ts' },
+      });
+      const turn = snapshot.items[2];
+      if (turn?.kind !== 'turn') throw new Error('expected turn');
+      expect(turn.prompt).toBe('please /skill:review and /skill:security');
+      expect(turn.steps).toHaveLength(1);
+    }
   });
 
   it('maps media parts on the opening user message to attachment entities, dropping base64 bytes', () => {
@@ -1710,6 +1753,27 @@ describe('foldWireRecordFacts (cold facts)', () => {
     expect(stillPlanning.meta.modes).toEqual({ plan: {} });
   });
 
+  it('keeps a model-started swarm that an older version never closed out of meta.modes', () => {
+    const base = baseWithMarker();
+    const markersOf = (snapshot: AgentTranscriptSnapshot) =>
+      snapshot.items
+        .filter((item) => item.kind === 'marker')
+        .map((item) => item.kind === 'marker' && item.marker);
+
+    const modelStarted = foldWireRecordFacts(
+      [{ type: 'swarm_mode.enter', agentId: 'main', trigger: 'tool', time: 1000 }],
+      base,
+    );
+    expect(modelStarted.meta.modes?.swarm).toBeUndefined();
+    expect(markersOf(modelStarted)).toEqual(['compaction', 'swarm.enter']);
+
+    const userStarted = foldWireRecordFacts(
+      [{ type: 'swarm_mode.enter', agentId: 'main', trigger: 'manual', time: 1000 }],
+      base,
+    );
+    expect(userStarted.meta.modes).toEqual({ swarm: {} });
+  });
+
   it('folds tower mode records into meta.modes without markers', () => {
     const base = baseWithMarker();
     const folded = foldWireRecordFacts(
@@ -1955,6 +2019,32 @@ describe('foldWireRecordFacts (cold facts)', () => {
           time: 3000,
         },
         { type: 'interaction.resolved', id: 'q-1', response: null, time: 4000 },
+        {
+          type: 'interaction.request',
+          id: 'q-2',
+          kind: 'question',
+          request: { questions: [] },
+          time: 5000,
+        },
+        {
+          type: 'interaction.resolved',
+          id: 'q-2',
+          response: { cancelled: true, reason: 'turn_ended' },
+          time: 6000,
+        },
+        {
+          type: 'interaction.request',
+          id: 'q-3',
+          kind: 'question',
+          request: { questions: [] },
+          time: 7000,
+        },
+        {
+          type: 'interaction.resolved',
+          id: 'q-3',
+          response: { cancelled: true },
+          time: 8000,
+        },
       ],
       base,
     );
@@ -1974,6 +2064,22 @@ describe('foldWireRecordFacts (cold facts)', () => {
         state: 'dismissed',
         request: { questions: [] },
         response: null,
+      },
+      {
+        interactionId: 'q-2',
+        interactionKind: 'question',
+        toolCallId: undefined,
+        state: 'cancelled',
+        request: { questions: [] },
+        response: { cancelled: true, reason: 'turn_ended' },
+      },
+      {
+        interactionId: 'q-3',
+        interactionKind: 'question',
+        toolCallId: undefined,
+        state: 'answered',
+        request: { questions: [] },
+        response: { cancelled: true },
       },
     ]);
   });
@@ -2037,7 +2143,7 @@ describe('foldWireRecordFacts (cold facts)', () => {
     expect(folded.items).toHaveLength(base.items.length);
   });
 
-  it('applies turn.ended records last-wins per turn and folds blocked into failed', () => {
+  it('applies turn.ended records last-wins per turn, folds blocked into failed, and ignores malformed records', () => {
     const base = baseWithMarker();
     const folded = foldWireRecordFacts(
       [
@@ -2060,11 +2166,8 @@ describe('foldWireRecordFacts (cold facts)', () => {
     const blockedTurn = blocked.items[0];
     if (blockedTurn?.kind !== 'turn') throw new Error('expected turn');
     expect(blockedTurn.state).toBe('failed');
-  });
 
-  it('ignores turn.ended records with unknown turn ids or malformed payloads', () => {
-    const base = baseWithMarker();
-    const folded = foldWireRecordFacts(
+    const malformed = foldWireRecordFacts(
       [
         { type: 'turn.ended', turnId: 9, reason: 'cancelled', time: 1000 },
         { type: 'turn.ended', reason: 'completed', time: 2000 },
@@ -2072,11 +2175,97 @@ describe('foldWireRecordFacts (cold facts)', () => {
       ],
       base,
     );
-    const turn = folded.items[0];
-    if (turn?.kind !== 'turn') throw new Error('expected turn');
-    expect(turn.state).toBe('completed');
-    expect(turn.endedAt).toBe(new Date(3000).toISOString());
-    expect(folded.items).toHaveLength(base.items.length);
+    const malformedTurn = malformed.items[0];
+    if (malformedTurn?.kind !== 'turn') throw new Error('expected turn');
+    expect(malformedTurn.state).toBe('completed');
+    expect(malformedTurn.endedAt).toBe(new Date(3000).toISOString());
+    expect(malformed.items).toHaveLength(base.items.length);
+  });
+
+  it('realigns rebuilt turns to wire turn ids with holes and restores startedAt', () => {
+    const base = groupMessagesIntoSnapshot([
+      { role: 'user', id: 'p5', content: [{ type: 'text', text: 'one' }], toolCalls: [], origin: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'reply one' }], toolCalls: [] },
+      { role: 'user', id: 'p7', content: [{ type: 'text', text: 'two' }], toolCalls: [], origin: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'reply two' }], toolCalls: [] },
+    ]);
+    expect(base.items.map((item) => item.kind === 'turn' && item.turnId)).toEqual(['t0', 't1']);
+    const folded = foldWireRecordFacts(
+      [
+        { type: 'turn.prompt', turnId: 5, promptId: 'p5', origin: { kind: 'user' }, time: 1000 },
+        { type: 'agent.turn.started', turnId: 5, time: 1100 },
+        { type: 'turn.ended', turnId: 5, reason: 'completed', time: 2000 },
+        { type: 'turn.prompt', turnId: 7, promptId: 'p7', origin: { kind: 'user' }, time: 3000 },
+        { type: 'turn.ended', turnId: 7, reason: 'completed', time: 4000 },
+      ],
+      base,
+    );
+    const [first, second] = folded.items;
+    if (first?.kind !== 'turn' || second?.kind !== 'turn') throw new Error('expected turns');
+    expect(first).toMatchObject({
+      turnId: 't5',
+      ordinal: 5,
+      state: 'completed',
+      startedAt: new Date(1100).toISOString(),
+      endedAt: new Date(2000).toISOString(),
+    });
+    expect(second).toMatchObject({
+      turnId: 't7',
+      ordinal: 7,
+      state: 'completed',
+      startedAt: new Date(3000).toISOString(),
+    });
+    expect(first.steps[0]?.stepId).toBe('t5.1');
+    expect(first.steps[0]?.frames.every((frame) => frame.frameId.startsWith('t5.1.'))).toBe(true);
+    expect(second.steps[0]?.stepId).toBe('t7.1');
+  });
+
+  it('marks a turn without terminal events as wedged once a later turn starts, and wedgifies a dangling tail unless it is live', () => {
+    const base = groupMessagesIntoSnapshot([
+      { role: 'user', id: 'p5', content: [{ type: 'text', text: 'one' }], toolCalls: [], origin: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'reply one' }], toolCalls: [] },
+      { role: 'user', id: 'p6', content: [{ type: 'text', text: 'two' }], toolCalls: [], origin: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'reply two' }], toolCalls: [] },
+      { role: 'user', id: 'p7', content: [{ type: 'text', text: 'three' }], toolCalls: [], origin: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'reply three' }], toolCalls: [] },
+    ]);
+    const records: HistoryWireRecord[] = [
+      { type: 'turn.prompt', turnId: 5, promptId: 'p5', origin: { kind: 'user' }, time: 1000 },
+      { type: 'agent.turn.started', turnId: 5, time: 1100 },
+      { type: 'turn.prompt', turnId: 6, promptId: 'p6', origin: { kind: 'user' }, time: 2000 },
+      { type: 'turn.ended', turnId: 6, reason: 'completed', time: 2500 },
+      { type: 'turn.prompt', turnId: 7, promptId: 'p7', origin: { kind: 'user' }, time: 3000 },
+      { type: 'turn.ended', turnId: 7, reason: 'completed', time: 4000 },
+    ];
+    const folded = foldWireRecordFacts(records, base);
+    const wedged = folded.items[0];
+    if (wedged?.kind !== 'turn') throw new Error('expected turn');
+    expect(wedged).toMatchObject({
+      turnId: 't5',
+      ordinal: 5,
+      state: 'failed',
+      wedged: true,
+      startedAt: new Date(1100).toISOString(),
+    });
+    expect(wedged.endedAt).toBeUndefined();
+    expect(folded.items.map((item) => item.kind === 'turn' && item.state)).toEqual([
+      'failed',
+      'completed',
+      'completed',
+    ]);
+
+    const tailOpen = records.slice(0, -1);
+    const dangling = foldWireRecordFacts(tailOpen, base);
+    const tail = dangling.items[2];
+    if (tail?.kind !== 'turn') throw new Error('expected turn');
+    expect(tail).toMatchObject({ turnId: 't7', state: 'failed', wedged: true });
+    expect(tail.endedAt).toBeUndefined();
+
+    const live = foldWireRecordFacts(tailOpen, base, { activeWireTurnId: 7 });
+    const liveTail = live.items[2];
+    if (liveTail?.kind !== 'turn') throw new Error('expected turn');
+    expect(liveTail).toMatchObject({ turnId: 't7', ordinal: 7, state: 'completed' });
+    expect(liveTail.wedged).toBeUndefined();
   });
 
   const baseWithSteps = (): AgentTranscriptSnapshot =>
@@ -2118,7 +2307,7 @@ describe('foldWireRecordFacts (cold facts)', () => {
     expect(folded.items).toHaveLength(base.items.length);
   });
 
-  it('applies turn.step.interrupted last-wins per step and tolerates a missing message', () => {
+  it('applies turn.step.interrupted last-wins per step and skips malformed records', () => {
     const base = baseWithSteps();
     const folded = foldWireRecordFacts(
       [
@@ -2137,21 +2326,18 @@ describe('foldWireRecordFacts (cold facts)', () => {
     });
     expect(turn.steps[0]?.endMessage).toBeUndefined();
     expect(turn.steps[1]?.state).toBe('completed');
-  });
 
-  it('skips turn.step.interrupted records with unknown turn ids or missing reason', () => {
-    const base = baseWithSteps();
-    const folded = foldWireRecordFacts(
+    const skipped = foldWireRecordFacts(
       [
         { type: 'turn.step.interrupted', turnId: 9, step: 1, reason: 'error', time: 1000 },
         { type: 'turn.step.interrupted', turnId: 0, step: 1, time: 3000 },
       ],
       base,
     );
-    const turn = folded.items[0];
-    if (turn?.kind !== 'turn') throw new Error('expected turn');
-    expect(turn.steps.map((step) => step.state)).toEqual(['completed', 'completed']);
-    expect(turn.steps.every((step) => step.endReason === undefined)).toBe(true);
+    const skippedTurn = skipped.items[0];
+    if (skippedTurn?.kind !== 'turn') throw new Error('expected turn');
+    expect(skippedTurn.steps.map((step) => step.state)).toEqual(['completed', 'completed']);
+    expect(skippedTurn.steps.every((step) => step.endReason === undefined)).toBe(true);
   });
 
   it('creates the interrupted step when the cold tree has no step with that ordinal', () => {

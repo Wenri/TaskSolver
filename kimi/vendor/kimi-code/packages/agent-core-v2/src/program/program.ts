@@ -20,6 +20,8 @@ import type { IWorkspaceMcpConfigService } from '#/workspace/workspaceMcpConfig/
 import { WorkspaceMcpConfigService } from '#/workspace/workspaceMcpConfig/workspaceMcpConfigService';
 import type { IWorkspaceTrust } from '#/workspace/workspaceTrust/workspaceTrust';
 import { WorkspaceTrustService } from '#/workspace/workspaceTrust/workspaceTrustService';
+import type { IWorkspaceTrustDisclosure } from '#/workspace/workspaceTrust/trustDisclosure';
+import { WorkspaceTrustDisclosureService } from '#/workspace/workspaceTrust/trustDisclosureService';
 import type { IExtraAgentProfileLoader } from '#/workspace/workspaceAgentProfileLoader/extraAgentProfileLoader';
 import { ExtraAgentProfileLoaderService } from '#/workspace/workspaceAgentProfileLoader/extraAgentProfileLoaderService';
 import type { IExplicitAgentProfileLoader } from '#/workspace/workspaceAgentProfileLoader/explicitAgentProfileLoader';
@@ -91,6 +93,7 @@ interface ProgramGeneration {
   readonly mcpConfig: IWorkspaceMcpConfigService;
   readonly mcp: IWorkspaceMcpService;
   readonly trust: IWorkspaceTrust;
+  readonly trustDisclosure: IWorkspaceTrustDisclosure;
   readonly skills: IWorkspaceSkillCatalog;
   readonly agentProfiles: IWorkspaceAgentProfileLoader;
   readonly userAgentProfiles: IUserAgentProfileLoader;
@@ -116,6 +119,7 @@ export class Program {
   private generation?: ProgramGeneration;
   private generationFailed = false;
   private disposed = false;
+  private readonly generationCleanups = new Set<Promise<void>>();
   private resolveReady?: () => void;
   readonly ready = new Promise<void>((resolve) => { this.resolveReady = resolve; });
 
@@ -144,8 +148,10 @@ export class Program {
   get mcpConfig(): IWorkspaceMcpConfigService { return this.requireGeneration().mcpConfig; }
   get mcp(): IWorkspaceMcpService { return this.requireGeneration().mcp; }
   get trust(): IWorkspaceTrust { return this.requireGeneration().trust; }
+  get trustDisclosure(): IWorkspaceTrustDisclosure { return this.requireGeneration().trustDisclosure; }
   get skills(): IWorkspaceSkillCatalog { return this.requireGeneration().skills; }
   get agentProfiles(): IWorkspaceAgentProfileLoader { return this.requireGeneration().agentProfiles; }
+  get userAgentProfiles(): IUserAgentProfileLoader { return this.requireGeneration().userAgentProfiles; }
   get sessionControllerGeneration(): string { return this.requireGeneration().id; }
 
   createSessionController(): SessionLifecycleService {
@@ -221,14 +227,21 @@ export class Program {
     };
   }
 
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    this.registrySubscription.dispose();
-    const generation = this.generation;
-    this.generation = undefined;
-    if (generation !== undefined) this.retireGeneration(generation);
-    this.changeEmitter.dispose();
+  async dispose(): Promise<void> {
+    if (!this.disposed) {
+      this.disposed = true;
+      this.registrySubscription.dispose();
+      const generation = this.generation;
+      this.generation = undefined;
+      if (generation !== undefined) this.retireGeneration(generation);
+      this.changeEmitter.dispose();
+    }
+    const settled = await Promise.allSettled(this.generationCleanups);
+    const errors = settled
+      .filter((result) => result.status === 'rejected')
+      .map((result) => result.reason);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, `program ${this.workspaceId} disposal failed`);
   }
 
   private requireGeneration(): ProgramGeneration {
@@ -283,9 +296,10 @@ export class Program {
       const git = new WorkspaceGitService(this.context, this.dependencies.git);
       const fs = new WorkspaceFsService(this.context, dirs, runtime.fs!, this.resolver, this.dependencies.telemetry, git);
       const instructions = own(new WorkspaceInstructionsService(this.context, runtime.fs!, runtime.environment, this.dependencies.bootstrap, this.dependencies.log, state));
-      const trust = own(new WorkspaceTrustService(this.context, this.dependencies.docs, state, this.dependencies.telemetry));
+      const trust = own(new WorkspaceTrustService(this.context, this.dependencies.trustStore, state));
       const mcpConfig = own(new WorkspaceMcpConfigService(this.context, this.dependencies.bootstrap, this.dependencies.plugins, this.dependencies.log, this.dependencies.config, runtime.fs!, trust, this.dependencies.configStore));
-      const mcp = own(new WorkspaceMcpService(this.context, this.resolver, mcpConfig, this.dependencies.oauth, this.dependencies.log, this.dependencies.telemetry, this.dependencies.identity, this.dependencies.sessionManager));
+      const mcp = new WorkspaceMcpService(this.context, this.resolver, mcpConfig, this.dependencies.oauth, this.dependencies.log, this.dependencies.telemetry, this.dependencies.identity, this.dependencies.sessionManager);
+      disposables.push({ dispose: () => mcp.disposeAsync() });
       const userAgentProfiles = own(new UserAgentProfileLoaderService(this.dependencies.bootstrap, runtime.fs!, this.dependencies.log, this.dependencies.builtinAgentProfiles, this.context, this.dependencies.agentProfiles));
       const pluginAgentProfiles = own(new PluginAgentProfileLoaderService(this.dependencies.plugins, runtime.fs!, this.dependencies.log, userAgentProfiles, this.context, this.dependencies.agentProfiles));
       const explicitAgentProfiles = own(new ExplicitAgentProfileLoaderService(this.context, this.dependencies.bootstrap, runtime.fs!, this.dependencies.log, userAgentProfiles, this.dependencies.agentProfiles));
@@ -298,6 +312,7 @@ export class Program {
       const workspaceSkills = own(new WorkspaceRootSkillSource(skillDiscovery, this.context, this.dependencies.config, this.dependencies.bootstrap));
       const pluginSkills = new PluginSkillSource(skillDiscovery, this.dependencies.plugins);
       const skills = own(new WorkspaceSkillCatalogService(this.dependencies.builtinSkills, userSkills, explicitSkills, extraSkills, workspaceSkills, pluginSkills, state));
+      const trustDisclosure = new WorkspaceTrustDisclosureService(this.context, runtime.fs!, this.dependencies.bootstrap, this.dependencies.config, localConfig, trust, skills, agentProfiles, this.dependencies.agentProfiles, instructions, this.dependencies.log);
       return {
         id: runtime.identity.generation,
         lease,
@@ -309,6 +324,7 @@ export class Program {
         mcpConfig,
         mcp,
         trust,
+        trustDisclosure,
         skills,
         agentProfiles,
         userAgentProfiles,
@@ -322,8 +338,7 @@ export class Program {
         retired: false,
       };
     } catch (error) {
-      for (const disposable of disposables.toReversed()) void disposable.dispose();
-      lease.dispose();
+      this.cleanupGeneration({ disposables, lease });
       throw error;
     }
   }
@@ -361,8 +376,37 @@ export class Program {
   private releaseGeneration(generation: ProgramGeneration): void {
     generation.references -= 1;
     if (generation.references !== 0 || !generation.retired) return;
-    for (const disposable of [...generation.disposables].toReversed()) void disposable.dispose();
-    generation.lease.dispose();
+    this.cleanupGeneration(generation);
+  }
+
+  private cleanupGeneration(generation: Pick<ProgramGeneration, 'disposables' | 'lease'>): void {
+    const cleanup = (async () => {
+      const errors: unknown[] = [];
+      for (const disposable of [...generation.disposables].toReversed()) {
+        try {
+          await disposable.dispose();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      try {
+        generation.lease.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, `program ${this.workspaceId} generation disposal failed`);
+    })();
+    this.generationCleanups.add(cleanup);
+    void cleanup.then(
+      () => {
+        this.generationCleanups.delete(cleanup);
+      },
+      (error) => {
+        this.generationCleanups.delete(cleanup);
+        this.dependencies.log.error('program generation disposal failed', { workspaceId: this.workspaceId, error });
+      },
+    );
   }
 
   private resolveProgramReady(): void {

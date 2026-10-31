@@ -36,7 +36,7 @@ export default defineConfig({
     __KIMI_CODE_VERSION__: JSON.stringify(packageJson.version),
   },
   deps: {
-    alwaysBundle: ['ws', 'qrcode'],
+    alwaysBundle: ['ws', 'qrcode', 'chokidar'],
     onlyBundle: false,
   },
   outputOptions: {

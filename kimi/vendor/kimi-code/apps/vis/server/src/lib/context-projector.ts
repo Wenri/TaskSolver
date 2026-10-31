@@ -541,6 +541,7 @@ export function projectContext(
       // are never part of context state:
       case 'metadata':
       case 'forked':
+      case 'changeNotifier.snapshot':
       case 'turn.prompt':
       case 'turn.steer':
       case 'turn.cancel':
@@ -582,6 +583,8 @@ export function projectContext(
       case 'llm.tools_snapshot':
       case 'llm.request':
       case 'mcp.tools_discovered':
+      case 'mcp.server_failed':
+      case 'mcp.server_failure_resolved':
       case 'file_history.checkpoint':
       case 'file_history.tracked':
         break;

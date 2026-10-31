@@ -90,6 +90,7 @@ const V2_RECORD_TYPES: ReadonlySet<string> = new Set([
   'file_history.checkpoint',
   'interruptionReminder.recorded',
   'plugin.session_start',
+  'changeNotifier.snapshot',
   'runtime.set_binding',
   'turn.ended',
   'prompt.aborted',
@@ -109,6 +110,8 @@ const V2_RECORD_TYPES: ReadonlySet<string> = new Set([
   'subagent.completed',
   'subagent.failed',
   'subagent.cancelled',
+  'mcp.server_failed',
+  'mcp.server_failure_resolved',
 ]);
 
 describe('v1 wire vocabulary', () => {

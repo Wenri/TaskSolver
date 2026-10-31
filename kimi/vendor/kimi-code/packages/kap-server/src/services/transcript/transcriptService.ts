@@ -33,6 +33,7 @@ import {
   groupMessagesIntoSnapshot,
   isPlainAgentId,
   turnId as exportTurnKey,
+  withoutUserPromptSubmitHookParts,
   type AgentDescriptor,
   type ActivityMeta,
   type AgentTranscript,
@@ -602,7 +603,7 @@ export class TranscriptService {
           anchorStack.push({ taskIdsSnapshot: new Set(taskOriginTurnTaskIds), steerCount: matchedSteers.length });
         }
         if (message?.role === 'user') {
-          const key = JSON.stringify(message.content);
+          const key = JSON.stringify(withoutUserPromptSubmitHookParts(message.content));
           const kind = message.origin?.kind ?? 'user';
           const pendingByKind = pendingSteers.get(key);
           const remaining = pendingByKind?.get(kind) ?? 0;
@@ -659,15 +660,16 @@ export class TranscriptService {
         ? { taskOriginTurnTaskIds, steeredContents, steeredByMessageId, turnPromptIds }
         : undefined,
     );
-    const folded = foldWireRecordFacts(projectQuestionInteractionRecords(records, sessionId), base, {
-      agentId,
-      resolvePlanRevisionKey: (key) =>
-        join(SESSIONS_ROOT, summary.workspaceId, sessionId, AGENTS_DIR, agentId, key),
-    });
     const status = liveAgents
       ?.handleOf(agentId)
       ?.accessor.get(IAgentLoopService)
       .snapshot();
+    const folded = foldWireRecordFacts(projectQuestionInteractionRecords(records, sessionId), base, {
+      agentId,
+      resolvePlanRevisionKey: (key) =>
+        join(SESSIONS_ROOT, summary.workspaceId, sessionId, AGENTS_DIR, agentId, key),
+      activeWireTurnId: status?.state === 'running' ? status.activeTurnId : undefined,
+    });
     const activity: ActivityMeta = status?.state === 'running' ? 'turn' : 'idle';
     const snapshot = {
       ...folded,

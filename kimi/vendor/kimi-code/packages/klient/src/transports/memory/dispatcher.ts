@@ -2,7 +2,8 @@
  * In-process dispatcher — resolves a wire triple `(service, method, args)`
  * against a live engine scope and mirrors kap-server's dispatcher semantics
  * (reflection call, non-function members are property reads, `main` agent
- * auto-materialized via `ensureMainAgent`). Scope routing resolves workspace
+ * auto-materialized via `ensureMainAgent`, other registered agents lazily
+ * rebuilt via `getOrRestoreAgent`). Scope routing resolves workspace
  * instances through `IWorkspaceInstanceManager` and live sessions through the
  * App `SessionManager`, matching the server's `resolveScope`. Every argument,
  * result, and event payload passes
@@ -22,6 +23,7 @@ import { getLiveSessionById } from '@moonshot-ai/agent-core-v2/app/sessionManage
 import { IAgentLifecycleService } from '@moonshot-ai/agent-core-v2/session/agentLifecycle/agentLifecycle';
 import { MAIN_AGENT_ID } from '@moonshot-ai/agent-core-v2/session/agentLifecycle/agentLifecycle';
 import { ensureMainAgent } from '@moonshot-ai/agent-core-v2/session/agentLifecycle/mainAgent';
+import { getOrRestoreAgent } from '@moonshot-ai/agent-core-v2/session/agentLifecycle/getOrRestoreAgent';
 import { agentContextOf } from '@moonshot-ai/agent-core-v2/agent/scopeContext/scopeContext';
 import {
   INTERACTION_TAG_AGENT_ID,
@@ -289,11 +291,15 @@ export function createMemoryDispatcher(root: ScopeLike): MemoryDispatcher {
   /** Mirrors kap-server's `resolveScope`, incl. main-agent materialization. */
   async function resolveScope(scope: ScopeRef): Promise<ResolvedScope> {
     if (scope.workspaceId !== undefined) {
-      const workspace = await root.accessor
+      const lease = await root.accessor
         .get(IWorkspaceInstanceManager)
-        .getOrCreate({ workspaceId: scope.workspaceId });
-      void workspace.program;
-      return { kind: 'workspace', like: root };
+        .acquire({ workspaceId: scope.workspaceId });
+      try {
+        void lease.instance.program;
+        return { kind: 'workspace', like: root };
+      } finally {
+        lease.dispose();
+      }
     }
     if (scope.sessionId === undefined) return { kind: 'core', like: root };
     const session = root.accessor.get(ISessionManager).get(scope.sessionId) ?? getLiveSessionById(root.accessor, scope.sessionId);
@@ -311,7 +317,7 @@ export function createMemoryDispatcher(root: ScopeLike): MemoryDispatcher {
       }
       return { kind: 'agent', like: handle };
     }
-    const agent = session.accessor.get(IAgentLifecycleService).handleOf(scope.agentId);
+    const agent = await getOrRestoreAgent(session, scope.agentId);
     if (agent === undefined) {
       throw new RPCError(NOT_FOUND, `agent not found: ${scope.agentId}`);
     }

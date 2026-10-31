@@ -48,7 +48,26 @@ export function eventSnapshot(
   events: readonly EventSnapshotEntry[],
   labels: SnapshotLabels,
 ) {
-  const normalized = events.map((event) => normalizeValue(event, labels));
+  const normalized = events.map((event) => {
+    let stableEvent = event;
+    if (event.type === '[wire]' && event.event === 'llm.tools_snapshot') {
+      const args = event.args as { readonly tools: readonly { readonly name: string }[] };
+      stableEvent = {
+        ...event,
+        args: { ...args, hash: '<tools-hash>', tools: args.tools.map((tool) => tool.name) },
+      };
+    }
+    if (
+      event.type === '[wire]' &&
+      event.event === 'llm.request' &&
+      event.args !== null &&
+      typeof event.args === 'object' &&
+      'toolsHash' in event.args
+    ) {
+      stableEvent = { ...event, args: { ...event.args, toolsHash: '<tools-hash>' } };
+    }
+    return normalizeValue(stableEvent, labels);
+  });
   (normalized as unknown as Record<symbol, true>)[IS_EVENT_ARRAY] = true;
   return normalized;
 }
@@ -93,6 +112,56 @@ export function generateInputsSnapshot(
 
 export function normalizeGenerateInput(input: GenerateCall): GenerateCall {
   return stripUndefined(input) as GenerateCall;
+}
+
+export type GenerateCallPrefixBreak =
+  | { readonly at: 'systemPrompt'; readonly previous: string; readonly next: string }
+  | {
+      readonly at: 'tools' | 'history';
+      readonly index: number;
+      readonly previous: unknown;
+      readonly next: unknown;
+    };
+
+export function findGenerateCallPrefixBreak(
+  previous: GenerateCall,
+  next: GenerateCall,
+): GenerateCallPrefixBreak | undefined {
+  if (previous.systemPrompt !== next.systemPrompt) {
+    return { at: 'systemPrompt', previous: previous.systemPrompt, next: next.systemPrompt };
+  }
+  const toolIndex = firstDifference(
+    previous.tools,
+    next.tools,
+    Math.max(previous.tools.length, next.tools.length),
+  );
+  if (toolIndex !== undefined) {
+    return {
+      at: 'tools',
+      index: toolIndex,
+      previous: previous.tools[toolIndex],
+      next: next.tools[toolIndex],
+    };
+  }
+  const historyIndex = firstDifference(previous.history, next.history, previous.history.length);
+  if (historyIndex === undefined) return undefined;
+  return {
+    at: 'history',
+    index: historyIndex,
+    previous: previous.history[historyIndex],
+    next: next.history[historyIndex],
+  };
+}
+
+function firstDifference(
+  previous: readonly unknown[],
+  next: readonly unknown[],
+  length: number,
+): number | undefined {
+  for (let index = 0; index < length; index += 1) {
+    if (!isDeepEqual(previous[index], next[index])) return index;
+  }
+  return undefined;
 }
 
 function stringifyCompact(obj: unknown) {
@@ -194,8 +263,7 @@ function formatToolNames(tools: GenerateCall['tools']): string {
 }
 
 function isMessagePrefix(previous: readonly Message[], input: readonly Message[]): boolean {
-  if (previous.length > input.length) return false;
-  return previous.every((message, index) => isDeepEqual(message, input[index]));
+  return firstDifference(previous, input, previous.length) === undefined;
 }
 
 function formatMessages(messages: readonly Message[]): string[] {
@@ -367,7 +435,8 @@ function isVolatileDurationKey(key: string): boolean {
 
 function isPlanModeReminder(value: string): boolean {
   return (
-    value.includes('Plan mode is active. You MUST NOT make any edits') &&
+    value.includes('Plan mode is active') &&
+    value.includes('You MUST NOT make any edits') &&
     value.includes('Plan file:')
   );
 }

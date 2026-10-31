@@ -41,13 +41,19 @@ function makeStartupInput(): KimiTUIStartupInput {
 function makeHarness() {
   return {
     getConfig: vi.fn(async () => ({})),
+    onConfigSectionChanged: vi.fn(() => vi.fn()),
     createSession: vi.fn(),
     resumeSession: vi.fn(),
     listSessions: vi.fn(async () => []),
     close: vi.fn(async () => {}),
     track: vi.fn(),
     setTelemetryContext: vi.fn(),
-    getWorkspaceTrustInfo: vi.fn(async () => ({ trusted: true, gatedMcpServers: [] })),
+    getWorkspaceTrustInfo: vi.fn(async () => ({
+      trusted: true,
+      gatedMcpServers: [],
+      gatedAdditionalDirs: [], additionalDirSources: [], warnings: [],
+      instructionSources: { agentsMdPaths: [], skills: [], agentProfiles: [], paths: [] },
+    })),
     auth: {
       status: vi.fn(async () => ({ providers: [] })),
       login: vi.fn(),

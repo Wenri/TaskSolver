@@ -230,11 +230,16 @@ extra_skill_dirs = []
 #   env:
 #     startup_timeout_ms <- KIMI_MCP_STARTUP_TIMEOUT_MS (custom parse)
 #     tool_timeout_ms <- KIMI_MCP_TOOL_TIMEOUT_MS (custom parse)
+#     reconnect_initial_delay_ms <- KIMI_MCP_RECONNECT_INITIAL_DELAY_MS (custom parse)
+#     reconnect_max_delay_ms <- KIMI_MCP_RECONNECT_MAX_DELAY_MS (custom parse)
 # ##########################################################################
 
 [mcp]
 # startup_timeout_ms: integer
 # tool_timeout_ms: integer
+# default_deferred: boolean
+# reconnect_initial_delay_ms: integer
+# reconnect_max_delay_ms: integer
 
 # ##########################################################################
 # mergeAllAvailableSkills (config.toml: merge_all_available_skills)
@@ -288,6 +293,10 @@ merge_all_available_skills = true
   # support_efforts: string[]
   # default_effort: string
   # off_effort: string
+  # upgrade: object
+    # model: string
+    # migration_markdown: string
+    # retirement_at: string
   # overrides: object
     # max_context_size: integer
     # max_input_size: integer

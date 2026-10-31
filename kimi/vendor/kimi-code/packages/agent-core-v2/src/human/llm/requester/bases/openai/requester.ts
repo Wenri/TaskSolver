@@ -20,6 +20,10 @@ import {
   type LlmRequestEvent,
   type ToolCallIdPolicy,
 } from '#/llm/requester/requester';
+import {
+  getLlmHeadersTimeoutDispatcher,
+  resolveLlmHeadersTimeoutMs,
+} from '#/llm/requester/timeout';
 
 import {
   normalizeToolCallIdsForProvider,
@@ -50,11 +54,15 @@ const OPENAI_CHAT_TOOL_CALL_ID_POLICY: ToolCallIdPolicy = {
 };
 
 function createClient(model: LlmModel, headers: Record<string, string> | undefined): OpenAI {
+  const headersTimeoutMs = resolveLlmHeadersTimeoutMs();
+  const dispatcher =
+    headersTimeoutMs === undefined ? undefined : getLlmHeadersTimeoutDispatcher(headersTimeoutMs);
   return new OpenAI({
     apiKey: model.apiKey ?? 'unused',
     baseURL: model.baseUrl,
     defaultHeaders: headers,
     maxRetries: 0,
+    fetchOptions: dispatcher === undefined ? undefined : { dispatcher },
   });
 }
 
@@ -96,7 +104,11 @@ export function prepareOpenAIRequest(
   if (input.responseFormat !== undefined) {
     kwargs = { ...kwargs, response_format: responseFormatToOpenAI(input.responseFormat) };
   }
-  const cap = resolveMaxCompletionCap(input);
+  const requested = input.maxCompletionTokens;
+  const cap =
+    requested !== undefined && requested <= 0
+      ? undefined
+      : (resolveMaxCompletionCap(input) ?? trait?.completionTokensWhenUnset?.(input));
   if (cap !== undefined) {
     kwargs = {
       ...kwargs,
@@ -112,11 +124,21 @@ export function prepareOpenAIRequest(
     toolMessageConversion: input.toolMessageConversion ?? trait?.toolMessageConversion,
   });
   const converted = lowered.flatMap(({ source, message }) => {
-    if (trait?.convertMessage === undefined) {
-      return [message];
+    const hooked = trait?.convertMessage?.(source, message, ctx);
+    if (hooked === null) return [];
+    const convertedMessage = hooked ?? message;
+    if (
+      source.role === 'system' &&
+      source.content.length === 0 &&
+      source.tools !== undefined &&
+      source.tools.length > 0 &&
+      convertedMessage.role === 'system' &&
+      convertedMessage.content === '' &&
+      !('tools' in convertedMessage)
+    ) {
+      return [];
     }
-    const hooked = trait.convertMessage(source, message, ctx);
-    return hooked === null ? [] : [hooked];
+    return [convertedMessage];
   });
   const history: readonly OpenAIWireMessage[] = input.systemPrompt
     ? [{ role: 'system', content: input.systemPrompt }, ...converted]

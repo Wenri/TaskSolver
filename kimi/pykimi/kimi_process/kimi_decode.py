@@ -80,12 +80,18 @@ def _tool_calls(message):
     return calls
 
 
+def _is_system_reminder(text):
+    """kimi-code 2.4+ appends harness context (date, permission mode) after the prompt as extra
+    user messages, each one a ``<system-reminder>`` block."""
+    return text.lstrip().startswith("<system-reminder>")
+
+
 def _last_user_text(messages):
     text = ""
     for m in messages or []:
         if isinstance(m, dict) and m.get("role") == "user":
             t = _content_text(m.get("content"), "text")
-            if t:
+            if t and not _is_system_reminder(t):
                 text = t                 # keep the last user message = the actual prompt
     return text
 

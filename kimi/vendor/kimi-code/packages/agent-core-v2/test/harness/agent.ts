@@ -128,6 +128,9 @@ import {
   AgentExternalHooksService,
   FileStorageService,
   InMemoryStorageService,
+  InMemorySessionLockService,
+  ISessionLockService,
+  ISessionRunGate,
   AgentFullCompactionService,
   IAppendLogStore,
   IFileSystemStorageService,
@@ -159,14 +162,12 @@ import {
   ISessionTokenCountingService,
   IAppStateService,
   ITelemetryService,
-  IHostTerminalService,
   IAgentToolRegistryService,
   IAgentToolActivationService,
   IAgentUserToolService,
   ISessionUsageService,
   ISessionWorkspaceContext,
   IWorkspaceStateService,
-  AgentLLMRequesterService,
   LifecycleScope,
   AgentMcpService,
   AgentPermissionGate,
@@ -188,6 +189,7 @@ import {
   type SessionCreatedEvent,
   type SessionWillCloseEvent,
 } from '#/workspace/sessionLifecycle/sessionLifecycle';
+import { stubSessionRunGate } from '../stubs';
 import { IEventService } from '#/app/event/event';
 import { IEventBus, ISessionEventBus } from '#/app/event/eventBus';
 import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
@@ -233,6 +235,7 @@ import { stubAgentIdentity } from '../app/agentIdentity/stubs';
 import { stubClientIdentity } from '../app/bootstrap/stubs';
 import { recordAgentEvents, type RecordedEventEntry } from '../snapshot/events';
 import { createFakeHostFs, createFakeProcessRunner } from '../tools/fixtures/fake-exec';
+import { guardPromptCachePrefix, PromptCacheGuardedLLMRequesterService } from './prompt-cache-guard';
 import { createScriptedGenerate } from './scripted-generate';
 import {
   DEFAULT_TEST_SYSTEM_PROMPT,
@@ -1022,6 +1025,13 @@ class PersistenceAppendLogStore implements IAppendLogStore {
     return Promise.resolve();
   }
 
+  externallyModified(): boolean {
+    return false;
+  }
+
+  bindWriteGuard(): IDisposable {
+    return toDisposable(() => undefined);
+  }
   snapshot(): WireRecord[] {
     return this.persistence.records.map(cloneRecord);
   }
@@ -1138,6 +1148,9 @@ export class AgentTestContext {
           const memoryStorage = (): SyncDescriptor<IFileSystemStorageService> =>
             new SyncDescriptor(InMemoryStorageService, []);
           reg.defineDescriptor(IFileSystemStorageService, memoryStorage());
+          const sessionLocks = new InMemorySessionLockService();
+          reg.defineInstance(ISessionLockService, sessionLocks);
+          reg.defineInstance(ISessionRunGate, stubSessionRunGate(sessionLocks));
           reg.define(IBlobStore, BlobStoreService);
           reg.defineInstance(
             IConfigService,
@@ -1167,7 +1180,7 @@ export class AgentTestContext {
           reg.defineInstance(
             IProtocolAdapterRegistry,
             createGenerateBackedGateway(
-              options.generate ?? this.scriptedGenerate.requester,
+              guardPromptCachePrefix(options.generate ?? this.scriptedGenerate.requester),
             ),
           );
           reg.defineInstance(
@@ -1197,7 +1210,6 @@ export class AgentTestContext {
               resolveExternalHooksRunner(options.hookEngine),
             );
           }
-          reg.defineInstance(IHostTerminalService, createHostTerminalService());
           reg.defineInstance(IHostFileSystem, new HostFileSystem());
           reg.defineInstance(
             IHostEnvironment,
@@ -1344,7 +1356,6 @@ export class AgentTestContext {
               this.root.accessor.get(IHostEnvironment),
               this.root.accessor.get(IHostFileSystem),
               this.root.accessor.get(IHostProcessService),
-              this.root.accessor.get(IHostTerminalService),
             );
             reg.defineInstance<IAgentRuntimeService>(IAgentRuntimeService, {
               _serviceBrand: undefined,
@@ -1371,7 +1382,7 @@ export class AgentTestContext {
             reg.defineDescriptor(IAgentProfileService, new SyncDescriptor(AgentProfileService));
             reg.defineDescriptor(
               IAgentLLMRequesterService,
-              new SyncDescriptor(AgentLLMRequesterService),
+              new SyncDescriptor(PromptCacheGuardedLLMRequesterService),
             );
             reg.defineDescriptor(
               IAgentExternalHooksService,
@@ -2134,7 +2145,7 @@ export class AgentTestContext {
     const env = this.root.accessor.get(IHostEnvironment);
     const bootstrapService = this.root.accessor.get(IBootstrapService);
     const cwd = this.cwd;
-    let current: LoadedAgentsMd = { content: '', warning: undefined, paths: [] };
+    let current: LoadedAgentsMd = { content: '', warning: undefined, paths: [], files: new Map() };
     return {
       _serviceBrand: undefined,
       get ready(): Promise<void> {
@@ -2369,19 +2380,6 @@ function createPermissionRulesStub(
       rules = [...rules, ...nextRules];
     },
     recordApprovalResult: () => { },
-  };
-}
-
-function createHostTerminalService(): IHostTerminalService {
-  return {
-    _serviceBrand: undefined,
-    spawn: async () => ({
-      onProcessData: Event.None as Event<string>,
-      onProcessExit: Event.None as Event<{ exitCode: number | null }>,
-      write: () => { },
-      resize: () => { },
-      kill: () => { },
-    }),
   };
 }
 

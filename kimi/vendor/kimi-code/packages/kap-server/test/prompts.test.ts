@@ -13,6 +13,7 @@ import {
   IAgentProfileService,
   IAgentLoopService,
   IAgentStateService,
+  IAgentSwarmService,
   IAgentToolPolicyService,
   IBootstrapService,
   IConfigService,
@@ -21,6 +22,8 @@ import {
   ISessionContext,
   ISessionMetadata,
   MAX_IMAGE_DECODE_BYTES,
+  Error2,
+  ErrorCodes,
   closeSessionById,
   getLiveSessionById,
 } from '@moonshot-ai/agent-core-v2';
@@ -308,6 +311,40 @@ describe('server-v2 /api/v1 prompts', () => {
     expect(Array.isArray(list.body.data.queued)).toBe(true);
   });
 
+  it('applies swarm_mode before submitting the prompt', async () => {
+    const id = await createSession(home as string);
+    await createMainAgent(id);
+    const session = getLiveSessionById(server!.core.accessor, id)!;
+    const agent = session.accessor.get(IAgentLifecycleService).handleOf('main')!;
+    const swarm = agent.accessor.get(IAgentSwarmService);
+    const loop = agent.accessor.get(IAgentLoopService);
+    const enter = vi.spyOn(swarm, 'enter');
+    const exit = vi.spyOn(swarm, 'exit');
+    const submit = vi.spyOn(loop, 'submit');
+    const post = (swarmMode: boolean) =>
+      call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
+        content: [{ type: 'text', text: 'hello' }],
+        swarm_mode: swarmMode,
+      });
+
+    const first = await post(true);
+    expect(first.body.code).toBe(0);
+    expect(enter).toHaveBeenCalledTimes(1);
+    expect(enter).toHaveBeenCalledWith('manual');
+    expect(enter.mock.invocationCallOrder[0]!).toBeLessThan(submit.mock.invocationCallOrder[0]!);
+    expect(swarm.isActive).toBe(true);
+
+    const repeated = await post(true);
+    expect(repeated.body.code).toBe(0);
+    expect(enter).toHaveBeenCalledTimes(1);
+
+    const off = await post(false);
+    expect(off.body.code).toBe(0);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit.mock.invocationCallOrder[0]!).toBeLessThan(submit.mock.invocationCallOrder[2]!);
+    expect(swarm.isActive).toBe(false);
+  });
+
   it('accepts a prompt-carried model when default_model is not configured', async () => {
     await writeConfigToml(home as string, PROMPT_TOML_NO_DEFAULT);
     const id = await createSession(home as string);
@@ -467,6 +504,11 @@ describe('server-v2 /api/v1 prompts', () => {
       message: {
         role: 'user',
         content: [
+          {
+            type: 'text',
+            text: '<hook_result hook_event="UserPromptSubmit">\nhook note\n</hook_result>',
+            meta: { contentType: 'text/xml', source: 'user prompt submit hook' },
+          },
           { type: 'text', text: 'rendered skill block' },
           { type: 'text', text: 'Review this change.' },
         ],
@@ -567,6 +609,29 @@ describe('server-v2 /api/v1 prompts', () => {
     expect(submitted.body.code).toBe(0);
     expect(submitted.body.data.prompt_id).toBe('submission-1');
     expect(submitted.body.data.user_message_id).toBe('submission-1');
+  });
+
+  it('reloads a stale session and resubmits under the same prompt_id', async () => {
+    const id = await createSession(home as string);
+    await createMainAgent(id);
+    const handle = getLiveSessionById(server!.core.accessor, id)!;
+    const loop = handle.accessor
+      .get(IAgentLifecycleService)
+      .handleOf('main')!
+      .accessor.get(IAgentLoopService);
+    const submit = vi.spyOn(loop, 'submit').mockImplementation(() => {
+      throw new Error2(ErrorCodes.SESSION_STALE, 'stale');
+    });
+
+    const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
+      content: [{ type: 'text', text: 'hello' }],
+      prompt_id: 'submission-1',
+    });
+
+    expect(submitted.body.code).toBe(0);
+    expect(submitted.body.data.prompt_id).toBe('submission-1');
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(getLiveSessionById(server!.core.accessor, id)).not.toBe(handle);
   });
 
   it.each([false, true])('preserves client metadata through submission and cold resume (skills=%s)', async (withSkills) => {
@@ -1800,6 +1865,39 @@ describe('server-v2 /api/v1 prompts', () => {
       agent_id: 'agent_does_not_exist',
     });
     expect(body.code).toBe(40401);
+  });
+
+  it('rebuilds a forked agent named by agent_id after a session reload', async () => {
+    const id = await createSession(home as string);
+    await createMainAgent(id);
+
+    const session = getLiveSessionById(server!.core.accessor, id);
+    if (session === undefined) throw new Error(`session ${id} not found`);
+    const lifecycle = session.accessor.get(IAgentLifecycleService);
+    const childContext = await lifecycle.fork(agentContextOf(lifecycle.handleOf('main')!));
+
+    await closeSessionById(server!.core.accessor, id);
+    expect(getLiveSessionById(server!.core.accessor, id)).toBeUndefined();
+
+    const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
+      content: [{ type: 'text', text: 'side question after reload' }],
+      agent_id: childContext.agentId,
+    });
+    expect(submitted.body.code).toBe(0);
+
+    const resumed = getLiveSessionById(server!.core.accessor, id);
+    if (resumed === undefined) throw new Error(`session ${id} not live after reload`);
+    const rebuilt = resumed.accessor.get(IAgentLifecycleService).handleOf(childContext.agentId);
+    expect(rebuilt).toBeDefined();
+    const hasText = rebuilt!.accessor
+      .get(IAgentContextMemoryService)
+      .get()
+      .some(
+        (m) =>
+          m.role === 'user' &&
+          m.content.some((p) => p.type === 'text' && p.text === 'side question after reload'),
+      );
+    expect(hasText).toBe(true);
   });
 
   it('rejects an unknown agent profile with 40001', async () => {
