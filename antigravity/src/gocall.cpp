@@ -25,8 +25,7 @@ __attribute__((used, externally_visible)) agy_book_fn g_agy_on[BK_COUNT];
 
 static agy_book_fn agy_handler_for(std::string_view id) {
     if (id == "fh_update")       return &agy_on_fh_update;
-    if (id == "resp")            return &agy_on_resp;
-    if (id == "tls_write")       return &agy_on_tls_write;
+    if (id == "resp" || id == "tls_write") return &agy_on_stream;
     if (id == "file_open")       return &agy_on_file_open;
     if (id == "http_rt")         return &agy_on_http_rt;
     if (id == "exit")            return &agy_on_exit;
@@ -265,13 +264,7 @@ extern "C" void agy_on_fh_update(agy_block *b)
     wire_emit(&ev);
 }
 
-extern "C" void agy_on_resp(agy_block *b)
-{
-    cgt_common(b);
-    cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rbx, b->regs.rcx, true);
-}
-
-extern "C" void agy_on_tls_write(agy_block *b)
+extern "C" void agy_on_stream(agy_block *b)
 {
     cgt_common(b);
     cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rbx, b->regs.rcx, true);

@@ -162,8 +162,8 @@ htop = ">=3.5.1,<4"
 # `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …` during the package build,
 # so `pixi install` builds it). Manual rebuilds via the pixi tasks below:
 #   pixi run build-shim         # configure (fetch deps) + compile the shim
-#   pixi run shim-symbols       # after an agy update: re-resolve symbols.json + rebuild
-#   pixi run shim-agy-update    # fetch the latest agy + print new pin values
+#   pixi run shim-symbols       # ensure raw agy conversion + metadata are current, then rebuild
+#   pixi run shim-agy-update    # query the latest release manifest + print new pin values
 #   pixi run shim-hooks         # after editing procdef.h: regen pyagy's BOOKS mirror
 [tool.pixi.package]
 name = "tasksolver"
@@ -230,8 +230,8 @@ pymport-test = { cmd = "node -e \"const {pymport,proxify}=require('pymport'); co
 # `build-shim` is a fast in-place shim rebuild for C++ iteration (skips the package rebuild); the
 # cmake configure is idempotent (fetches vendored deps on first run), so each task re-runs it.
 build-shim = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build"
-shim-symbols = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target symbols && cmake --build antigravity/build"   # regen symbols.json after an agy update
-shim-agy-update = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target agy-update"   # fetch the latest agy + print new pin values
+shim-symbols = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target symbols && cmake --build antigravity/build"   # ensure library + metadata are current
+shim-agy-update = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target agy-update"   # query latest manifest + print new pins
 shim-hooks = { cmd = "python3 -m symbols.gen_sources --hooks", cwd = "antigravity" }   # regen pyagy's BOOKS mirror from procdef.h (after editing the C table)
 
 # --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---

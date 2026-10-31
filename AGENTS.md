@@ -233,9 +233,13 @@ instrumentation layer; Claude uses its SDK protocol directly:
   `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<id>`) in
   `agy_trampolines`, binds both directions via `ld` / `ld.so`, and splices its synthetic
   `moduledata` (`md->bad = 1`) onto `agy_firstmoduledata.next` before calling `agy_rt0_go`.
+  Active rows also export `agy_resume__<id>` at `entry + skip + ow`; after the displaced
+  prologue, a stub resumes with one GOT-indirect jump. Keep the original `agy_go__<id>`
+  entry exports for introspection and patching.
   `g_agy_on` is a zero-initialized handler pointer table. Before Go starts, `agy_enable_hooks`
   in `gocall.cpp` selects each enabled row's handler; disabled rows, including `file_open`
-  when conversation-id capture is off, remain `nullptr`. Each `naked` stub uses basic asm
+  when conversation-id capture is off, remain `nullptr`. `resp` and `tls_write` share
+  `agy_on_stream`, retaining their row-derived event kinds. Each `naked` stub uses basic asm
   to load its entry once into `r12`, skips the hook if null, and otherwise passes that same
   pointer with `&block` through the row's Go gateway (`runtime.cgocall` or `runtime.asmcgocall`).
   `AGY_STUB_FULLCGO` passes `fn`/`arg` in RAX/RBX; `AGY_STUB_ASMCGO` writes them to the stack.
@@ -262,6 +266,11 @@ instrumentation layer; Claude uses its SDK protocol directly:
   work before TaskSolver is installed. LIEF is required and supplied by the Pixi default
   and build host environments; `symbols` is excluded from the runtime wheel. Keep these
   build imports separate from the embedded runtime's stdlib-only modules.
+  CMake caches the verified raw agy under its archive SHA512 in `build/`. One conversion
+  generates `libagy.so`, `symbols.json`, and `funcmap.tsv.gz`: resolve the final ELF layout
+  before writing the six-byte hook jumps. Every rebuild starts from raw input; the generated
+  metadata is gitignored. `shim-symbols` ensures these outputs are current. `shim-agy-update`
+  only prints new pins from the release manifest; update `CMakeLists.txt`, then rebuild.
   See `antigravity/README.md`.
 - **`codex/`** → the `pycodex` package: OpenAI's Rust codex, built from a vendored source tree with
   the bridge compiled in (no preload needed). See `codex/README.md`.

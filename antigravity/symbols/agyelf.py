@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Shared parsing for the agy toolchain: the C book table, ELF, and Go's pclntab.
 
-`make_libagy.py` (raw agy -> libagy.so) and `build_symbols.py` (libagy.so -> symbols.json) both
-have to find Go's moduledata, walk its function table and compute the same prologue skips. They
-used to carry two copies of that code plus two copies of the hook-target list; a hook whose skip
-differed between them would be patched at one offset and resumed at another. `gen_sources.py`
-(procdef.h -> symbols_gen.h / hooks.py) is the third consumer. Everything any of them needs lives
-here, so they cannot disagree.
+`make_libagy.py` converts raw agy into a shared library, then `build_symbols.py` resolves its
+metadata before any hook is patched. Both use the ELF/pclntab and original-prologue parsing
+here. `gen_sources.py` builds symbols_gen.h and hooks.py from that metadata and procdef.h.
 
 Every fact about a hook is read from `src/procdef.h` — its targets and install mechanism — so that
 one C table stays the single source the host, the generated assembly and the Python mirror are all
@@ -238,8 +235,7 @@ def prologue_skip(elf: ELF, d: bytes, addr: int) -> int:
 def frame_prologue_hex(elf: ELF, d: bytes, addr: int, skip: int) -> str:
     """The position-independent Go frame setup at `addr + skip` (`push %rbp; mov %rsp,%rbp;
     sub $imm8/imm32,%rsp` = 8 or 11 bytes), so the static trampoline stubs can bake the displaced
-    instructions at compile time. Reconstructs the original losslessly when make_libagy.py has
-    already patched bytes 0..5 with `ff 25 <disp32>` and stored `0x81`/`0x83` at byte 6."""
+    instructions at compile time. Only accepts original, unpatched frame setups."""
     if skip == 0:
         return ""
     try:
@@ -250,10 +246,6 @@ def frame_prologue_hex(elf: ELF, d: bytes, addr: int, skip: int) -> str:
         return p[:11].hex()
     if len(p) >= 8 and p[:7] == b"\x55\x48\x89\xe5\x48\x83\xec":
         return p[:8].hex()
-    if len(p) >= 11 and p[:2] == b"\xff\x25" and p[6] == 0x81:
-        return "554889e54881ec" + p[7:11].hex()
-    if len(p) >= 8 and p[:2] == b"\xff\x25" and p[6] == 0x83:
-        return "554889e54883ec" + p[7:8].hex()
     return ""
 
 

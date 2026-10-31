@@ -17,8 +17,7 @@ extern agy_book_fn g_agy_on[];         /* per BOOKS row: handler, or nullptr whe
 
 void agy_on_generic(agy_block *b);
 void agy_on_fh_update(agy_block *b);
-void agy_on_resp(agy_block *b);
-void agy_on_tls_write(agy_block *b);
+void agy_on_stream(agy_block *b);
 void agy_on_file_open(agy_block *b);
 void agy_on_http_rt(agy_block *b);
 void agy_on_exit(agy_block *b);

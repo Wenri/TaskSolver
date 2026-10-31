@@ -17,13 +17,15 @@ each hooked Go function's `entry + skip` with
 symbols via `R_X86_64_GLOB_DAT` relocations, while retaining `PT_TLS` inside `libagy.so`) and
 linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` as its first
 `DT_NEEDED` dependency (so `ld-linux-x86-64.so.2` assigns `libagy.so` static TLS slot 1 at
-`[%fs:-0x4a0 .. %fs:0)` with no external `agy_tls.S` needed). At startup, `main()` runs
+`[%fs:-0x4a0 .. %fs:0)` with no external `agy_tls.S` needed). Each active row also exports
+`agy_resume__<id>` at `entry + skip + ow` for the stub's continuation; the original entry
+exports remain for introspection and patching. At startup, `main()` runs
 `agy_init()` before calling `agy_rt0_go(argc, argv)`, combining two mechanisms:
 
 1. **Bidirectional static `ld` / `ld.so` binding** (`-Wl,--export-dynamic`):
    - `vendor/agy` → `libagy.so`: direct ELF relocation binding (`R_X86_64_64` /
-     `R_X86_64_GLOB_DAT`) of `agy_rt0_go`, `agy_firstmoduledata`, and every `agy_go__*`
-     target function (plus libc `getaddrinfo` interposition for cgo DNS).
+     `R_X86_64_GLOB_DAT`) of `agy_rt0_go`, `agy_firstmoduledata`, the `agy_go__*` gateways,
+     and `agy_resume__*` continuation targets (plus libc `getaddrinfo` interposition for cgo DNS).
    - `libagy.so` → `vendor/agy`: `ld.so` populates `agy_tramp_slots[slot]` in `libagy.so`
      with the address of each static trampoline stub `agy_stub__<id>` in `vendor/agy` at
      process load time — zero runtime code patching or `mprotect`.
@@ -38,9 +40,10 @@ linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` a
    `g_agy_on` handler pointer table for enabled rows; disabled entries remain `nullptr`.
    Each stub loads its entry once, skips the hook if null, and otherwise passes that pointer
    through the `ld`-bound `runtime.cgocall`/`runtime.asmcgocall` gateway to its C handler
-   (`agy_on_fh_update`, `agy_on_resp`, `agy_on_tls_write`, `agy_on_file_open`,
+   (`agy_on_fh_update`, `agy_on_stream`, `agy_on_file_open`,
    `agy_on_http_rt`, `agy_on_exit`, `agy_on_resp_chunk`, `agy_on_readlink_filter`,
-   `agy_on_generic`). `BOOKS` stores hook metadata only. frida-gum has been completely removed.
+   `agy_on_generic`). `resp` and `tls_write` share `agy_on_stream`; each event keeps the kind
+   from its `BOOKS` row. `BOOKS` stores hook metadata only. frida-gum has been completely removed.
 
 Hook events are delivered to an **embedded CPython interpreter** running on a
 dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/`).
@@ -62,8 +65,8 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
 `85d3425a18a809e545747dcb9d87c03c`, agy **1.4.11**). The shim refuses to install hooks if
 the running binary's BuildID doesn't match `symbols.json`, so offsets can never be
-silently applied to a different build. Re-run the extractor after any `agy` update
-(`pixi run shim-symbols`).
+silently applied to a different build. After updating the release pins, rebuild the library
+and metadata with `pixi run shim-symbols`.
 
 The 1.4.11 upgrade follows the package move of `createPlannerResponseStep` and
 `(*ToolContextTrajectory).AppendStep` from `gemini_coder/framework/core` to
@@ -136,8 +139,9 @@ round-trip to a rewrite service), log ASYNC and rewrite on a later turn.
 
 ## Hook set (v1)
 
-Addresses come from `symbols/symbols.json` (resolved by `symbols.build_symbols`
-through `symbols.agyelf`, pinned to build-id). Names are stable across Go versions;
+Addresses come from generated `symbols/symbols.json` (`symbols.make_libagy` calls the
+`symbols.build_symbols` resolver on the final ELF layout before patching, pinned to build-id).
+Names are stable across Go versions;
 offsets are not.
 
 | Function | Go signature (register ABI) | Purpose | Mode |
@@ -204,7 +208,8 @@ with `jmp *agy_tramp_slots[slot](%rip)` into a static assembly trampoline stub
    `runtime.asmcgocall` is used for the non-parking rows. The gateway runs the handler
    directly; the handler copies + enqueues to the pyworker,
 4. zeros X15, restores the registers, and returns if the handler set `block.action`; otherwise it runs the
-   displaced original frame-setup prologue and `jmp`s back into `agy_go__* + skip + ow` via `@GOTPCREL`.
+   displaced original frame-setup prologue and resumes with
+   `jmp *agy_resume__<id>@GOTPCREL(%rip)`. The alias already points at `entry + skip + ow`.
 
 Because the trampoline never rewrites *our* return address, parking/rescheduling is
 unaffected — the goroutine may resume on any M. Each `procdef.h` row has the form
@@ -415,23 +420,24 @@ result). See `config/` and `pyagy/config.py`.
 antigravity/
   README.md                 ← this file (the design)
   CMakeLists.txt            ← the build: generates symbols_gen.h + links vendor/agy against vendor/libagy.so
+  build/                    ← CMake files + immutable raw agy cache, keyed by archive SHA512
   vendor/                   ← libagy.so (164 MB) + built vendor/agy host executable
   symbols/                  ← source build package; run with `python3 -m symbols.<tool>` from antigravity/
     __init__.py
     agyelf.py               ← shared parsing: procdef.h rows and hook targets, ELF (lief) + Go pclntab/moduledata,
                               prologue skip/extract. The three tools below cannot disagree about
                               an offset. All three use lief from the build environment.
-    build_symbols.py        ← authoritative resolver: pclntab + moduledata.text →
-                              symbols.json; self-verifies every installed hook's prologue
-    make_libagy.py          ← converts PIE agy → libagy.so; exports agy_go__* / agy_tramp_slots,
-                              imports agy_stub__* via R_X86_64_GLOB_DAT, and statically patches entry+skip.
-                              `--update` fetches the LATEST agy (sha512-verified) and prints the new pins;
+    build_symbols.py        ← resolver used before patching: pclntab + moduledata.text →
+                              symbols.json + funcmap; verifies every installed hook's prologue
+    make_libagy.py          ← converts PIE agy → libagy.so; exports agy_go__* / agy_resume__* / agy_tramp_slots,
+                              imports agy_stub__* via R_X86_64_GLOB_DAT, captures metadata, then patches entry+skip.
+                              `--update` queries the latest release manifest and prints new pins;
                               `--wsl1` applies the tcmalloc MAP_FIXED_NOREPLACE fix on its own (a
                               conversion applies it automatically when running on WSL1).
     gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (build id + AGY_STUBS(FULLCGO, ASMCGO),
                               one line of stub literals per installed hook); `--hooks` →
                               pyagy/agy_process/hooks.py
-    symbols.json            ← {build_id, text_base, hooks:{name→vaddr}, skips, prologues}
+    symbols.json            ← generated, gitignored: {build_id, text_base, hooks:{name→vaddr}, skips, prologues}
   src/
     goframe.h               ← the stub frame layout, shared by goframe.cpp and the rest of the
                               C++ (gomod.cpp static_asserts every offset against agy_block)
@@ -478,23 +484,31 @@ The in-process module is **`pyagy.agy_process`** (loaded by `vendor/agy` via
 
 `pixi install` **builds `vendor/libagy.so` and `vendor/agy`** — the tasksolver package build (`setup.py` →
 `build_py`) runs `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …`,
-which (at configure time) fetches the pinned upstream `agy` tarball, converts it via
-`python3 -m symbols.make_libagy` into `antigravity/vendor/libagy.so`, and
-compiles the linked host executable `antigravity/vendor/agy`. Since the build is x86-64-specific and a main
+which caches the pinned upstream raw `agy` at configure time after verifying the tarball's SHA512.
+The build converts it via `python3 -m symbols.make_libagy` into `antigravity/vendor/libagy.so`
+and generates its metadata, then compiles the linked host executable `antigravity/vendor/agy`.
+Since the build is x86-64-specific and a main
 target, the package is **arch-specific (linux-64)** (`[tool.pixi.package.build.config]
 noarch=false`) and the build is **required, with no skip/opt-out** — it fails loudly
 if the toolchain (g++ / libpython / lief) is missing, because a wheel without the
 shim can't run the `agy` backend. (`cmake`, `ninja`, `hpack`, and `brotli-python`
 are pixi/conda deps — no `pip install` needed.)
 
+The raw cache is `build/antigravity-<archive-sha512>.raw`; a new pin gets a separate cache entry.
+Every conversion starts from this unchanged input. After LIEF writes the final ELF layout,
+the converter records original prologues and addresses in `symbols.json` and `funcmap.tsv.gz`,
+then writes each six-byte hook jump and publishes the library and metadata together.
+Both metadata files are generated and gitignored. `-DAGY_BIN=/path/to/raw-agy` selects an
+explicit raw input instead of the download; `vendor/agy` is the compiled host, never an input.
+
 pixi caches the package build, so **after an agy update** rebuild the shim explicitly via
 the pixi tasks:
 
 ```bash
-pixi run shim-agy-update  # fetch the LATEST agy, convert it, print the new CMakeLists pins
-pixi run shim-symbols     # after an agy update: re-resolve symbols.json + recompile
+pixi run shim-agy-update  # query the latest release manifest and print new CMakeLists pins
+pixi run shim-symbols     # ensure library + metadata are current, then recompile
 pixi run shim-hooks       # after editing src/procdef.h: regen pyagy's BOOKS mirror
-pixi run build-shim       # a plain recompile (configure fetches the vendored deps on first run)
+pixi run build-shim       # rebuild changed outputs (fetches pinned raw agy on first run)
 ```
 
 The tools in `antigravity/symbols/` form a source package and share code through
@@ -508,16 +522,17 @@ For direct use inside an activated Pixi environment:
 
 ```bash
 cd antigravity
+python3 -m symbols.make_libagy /path/to/raw-agy vendor/libagy.so symbols/symbols.json
 python3 -m symbols.gen_sources --hooks
 python3 -m symbols.gen_sources symbols/symbols.json src/symbols_gen.h
 ```
 
-To check the table parser and checked-in Python mirror, run
-`pixi run python -m unittest symbols.test_procdef` from `antigravity/`.
+To check metadata validation, the table parser, and the checked-in Python mirror, run
+`pixi run python -m unittest symbols.test_procdef symbols.test_build_symbols` from `antigravity/`.
 
 Bumping agy is `shim-agy-update` (it prints the `AGY_VERSION`/`AGY_URL`/`AGY_SHA512` lines to paste
-into `CMakeLists.txt`) followed by `shim-symbols`; commit `symbols.json` and `CMakeLists.txt`
-together, since the build-id guard ties them to one upstream build.
+into `CMakeLists.txt`) followed by `shim-symbols`. Commit the updated pins; the library and
+metadata are regenerated from the verified raw release.
 
 **libpython / Python version.** The shim embeds the **pixi env's libpython 3.15**
 (`$(CONDA_PREFIX)/bin/python3-config`), unified with the pixi-3.15 driver so the
@@ -947,11 +962,11 @@ shell's `LD_PRELOAD`), otherwise it fails copying `_distutils_hack/__init__.py`.
   kernel.
 - **Cloud-container caveats**: `cmake configure` downloads the pinned agy and the `pixi`
   installer fetches from GitHub releases; a locked-down egress policy may block either (403) —
-  point `-DAGY_BIN=` at a local copy of the pinned agy (and fetch the pixi binary from a mirror)
+  point `-DAGY_BIN=` at a local raw copy of the pinned agy (and fetch the pixi binary from a mirror)
   instead. agy sign-in works headlessly via
   its out-of-band OAuth code-paste flow (no in-container browser needed).
-- **agy updates** change offsets and may reorder text again → re-run
-  `build_symbols.py` (`pixi run shim-symbols`). Names are stable; the build-id guard blocks
+- **agy updates** change offsets and may reorder text again → update the release pins and run
+  `pixi run shim-symbols` to regenerate the library and metadata. Names are stable; the build-id guard blocks
   mismatched hooks.
 - **SYNC + GC**: keep SYNC callbacks fast/CPU-bound (above).
 - This instruments a binary **you run on your own machine** for research/interop.

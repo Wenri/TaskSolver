@@ -43,7 +43,7 @@ static_assert(std::size(BOOKS) <= INT32_MAX, "movq's signed immediate must zero 
     "movq   %rbp, " TO_STRING(AGY_OFF_RBP) "(%rsp)\n\t" \
     "movq   $" #book ", " TO_STRING(AGY_OFF_BOOK) "(%rsp)\n\t"
 
-#define AGY_STUB_LEAVE(id, resume_off, ...) \
+#define AGY_STUB_LEAVE(id, ...) \
     "xorps  %xmm15, %xmm15\n\t" \
     "movq   " TO_STRING(AGY_OFF_RAX) "(%rsp), %rax\n\t" \
     "movq   " TO_STRING(AGY_OFF_RBX) "(%rsp), %rbx\n\t" \
@@ -61,9 +61,7 @@ static_assert(std::size(BOOKS) <= INT32_MAX, "movq's signed immediate must zero 
     "jne    2f\n" \
     "1:\n\t" \
     ".byte  " #__VA_ARGS__ "\n\t" \
-    "movq   agy_go__" #id "@GOTPCREL(%rip), %r12\n\t" \
-    "leaq   " #resume_off "(%r12), %r12\n\t" \
-    "jmp    *%r12\n" \
+    "jmp    *agy_resume__" #id "@GOTPCREL(%rip)\n" \
     "2:\n\t" \
     "ret\n\t" \
     ".balign " TO_STRING(AGY_SLOT_SIZE) ", 0x90"
@@ -75,25 +73,25 @@ static_assert(std::size(BOOKS) <= INT32_MAX, "movq's signed immediate must zero 
     void agy_stub__##id()
 
 /* ABIInternal: cgocall spills its own RAX/RBX arguments into our reserved two words. */
-#define AGY_STUB_FULLCGO(id, book, resume_off, ...) \
+#define AGY_STUB_FULLCGO(id, book, ...) \
     AGY_STUB_DECLARE(id, book) { \
         __asm__(AGY_STUB_ENTER(book) \
             "leaq   " TO_STRING(AGY_OFF_BLOCK) "(%rsp), %rbx\n\t" \
             "movq   %r12, %rax\n\t" \
             "call   *agy_go__CGOCALL@GOTPCREL(%rip)\n\t" \
-            AGY_STUB_LEAVE(id, resume_off, __VA_ARGS__)); \
+            AGY_STUB_LEAVE(id, __VA_ARGS__)); \
         __builtin_unreachable(); \
     }
 
 /* ABI0: asmcgocall reads fn/arg from the stack; it does not need register copies. */
-#define AGY_STUB_ASMCGO(id, book, resume_off, ...) \
+#define AGY_STUB_ASMCGO(id, book, ...) \
     AGY_STUB_DECLARE(id, book) { \
         __asm__(AGY_STUB_ENTER(book) \
             "movq   %r12, " TO_STRING(AGY_OFF_FN) "(%rsp)\n\t" \
             "leaq   " TO_STRING(AGY_OFF_BLOCK) "(%rsp), %rax\n\t" \
             "movq   %rax, " TO_STRING(AGY_OFF_ARG) "(%rsp)\n\t" \
             "call   *agy_go__ASMCGOCALL@GOTPCREL(%rip)\n\t" \
-            AGY_STUB_LEAVE(id, resume_off, __VA_ARGS__)); \
+            AGY_STUB_LEAVE(id, __VA_ARGS__)); \
         __builtin_unreachable(); \
     }
 

@@ -30,12 +30,14 @@ OBJECT = ANTI / "build/CMakeFiles/agy.dir/src/goframe.cpp.o"
 class AgyStubTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        missing = [p for p in (AGY, OBJECT, ANTI / "vendor/libagy.so") if not p.is_file()]
+        missing = [p for p in (AGY, OBJECT, ANTI / "vendor/libagy.so", ANTI / "symbols/symbols.json")
+                   if not p.is_file()]
         if missing:
             raise unittest.SkipTest(f"run pixi run build-shim; missing: {missing}")
         lief.logging.disable()
         cls.image = lief.parse(str(AGY))
         cls.obj = lief.parse(str(OBJECT))
+        cls.go = lief.parse(str(ANTI / "vendor/libagy.so"))
         cls.symbols = {s.name: s for s in cls.image.symtab_symbols}
         cls.stubs = {name: s for name, s in cls.symbols.items() if name.startswith("agy_stub__")}
         cls.layout = {name: int(value) for name, value in re.findall(
@@ -65,6 +67,41 @@ class AgyStubTests(unittest.TestCase):
                 action = self.layout["AGY_OFF_ACTION"]
                 self.assertEqual(code[hi - 10:hi - 5], b"\x83\x7c\x24" + bytes([action, 0]))
                 self.assertEqual(code[hi], 0x75)  # JNE RETURN; pcsp changes after LEA
+
+    def test_direct_resume_targets(self):
+        metadata = json.loads((ANTI / "symbols/symbols.json").read_text())
+        exports = {s.name: s for s in self.go.dynamic_symbols}
+        expected = {"agy_resume__" + row["id"] for row in enabled_hooks()}
+        self.assertEqual({name for name in exports if name.startswith("agy_resume__")}, expected)
+        bindings = {r.address: r for r in self.image.relocations if r.has_symbol}
+        for slot, row in enumerate(enabled_hooks()):
+            with self.subTest(hook=row["id"]):
+                name = "agy_resume__" + row["id"]
+                entry = exports["agy_go__" + row["id"]]
+                prologue = bytes.fromhex(metadata["prologues"][row["symbol"]])
+                self.assertEqual(entry.value, metadata["hooks"][row["symbol"]])
+                hook = entry.value + metadata["skips"][row["symbol"]]
+                patched = bytes(self.go.get_content_from_virtual_address(hook, len(prologue)))
+                self.assertEqual(patched[:2], b"\xff\x25")
+                self.assertEqual(patched[6], 0xec)  # SUB opcode survives; no marker byte
+                self.assertEqual(patched[6:], prologue[6:])
+                self.assertEqual(hook + 6 + struct.unpack_from("<i", patched, 2)[0],
+                                 exports["agy_tramp_slots"].value + slot * 8)
+                self.assertEqual(exports[name].value,
+                                 entry.value + metadata["skips"][row["symbol"]] + len(prologue))
+                self.assertEqual(exports[name].binding, lief.ELF.Symbol.BINDING.GLOBAL)
+                self.assertEqual(exports[name].type, lief.ELF.Symbol.TYPE.FUNC)
+                stub = self.stubs["agy_stub__" + row["id"]]
+                code = bytes(self.image.get_content_from_virtual_address(stub.value, stub.size))
+                original = 16 + struct.unpack_from("<i", code, 12)[0]
+                jump = original + len(prologue)
+                self.assertEqual(code[jump:jump + 2], b"\xff\x25")  # JMP *resume@GOTPCREL
+                got = stub.value + jump + 6 + struct.unpack_from("<i", code, jump + 2)[0]
+                self.assertEqual(bindings[got].symbol.name, name)
+                self.assertEqual(bindings[got].type, lief.ELF.Relocation.TYPE.X86_64_GLOB_DAT)
+                self.assertEqual(code[jump + 6], 0xc3)  # RETURN follows the one-instruction tail
+                hi = self.frame_hi(row)
+                self.assertEqual(hi + 2 + struct.unpack_from("b", code, hi + 1)[0], jump + 6)
 
     def test_nullable_handler_table(self):
         for binary in (self.obj, self.image):

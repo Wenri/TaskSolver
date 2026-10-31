@@ -5,11 +5,11 @@
 #   cmake -S antigravity -B antigravity/build -G Ninja
 #   cmake --build antigravity/build
 # Maintenance targets (see the pixi tasks shim-symbols / shim-agy-update):
-#   cmake --build antigravity/build --target symbols     # re-resolve symbols.json from vendor/libagy.so
-#   cmake --build antigravity/build --target agy-update   # fetch the latest agy + print new pins
+#   cmake --build antigravity/build --target symbols     # ensure libagy.so + metadata match cached raw agy
+#   cmake --build antigravity/build --target agy-update   # query the latest release + print new pins
 #
-# Configure-time "setup": fetch the pinned agy (sha512-verified) and convert it into
-# vendor/libagy.so (idempotent; guarded by existence), then the build compiles the three C++23 TUs.
+# Configure caches the pinned raw agy (sha512-verified). The build converts it, records metadata
+# before patching, and compiles the linked host.
 cmake_minimum_required(VERSION 3.19)
 project(antigravity CXX)
 
@@ -32,14 +32,11 @@ endif()
 
 # ---- pinned agy release (keep these three in sync; then `pixi run shim-symbols`) ---------------
 # agy self-updates in the background, so a local install's build-id DRIFTS; we vendor a PINNED,
-# sha512-verified release so the addresses in symbols.json stay valid. AGY_BIN is an escape hatch:
-# point it at a local agy build to vendor instead of downloading (must match symbols.json's build-id).
+# sha512-verified release and derive symbols.json from its converted layout. AGY_BIN is an escape
+# hatch: point it at a local raw agy build instead of downloading.
 #
-# Pinned from the GitHub releases (github.com/google-antigravity/antigravity-cli), NOT the GCS
-# auto-updater: the updater only ever serves "latest" and the bucket denies listing, so it cannot
-# fetch a specific older version — while the releases expose every version at a stable URL. The
-# assets are the same official artifacts: 1.0.16's asset sha512 is byte-identical to the GCS
-# tarball we ran for weeks, and the tarball member is still `antigravity` (extracted below).
+# The exact release URL and archive hash are pinned below; the updater manifest is consulted only
+# by the explicit agy-update target. The tarball member is `antigravity` (extracted below).
 #
 # Version history worth keeping: 1.1.6 (2026-07-24) added a client-side eligibility check that
 # hard-exited with "not currently available in your location" before any model call, which forced the
@@ -51,43 +48,33 @@ endif()
 # so mid-session on 2026-08-05, swapping 1.1.9 for 1.1.10 and breaking the build-id match), and
 # AGY_PROC_* setting AGY_CLI_DISABLE_AUTO_UPDATE=true no longer stops it. Symptom is the shim logging
 # "build-id not agy (running=… symbols=…); not hooking this process" and every hook silently not
-# firing. Re-fetch the pin (rm vendor/agy && pixi run build-shim) or `pixi run shim-symbols` to
-# re-resolve against whatever landed; `chmod a-w vendor/agy` blunts the in-place overwrite.
+# firing. Rebuild the host (rm vendor/agy && pixi run build-shim); never use vendor/agy as
+# conversion input. `chmod a-w vendor/agy` blunts the in-place overwrite.
 set(AGY_VERSION "1.4.11")
 set(AGY_URL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.11-5180209989812224/linux-x64/cli_linux_x64.tar.gz")
 set(AGY_SHA512 "2935601efa745ed6e314d32b415c71f44d9d455f0e6a2583372584be5a9074c28154cf81d5eec65b4416579453a3b3b05d3abe4d4f176754d5ef93a84af6cf28")
-set(AGY_BIN "" CACHE STRING "optional: local agy binary to vendor instead of downloading")
+set(AGY_BIN "" CACHE STRING "optional: local raw agy input (relative to the source directory)")
 # WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag, so a freshly-fetched agy must
 # be byte-patched to run there (length-preserving, so addresses and the build-id survive).
 # make_libagy.py detects WSL1 and patches as part of the conversion; -DAGY_WSL1=0/1 forces it.
+set(AGY_CONVERT_ENV)
 if(DEFINED AGY_WSL1)
-  set(ENV{AGY_WSL1} "${AGY_WSL1}")
+  list(APPEND AGY_CONVERT_ENV "AGY_WSL1=${AGY_WSL1}")
 endif()
 
 file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor")
 
-# ---- vendor libagy.so (pinned agy converted to shared library, sha512-verified) ---------------
-if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
-  message(STATUS "[setup] libagy.so present")
-elseif(AGY_BIN AND EXISTS "${AGY_BIN}")
-  file(COPY_FILE "${AGY_BIN}" "${CMAKE_BINARY_DIR}/antigravity.raw")
-  message(STATUS "[setup] vendoring libagy.so from ${AGY_BIN}")
-  execute_process(
-    COMMAND python3 -m symbols.make_libagy
-            "${CMAKE_BINARY_DIR}/antigravity.raw" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    RESULT_VARIABLE _mk_rc)
-  file(REMOVE "${CMAKE_BINARY_DIR}/antigravity.raw")
-  if(NOT _mk_rc EQUAL 0)
-    message(FATAL_ERROR "make_libagy.py failed")
+# ---- immutable raw input, keyed by the verified archive hash -------------------------------
+if(AGY_BIN)
+  get_filename_component(AGY_RAW "${AGY_BIN}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+  if(NOT EXISTS "${AGY_RAW}")
+    message(FATAL_ERROR "AGY_BIN does not exist: ${AGY_RAW}")
   endif()
+else()
+  set(AGY_RAW "${CMAKE_BINARY_DIR}/antigravity-${AGY_SHA512}.raw")
 endif()
-# NOTE: there is deliberately no "convert whatever vendor/agy happens to be" branch. vendor/agy is
-# the linked C++ host this build produces, and agy's background self-updater used to drop a raw
-# upstream binary there under the same name — converting that silently vendored an unpinned,
-# unverified agy. Delete vendor/libagy.so to re-fetch the pin instead.
 
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
+if(NOT EXISTS "${AGY_RAW}")
   message(STATUS "[setup] fetching pinned agy ${AGY_VERSION} (sha512-verified)")
   set(_agy_tgz "${CMAKE_BINARY_DIR}/agy.tar.gz")
   file(DOWNLOAD "${AGY_URL}" "${_agy_tgz}" EXPECTED_HASH "SHA512=${AGY_SHA512}" STATUS _agy_st SHOW_PROGRESS)
@@ -99,19 +86,31 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
   execute_process(COMMAND tar -xzf "${_agy_tgz}" -C "${CMAKE_BINARY_DIR}" antigravity RESULT_VARIABLE _agy_tar)
   file(REMOVE "${_agy_tgz}")
   if(NOT _agy_tar EQUAL 0)
+    file(REMOVE "${CMAKE_BINARY_DIR}/antigravity")
     message(FATAL_ERROR "agy extract failed")
   endif()
-  execute_process(
-    COMMAND python3 -m symbols.make_libagy
-            "${CMAKE_BINARY_DIR}/antigravity" "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    RESULT_VARIABLE _mk_rc)
-  file(REMOVE "${CMAKE_BINARY_DIR}/antigravity")
-  if(NOT _mk_rc EQUAL 0)
-    message(FATAL_ERROR "make_libagy.py failed")
-  endif()
-  message(STATUS "[setup] vendored libagy.so ${AGY_VERSION}")
+  file(RENAME "${CMAKE_BINARY_DIR}/antigravity" "${AGY_RAW}")
 endif()
+message(STATUS "[setup] raw agy input: ${AGY_RAW}")
+
+# One conversion owns the library and its metadata. Read the final ELF layout before patching;
+# every rebuild starts from unchanged raw input.
+add_custom_command(
+  OUTPUT "${CMAKE_SOURCE_DIR}/vendor/libagy.so"
+         "${CMAKE_SOURCE_DIR}/symbols/symbols.json"
+         "${CMAKE_SOURCE_DIR}/symbols/funcmap.tsv.gz"
+  COMMAND "${CMAKE_COMMAND}" -E env ${AGY_CONVERT_ENV}
+          python3 -m symbols.make_libagy "${AGY_RAW}" vendor/libagy.so symbols/symbols.json
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  DEPENDS "${AGY_RAW}"
+          "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
+          "${CMAKE_SOURCE_DIR}/symbols/build_symbols.py"
+          "${CMAKE_SOURCE_DIR}/symbols/agyelf.py"
+          "${CMAKE_SOURCE_DIR}/symbols/__init__.py"
+          "${CMAKE_SOURCE_DIR}/src/procdef.h"
+  COMMENT "convert raw agy + capture metadata before patching"
+  VERBATIM)
+add_custom_target(agy_library DEPENDS "${CMAKE_SOURCE_DIR}/vendor/libagy.so")
 
 # ---- Linux UAPI headers: glibc <limits.h> needs <linux/limits.h>. Reference the
 # conda kernel-headers sysroot in place via -idirafter; empty on a host that has /usr/include/linux.
@@ -132,7 +131,7 @@ message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 
 # NOTE: no python3-config probe here. No shim TU includes a Python header — CPython is embedded by
 # the SHARED bridge (wirecap/native), which does its own probe and carries the embed link flags.
-# ---- generate symbols_gen.h from the committed symbols.json + src/procdef.h -------------------
+# ---- generate symbols_gen.h from generated symbols.json + src/procdef.h ----------------------
 add_custom_command(
   OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
   COMMAND python3 -m symbols.gen_sources
@@ -158,7 +157,7 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wi
 # the generated src/symbols_gen.h selects the variant and supplies its literals (AGY_STUBS).
 add_executable(agy
   src/antigravity.cpp src/gomod.cpp src/gocall.cpp src/goframe.cpp)
-add_dependencies(agy gen_symbols)
+add_dependencies(agy gen_symbols agy_library)
 set_target_properties(agy PROPERTIES
   OUTPUT_NAME "agy"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor"
@@ -197,16 +196,12 @@ target_link_options(agy PRIVATE
   "-Wl,-rpath,\$ORIGIN:\$ORIGIN/../../../..:${CONDA_PREFIX}/lib")
 
 # ---- maintenance targets ----------------------------------------------------------------------
-add_custom_target(symbols
-  # Run from the source dir with RELATIVE paths so the recorded agy_path stays "vendor/libagy.so".
-  COMMAND python3 -m symbols.build_symbols vendor/libagy.so symbols/symbols.json
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-  COMMENT "re-resolve symbols.json from vendor/libagy.so (after an agy update)"
-  VERBATIM USES_TERMINAL)
+add_custom_target(symbols)
+add_dependencies(symbols agy_library)
 add_custom_target(agy-update
   COMMAND python3 -m symbols.make_libagy --update
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-  COMMENT "fetch the LATEST agy + print new pin values for this CMakeLists"
+  COMMENT "query the LATEST release manifest + print new pin values for this CMakeLists"
   VERBATIM USES_TERMINAL)
 
 # ---- clangd: expose the compile db at the source root (dangling until the first configure writes

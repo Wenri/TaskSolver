@@ -89,10 +89,9 @@ class BuildPyNative(build_py):
     def _build_antigravity_shim(self, root, env):
         if not os.path.isdir(os.path.join(root, "antigravity")):
             return  # antigravity/ absent (degenerate checkout with the source tree missing)
-        # CMake + Ninja (both pixi host-dependencies) run the whole chain: configure fetches the
-        # pinned agy (sha512-verified) and converts it into vendor/libagy.so, then the build
-        # generates symbols_gen.h from the committed symbols.json and links wirecap_bridge + the
-        # vendor/agy host.
+        # CMake + Ninja (both pixi host-dependencies) run the whole chain: configure caches the
+        # pinned raw agy (sha512-verified); the build converts it into vendor/libagy.so, captures
+        # metadata before patching, generates symbols_gen.h, and links wirecap_bridge + vendor/agy.
         # All idempotent; picks up conda's g++/python3-config from the env ($CXX / $CONDA_PREFIX).
         build = os.path.join("antigravity", "build")
         subprocess.run(["cmake", "-S", "antigravity", "-B", build, "-G", "Ninja", *cmake_python_args(env)],
