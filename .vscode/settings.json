@@ -1,7 +1,6 @@
 {
     "python-envs.defaultEnvManager": "renan-r-santos.pixi-code:pixi",
     "python-envs.defaultPackageManager": "renan-r-santos.pixi-code:pixi",
-
     // The antigravity shim is its own CMake project (antigravity/CMakeLists.txt). Build it via the
     // "pixi" CMake preset (antigravity/CMakePresets.json), which self-contains the conda toolchain +
     // CONDA_PREFIX — so CMake Tools needs NO kit. useCMakePresets=always keeps it on presets, never
@@ -9,7 +8,6 @@
     "cmake.sourceDirectory": "${workspaceFolder}/antigravity",
     "cmake.cmakePath": "${workspaceFolder}/.pixi/envs/default/bin/cmake",
     "cmake.useCMakePresets": "always",
-
     // Point the C/C++ tooling at the generated compile DB (antigravity/compile_commands.json is a
     // symlink into the build dir) so it resolves frida-gum.h + the Gum* types in antigravity/src.
     // clangd.arguments applies if the clangd extension is installed; C_Cpp.* if using Microsoft
