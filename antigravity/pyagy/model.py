@@ -180,6 +180,8 @@ class AgyModel(CLIBackendModel):
         if self.multi_turn and self.conversation_id is None:
             self.conversation_id = r.conversation_id
         res["conversation_id"] = self.conversation_id
+        res["system_messages"] = r.system_messages
+        res["system_message_errors"] = r.system_message_errors
         return res
 
     def session(self, **kwargs):
@@ -196,6 +198,8 @@ class AgyModel(CLIBackendModel):
         elif self.continue_latest:
             kw["continue_latest"] = True
         kw.update(kwargs)
+        if self.chat:
+            kw["enable_system_messages"] = False
         return Session(**kw)
 
 

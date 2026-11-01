@@ -10,19 +10,21 @@
         s.set_rewrite([RewriteRule("Paris", "Tokyo")])   # live, equal-length
         print(s.ask("And there?").text)
 
-Two modify mechanisms compose here (the package accepts *both*, per the design):
+Request and context controls compose here:
   * ``rewrite=`` — live equal-length SYNC substitution on the outbound request
     (framing-safe; additive changes are impossible — use tools/context for those).
   * ``tools=`` / ``context=`` — additive, via an injected MCP server (config.py).
+  * ``system_messages=`` — native harness notifications before the next model invocation.
 
 Every call installs the full working book union, so one run captures all surfaces at once:
   * ``.turns``/``.request``/``.usage``/``.model`` — the decoded wire model turn (and the
     ``rewrite=`` SYNC-substitution surface);
   * ``.app_text``/``.source`` — the answer decoded at agy's own consumer boundary;
   * ``.rpc_trace`` — the labeled backend-RPC timeline;
+  * ``.system_messages`` — observed native system-message steps, including agy's own;
   * ``stack=True`` → ``.stacks``/``.call_graph`` (symbolized Go call stacks);
   * ``arg_probe=True`` → ``.cgt_args`` (trampoline arg-graph reports).
-The accessors are lazy: reading one decodes its capture on demand (and returns
+Diagnostic accessors are lazy: reading one decodes its capture on demand (and returns
 empty/None when this run didn't capture that kind). Because the app-boundary answer is
 now always captured, ``.text``/``.source`` prefer it over the wire transcript.
 
@@ -32,6 +34,7 @@ Every call is instrumented (shim + capture on the pinned vendor/agy) via
 import json
 import os
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import cached_property
 from multiprocessing import get_context as _get_context
@@ -49,6 +52,8 @@ from wirecap.runtime.session import WireSession as _WireSession
 
 _UNIQ = [0]
 _ANSWER_KINDS = ("genai_turn", "app_response")   # decoded objects the default target streams home
+_EVENT_KINDS = ("system_message", "system_message_capture_error")
+_STREAM_KINDS = _ANSWER_KINDS + _EVENT_KINDS
 _SPAWN = _get_context("spawn")                    # context for the caller-owned result SimpleQueue
 
 
@@ -105,6 +110,10 @@ class AgyResponse:
     app_turns: list = field(default_factory=list)   # app-boundary answers (fh_update)
     funcmap: str = None                              # symbols/funcmap.tsv.gz for .stacks
     conversation_id: str = None                      # agy's native conversation id (resumable)
+    system_messages: list = field(default_factory=list)
+    # Each record is one observed serialization of a native system-message step.
+    # History can be serialized repeatedly; retain those observations and their metadata.
+    system_message_errors: list = field(default_factory=list)
 
     def __str__(self):
         return self.text
@@ -124,7 +133,11 @@ class AgyResponse:
         text = (max(app_texts, key=len) if app_texts else
                 wire["text"] if wire else _answer_text(transcript))
         meta.setdefault("instrumented", True)
-        return cls(text=text, transcript=transcript, turns=turns, app_turns=app_texts, **meta)
+        system_messages = [o for o in objs if o.get("kind") == "system_message"]
+        system_message_errors = [o for o in objs if o.get("kind") == "system_message_capture_error"]
+        return cls(text=text, transcript=transcript, turns=turns, app_turns=app_texts,
+                   system_messages=system_messages, system_message_errors=system_message_errors,
+                   **meta)
 
     @property
     def app_text(self):
@@ -284,35 +297,66 @@ def _prepare_rewrite(spec, workdir):
     return env, path
 
 
-def _load_capture(capture_path, since=0):
-    """Single pass over the capture from line ``since`` onward. Returns
-    ``(genai_turns, app_texts, new_cursor)`` — ``genai_turns`` are the wire-decoded
-    model turns (http1sse), ``app_texts`` are the app-boundary ``app_response`` answer
-    strings (updateWithStep). Both come from the same file so one cursor
-    covers a multi-turn session."""
-    turns, app_texts = [], []
+def _load_capture_objs(capture_path, since=0):
+    """Return decoded answer and side-event records after a line cursor.
+
+    Keep the original records, including system-message provenance and truncation
+    fields. A single cursor covers all kinds in a cumulative Session capture.
+    """
+    objs = []
     n = since
     if not capture_path or not os.path.exists(capture_path):
-        return turns, app_texts, since
+        return objs, since
     with open(capture_path) as f:
         for n, line in enumerate(f, 1):
             if n <= since:
                 continue
             line = line.strip()
-            if not line or ('"genai_turn"' not in line and '"app_response"' not in line):
+            if not line or not any('"' + kind + '"' in line for kind in _STREAM_KINDS):
                 continue
             try:
                 obj = json.loads(line)
             except ValueError:
                 continue
-            kind = obj.get("kind")
-            if kind == "genai_turn":
-                turns.append(obj)
-            elif kind == "app_response":
-                t = obj.get("text", "")
-                if t:
-                    app_texts.append(t)
-    return turns, app_texts, n
+            if isinstance(obj, dict) and obj.get("kind") in _STREAM_KINDS:
+                objs.append(obj)
+    return objs, n
+
+
+def _load_capture(capture_path, since=0):
+    """Historical ``(genai_turns, app_texts, cursor)`` capture reader."""
+    objs, cursor = _load_capture_objs(capture_path, since)
+    return ([o for o in objs if o["kind"] == "genai_turn"],
+            [o["text"] for o in objs if o["kind"] == "app_response" and o.get("text")],
+            cursor)
+
+
+def _capture_or_stream(objs, capture_path):
+    """An exiting CLI's capture is authoritative for each recorded kind.
+
+    Preserve streamed kinds absent from the capture: capture can be disabled, or
+    a partial recording may contain a system notification but no model answer.
+    """
+    recorded, _ = _load_capture_objs(capture_path)
+    kinds = {o["kind"] for o in recorded}
+    return recorded + [o for o in objs if o.get("kind") not in kinds]
+
+
+def _message_texts(messages):
+    """Validate once before parallel launches; a string is one message, not characters."""
+    if messages is None:
+        return ()
+    if isinstance(messages, str):
+        messages = (messages,)
+    messages = tuple(messages)
+    if any(not isinstance(text, str) or not text.strip() for text in messages):
+        raise ValueError("system_messages must contain nonempty strings")
+    return messages
+
+
+def _message_channel(workspace, conversation_id=None):
+    from .system_messages import SystemMessageChannel
+    return SystemMessageChannel(workspace, conversation_id=conversation_id)
 
 
 def _shim_overlays(rewrite, workspace, stack, arg_probe, extra_env):
@@ -392,7 +436,7 @@ def _close_channel(q):
     _wire_session.close_channel(q)
 
 
-def _collect(proc, q, timeout=300.0, kinds=_ANSWER_KINDS):
+def _collect(proc, q, timeout=300.0, kinds=_STREAM_KINDS):
     """One-shot: drain the PTY and collect the decoded objects (of ``kinds``) the target streams home
     over ``q`` until agy exits / the target signals done (``_wire_done``/``_wire_exc``) / ``timeout``.
     Returns the dicts in arrival order (possibly empty; use ``proc.transcript`` as the fallback)."""
@@ -422,11 +466,12 @@ def _ask_turn(proc, q, prompt=None, idle=6.0, pty_idle=15.0, timeout=180.0, read
     Compat shim over :func:`wirecap.runtime.session.ask_turn`, keeping this module's historical
     defaults and objs-only return (the hoisted version also reports *why* the turn ended)."""
     got, _reason = _wire_session.ask_turn(proc, q, prompt, kinds=kinds, idle=idle,
-                                          pty_idle=pty_idle, timeout=timeout, ready=ready)
+                                          pty_idle=pty_idle, timeout=timeout, ready=ready,
+                                          event_kinds=_EVENT_KINDS)
     return got
 
 
-def _collect_many(procs, queues, timeout=300.0, kinds=_ANSWER_KINDS):
+def _collect_many(procs, queues, timeout=300.0, kinds=_STREAM_KINDS):
     """One-shot collect from several already-``start()``ed AgyProcesses concurrently, in one event
     loop. ``procs`` and ``queues`` are parallel. A single ``_pty.service_many`` watches every live
     proc's PTY + queue reader together, so all PTYs are drained while each proc's ``kinds`` objects
@@ -465,7 +510,8 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, mcp_ser
         rewrite=None,
         capture=True, timeout=300, skip_permissions=False, agy_bin=None, extra_env=None,
         stack=False, arg_probe=False, funcmap=None, conversation_id=None,
-        continue_latest=False, data_dir=None, trust=True, extra_flags=None):
+        continue_latest=False, data_dir=None, trust=True, extra_flags=None,
+        system_messages=()):
     """Run one ``agy --print`` turn and return a decoded :class:`AgyResponse`.
 
     The shim installs the full working book union, so one turn populates the wire
@@ -488,7 +534,14 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, mcp_ser
     instead of the global ``~/.gemini`` — login is preserved by seeding credentials (see
     :func:`pyagy.conversations.prepare_scoped_home`). ``trust`` (default on) pre-registers the
     workspace in agy's ``trustedWorkspaces`` so interactive mode never blocks on the
-    folder-trust prompt."""
+    folder-trust prompt.
+
+    ``system_messages`` queues strings as native harness system-message steps before
+    the next model invocation. These retain system attribution; they are not a
+    replacement for the provider's system prompt. Observations, including messages
+    generated by agy itself, appear in ``response.system_messages``.
+    """
+    messages = _message_texts(system_messages)
     workspace = ensure_git_workspace(workspace)
     cap_path = None
     if capture:
@@ -501,10 +554,16 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, mcp_ser
     cleanup = _inject_config(tools, context, mcp_servers, data_dir)
     q = _new_channel()                              # caller owns the result queue (stock-mp style)
     p = None
+    channel = None
     try:
+        if messages:
+            channel = _message_channel(workspace, conversation_id)
+            for text in messages:
+                channel.send(text)
+            overlays.update(channel.start())
         p = AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
                        agy_bin=agy_bin, workdir=workspace, capture=cap_path,
-                       args=(q, _ANSWER_KINDS, timeout + 60),  # max_wait > timeout → death-based done
+                       args=(q, _STREAM_KINDS, timeout + 60),  # max_wait > timeout → death-based done
                        conversation_id=conversation_id, continue_latest=continue_latest,
                        data_dir=data_dir, trust=trust, extra_env=overlays,
                        extra_flags=extra_flags)
@@ -517,14 +576,21 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, mcp_ser
         # close() in the finally so a KeyboardInterrupt / mid-collect raise never leaves agy running
         # (it is idempotent). It also SIGTERMs + blocking-reaps, so exit_status is only reliably set
         # afterwards — on the _collect timeout path nothing had reaped yet.
-        if p is not None:
-            p.close()
-        _close_channel(q)
-        cleanup()
+        try:
+            if p is not None:
+                p.close()
+        finally:
+            try:
+                _close_channel(q)
+                cleanup()
+            finally:
+                if channel is not None:
+                    channel.close()
     exit_status = p.exit_status if p is not None else None
 
     return AgyResponse.from_objs(
-        objs, transcript, exit_status=exit_status, capture_path=cap_path,
+        _capture_or_stream(objs, cap_path), transcript,
+        exit_status=exit_status, capture_path=cap_path,
         workspace=workspace, funcmap=funcmap, conversation_id=cid)
 
 
@@ -532,20 +598,23 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
              mcp_servers=None, rewrite=None,
              capture=True, timeout=300, skip_permissions=False, agy_bin=None, extra_env=None,
              stack=False, arg_probe=False, funcmap=None, conversation_id=None,
-             continue_latest=False, data_dir=None, trust=True, extra_flags=None):
+             continue_latest=False, data_dir=None, trust=True, extra_flags=None,
+             system_messages=()):
     """Run ``n`` independent ``agy --print`` turns of the same ``prompt`` concurrently and
     return a list of ``n`` decoded :class:`AgyResponse` (parallel sampling — e.g. ``AgyModel``
     with ``n_choices>1``). Same kwargs as :func:`ask`; all share one workspace + tools/context,
     each gets its own capture file. No threads: every process is ``start()``ed (a fast, serial,
     non-blocking fork), then the caller-side ``_collect_many`` services them all in one event loop
     (draining every PTY + result queue together). ``n <= 1`` delegates to :func:`ask`."""
+    messages = _message_texts(system_messages)
     if n <= 1:
         return [ask(prompt, model=model, workspace=workspace, tools=tools, context=context,
-                    rewrite=rewrite, capture=capture, timeout=timeout,
+                    mcp_servers=mcp_servers, rewrite=rewrite, capture=capture, timeout=timeout,
                     skip_permissions=skip_permissions, agy_bin=agy_bin, extra_env=extra_env,
                     stack=stack, arg_probe=arg_probe, funcmap=funcmap,
                     conversation_id=conversation_id, continue_latest=continue_latest,
-                    data_dir=data_dir, trust=trust, extra_flags=extra_flags)]
+                    data_dir=data_dir, trust=trust, extra_flags=extra_flags,
+                    system_messages=messages)]
     workspace = ensure_git_workspace(workspace)
     overlays, _ = _shim_overlays(rewrite, workspace, stack, arg_probe, extra_env)
     overlays["AGY_PROC_LOG"] = os.path.join(workspace, "pyagy-shim.log")
@@ -557,31 +626,47 @@ def ask_many(prompt, n, *, model=None, workspace=None, tools=None, context=None,
     cleanup = _inject_config(tools, context, mcp_servers, data_dir)  # one shared MCP config for all n
     queues = [_new_channel() for _ in range(n)]   # one caller-owned result queue per proc
     procs = []
+    channels = []
     try:
-        procs = [AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
+        for i in range(n):
+            process_env = dict(overlays)
+            if messages:
+                channel = _message_channel(workspace, conversation_id)
+                channels.append(channel)
+                for text in messages:
+                    channel.send(text)
+                process_env.update(channel.start())
+            procs.append(AgyProcess(prompt=prompt, model=model, skip_permissions=skip_permissions,
                             agy_bin=agy_bin, workdir=workspace, capture=cap_paths[i],
-                            args=(queues[i], _ANSWER_KINDS, timeout + 60),  # > timeout → death-based
+                            args=(queues[i], _STREAM_KINDS, timeout + 60),  # > timeout → death-based
                             conversation_id=conversation_id, continue_latest=continue_latest,
-                            data_dir=data_dir, trust=trust, extra_env=overlays,
-                            extra_flags=extra_flags)
-                 for i in range(n)]
+                            data_dir=data_dir, trust=trust, extra_env=process_env,
+                            extra_flags=extra_flags))
         for p, q in zip(procs, queues):
             p.start()                            # non-blocking fork; serial → no fork-in-thread
             q._writer.close()                    # parent reads only; reader EOFs on that agy's death
         objs_list = _collect_many(procs, queues, timeout=timeout)   # one event loop services all n
+        # Flush the final captured events and settle exit status before building responses.
+        for p in procs:
+            p.close()
         responses = [AgyResponse.from_objs(
-                         objs, p.transcript, exit_status=p.exit_status, capture_path=cap,
+                         _capture_or_stream(objs, cap), p.transcript,
+                         exit_status=p.exit_status, capture_path=cap,
                          workspace=workspace, funcmap=funcmap, conversation_id=p.conversation_id)
                      for p, objs, cap in zip(procs, objs_list, cap_paths)]
         return responses
     finally:
         # close in the finally (idempotent) so a raise mid-start/mid-collect never leaves any agy
         # running — the old placement also skipped every already-started proc if start() raised.
-        for p in procs:
-            p.close()
-        for q in queues:
-            _close_channel(q)
-        cleanup()
+        # ExitStack attempts every cleanup even if a process or edited hook config raises.
+        with ExitStack() as closing:
+            for channel in channels:
+                closing.callback(channel.close)
+            closing.callback(cleanup)
+            for q in queues:
+                closing.callback(_close_channel, q)
+            for p in procs:
+                closing.callback(p.close)
 
 
 # --- multi-turn --------------------------------------------------------------
@@ -596,12 +681,19 @@ class Session(_WireSession):
     turn, :attr:`conversation_id` holds this session's id — persist it to resume later,
     and read :meth:`history` for the stored transcript.
 
-    ``set_rewrite(spec)`` updates the live rewrite rules (picked up in-agy on mtime). Use
-    as a context manager to guarantee cleanup. Lifecycle (lazy start, dead-process guard,
+    ``set_rewrite(spec)`` updates the live rewrite rules (picked up in-agy on mtime).
+    ``send_system_message(text, conversation_id=...)`` queues a native system notification
+    for the main agent (default) or a specific subagent's next model invocation. Injection
+    can be disabled with ``enable_system_messages=False``; capture remains enabled.
+    ``system_messages=[...]`` seeds initial notifications and ``system_message_ids`` contains
+    their queue IDs. ``system_message_status(id)`` reports emission separately from capture.
+    Use the Session as a context manager to guarantee cleanup. Lifecycle (lazy start,
+    dead-process guard,
     channel plumbing, turn loop) lives on :class:`wirecap.runtime.session.WireSession`;
     this class supplies agy's process construction and response shape."""
 
     _KINDS = _ANSWER_KINDS
+    _EVENT_KINDS = _EVENT_KINDS
     _IDLE = 25.0
     _PTY_IDLE = 15.0
     _ID_KW = "conversation_id"
@@ -611,7 +703,11 @@ class Session(_WireSession):
                  rewrite=None, capture=True, timeout=180, idle=25.0, agy_bin=None,
                  extra_env=None, stack=False, arg_probe=False, funcmap=None,
                  conversation_id=None, continue_latest=False, skip_permissions=False,
-                 data_dir=None, trust=True, extra_flags=None, capture_tail=False):
+                 data_dir=None, trust=True, extra_flags=None, capture_tail=False,
+                 system_messages=(), enable_system_messages=True):
+        messages = _message_texts(system_messages)
+        if messages and not enable_system_messages:
+            raise ValueError("system-message injection is disabled for this Session")
         self.workspace = ensure_git_workspace(workspace)
         self.agy_bin = agy_bin
         self.model = model
@@ -638,6 +734,15 @@ class Session(_WireSession):
         self.rules_path = None
         self._cap_cursor = 0                         # capture_tail line cursor (one per session)
         self._cleanup = lambda: None
+        self._closed = False
+        self._messages = (_message_channel(self.workspace, conversation_id)
+                          if enable_system_messages else None)
+        try:
+            self.system_message_ids = [self._messages.send(text) for text in messages]
+        except BaseException:
+            if self._messages is not None:
+                self._messages.close()
+            raise
 
     def _pre_start(self):
         if self.capture:
@@ -648,12 +753,26 @@ class Session(_WireSession):
         self._overlays["AGY_PROC_LOG"] = os.path.join(self.workspace, "pyagy-session.log")
         self._cleanup = _inject_config(self._tools, self._context,
                                        self._mcp_servers, self._data_dir)
+        if self._messages is not None:
+            self._overlays.update(self._messages.start())
+
+    def _start(self, prompt):
+        try:
+            super()._start(prompt)
+        except BaseException:
+            self.close()
+            raise
+
+    def ask(self, prompt):
+        if self._closed:
+            raise RuntimeError("this Session is closed; open a new Session to continue")
+        return super().ask(prompt)
 
     def _make_process(self, prompt):
         return AgyProcess(persistent=True, prompt=prompt, model=self.model,
                           skip_permissions=self.skip_permissions, agy_bin=self.agy_bin,
                           workdir=self.workspace, capture=self.cap_path,
-                          args=(self._q, _ANSWER_KINDS, None),  # max_wait=None: base asserts
+                          args=(self._q, _STREAM_KINDS, None),  # max_wait=None: base asserts
                           conversation_id=self._id,
                           continue_latest=self.continue_latest,
                           data_dir=self._data_dir, trust=self._trust,
@@ -663,7 +782,10 @@ class Session(_WireSession):
         self._home = self._proc.home                 # scoped store home (for .history())
 
     def _latch_id(self):
-        return self._proc.conversation_id
+        cid = self._proc.conversation_id
+        if cid and self._messages is not None:
+            self._messages.bind_main(cid)
+        return cid
 
     def _build_response(self, objs, reason):
         return AgyResponse.from_objs(
@@ -680,12 +802,37 @@ class Session(_WireSession):
     def _load_capture_tail(self):
         """This turn's records from the cumulative session capture: the lines appended
         since the previous turn's cursor, re-shaped into stream-object dicts."""
-        turns, app_texts, self._cap_cursor = _load_capture(self.cap_path,
-                                                           since=self._cap_cursor)
-        return list(turns) + [{"kind": "app_response", "text": t} for t in app_texts]
+        objs, self._cap_cursor = _load_capture_objs(self.cap_path, since=self._cap_cursor)
+        return objs
 
     def _teardown(self):
-        self._cleanup()
+        self._closed = True
+        try:
+            self._cleanup()
+        finally:
+            if self._messages is not None:
+                self._messages.close()
+
+    def send_system_message(self, text, *, conversation_id=None):
+        """Queue a native system notification for the next model invocation.
+
+        The default recipient is this Session's main agent. Pass a subagent's
+        conversation ID to target it. May be called before the first ``ask`` or
+        from another thread while ``ask`` is running. This does not wake an idle
+        agent; the message waits until its next native PreInvocation hook.
+        Returns an ID for :meth:`system_message_status`.
+        """
+        if self._closed:
+            raise RuntimeError("cannot queue a system message on a closed Session")
+        if self._messages is None:
+            raise RuntimeError("system-message injection is disabled for this Session")
+        return self._messages.send(text, conversation_id=conversation_id)
+
+    def system_message_status(self, message_id):
+        """Queue status; ``emitted`` means hook output, not confirmed model delivery."""
+        if self._messages is None:
+            raise RuntimeError("system-message injection is disabled for this Session")
+        return self._messages.status(message_id)
 
     def set_rewrite(self, spec):
         """Replace the live rewrite spec. For a RewriteRule list this rewrites the

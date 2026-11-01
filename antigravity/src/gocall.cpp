@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <sys/uio.h>
 #include <array>
+#include <memory>
+#include <new>
 #include <string_view>
 
 #define GHLOG(...) do { std::fprintf(stderr, "[antigravity/gobook] " __VA_ARGS__); \
@@ -28,6 +30,8 @@ static agy_book_fn agy_handler_for(std::string_view id) {
     if (id == "http_rt")         return &agy_on_http_rt;
     if (id == "exit")            return &agy_on_exit;
     if (id == "resp_chunk")      return &agy_on_resp_chunk;
+    if (id == "system_message" || id == "system_message_legacy")
+        return &agy_on_system_message;
     if (id == "readlink_filter") return &agy_on_readlink_filter;
     return &agy_on_generic;
 }
@@ -300,6 +304,55 @@ void agy_on_resp_chunk(agy_block *b)
 {
     cgt_common(b);
     cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rax, b->regs.rbx, false);
+}
+
+void agy_on_system_message(agy_block *b)
+{
+    cgt_common(b);
+    /* Pinned Go layouts, checked against GetType/GetSystemMessage and the two serializers:
+     * DefaultSerializer's value receiver is stack-passed, so Step is RAX; the old converter
+     * takes receiver, context (two words), Step, making Step RDI. Step+0x60 is the oneof
+     * wrapper, whose first word is *CortexStepSystemMessage. No Go pointers escape this call. */
+    const uint64_t step = b->book == (uint32_t)bk("system_message") ? b->regs.rax : b->regs.rdi;
+    uint32_t type = 0;
+    uint64_t wrapper = 0, message = 0;
+    if (step < 0x10000 || step > UINT64_MAX - 0x68
+            || agy_safe_read(step + 8, &type, sizeof(type)) != (long)sizeof(type) || type != 101
+            || agy_safe_read(step + 0x60, &wrapper, sizeof(wrapper)) != (long)sizeof(wrapper)
+            || agy_safe_read(wrapper, &message, sizeof(message)) != (long)sizeof(message)
+            || message < 0x10000 || message > UINT64_MAX - 0x30)
+        return;
+    uint64_t fields[6];
+    if (agy_safe_read(message, fields, sizeof(fields)) != (long)sizeof(fields)) return;
+    const uint64_t text_ptr = fields[1], text_len = fields[2];
+    const uint64_t event_ptr = fields[4], event_len = fields[5];
+    if (text_len > INT64_MAX || event_len > INT64_MAX) return;
+
+    /* One event holds both strings, so concurrent Go producers cannot interleave chunks.
+     * Stay within the bridge's default 1 MiB copy limit. Original lengths make truncation
+     * explicit; the Python decoder also notices a smaller WIRE_MAXCOPY cutting this packet. */
+    struct header {
+        char magic[4];
+        uint32_t version;
+        uint64_t text_len, event_len;
+        uint32_t text_copied, event_copied;
+    } h = {{'A', 'G', 'S', 'M'}, 1, text_len, event_len, 0, 0};
+    static_assert(sizeof(header) == 32);
+    constexpr size_t limit = 1u << 20;
+    h.event_copied = (uint32_t)std::min<uint64_t>(event_len, 4096);
+    h.text_copied = (uint32_t)std::min<uint64_t>(text_len, limit - sizeof(h) - h.event_copied);
+    const size_t size = sizeof(h) + h.event_copied + h.text_copied;
+    std::unique_ptr<uint8_t[]> packet(new (std::nothrow) uint8_t[size]);
+    if (!packet) return;
+    std::memcpy(packet.get(), &h, sizeof(h));
+    if ((h.event_copied && agy_safe_read(event_ptr, packet.get() + sizeof(h), h.event_copied)
+                           != h.event_copied)
+            || (h.text_copied && agy_safe_read(text_ptr, packet.get() + sizeof(h) + h.event_copied,
+                                             h.text_copied) != h.text_copied))
+        return;
+    wire_event_t ev = {.kind = book_id(b), .stream_id = step, .data = packet.get(),
+                       .len = size, .mode = WIRE_ASYNC};
+    wire_emit(&ev);
 }
 
 void agy_on_readlink_filter(agy_block *b)

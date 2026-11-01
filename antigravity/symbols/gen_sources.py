@@ -88,7 +88,8 @@ BOOKS = [
 BOOKS_FOOTER = ''']
 
 #: kinds the Python layer DERIVES rather than receiving straight from a book.
-DERIVED_KINDS = ("genai_turn", "h2msg", "conversation_id", "callstack", "app_response")
+DERIVED_KINDS = ("genai_turn", "h2msg", "conversation_id", "callstack", "app_response",
+                 "system_message_capture_error")
 
 
 def by_mech(mech):

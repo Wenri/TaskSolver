@@ -54,6 +54,10 @@ inline constexpr agy_book BOOKS[] = {
 /* App boundary: the user message in, the streamed reply out. */
 { "send_user_msg", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cli/backend/backend.(*ServerBackend).SendUserMessage") },
 { "stream_send", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send") },
+/* System steps consumed by either prompt serializer, including agy's own notifications.
+ * Entry args carry the Step; repeated history serialization remains observable. */
+{ "system_message", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/oneharness/internal/core/serializers/serializers.DefaultSerializer.systemMessageToMessage") },
+{ "system_message_legacy", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cortex/chatconverters/chatconverters.(*SystemMessageStringConverter).ToOutputString") },
 /* Off: smoke already patches os.Getenv. */
 { "cgt_getenv", WIRE_ASYNC, 0, AGY_OFF("os.Getenv") },
 /* Off: return-value getters that never fire on current agy. */

@@ -247,6 +247,20 @@ construction and response shape. Build session processes with `max_wait=None` (a
 `_start`), or a deadline kills the bridge mid-session. `pycodex.SDKSession` and `pyclaude.Session`
 have their own SDK lifecycles and never use `WireSession`.
 
+**agy system notifications.** `AgyResponse.system_messages` captures native system-step
+serialization, including agy's own notifications. `Session.send_system_message()` queues a
+`HookSystemMessage` for the target conversation's next `PreInvocation`; it does not wake idle
+agents. Delivery uses a scoped command hook in `.agents/hooks.json`, preserving unrelated
+configuration. Queue emission and observed serialization are distinct. The `system_message`
+and `system_message_legacy` BOOKS entries cover both serializers; repeated history observations
+are retained, truncation is explicit, and no conversation id is inferred from a Go pointer.
+Malformed packets surface in `AgyResponse.system_message_errors`, including streamed capture.
+These notifications have harness attribution, not provider system-prompt priority. Side events
+must not start/reset the session's model-answer idle timer. Chat-mode sessions disable injection.
+Offline checks: `test_system_messages.py`, `test_agy_system_message_queue.py`, and
+`test_agy_system_message_api.py`. The authenticated `test_agy_system_messages_live.py` checks
+native observations and outgoing requests; model compliance is not its delivery assertion.
+
 Run tests with `pixi run python test_scripts/<file>.py`; live agy/Codex examples need authentication.
 
 ## Adding a new backend

@@ -45,6 +45,10 @@ BOOKS = [
      "mode": 'async', "kind": 'send_user_msg', "mech": 'fullcgo', "retcap": 0},
     {"id": 'stream_send', "symbol": 'google3/third_party/jetski/cli/backend/backend.(*callbackStreamer).Send',
      "mode": 'async', "kind": 'stream_send', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'system_message', "symbol": 'google3/third_party/oneharness/internal/core/serializers/serializers.DefaultSerializer.systemMessageToMessage',
+     "mode": 'async', "kind": 'system_message', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'system_message_legacy', "symbol": 'google3/third_party/jetski/cortex/chatconverters/chatconverters.(*SystemMessageStringConverter).ToOutputString',
+     "mode": 'async', "kind": 'system_message_legacy', "mech": 'fullcgo', "retcap": 0},
     {"id": 'cgt_getenv', "symbol": 'os.Getenv',
      "mode": 'async', "kind": 'cgt_getenv', "mech": 'off', "retcap": 0},
     {"id": 'delta_ccpa', "symbol": 'google3/third_party/jetski/api_server_pb/api_server_go_proto.(*GetChatMessageResponse).GetDeltaText',
@@ -98,7 +102,8 @@ BOOKS = [
 ]
 
 #: kinds the Python layer DERIVES rather than receiving straight from a book.
-DERIVED_KINDS = ("genai_turn", "h2msg", "conversation_id", "callstack", "app_response")
+DERIVED_KINDS = ("genai_turn", "h2msg", "conversation_id", "callstack", "app_response",
+                 "system_message_capture_error")
 
 
 def by_mech(mech):

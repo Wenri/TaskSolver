@@ -17,6 +17,7 @@ void agy_on_file_open(agy_block *b);
 void agy_on_http_rt(agy_block *b);
 void agy_on_exit(agy_block *b);
 void agy_on_resp_chunk(agy_block *b);
+void agy_on_system_message(agy_block *b);
 void agy_on_readlink_filter(agy_block *b);
 
 /* Returns -1 instead of faulting on a bad address. */

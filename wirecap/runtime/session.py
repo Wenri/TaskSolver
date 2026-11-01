@@ -43,7 +43,7 @@ def close_channel(q):
 
 
 def ask_turn(proc, q, prompt=None, *, kinds, idle, pty_idle, timeout,
-             ready=2.5, pty_quiet=0.0, pending=None):
+             ready=2.5, pty_quiet=0.0, pending=None, event_kinds=()):
     """One turn against a live interactive CLI: submit ``prompt``, then drain
     decoded objects (of ``kinds``) off ``q`` until the turn settles. Returns
     ``(objs, reason)``.
@@ -75,6 +75,8 @@ def ask_turn(proc, q, prompt=None, *, kinds, idle, pty_idle, timeout,
       it returns True the ``idle`` break is suppressed entirely (``timeout``
       still applies — a hung tool must surface as ``"deadline"``, not ride
       forever).
+    * ``event_kinds``: side events returned with the turn, such as system
+      notifications. They neither start nor reset the answer-settle timer.
 
     ``ready`` waits for the TUI to settle (screen drawn / prior turn done)
     before typing, so the prompt is not swallowed. ``prompt=None`` submits the
@@ -103,12 +105,17 @@ def ask_turn(proc, q, prompt=None, *, kinds, idle, pty_idle, timeout,
                 if isinstance(o, tuple) and o and o[0] in (_DONE, _EXC):
                     proc.reap()          # the in-CLI target finished/raised: the stream is
                     return got, "exit"   # over — end the turn, don't wait out pty_idle
-                if isinstance(o, dict) and o.get("kind") in kinds:
-                    got.append(o)
-                    last = time.time()
+                if isinstance(o, dict):
+                    kind = o.get("kind")
+                    if kind in kinds:
+                        got.append(o)
+                        last = time.time()
+                    elif kind in event_kinds:
+                        got.append(o)
         now = time.time()
         if last is not None and now - last >= idle:
-            if pending is not None and pending(got):
+            answers = [o for o in got if o.get("kind") in kinds]
+            if pending is not None and pending(answers):
                 continue                 # decoded turn still owes tool results — not the end
             if now - proc.last_output < pty_quiet:
                 continue                 # the CLI is still painting — not the end either
@@ -166,6 +173,7 @@ class WireSession:
     """
 
     _KINDS: tuple = ()
+    _EVENT_KINDS: tuple = ()
     _IDLE = 8.0
     _PTY_IDLE = 25.0
     _READY = 2.5
@@ -259,7 +267,8 @@ class WireSession:
         return ask_turn(self._proc, self._q, prompt, kinds=self._KINDS,
                         idle=self.idle, pty_idle=self._PTY_IDLE,
                         timeout=self.timeout, ready=self._READY,
-                        pty_quiet=self._PTY_QUIET, pending=self._pending)
+                        pty_quiet=self._PTY_QUIET, pending=self._pending,
+                        event_kinds=self._EVENT_KINDS)
 
     @property
     def session_id(self):

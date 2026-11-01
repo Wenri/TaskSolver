@@ -35,6 +35,7 @@ from wirecap.decode.record import Recorder
 from wirecap.decode import h2reassemble as h2
 from wirecap.decode.capture import BaseCorrelator
 from .http1sse import GenaiTurnBuilder
+from .system_messages import decode_system_message
 
 def _knob(name, default=None):
     """Read a SHARED decode-layer knob: WIRE_<name>, falling back to the legacy AGY_PROC_<name>.
@@ -199,6 +200,18 @@ def _on_model_text(kind):
     return handler
 
 
+def _on_system_message(source):
+    def handler(step_address, data):
+        try:
+            event = decode_system_message(source, step_address, data)
+        except ValueError as exc:
+            event = {"kind": "system_message_capture_error", "capture_source": source,
+                     "step_address": step_address, "error": str(exc), "captured_bytes": len(data)}
+        _rec.event(event)
+        return None
+    return handler
+
+
 _ROUTER = {
     "tls_write": on_tls_write,
     "tls_read": on_tls_read,
@@ -220,6 +233,8 @@ _ROUTER = {
     # (updateWithStep, rsi+0x8) — the app-boundary RESPONSE. Stored full (not preview-
     # truncated) so the client can prefer it over the wire-reassembled genai_turn.text.
     "app_response": _on_model_text("app_response"),
+    "system_message": _on_system_message("system_message"),
+    "system_message_legacy": _on_system_message("system_message_legacy"),
 }
 
 

@@ -140,13 +140,15 @@ the PTY transcript, and reports which it used in `.source`.
 |---|---|---|
 | wire *(the `rewrite=` surface)* | egress `tls_write` + `resp_chunk` | `.turns` / `.request` / `.events` / `.usage` / `.model` |
 | app boundary | framework consumer (`updateWithStep`) | `.app_text` (+ `.source=="app"`) |
+| system notifications | native system-step serializers | `.system_messages` / `.system_message_errors` |
 | rpc trace | `CodeAssistClient.*` backend RPCs | `.rpc_trace` |
 | overlay `stack=True` | Go call-stack unwind at each fire | `.stacks` (rendered) / `.call_graph` (`Counter`) |
 | overlay `arg_probe=True` | arg-graph walk at entry | `.cgt_args` (list of reports) |
 
-- **Two composable ways to modify:** `rewrite=` (a `RewriteRule` list, a `"module:func"` string or
+- **Composable controls:** `rewrite=` (a `RewriteRule` list, a `"module:func"` string or
   a callable) makes `tls_write` a live SYNC egress rewrite, equal-length only (a length-changing
-  rule is skipped and recorded as `rewrite_skip`); `tools=` / `context=` add an MCP server.
+  rule is skipped and recorded as `rewrite_skip`); `tools=` / `context=` add an MCP server;
+  `system_messages=` queues native harness notifications before the next model invocation.
 - **Introspection:** `from pyagy import BOOKS, by_mech, enabled_books, by_kind, sync_capable,
   DERIVED_KINDS`, the machine-readable mirror of `src/procdef.h`.
 - **Env knobs** (the kwargs set them; diagnostics are in the table above):
@@ -165,6 +167,76 @@ the PTY transcript, and reports which it used in `.source`.
 - **Tests:** offline `test_http1sse.py`, `test_config.py`, `test_client.py`,
   `test_appresponse.py`, `test_rpctrace.py`, `test_symbolize.py`; live (skipping cleanly)
   `test_rewrite.py`, `test_trampoline.py`, `test_agyprocess.py`, `test_agy_session.py`.
+
+## System notifications
+
+`AgyResponse.system_messages` contains the native system-message steps observed while agy
+assembles model prompts. This includes agy's own notifications and interagent messages as well
+as injected hook messages. Each record includes `text`, `event_type`, `capture_source`,
+`step_address`, and explicit truncation information. The serializers can revisit history, so
+repeated observations are retained. An address identifies a Go object only within that process;
+the capture does not infer a conversation id from it.
+Malformed capture packets appear in `AgyResponse.system_message_errors`, including when
+`capture=False` streams observations without a parent-side capture-file reader.
+`AgyModel` also returns both lists in TaskSolver's response metadata under the same keys.
+
+Capture works independently of sending. To observe agy's notifications without registering
+an injection hook:
+
+```python
+from pyagy import Session
+
+with Session(workspace="/path/to/repo", enable_system_messages=False) as session:
+    response = session.ask("Review the current changes.")
+    for message in response.system_messages:
+        print(message["event_type"], message["text"])
+    print(response.system_message_errors)
+```
+
+Send a notification with `Session.send_system_message(text, conversation_id=...)`. Omitting the
+id targets the session's main agent; an explicit id targets that conversation, including a
+subagent. Messages are queued for the target's next `PreInvocation` hook. Queueing does not
+wake an idle agent or interrupt a model request already in flight.
+
+```python
+with Session(workspace="/path/to/repo") as session:
+    message_id = session.send_system_message("The test run has finished successfully.")
+    response = session.ask("Review the latest test result.")
+    print(session.system_message_status(message_id))
+    for message in response.system_messages:
+        print(message["event_type"], message["text"])
+```
+
+Pass `conversation_id=child_id` to `send_system_message` to target an existing subagent.
+Initial notifications can also be supplied to `Session(system_messages=["..."])`, with their
+queue ids available in `session.system_message_ids`. For a one-shot call, use
+`ask(prompt, system_messages=["..."])` (or `ask_many` for independent runs).
+
+Delivery uses the CLI's
+[native command-hook protocol](https://antigravity.google/docs/hooks?tab=cli): a temporary,
+session-scoped entry in `<workspace>/.agents/hooks.json` returns `HookSystemMessage` steps.
+Unrelated hooks are preserved. `Session(enable_system_messages=False)` disables registration
+and sending; chat-mode sessions use that setting. Capture remains available independently.
+Closing the session removes its unmodified hook and private queue, including pending messages.
+An externally modified hook entry is preserved; invalid or repeatedly changing configuration
+can make cleanup raise. Parallel calls still attempt every channel's cleanup.
+
+Queue status `emitted` means the command hook returned the step to agy; it is not a receipt
+from the model. Inspect `.system_messages` to verify native serialization. The native step
+attributes its content to the harness, but the inspected serializers carry it in a user/context
+envelope with a `SYSTEM_MESSAGE` marker. This does not change the provider's system prompt.
+The pinned agy 1.4.11 crashes while scrubbing hook metadata maps, so notifications carry text
+only; queue ids stay in the parent-side status records.
+
+Messages are limited to 256 KiB of UTF-8 text and must fit within the 1 MiB hook-output limit
+after JSON escaping. A callback claims each batch before writing it; a crash can leave a
+message `claimed`, which is not retried automatically because agy may already have received it.
+
+Checks: `test_system_messages.py` exercises the native reader and decoder,
+`test_agy_system_message_queue.py` covers routing and configuration cleanup, and
+`test_agy_system_message_api.py` covers response capture and turn boundaries. The authenticated
+`test_agy_system_messages_live.py` verifies one-shot and persistent delivery against native
+observations and outgoing model requests. All run with `pixi run python test_scripts/<file>`.
 
 ## Sessions
 

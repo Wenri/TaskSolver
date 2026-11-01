@@ -77,6 +77,9 @@ pixi run python test_scripts/test_kimi_process.py
 pixi run python test_scripts/test_kimi_session.py
 pixi run python test_scripts/test_wire_session.py
 pixi run python test_scripts/test_kimi_bundle.py
+pixi run python test_scripts/test_system_messages.py
+pixi run python test_scripts/test_agy_system_message_queue.py
+pixi run python test_scripts/test_agy_system_message_api.py
 ```
 
 The Claude bundle check needs its downloaded runtime; the Kimi bundle check needs its built
@@ -212,6 +215,13 @@ cleanup — don't run parallel sessions that way.
 ## Antigravity (`agy`) instrumentation
 
 [`antigravity/`](antigravity/) is a subsystem that instruments Google's Antigravity CLI (`agy`) in-process (converting the Go PIE binary into `vendor/libagy.so` and linking a C++23 host executable `vendor/agy` with bidirectional `ld` / `ld.so`-bound static cgocall trampolines plus an embedded CPython), and exposes `agy` as a TaskSolver backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the static cgocall-trampoline hook mechanism (`src/gocall.cpp` + `src/gomod.cpp`), current build/validation notes, and the historical WSL1/cloud-kernel investigations.
+
+`pyagy` also captures agy's own system notifications and interagent messages in
+`AgyResponse.system_messages`, with capture errors in `.system_message_errors`.
+`Session.send_system_message(text, conversation_id=...)` queues a native harness notification
+for the main agent or a specific subagent's next model invocation. It does not wake an idle
+agent or replace the provider's system prompt. See [system notifications](antigravity/README.md#system-notifications)
+for capture, delivery status, and examples.
 
 ## License
 
