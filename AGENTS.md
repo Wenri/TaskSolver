@@ -101,7 +101,7 @@ exports, so embedded CLI interpreters never import TaskSolver.
 
 The three linked CLIs host the `wirecap` bridge differently: agy converts its Go PIE into
 `libagy.so` linked by a C++ host (`vendor/agy`); Codex compiles it into its Rust binary; Kimi loads
-an N-API addon (`kimi/native/wirecap_node.node`) through a source patch, promoting libpython to the
+an N-API addon (`kimi/native/build/wirecap_node.node` in the source checkout) through a source patch, promoting libpython to the
 global namespace (`dlopen(RTLD_GLOBAL|RTLD_NOLOAD)`) before `wire_start()` so Python's C extensions
 resolve the C API. Their exec/PTY clients use `WirePtyPopen` and `mp_child`, with the capture JSONL
 authoritative; the Codex SDK drives app-server over JSON-RPC and merges SDK results with capture.
