@@ -9,17 +9,21 @@ native build artifacts or Node runtime are absent.
     python3 test_scripts/test_kimi_bundle.py
 """
 
+from __future__ import annotations
+
 import hashlib
-import json
 import os
-from pathlib import Path
 import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Final
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import patch
+
+if TYPE_CHECKING:
+    from setup import BinaryDistribution, BuildPyNative
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 NODE: Final = shutil.which("node")
@@ -31,7 +35,10 @@ ARTIFACTS: Final = {
 }
 
 
-def main():
+from wirecap.types import json_loads, json_loads_object
+
+
+def main() -> None:
     missing: Final = [str(path) for path in ARTIFACTS.values() if not path.is_file()]
     if NODE is None or len(missing) == len(ARTIFACTS):
         print(
@@ -39,11 +46,12 @@ def main():
         )
         sys.exit(0)
     assert not missing, f"Incomplete Kimi build: {missing}"
-    expected_version: Final = json.loads((DIST.parent / "package.json").read_text())[
+    expected_version: Final = json_loads_object((DIST.parent / "package.json").read_text())[
         "version"
     ]
+    assert isinstance(expected_version, str)
     with patch("setuptools.setup"):
-        setup: Final = runpy.run_path(ROOT / "setup.py")
+        setup: Final = cast(dict[str, object], runpy.run_path(str(ROOT / "setup.py")))
     with tempfile.TemporaryDirectory(prefix="tasksolver-kimi-package-") as temp:
         sandbox: Final = Path(temp)
         fake_root: Final = sandbox / "source"
@@ -61,7 +69,9 @@ def main():
             stage / "wirecap",
             ignore=shutil.ignore_patterns("__pycache__", "native"),
         )
-        builder: Final = setup["BuildPyNative"](setup["BinaryDistribution"]())
+        builder_type = cast("type[BuildPyNative]", setup["BuildPyNative"])
+        distribution_type = cast("type[BinaryDistribution]", setup["BinaryDistribution"])
+        builder: Final = builder_type(distribution_type())
         builder.build_lib = str(stage)
         builder._bundle_artifacts(str(fake_root))
         bundle_dir: Final = stage / "pykimi/vendor"
@@ -85,7 +95,7 @@ def main():
             env=env,
             text=True,
         )
-        assert json.loads(resolved) == [
+        assert json_loads(resolved) == [
             str(bundle_dir / "main.mjs"),
             str(bundle_dir / "wirecap_node.node"),
         ]

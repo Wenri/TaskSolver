@@ -16,6 +16,7 @@ TaskSolver is a **provider-agnostic query flow for vision-language models**. You
 pixi install            # default env; `pixi install -e cuda` for the GPU stack
 pixi run python test_scripts/text_only.py --model claude-code
 pixi shell
+pixi run typecheck      # strict checks for all project Python; no Any, vendors excluded
 
 # pymport (Node ↔ Python): a dev diagnostic only. 1.5.1 calls Py_GetPythonHome, removed in 3.15,
 # so it does not build until upstream ports it; rebuild with `npm rebuild pymport`.
@@ -38,6 +39,12 @@ Run the relevant offline tests in `test_scripts/` after changes; they need no cr
 not a pass, and offline fixtures are not authenticated provider validation. Native capture artifacts
 must match the consumer's Python minor version (3.15).
 
+**Python typing.** All first-party Python, including build tools, examples and tests, is checked
+by BasedPyright in strict mode. Inferred and explicit `Any` are errors; do not add type-ignore
+suppression. Use typed protocol boundaries for untyped dependencies, and keep the consumed API
+stubs in `typings/` aligned with their pinned versions. Runtime packages ship `py.typed`; the
+source-only third-party stubs stay out of the wheel. The package requires Python >=3.15.
+
 **pixi-build.** `tasksolver` is a linux-64 conda package built by `pixi-build-python` without
 isolation, so `[build-system].requires` and the native tools must also be in
 `[tool.pixi.package.host-dependencies]`. Under rattler-build `CONDA_PREFIX` is the empty build env:
@@ -47,8 +54,8 @@ otherwise only warn. A fresh build work dir has its own `HOME`, so codex's crate
 rebuild (~25 min).
 
 **Toolchain.** Conda GCC `>=15,<16` (C++23; GCC 15's constexpr asm strings build agy's stubs).
-After a compiler-major upgrade reconfigure the native CMake trees from scratch, but keep
-`antigravity/build/antigravity-*.raw`.
+After a compiler-major upgrade or removal of a cached build environment, reconfigure the
+native CMake trees from scratch, but keep `antigravity/build/antigravity-*.raw`.
 
 After source changes run `pixi reinstall --locked tasksolver` in the consuming workspace (without
 `--locked` if dependencies changed); an editable source path does not rebuild natives. Never
@@ -83,14 +90,16 @@ The four **agent-runtime** backends — `ClaudeCodeModel`, `pyagy.AgyModel`, `py
 parse-retry loops, exception context, `run_once` and default payload/call handling.
 `ClaudeCodeModel` subclasses `pyclaude.ClaudeAgentModel` (native SDK image payloads and metadata);
 `CodexModel` defaults to the official Python SDK over app-server (`transport="exec"` selects the
-compatibility client); agy and Kimi keep instrumented PTY clients. A new runtime backend subclasses
-the base, sets `backend_label`, `command_label`, `generic_model_aliases`, `no_output_hint` and
-`_client_ask_many`, and overrides payload/call/finish methods as its protocol needs.
+compatibility client); agy and Kimi keep linked PTY clients. A new runtime backend subclasses
+`CLIBackendModel[ResponseType]`, sets `backend_label`, `command_label`, `generic_model_aliases`
+and `no_output_hint`, and implements `_sample(payload, n_choices)` with its typed client options.
+The existing `_client_ask_many` plus `_call_kwargs` extension remains supported. Override
+payload/finish methods as the protocol needs.
 `CLIBackendModel` lives in `tasksolver/`, never `wirecap/` (whose stdlib purity the `python3 -S`
 probes enforce); import it only from provider `model.py` modules, behind the packages' PEP-562 lazy
 exports, so embedded CLI interpreters never import TaskSolver.
 
-The three instrumented CLIs host the `wirecap` bridge differently: agy converts its Go PIE into
+The three linked CLIs host the `wirecap` bridge differently: agy converts its Go PIE into
 `libagy.so` linked by a C++ host (`vendor/agy`); Codex compiles it into its Rust binary; Kimi loads
 an N-API addon (`kimi/native/wirecap_node.node`) through a source patch, promoting libpython to the
 global namespace (`dlopen(RTLD_GLOBAL|RTLD_NOLOAD)`) before `wire_start()` so Python's C extensions
@@ -201,7 +210,7 @@ own MCP and tool children. Tests: `test_codex_argv.py`, `test_codex_process.py`.
 
 ## Agent runtime subsystems
 
-Agy, Codex and Kimi share the instrumentation layer; Claude speaks its SDK protocol directly.
+Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protocol directly.
 
 - **`wirecap/`**, the shared capture layer:
   - `wirecap/decode/` is **stdlib-import-pure**, because each CLI's embedded interpreter imports it:
@@ -211,11 +220,17 @@ Agy, Codex and Kimi share the instrumentation layer; Claude speaks its SDK proto
     its session-title call alongside the answer. Never import `wirecap.runtime` or `tasksolver`
     here; the `python3 -S` probes in `test_scripts/` enforce it.
   - `wirecap/runtime/` is parent-side: `WirePopen`/`WireProcess`, the PTY flavours, git-workspace
-    scoping and the vendored-artifact resolver.
+    scoping and the vendored-artifact resolver. Process launch serializes descriptor inheritance
+    changes and preserves Python 3.15's resource-tracker fd across `pty.fork`; restore the parent's
+    flags before releasing the launch lock. Keep descriptor ownership and child reaping one-shot,
+    including failed startup. PTY result/death readiness must drain buffered output before closing.
   - `wirecap/native/` is the C ABI bridge (`libwirecap_bridge.a`) that embeds CPython on a 16 MB-stack
     worker thread, linked into the agy host, the codex binary and the kimi addon. They build with
     GCC LTO (`TASKSOLVER_LTO`, default on); the archive holds fat LTO objects because codex's Rust
-    link cannot read GCC bytecode.
+    link cannot read GCC bytecode. Repeated starts share one worker; shutdown drains accepted
+    events, joins once and prevents restart. Event-kind strings must live for the process lifetime.
+    Shared regressions: `test_wire_process.py`, `test_wire_session.py`, `test_wire_bridge.py`,
+    and `test_wirecap_framing.py`.
 - **`antigravity/`** → the `pyagy` package: Google's Go `agy` converted into `vendor/libagy.so`
   and linked into a C++23 host, `vendor/agy`; the mechanism is in `antigravity/README.md`. Rules:
   - `BOOKS` in `procdef.h` is the one table (`{id, mode, retcap, AGY_FULLGO(symbol)}`, or
@@ -223,17 +238,32 @@ Agy, Codex and Kimi share the instrumentation layer; Claude speaks its SDK proto
     `symbols_gen.h` holds `AGY_BUILD_ID` and the `AGY_STUBS` list; never edit it.
   - Keep eager PLT binding (lazy resolution would run on the Go stack and clobber R10/R11),
     `FuncFlagAsm` on the synthetic functions, `__builtin_unreachable()` after the stub asm,
-    `goframe.cpp` at `-fno-lto`, and `g_agy_on` `used`/`externally_visible` (LTO cannot see the
-    asm's loads). The host exports only what libagy.so references; do not add
-    `--export-dynamic`.
-  - Run `test_scripts/test_agy_stubs.py` after stub or toolchain changes.
+    the compile-time `AGY_FRAME <= 128` bound, `goframe.cpp` at `-fno-lto`, and `g_agy_on`
+    `used`/`externally_visible` (LTO cannot see the asm's loads). The host exports only what
+    libagy.so references; do not add `--export-dynamic`.
+  - Synthetic Go frames require precise pointer maps; `FuncFlagAsm` does not change scanning
+    into conservative scanning. Generate each saved-register mask and stack-argument map from
+    the pinned target's `ArgsPointerMaps[0]` and validated `morestack_noctxt` spills. The locals
+    map also marks the initialized `&block` argument. Scalar words and uninitialized register
+    spill homes remain unmarked; unsupported register/context layouts fail the symbol build.
   - `symbols/` is a source build package run as `python3 -m symbols.<tool>` from `antigravity/`;
-    it needs LIEF, stays out of the wheel, and must not leak into the embedded runtime's
-    stdlib-only modules. Every rebuild converts the cached raw agy (`build/antigravity-*.raw`,
-    keyed by SHA512) from scratch; `shim-symbols` refreshes it, and `shim-agy-update` prints new
-    pins for `CMakeLists.txt`.
+    LIEF writes the ELF layout, pyelftools reads and validates its metadata, Capstone decodes Go
+    prologues, spills and the planner-response getter, and pwntools assembles book/PLT jumps with
+    the conda toolchain. Keep these build-only
+    requirements in `[build-system].requires`, pixi host dependencies and workspace dependencies.
+    Source tools stay out of the wheel and embedded runtime's stdlib-only modules. Conversions
+    always start from cached raw agy (`build/antigravity-*.raw`, keyed by SHA512); `shim-symbols`
+    refreshes the outputs, and `shim-agy-update` prints new pins for `CMakeLists.txt`.
+  - Run `test_scripts/test_agy_symbols.py` and `test_scripts/test_agy_stubs.py` after build-tool,
+    stub or toolchain changes. `test_appresponse.py` checks native planner-response reads,
+    Unicode, payload truncation and concurrent stack diagnostics. App/SSE capture errors are
+    exposed through `AgyResponse.response_capture_errors`; a truncated app snapshot cannot
+    override complete wire text. Request rewriting is unsupported: the TLS book is asynchronous.
 - **`codex/`** → the `pycodex` package: OpenAI's Rust codex built from a vendored tree with the bridge
-  compiled in. See `codex/README.md`.
+  compiled in. Each transport request owns a `ResponseCapture` ID through SSE/WebSocket events
+  and termination; never correlate concurrent streams using a global latest-request ID.
+  `test_codex_sdk_native.py` verifies overlapping requests against the real built app-server.
+  See `codex/README.md`.
 - **`kimi/`** → the `pykimi` package: Moonshot's Node kimi-code built from a vendored tree, with a
   three-line patch loading the bridge as an N-API addon (`kimi/native/`). See `kimi/README.md`.
 - **`claude/`** → `pyclaude` and the pristine `claude/vendor/sdk`. `claude/vendor.json` pins SDK
@@ -245,7 +275,8 @@ belongs in `wirecap/`. `pyagy.Session`, `pycodex.Session` and `pykimi.Session` s
 `wirecap/runtime/session.py` (`ask_turn` and the `WireSession` base); providers supply only process
 construction and response shape. Build session processes with `max_wait=None` (asserted in
 `_start`), or a deadline kills the bridge mid-session. `pycodex.SDKSession` and `pyclaude.Session`
-have their own SDK lifecycles and never use `WireSession`.
+have their own SDK lifecycles and never use `WireSession`. Failed `WireSession` startup unwinds
+all resources, and closing is idempotent; closed sessions and ended workers cannot accept turns.
 
 **agy system notifications.** `AgyResponse.system_messages` captures native system-step
 serialization, including agy's own notifications. `Session.send_system_message()` queues a

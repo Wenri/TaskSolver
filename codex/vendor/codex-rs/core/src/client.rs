@@ -1168,11 +1168,6 @@ impl ModelClient {
             client_metadata: Some(client_metadata),
             access_programs: None,
         };
-        // wirecap capture: emit the serialized /v1/responses request (transport-agnostic — both the
-        // SSE and WebSocket paths send this same request). No-op unless the bridge is enabled.
-        if let Ok(body) = serde_json::to_vec(&request) {
-            codex_wirecap::emit_request(&body);
-        }
         Ok(request)
     }
 

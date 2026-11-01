@@ -13,10 +13,14 @@ types turn 1 (no prefill), guards a dead CLI, and sweeps on close.
 
     python3 test_scripts/test_kimi_session.py
 """
+
+from __future__ import annotations
+
 import json
 import os
 import sys
 import tempfile
+from collections.abc import Sequence
 from typing import Final
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,20 +29,23 @@ sys.path.insert(0, os.path.join(_REPO, "kimi"))
 sys.path.insert(0, _REPO)
 
 try:
-    import pygit2  # noqa: F401
+    import importlib
+    importlib.import_module("pygit2")
 except ImportError:  # offline: caller-supplied workspaces never touch pygit2
     import types
     sys.modules["pygit2"] = types.ModuleType("pygit2")
 
-from pykimi._env import kimi_argv  # noqa: E402
-from pykimi.config import encode_workdir_key, trust_workspace  # noqa: E402
 from pykimi import sessions  # noqa: E402
+from pykimi._env import kimi_argv  # noqa: E402
 from pykimi.client import Session  # noqa: E402
+from pykimi.config import encode_workdir_key, trust_workspace  # noqa: E402
 
-_failures = []
+from wirecap.types import JSONObject, JSONValue, json_loads_object
+
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
@@ -47,7 +54,7 @@ def check(cond, name):
 BIN = "/fake/kimi"
 
 
-def test_argv_persistent():
+def test_argv_persistent() -> None:
     print("[offline] kimi_argv: shell mode (persistent)")
     argv = kimi_argv(None, kimi_bin=BIN, persistent=True)
     check(argv == [BIN], "bare argv — shell mode is the absence of -p")
@@ -64,7 +71,7 @@ def test_argv_persistent():
         check(True, "positional prompt rejected in shell mode")
 
 
-def test_workdir_key_golden():
+def test_workdir_key_golden() -> None:
     print("[offline] encode_workdir_key: production golden")
     # Key minted by the real kimi-code 0.34.0 on the lab box (session_index.jsonl):
     # workDir .../GrassTuftFactory -> wd_grasstuftfactory_aa5a5ce10ff5
@@ -77,7 +84,7 @@ def test_workdir_key_golden():
           "degenerate basename falls back to 'workspace'")
 
 
-def test_trust_workspace(td):
+def test_trust_workspace(td: str) -> None:
     print("[offline] trust_workspace: record shape, placement, idempotence")
     home = os.path.join(td, "home")
     ws = os.path.join(td, "MyProj")
@@ -86,7 +93,7 @@ def test_trust_workspace(td):
     key = encode_workdir_key(os.path.abspath(ws))
     check(path == os.path.join(home, "workspace-trust", key),
           "record at <home>/workspace-trust/<wd_key>")
-    doc = json.loads(open(path).read())
+    doc = json_loads_object(open(path).read())
     check(set(doc) == {"root", "trustedAt"} and doc["root"] == os.path.abspath(ws)
           and isinstance(doc["trustedAt"], int),
           "WorkspaceTrustService record shape {root, trustedAt(ms)}")
@@ -98,7 +105,7 @@ def test_trust_workspace(td):
     check(open(path).read() == before, "idempotent — presence IS the contract")
 
 
-def test_read_transcript(td):
+def test_read_transcript(td: str) -> None:
     print("[offline] sessions.read_transcript: wire -> pycodex transcript shape")
     home = os.path.join(td, "kimi_home")
     sid = "session_rt"
@@ -128,25 +135,25 @@ def test_read_transcript(td):
     check(t[0] == {"step_index": 0, "role": "user", "type": "message",
                    "created_at": 111, "content": "hi there"},
           "parts flattened; keys match pycodex.read_transcript")
-    check(t[1]["content"] == "4" and t[1]["step_index"] == 1,
+    check(t[1]["content"] == "4" and t[1].get("step_index") == 1,
           "string content passes through; step_index increments")
 
 
-def test_read_transcript_v2(td):
+def test_read_transcript_v2(td: str) -> None:
     print("[offline] sessions.read_transcript: Kimi 2.x assistant/tool journals")
     home: Final = os.path.join(td, "kimi_v2_home")
     sid: Final = "session_v2"
     sdir: Final = os.path.join(home, "sessions", "wd_v2_000000000000", sid)
 
-    def loop(time, kind, **fields):
+    def loop(time: int, kind: str, **fields: JSONValue) -> JSONObject:
         return {"type": "context.append_loop_event", "time": time,
                 "event": {"type": kind, **fields}}
 
-    def message(time, role, text):
+    def message(time: int, role: str, text: str) -> JSONObject:
         return {"type": "context.append_message", "time": time,
                 "message": {"role": role, "content": [{"type": "text", "text": text}]}}
 
-    def write_agent(aid, records):
+    def write_agent(aid: str, records: Sequence[JSONObject]) -> None:
         directory: Final = os.path.join(sdir, "agents", aid)
         os.makedirs(directory)
         with open(os.path.join(directory, "wire.jsonl"), "w") as f:
@@ -212,16 +219,16 @@ def test_read_transcript_v2(td):
     all_agents: Final = sessions.read_transcript(sid, home=home)
     check(all_agents[:len(main)] == main and all_agents[-1]["content"] == "Recovered",
           "agent journals fold independently without leaking an unfinished assistant")
-    check(all_agents[-2]["role"] == "tool" and all_agents[-2]["content"] == (
+    check(all_agents[-2].get("role") == "tool" and all_agents[-2]["content"] == (
         "Tool execution was interrupted before its result was recorded. "
         "Do not assume the tool completed successfully."
     ), "resuming an unfinished tool uses the upstream interrupted-tool transcript entry")
-    check([entry["step_index"] for entry in all_agents] == list(range(len(all_agents))),
+    check([entry.get("step_index") for entry in all_agents] == list(range(len(all_agents))),
           "step indexes stay contiguous across filtered empty steps and multiple agents")
     check(sessions.read_transcript("missing", home=home) == [], "unknown session stays empty")
 
 
-def _stub(td, name, body):
+def _stub(td: str, name: str, body: str):
     """A kimi stand-in that drains the mp boot fd (see test_kimi_process)."""
     path = os.path.join(td, name)
     with open(path, "w") as f:
@@ -233,7 +240,7 @@ def _stub(td, name, body):
     return path
 
 
-def test_session_stub(td):
+def test_session_stub(td: str) -> None:
     print("[offline] Session over a stub shell: typed turn 1, paste framing, sweep")
     ws = os.path.join(td, "ws-sess")
     os.makedirs(ws)
@@ -251,6 +258,8 @@ def test_session_stub(td):
               "no -p and no prompt on the argv")
         # the transcript property is ANSI-stripped (it removes the ESC markers),
         # so assert the framing on the raw PTY bytes the stub echoed back
+        assert s._proc is not None
+        assert s._proc._popen is not None
         raw = bytes(s._proc._popen.raw)
         check(b"\x1b[200~" in raw and b"\x1b[201~" in raw,
               "multi-line turn 1 typed as one bracketed paste")
@@ -264,11 +273,12 @@ def test_session_stub(td):
               "single-line follow-up not paste-wrapped")
     finally:
         s.close()
-    check(s._proc is not None and s._proc.exit_status is not None,
+    assert s._proc is not None
+    check(s._proc.exit_status is not None,
           "close() reaped the stub")
 
 
-def main():
+def main() -> None:
     with tempfile.TemporaryDirectory() as td:
         test_argv_persistent()
         test_workdir_key_golden()

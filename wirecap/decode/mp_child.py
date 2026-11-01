@@ -1,106 +1,126 @@
-"""In-host child runner — make a wirecap-instrumented CLI's embedded interpreter act as a
-REAL `multiprocessing.spawn` child, WITHOUT the process-ownership teardown that stock
-`spawn_main`/`_bootstrap` would inflict on the host (agy/codex own the process, not us).
+"""Run a multiprocessing target inside the linked CLI's embedded interpreter.
 
-Shared by every wrapper (pyagy, pycodex): the parent launches the host through a
-`wirecap.runtime.process.WirePopen`, which wires a boot pipe (`WIRE_MP_BOOT_FD`) + a caller-owned
-result `SimpleQueue`; this module (loaded into the embedded interpreter as part of the WIRE_MODULE
-import) unpickles the spawn payload off the boot pipe and runs the pickled target, which `.put`s
-native Python objects home over that queue.
+WirePopen supplies a boot pipe (``WIRE_MP_BOOT_FD``) and a caller-owned result
+SimpleQueue. This module unpickles the spawn payload and runs the target on a daemon
+thread, so blocking queue operations do not stop the book-dispatch worker.
 
-Started on a daemon thread by the provider's WIRE_MODULE `__init__` when the worker channel is
-wired (`WIRE_MP_BOOT_FD` set), so a blocking `get()` here can't starve the hook-dispatch worker
-(blocking releases the GIL).
+The CLI retains process ownership. Calling ``proc._bootstrap`` directly avoids
+``spawn_main``'s argv check and sys.exit. Three adjustments protect the host:
+  * ``sys.stdin = None`` prevents multiprocessing from closing the host's fd 0.
+  * A temporary ``threading._shutdown`` no-op prevents host-thread teardown.
+  * Preparation applies the name, authkey and start method while preserving the
+    host's sys.path, cwd, argv and __main__.
 
-The three neutralizations:
-  * `sys.stdin = None`            → `util._close_stdin()` early-returns (won't close the host's fd 0)
-  * `threading._shutdown` no-op   → `_bootstrap`'s finally won't tear down the host's threads
-  * trimmed `prepare()`           → apply authkey/name only; skip sys.path=/os.chdir/_fixup_main
-We call `proc._bootstrap()` DIRECTLY (not `spawn_main`), which also skips its `sys.exit()`
-and the `is_forking(sys.argv)` assert. `_bootstrap` runs the target and RETURNS the exitcode.
-
-Stdlib-only (same rule as the WIRE_MODULE it is loaded beside): the only provider touch is a
-RUNTIME `importlib.import_module(os.environ["WIRE_MODULE"])` inside `stream_turns` (never at import).
+Imports remain stdlib-only. ``stream_turns`` loads the provider's ``WIRE_MODULE``
+at call time to subscribe to its recorder.
 """
+from __future__ import annotations
+
 import os
+import pickle
 import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable, Mapping, Sequence
+from multiprocessing.connection import Connection
+from typing import Protocol, cast
 
-# Completion sentinels the target/runner puts on the result queue (the parent compares the imported
-# symbols, so the wire never drifts on a string literal). Tuple tag → distinguishable from turn dicts.
+from ..types import Event
+
+
+class ResultWriter(Protocol):
+    def put(self, obj: object) -> None: ...
+
+
+class _ChildChannel(ResultWriter, Protocol):
+    _reader: Connection[object, object]
+    _writer: Connection[object, object]
+
+
+class _BootProcess(Protocol):
+    _args: tuple[object, ...]
+    def _bootstrap(self, parent_sentinel: int) -> int: ...
+
+
+class _SubscriberModule(Protocol):
+    def subscribe(self, fn: Callable[[Event], object]) -> None: ...
+
+
+class _ThreadingState(Protocol):
+    _shutdown: Callable[[], None]
+
+
+class _TrackerState(Protocol):
+    _fd: int | None
+
+
+__all__ = ["DONE", "EXC", "get_result_conn", "main", "start", "stream_turns",
+           "_demo_target", "_raise_target"]
+
+# Tuple tags distinguish target completion and failures from streamed event dictionaries.
 DONE = "_wire_done"   # ("_wire_done", exitcode) — normal completion (host owns process lifetime)
 EXC = "_wire_exc"     # ("_wire_exc", traceback) — the target raised; firewalled off Py_Exit
 
-_result_conn = None   # the result SimpleQueue (child side), sourced from proc._args[0] in _run;
-#                       the target puts objects here (also handed to the target as its arg0)
+_result_conn: _ChildChannel | None = None   # proc._args[0], also passed to the target
 
 
-def get_result_conn():
-    """The result `SimpleQueue` back to the parent (child side) — the same object handed to the
-    target as arg0 (``args=(q,)``), also exposed here so a target can fetch it without threading it
-    through. A target calls ``.put(obj)`` on it to stream native Python objects home."""
+def get_result_conn() -> ResultWriter | None:
+    """Return the target's result queue; ``put(obj)`` sends an object to the parent."""
     return _result_conn
 
 
-def _set_cloexec(fd):
+def _set_cloexec(fd: int) -> None:
     import fcntl
     fcntl.fcntl(fd, fcntl.F_SETFD, fcntl.fcntl(fd, fcntl.F_GETFD) | fcntl.FD_CLOEXEC)
 
 
-def _trimmed_prepare(data):
-    # Only what a child legitimately needs; SKIP the process-hostile bits of the stock
-    # spawn.prepare(): sys.path= (drops the shim's PYTHONPATH), os.chdir (moves the host's cwd),
-    # sys.argv=, and _fixup_main_* (re-imports the parent's __main__ into the host).
+def _trimmed_prepare(data: Mapping[str, object]) -> None:
+    # Preserve the host's import paths, cwd, argv and __main__ while preparing the target.
     from multiprocessing import process
-    if data.get("name"):
-        process.current_process().name = data["name"]
-    if "authkey" in data:
-        process.current_process().authkey = data["authkey"]
+    name = data.get("name")
+    if isinstance(name, str) and name:
+        process.current_process().name = name
+    authkey = data.get("authkey")
+    if isinstance(authkey, bytes):
+        process.current_process().authkey = authkey
     if "start_method" in data:
-        from multiprocessing import spawn as _spawn
-        _spawn.set_start_method(data["start_method"], force=True)
+        from multiprocessing import set_start_method
+        method = data["start_method"]
+        if method is None or isinstance(method, str):
+            set_start_method(method, force=True)
 
 
-def _run():
+def _run() -> None:
     global _result_conn
-    from multiprocessing import reduction, resource_tracker
+    from multiprocessing import resource_tracker
     boot = int(os.environ["WIRE_MP_BOOT_FD"])
-    # keep boot open in-process (it's the parent-death sentinel), but CLOEXEC so the host's own
-    # child processes don't inherit it
+    # Keep the parent-death sentinel open here, but prevent inheritance across exec.
     _set_cloexec(boot)
-    with os.fdopen(boot, "rb", closefd=False) as fp:  # closefd=False: boot outlives the read — the parent
-        tracker_fd = reduction.pickle.load(fp)      #   holds its write end open, so boot's EOF = our death
-        # Re-attach to the parent's resource_tracker (as spawn_main does) so the queue's SemLocks share
-        # it instead of this interpreter booting a second tracker. CLOEXEC: keep it in-process; don't
-        # leak it into the host's child processes. Installed BEFORE proc unpickles, so the queue's
-        # SemLocks (rebuilt with proc's args) re-attach to this tracker rather than a fresh one.
-        resource_tracker._resource_tracker._fd = tracker_fd
+    with os.fdopen(boot, "rb", closefd=False) as fp:  # boot must outlive payload reading
+        tracker_fd = cast(int, pickle.load(fp))
+        # Attach the parent's tracker before unpickling the queue's SemLocks, so
+        # they share it rather than starting another tracker. Keep it out of exec'd children.
+        cast(_TrackerState, resource_tracker._resource_tracker)._fd = tracker_fd
         _set_cloexec(tracker_fd)
-        prep = reduction.pickle.load(fp)
+        prep = cast(Mapping[str, object], pickle.load(fp))
         _trimmed_prepare(prep)
-        proc = reduction.pickle.load(fp)            # the WireProcess instance (target + args)
+        proc = cast(_BootProcess, pickle.load(fp))            # the WireProcess instance (target + args)
 
-    # The result SimpleQueue rides proc's args (arg0 = result conn, stock-mp style: the caller passes
-    # it via WireProcess(target=..., args=(q,))). Pull it out for get_result_conn() + the firewall
-    # puts below; the pipe fds were inherited across execve, the SemLocks sem_opened by name.
-    _result_conn = proc._args[0]
+    # Queue pipe fds survive exec; its SemLocks are reopened by name during unpickling.
+    _result_conn = cast(_ChildChannel, proc._args[0])
     _result_conn._reader.close()                    # child only puts; drop the inherited reader end
-    # CLOEXEC the writer too: the host spawns its own tool grandchildren (codex runs shells/apply_patch),
-    # and if they inherited this writer they'd pin the pipe so the parent never sees EOF on our death.
-    # CLOEXEC affects execve only, not this daemon thread's put()s — safe, and it also tightens agy.
+    # Tool subprocesses must not inherit the writer and prevent EOF when the host exits.
     _set_cloexec(_result_conn._writer.fileno())
 
-    sys.stdin = None                                 # neutralization 1
-    _orig_shutdown = threading._shutdown             # neutralization 2
-    threading._shutdown = lambda: None
+    sys.stdin = None                                 # protect the host's fd 0
+    thread_state = cast(_ThreadingState, threading)
+    _orig_shutdown = thread_state._shutdown
+    thread_state._shutdown = lambda: None
     try:
-        # boot doubles as the parent-death sentinel (so parent_process().is_alive()/.join() work): the
-        # parent writes the payload once, then holds boot's write end open for its whole life, so boot
-        # goes readable only when that end closes (EOF = our death). A dedicated write-once pipe like
-        # stock multiprocessing's child_r/parent_w — no data ever rides it, so nothing spuriously trips it.
-        exitcode = proc._bootstrap(parent_sentinel=boot)   # REAL mp child path (runs target, returns exitcode)
+        # After the payload is consumed, boot's EOF signals parent death. The parent
+        # holds its write end open for its lifetime and sends no further data.
+        exitcode = proc._bootstrap(parent_sentinel=boot)
     except BaseException as e:                       # firewall: an escaped error must never reach Py_Exit
         exitcode = 1
         try:
@@ -108,31 +128,28 @@ def _run():
         except Exception:
             pass
     finally:
-        threading._shutdown = _orig_shutdown
+        thread_state._shutdown = _orig_shutdown
     try:
         _result_conn.put((DONE, exitcode))          # completion sentinel (host owns process lifetime)
     except Exception:
         pass
 
 
-def main():
+def main() -> None:
     try:
         _run()
     except Exception:
         traceback.print_exc()
 
 
-def start():
-    """Run the child on a daemon thread — called unconditionally from a WIRE_MODULE's import; it
-    decides for itself whether the embedded-worker channel is actually wired.
+def start() -> None:
+    """Start the target thread when an embedded interpreter has a live boot fd.
 
-    No-ops unless WIRE_MP_BOOT_FD names a live fd AND we are inside a provider's embedded
-    interpreter (``sys._wire_shim``, set by the native bridge). That keeps a bare `agy`/`codex exec`
-    run — which just writes the WIRE_CAPTURE JSONL — from trying to unpickle a spawn payload, and
-    keeps the target off this thread so a blocking recv() can't starve hook dispatch. Never raises:
-    a failure here must not take down the host's import."""
+    Safe to call from every WIRE_MODULE import: ordinary capture runs have no
+    worker channel, and startup failures must not interrupt the host's import.
+    """
     try:
-        if not getattr(sys, "_wire_shim", False):
+        if not cast(object, getattr(sys, "_wire_shim", False)):
             return
         boot = int(os.environ.get("WIRE_MP_BOOT_FD", "-1"))
         if boot < 0:
@@ -146,34 +163,28 @@ def start():
     threading.Thread(target=main, name="wire-mp-child", daemon=True).start()
 
 
-def stream_turns(conn, kinds=None, max_wait=None):
-    """Built-in WireProcess target: stream the host's DECODED model turns home over the result queue
-    `conn` — arg0, passed by the caller via ``WireProcess(target=stream_turns, args=(q,))`` (stock-mp
-    style) — as they're produced, until the host exits (the parent then sees EOF on get()), the parent
-    goes away (our writer breaks), or `max_wait` elapses.
+def stream_turns(conn: ResultWriter, kinds: Sequence[str] | None = None,
+                 max_wait: float | None = None) -> None:
+    """Stream recorder events through the result queue passed as the target's first argument.
 
-    `max_wait=None` (the default) means NO deadline, and that is almost always what you want: this
-    target runs INSIDE the host, so the host's own exit is the real terminator and the parent already
-    observes it as queue EOF. A NUMBER is a belt-and-braces cap only, and it MUST be strictly greater
-    than the parent's own collect budget — when the timer fires, this target returns and _bootstrap's
-    finally puts ``(DONE, exitcode)`` while the host is still alive. That sentinel is indistinguishable
-    on the wire from host death, so every parent-side collector stops: a one-shot silently truncates,
-    and a persistent session loses every later turn.
+    Keep ``max_wait=None`` for persistent sessions. A finite deadline returns from
+    this target and sends DONE while the CLI may still be running, ending collection
+    and losing subsequent turns. Any cap must exceed the parent's collection budget.
 
-    `subscribe`/`unsubscribe` are resolved from the live WIRE_MODULE (the provider's in-process module)
-    so this stays provider-neutral; we ALWAYS unsubscribe on the way out, else the host keeps filling a
-    dead in-process queue for the rest of its life. `kinds` None = every decoded dict (including the raw
-    hook records) — else only those kinds; the parent filters again, so a superset is harmless, but
-    passing the parent's exact set keeps tls_write/callstack/… off the pipe entirely. Uses a subscribe →
-    in-process queue → single-sender loop, so the put side has no cross-thread race."""
+    Subscriptions come from the live WIRE_MODULE and are removed on exit to prevent
+    abandoned queues from growing. ``kinds=None`` forwards every event, including raw
+    records; specifying kinds avoids unnecessary pipe traffic. A local queue funnels
+    recorder callbacks through one sender so writes cannot race across threads.
+    """
     import importlib
     import queue as _q
-    mod = importlib.import_module(os.environ["WIRE_MODULE"])
+    mod = cast(_SubscriberModule, importlib.import_module(os.environ["WIRE_MODULE"]))
     want = set(kinds) if kinds else None
-    q = _q.Queue()
+    q: _q.Queue[Event] = _q.Queue()
 
-    def _sub(obj):
-        if isinstance(obj, dict) and obj.get("kind") and (want is None or obj["kind"] in want):
+    def _sub(obj: Event) -> None:
+        kind = obj.get("kind")
+        if isinstance(kind, str) and kind and (want is None or kind in want):
             q.put(obj)
 
     mod.subscribe(_sub)
@@ -189,22 +200,23 @@ def stream_turns(conn, kinds=None, max_wait=None):
             except (BrokenPipeError, OSError):
                 break
     finally:
-        unsub = getattr(mod, "unsubscribe", None)   # tolerate a provider module without it
+        unsub = cast(Callable[[Callable[[Event], object]], None] | None, getattr(mod, "unsubscribe", None))   # tolerate a provider module without it
         if unsub is not None:
             unsub(_sub)
 
 
 # --- targets used by test_scripts/test_agyprocess.py (importable by reference in the child) ---
 # All targets receive the result conn as arg0 (the caller passes args=(q, ...)), stock-mp style.
-def _demo_target(conn, *args, **kwargs):
+def _demo_target(conn: ResultWriter, *args: object, **kwargs: object) -> None:
     # also probes the parent-death sentinel: parent_process() reflects the controlling process,
     # and is_alive() is True here because the parent is alive (its boot-pipe write end is open).
     import multiprocessing as _mp
     parent = _mp.parent_process()
+    assert parent is not None
     conn.put({"wire_mp": "ok", "args": args, "kwargs": kwargs,
               "pid": os.getpid(), "py": sys.version.split()[0],
               "parent_alive": parent.is_alive(), "ppid": parent.pid})
 
 
-def _raise_target(conn, *args, **kwargs):
+def _raise_target(conn: ResultWriter, *args: object, **kwargs: object) -> None:
     raise ValueError("wire-mp boom")   # -> _bootstrap catches it, exitcode 1 over (EXC, tb) then (DONE, 1)

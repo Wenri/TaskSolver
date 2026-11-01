@@ -1,37 +1,24 @@
-import argparse
-import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
+from __future__ import annotations
 
-import json
 import random
-import re
-import torch
-import numpy as np
-from tqdm import tqdm
-import shortuuid
-import sys
-import numpy as np
-import torch
-import torchvision.transforms as T
-from decord import VideoReader, cpu
-from PIL import Image
-from torchvision.transforms.functional import InterpolationMode
-
-from transformers import AutoModel, AutoTokenizer
-
-from torch.utils.data import Dataset, DataLoader
-
-from PIL import Image
-import math
-
-from .gpt4v import TaskSpec, ParsedAnswer, Question
-from .exceptions import GPTOutputParseException, GPTMaxTriesExceededException
 import threading
-from typing import List, Tuple, Union
+import numpy as np
 from loguru import logger
-from copy import deepcopy
-import time
-import os
+from .common import TaskSpec, Question
+from .exceptions import GPTOutputParseException, GPTMaxTriesExceededException
+from .provider_types import BackendResult, BackendManyResults, parse_response
+from .hf_types import HFResult, completed_results, torch, transformers
+from wirecap.types import JSONObject
+from .hf_types import InternPayload
+from .hf_types import InternRemoteModel
+from PIL import Image
+from importlib import import_module
+from typing import cast
+from .hf_types import RemoteTransformersSDK
+
+AutoModel = cast(RemoteTransformersSDK[InternRemoteModel], import_module("transformers")).AutoModel
+from collections.abc import Callable, Sequence
+from .hf_types import Tensor, TransformsSDK, GenerationConfig
 
 seed = 42
 torch.manual_seed(seed)
@@ -40,15 +27,14 @@ random.seed(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-def build_transform(input_size):
-    transform = T.Compose([
-        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
-        # T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
-        T.ToTensor(),
-    ])
-    return transform
+def build_transform(input_size: int) -> Callable[[Image.Image], Tensor]:
+    transforms = cast(TransformsSDK, import_module("torchvision.transforms"))
+    def rgb(image: Image.Image) -> Image.Image:
+        return image.convert("RGB") if image.mode != "RGB" else image
+    return transforms.Compose([transforms.Lambda(rgb), transforms.ToTensor()])
 
-def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
+def find_closest_aspect_ratio(aspect_ratio: float, target_ratios: Sequence[tuple[int, int]],
+                              width: int, height: int, image_size: int) -> tuple[int, int]:
     best_ratio_diff = float('inf')
     best_ratio = (1, 1)
     area = width * height
@@ -63,15 +49,16 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_
                 best_ratio = ratio
     return best_ratio
 
-def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbnail=False):
+def dynamic_preprocess(image: Image.Image, min_num: int = 1, max_num: int = 12,
+                       image_size: int = 448, use_thumbnail: bool = False) -> list[Image.Image]:
     orig_width, orig_height = image.size
     aspect_ratio = orig_width / orig_height
 
     # calculate the existing image aspect ratio
-    target_ratios = set(
+    ratio_set = set(
         (i, j) for n in range(min_num, max_num + 1) for i in range(1, n + 1) for j in range(1, n + 1) if
         i * j <= max_num and i * j >= min_num)
-    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+    target_ratios = sorted(ratio_set, key=lambda x: x[0] * x[1])
 
     # find the closest aspect ratio to the target
     target_aspect_ratio = find_closest_aspect_ratio(
@@ -84,7 +71,7 @@ def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbna
 
     # resize the image
     resized_img = image.resize((target_width, target_height))
-    processed_images = []
+    processed_images: list[Image.Image] = []
     for i in range(blocks):
         box = (
             (i % (target_width // image_size)) * image_size,
@@ -101,13 +88,11 @@ def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbna
         processed_images.append(thumbnail_img)
     return processed_images
 
-def load_image(image, input_size=448, max_num=12):
+def load_image(image: Image.Image, input_size: int = 448, max_num: int = 12) -> Tensor:
     image = image.convert('RGB')
     transform = build_transform(input_size=input_size)
     images = dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num)
-    pixel_values = [transform(image) for image in images]
-    pixel_values = torch.stack(pixel_values)
-    return pixel_values
+    return torch.stack([transform(image) for image in images])
 
 class InternModel(object):
     def __init__(self, task:TaskSpec,
@@ -116,10 +101,10 @@ class InternModel(object):
         self.task:TaskSpec = task
         self.model = self.get_model(model)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=False)
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=False)
 
-    
-    def get_model(self, model):
+
+    def get_model(self, model: str) -> InternRemoteModel:
         # Load the open-source model in
 
         if model == "OpenGVLab/InternVL2-8B":
@@ -134,39 +119,38 @@ class InternModel(object):
         else:
             raise ValueError(f"Such model {model} does not exist!")
 
-    def ask(self,  payload:dict, n_choices=1, temperature=0.7) -> Tuple[List[dict], List[dict]]:
+    def ask(self, payload: InternPayload, n_choices: int = 1, temperature: float = 0.7) -> tuple[list[JSONObject], list[object]]:
         """
-        args: 
+        args:
             payload: json dictionary, prepared by `prepare_payload`
         """
 
-        def intern_thread(self, idx, payload, results, temperature):
+        def intern_thread(self: InternModel, idx: int, payload: InternPayload, results: list[HFResult | None], temperature: float) -> None:
 
             # creation of payload
-            mod_payload = deepcopy(payload)
             question = payload['question']
             pixel_values = payload['pixel_values']
             num_patches_list = payload['num_patches_list']
             max_tokens = payload['max_tokens']
 
-            generation_config = dict(max_new_tokens=max_tokens, do_sample=True)
+            generation_config: GenerationConfig = {"max_new_tokens": max_tokens, "do_sample": True}
 
             try:
                 # Preparation for inference
                 output_text = self.model.chat(self.tokenizer, pixel_values, question, generation_config, num_patches_list=num_patches_list, history=None, return_history=None)
-            
+
             except Exception as e:
                 raise e
-            
-            # print('outputs: ', output_text)
-            message = {'content' : output_text}
 
-            results[idx] = {"metadata": output_text, "message": message} 
+            # print('outputs: ', output_text)
+            message: JSONObject = {'content': output_text}
+
+            results[idx] = {"metadata": output_text, "message": message}
 
             return
 
         assert n_choices >= 1
-        results = [None]  * n_choices 
+        results: list[HFResult | None] = [None] * n_choices
         if n_choices > 1:
             intern_jobs = [threading.Thread(target=intern_thread,
                             args=(self, idx, payload, results, temperature))
@@ -178,23 +162,22 @@ class InternModel(object):
         else:
             intern_thread(self, 0, payload, results, temperature)
 
-        messages:List[dict] = [ res["message"] for res in results]
-        metadata:List[dict] = [ res["metadata"] for res in results]
+        complete = completed_results(results)
+        messages = [res["message"] for res in complete]
+        metadata = [res["metadata"] for res in complete]
         return messages, metadata
 
 
     @staticmethod
     def prepare_payload(question:Question,
-            max_tokens=1000,
+            max_tokens: int = 1000,
             verbose:bool=False,
-            prepend:Union[dict, None]=None,
-            **kwargs
-            ) -> dict:
+            prepend: object = None,
+            **kwargs: object
+            ) -> InternPayload:
 
-        image_dic = None
         text = ''
-        dic_list = question.get_json()
-        img_list = []
+        img_list: list[Image.Image | None] = []
         for dic in question.get_json():
             # The case of text
             if dic['type'] == 'text':
@@ -205,7 +188,11 @@ class InternModel(object):
                 img_list.append(dic['image'])
                 text += '<image>\n'
 
-        pixel_list = [load_image(image).to(torch.float16).cuda() for image in img_list]
+        pixel_list: list[Tensor] = []
+        for image in img_list:
+            if image is None:
+                raise ValueError("Intern requires a loaded image")
+            pixel_list.append(load_image(image).to(torch.float16).cuda())
 
         if pixel_list:
             pixel_values = torch.cat(tuple(pixel_list), dim=0)
@@ -215,7 +202,7 @@ class InternModel(object):
             pixel_values = None
             num_patches_list = None
 
-        payload = {
+        payload: InternPayload = {
             'question': text,
             'pixel_values': pixel_values,
             'num_patches_list':num_patches_list,
@@ -225,23 +212,22 @@ class InternModel(object):
         return payload
 
 
-    def rough_guess(self, question:Question, max_tokens=1000,
-                    max_tries=1, query_id:int=0,
-                    verbose=False, temperature=1,
-                    **kwargs):
-    
-        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None, 
+    def rough_guess(self, question:Question, max_tokens: int = 1000,
+                    max_tries: int = 1, query_id:int=0,
+                    verbose: bool = False, temperature: float = 1,
+                    **kwargs: object) -> BackendResult:
+
+        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None,
                                     model=self.model)
 
-        ok = False
         reattempt = 0
-        while not ok:
-            response, meta_data = self.ask(p, temperature=temperature) 
-            response = response[0] 
+        while True:
+            responses, meta_data = self.ask(p, temperature=temperature)
+            response = responses[0]
             # logger.info(f'response: {response}')
-            try: 
-                parsed_response = self.task.answer_type.parser(response["content"])
-            except GPTOutputParseException as e:
+            try:
+                parsed_response = parse_response(self.task, response)
+            except GPTOutputParseException:
                 # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
                 pass
 
@@ -252,37 +238,36 @@ class InternModel(object):
                 # with open(error_saved, "w")  as f:
                 #     f.write(p_ans.code)
                 # logger.warning(f"The following was not parseable. Saved in {error_saved}.")
-                
+
                 reattempt += 1
                 if reattempt > max_tries:
                     logger.error(f"max tries ({max_tries}) exceeded.")
                     raise GPTMaxTriesExceededException
-             
+
                 logger.warning(f"Reattempt #{reattempt} querying LLM")
                 continue
-            ok = True 
+            break
 
         return parsed_response, response, meta_data, p
 
-    def all_task_rough_guess(self, task, question:Question, max_tokens=1000,
-                    max_tries=1, query_id:int=0,
-                    verbose=False, temperature=1,
-                    **kwargs):
-    
-        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None, 
+    def all_task_rough_guess(self, task: TaskSpec, question:Question, max_tokens: int = 1000,
+                    max_tries: int = 1, query_id:int=0,
+                    verbose: bool = False, temperature: float = 1,
+                    **kwargs: object) -> BackendResult:
+
+        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None,
                                     model=self.model)
 
-        ok = False
         reattempt = 0
-        while not ok:
-            response, meta_data = self.ask(p, temperature=temperature) 
-            response = response[0] 
+        while True:
+            responses, meta_data = self.ask(p, temperature=temperature)
+            response = responses[0]
             # logger.info(f'response: {response}')
-            try: 
-                parsed_response = task.answer_type.parser(response["content"])
-            except GPTOutputParseException as e:
+            try:
+                parsed_response = parse_response(task, response)
+            except GPTOutputParseException:
                 # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
-                
+
                 # if not os.path.exists('errors/'):
                 #     # Create the directory if it doesn't exist
                 #     os.makedirs('errors/')
@@ -290,22 +275,22 @@ class InternModel(object):
                 # with open(error_saved, "w")  as f:
                 #     f.write(p_ans.code)
                 # logger.warning(f"The following was not parseable. Saved in {error_saved}.")
-                
+
                 reattempt += 1
                 if reattempt > max_tries:
                     logger.error(f"max tries ({max_tries}) exceeded.")
                     raise GPTMaxTriesExceededException
-             
+
                 logger.warning(f"Reattempt #{reattempt} querying LLM")
                 continue
-            ok = True 
+            break
 
         return parsed_response, response, meta_data, p
 
     def many_rough_guesses(self, num_threads:int,
-                           question:Question, max_tokens=1000,
-                           verbose=False, max_tries=1, temperature=1
-                           ) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
+                           question:Question, max_tokens: int = 1000,
+                           verbose: bool = False, max_tries: int = 1, temperature: float = 1
+                           ) -> BackendManyResults:
         """
         Args:
             num_threads : number of independent threads.
@@ -316,20 +301,19 @@ class InternModel(object):
             return signature of `rough_guess()`
         """
 
-        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None, 
+        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None,
                                     model=self.model)
 
         #  TODO
         n_choices = num_threads
 
-        # TODO: wrap in robust-ask method, repeatedly asks until parseable output. 
-        ok = False
+        # TODO: wrap in robust-ask method, repeatedly asks until parseable output.
         reattempt = 0
-        while not ok:
+        while True:
             response, meta_data = self.ask(p, n_choices=n_choices, temperature=temperature)
             try:
-                parsed_response = [self.task.answer_type.parser(r["content"]) for r in response]
-            except GPTOutputParseException as e:
+                parsed_response = [parse_response(self.task, r) for r in response]
+            except GPTOutputParseException:
                 # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
 
                 # TODO provide the parse error message into GPT for the next round to be parsable
@@ -337,19 +321,14 @@ class InternModel(object):
                 if reattempt > max_tries:
                     logger.error(f"max tries ({max_tries}) exceeded.")
                     raise GPTMaxTriesExceededException
-             
+
                 logger.warning(f"Reattempt #{reattempt} querying LLM")
                 continue
-            ok = True 
+            break
 
         return parsed_response, response, meta_data, p
 
-    def run_once(self, question:Question, max_tokens=1000, temperature=1, **kwargs):
-        q = self.task.first_question(question) 
-        p_ans, ans, meta, p = self.rough_guess(q, max_tokens=max_tokens, temperature=temperature, **kwargs)
+    def run_once(self, question:Question, max_tokens: int = 1000, temperature: float = 1, *, max_tries: int = 1, query_id: int = 0, verbose: bool = False, **kwargs: object) -> BackendResult:
+        q = self.task.first_question(question)
+        p_ans, ans, meta, p = self.rough_guess(q, max_tokens=max_tokens, temperature=temperature, max_tries=max_tries, query_id=query_id, verbose=verbose, **kwargs)
         return p_ans, ans, meta, p
-
-
-
-
-

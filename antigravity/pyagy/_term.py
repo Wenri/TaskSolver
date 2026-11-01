@@ -7,17 +7,18 @@ Both the one-shot (`client.ask`) and multi-turn (`client.Session`,
 here once instead of being copied.
 """
 import re
+from collections.abc import Callable
 
-# strip_ansi and answer_text are not agy-specific — both operate on any instrumented CLI's PTY
+# strip_ansi and answer_text are not agy-specific — both operate on any linked CLI's PTY
 # transcript, so they live with the shared PTY driver. Re-exported here because `pyagy.strip_ansi`
 # is a documented public name and test_scripts imports both from `pyagy._term`. What stays below is
 # genuinely agy-only: the terminal-capability query and folder-trust auto-replies.
-from wirecap.runtime.pty import answer_text, strip_ansi  # noqa: F401
+from wirecap.runtime.pty import answer_text as answer_text, strip_ansi as strip_ansi
 
 
 # Terminal-capability queries agy sends and blocks on; reply like a real terminal.
 # (DECRQM, XTVERSION, kitty-kbd, secondary/primary DA, cursor-pos, device-status.)
-_QUERIES = [
+_QUERIES: list[tuple[re.Pattern[bytes], Callable[[re.Match[bytes]], bytes]]] = [
     (re.compile(rb"\x1b\[\?(\d+)\$p"), lambda m: b"\x1b[?" + m.group(1) + b";0$y"),
     (re.compile(rb"\x1b\[>0?q"),       lambda m: b"\x1bP>|pyagy\x1b\\"),
     (re.compile(rb"\x1b\[\?u"),        lambda m: b"\x1b[?0u"),
@@ -28,7 +29,7 @@ _QUERIES = [
 ]
 
 
-def answer_queries(raw, qpos, writer) -> int:
+def answer_queries(raw: bytes | bytearray, qpos: int, writer: Callable[[bytes], object]) -> int:
     """Scan ``raw[qpos:]`` for terminal-capability queries agy is blocking on and
     reply to each (earliest-match first) via ``writer(bytes)``. Returns the new scan
     position — pass it back on the next call. Keeps an 8-byte tail unscanned in case
@@ -56,7 +57,7 @@ def answer_queries(raw, qpos, writer) -> int:
 _TRUST_MENU = re.compile(rb"trust this folder", re.IGNORECASE)
 
 
-def answer_trust(raw, writer) -> bool:
+def answer_trust(raw: bytes | bytearray, writer: Callable[[bytes], object]) -> bool:
     """If the folder-trust menu is present, press Enter once (its default selection is
     "Yes, I trust this folder") to unblock the TUI. Returns True once it has answered so
     the caller can stop trying (the menu redraws, so answer at most once)."""

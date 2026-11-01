@@ -5,16 +5,31 @@ observation is retained, and a step address identifies an object only within its
 process lifetime. These are harness notifications, not provider system prompts.
 """
 import struct
+from typing import TypedDict, cast
 
 
 _HEADER = struct.Struct("<4sIQQII")
 
 
-def decode_system_message(source, step_address, data):
+class SystemMessageRecord(TypedDict):
+    kind: str
+    capture_source: str
+    step_address: int
+    event_type: str
+    text: str
+    text_bytes: int
+    event_type_bytes: int
+    captured_text_bytes: int
+    captured_event_type_bytes: int
+    truncated: bool
+
+
+def decode_system_message(source: str, step_address: int, data: bytes) -> SystemMessageRecord:
     """Decode one copied native packet, reporting any deliberate/transport truncation."""
     if len(data) < _HEADER.size:
         raise ValueError("incomplete system-message capture header")
-    magic, version, text_bytes, event_bytes, text_copied, event_copied = _HEADER.unpack_from(data)
+    magic, version, text_bytes, event_bytes, text_copied, event_copied = cast(
+        tuple[bytes, int, int, int, int, int], _HEADER.unpack_from(data))
     if magic != b"AGSM" or version != 1:
         raise ValueError("unsupported system-message capture format")
     if text_copied > text_bytes or event_copied > event_bytes:

@@ -20,16 +20,17 @@ import os
 import shutil
 import tempfile
 import warnings
+from collections.abc import Sequence
 
 import pygit2
 
 AGENTS_MD = "AGENTS.md"                            # instruction file BOTH agy and codex read
 SKILLS_SUBDIR = os.path.join(".agents", "skills")  # skill root BOTH agy and codex discover
 
-_scratch_ws = None
+_scratch_ws: str | None = None
 
 
-def _in_git_repo(path):
+def _in_git_repo(path: str) -> bool:
     """True if ``path`` or an ancestor holds a ``.git`` — skill discovery needs a repo root."""
     p = os.path.abspath(path)
     while True:
@@ -41,7 +42,7 @@ def _in_git_repo(path):
         p = parent
 
 
-def _seed_instructions(workspace, instructions, owned):
+def _seed_instructions(workspace: str, instructions: str | None, owned: bool) -> str:
     """Write the workspace's ``AGENTS.md``. ``instructions=None`` clears it, but only in the
     scratch repo we own — a caller-supplied workspace is never stripped of its own file."""
     path = os.path.join(workspace, AGENTS_MD)
@@ -53,7 +54,7 @@ def _seed_instructions(workspace, instructions, owned):
     return path
 
 
-def _seed_skills(workspace, skills, owned):
+def _seed_skills(workspace: str, skills: Sequence[str] | None, owned: bool) -> str:
     """Copy skill directories into ``<workspace>/.agents/skills/``.
 
     Copied, never symlinked: the run then owns a frozen snapshot of the skill text (so a capture
@@ -74,7 +75,8 @@ def _seed_skills(workspace, skills, owned):
     return root
 
 
-def ensure_git_workspace(path=None, prefix="wire-ws-", instructions=None, skills=None) -> str:
+def ensure_git_workspace(path: str | None = None, prefix: str = "wire-ws-",
+                         instructions: str | None = None, skills: Sequence[str] | None = None) -> str:
     """Return a git workspace path. If ``path`` is given, use it; otherwise create (once) a
     reusable throwaway repo and return it on subsequent calls.
 

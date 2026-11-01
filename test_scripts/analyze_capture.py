@@ -7,29 +7,70 @@ Prints per-kind counts and byte totals, per-connection request/response sizes,
 and (with --plot, needs matplotlib) a cumulative-bytes-over-time chart split by
 direction — the basic view for "how much did agy send/receive, and when".
 """
+
+from __future__ import annotations
+
 import argparse
 import collections
-import json
+from typing import NotRequired, Protocol, TypedDict, cast
+
+from wirecap.types import json_loads_object
 
 
-def load(path):
-    rows = []
+class CaptureRecord(TypedDict):
+    t: float
+    kind: str
+    len: NotRequired[int]
+    body_len: NotRequired[int]
+    stream: NotRequired[int]
+
+
+class H2Record(TypedDict):
+    t: float
+    kind: str
+    headers: dict[str, str]
+    conn: int
+    dir: str
+    h2sid: int
+    body_len: int
+
+
+def load(path: str) -> list[CaptureRecord]:
+    rows: list[CaptureRecord] = []
     with open(path) as f:
         for line in f:
             line = line.strip()
             if line:
                 try:
-                    rows.append(json.loads(line))
+                    rows.append(cast(CaptureRecord, json_loads_object(line)))
                 except Exception:
                     pass
     return rows
 
 
-def main():
+
+class PlotAxes(Protocol):
+    def plot(self, x: list[float], y: list[int], *, label: str) -> object: ...
+    def set_xlabel(self, label: str) -> object: ...
+    def set_ylabel(self, label: str) -> object: ...
+    def legend(self) -> object: ...
+    def set_title(self, title: str) -> object: ...
+
+
+class PlotFigure(Protocol):
+    def tight_layout(self) -> None: ...
+    def savefig(self, path: str) -> None: ...
+
+
+class Arguments(argparse.Namespace):
+    capture: str
+    plot: str | None
+
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("capture")
     ap.add_argument("--plot", metavar="PNG", help="write a cumulative-bytes chart")
-    args = ap.parse_args()
+    args = ap.parse_args(namespace=Arguments())
 
     rows = load(args.capture)
     if not rows:
@@ -37,9 +78,9 @@ def main():
         return
     t0 = min(r["t"] for r in rows if "t" in r)
 
-    by_kind = collections.Counter()
-    bytes_kind = collections.Counter()
-    per_conn = collections.defaultdict(lambda: collections.Counter())
+    by_kind: collections.Counter[str] = collections.Counter()
+    bytes_kind: collections.Counter[str] = collections.Counter()
+    per_conn: collections.defaultdict[int, collections.Counter[str]] = collections.defaultdict(collections.Counter)
     for r in rows:
         k = r.get("kind", "?")
         by_kind[k] += 1
@@ -52,7 +93,7 @@ def main():
     for k in sorted(by_kind):
         print(f"{k:<12}{by_kind[k]:>8}{bytes_kind[k]:>14}")
 
-    h2 = [r for r in rows if r.get("kind") == "h2msg"]
+    h2 = [cast(H2Record, r) for r in rows if r["kind"] == "h2msg"]
     if h2:
         print(f"\nHTTP/2 messages: {len(h2)}")
         for m in h2[:20]:
@@ -68,12 +109,14 @@ def main():
         except Exception as e:
             print(f"\n--plot needs matplotlib: {e}")
             return
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = cast(tuple[PlotFigure, PlotAxes], plt.subplots(figsize=(10, 5)))
         for direction, kinds in (("sent", {"tls_write"}), ("recv", {"tls_read"})):
             pts = sorted((r["t"] - t0, r.get("len", 0)) for r in rows if r.get("kind") in kinds)
             if not pts:
                 continue
-            xs, cum, tot = [], [], 0
+            xs: list[float] = []
+            cum: list[int] = []
+            tot = 0
             for t, n in pts:
                 tot += n
                 xs.append(t)

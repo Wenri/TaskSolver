@@ -4,20 +4,13 @@ Read the speed limit.
 Toy setting for vision-language input to test VLM implementation.
 """
 
-from tasksolver.common import TaskSpec, ParsedAnswer, Question, KeyChain
-from tasksolver.ollama import OllamaModel
-from tasksolver.llama import LlamaModel
-from tasksolver.exceptions import *
-from tasksolver.utils import docs_for_GPT4
-from tasksolver.claude import ClaudeModel
-from tasksolver.gemini import GeminiModel
-from tasksolver.qwen import QwenModel
-from tasksolver.gpt4v import GPTModel
-from tasksolver.phi import PhiModel
-from tasksolver.minicpm import MiniCPMModel
-from tasksolver.intern import InternModel
+from __future__ import annotations
+
 from PIL import Image
-from pathlib import Path
+
+from tasksolver.common import KeyChain, ParsedAnswer, Question, TaskSpec
+from tasksolver.exceptions import GPTOutputParseException
+from tasksolver.qwen import QwenModel
 
 '''
 TODO: Import the class instance for your own model
@@ -39,11 +32,11 @@ image_path = 'TaskSolver/test_scripts/speed_limit.png'
 image = Image.open(image_path)
 
 class SpeedLimit(ParsedAnswer):
-    def __init__(self, speed_limit:str):
+    def __init__(self, speed_limit:str) -> None:
         self.speed_limit = speed_limit
 
     @staticmethod    
-    def parser(gpt_raw:str) -> "ReadSign":
+    def parser(gpt_raw:str) -> SpeedLimit:
         """
         @GPT4-doc-begin
             ONLY RETURN A NUMBER.
@@ -62,7 +55,7 @@ class SpeedLimit(ParsedAnswer):
 
         return SpeedLimit(gpt_out)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return str(self.speed_limit)
     
 read_speed_limit = TaskSpec(

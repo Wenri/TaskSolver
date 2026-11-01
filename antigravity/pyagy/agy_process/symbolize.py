@@ -18,9 +18,12 @@ CLI:
 import bisect
 import collections
 import gzip
-import json
 import os
 import sys
+from collections.abc import Iterator, Sequence
+from typing import NotRequired, TypedDict, cast
+
+from wirecap.types import json_loads_object
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # pyagy/agy_process/ -> pyagy -> antigravity ; funcmap lives at antigravity/symbols/
@@ -31,9 +34,10 @@ DEFAULT_FUNCMAP = os.path.join(os.path.dirname(os.path.dirname(_HERE)),
 class Symbolizer:
     """addr→name lookup over the sorted funcmap (bisect on the enclosing entry)."""
 
-    def __init__(self, funcmap_path=None):
+    def __init__(self, funcmap_path: str | os.PathLike[str] | None = None) -> None:
         path = funcmap_path or DEFAULT_FUNCMAP
-        self.addrs, self.names = [], []
+        self.addrs: list[int] = []
+        self.names: list[str] = []
         with gzip.open(path, "rt", encoding="utf-8") as f:
             for line in f:
                 a, _, nm = line.rstrip("\n").partition("\t")
@@ -47,32 +51,44 @@ class Symbolizer:
             self.addrs = [self.addrs[i] for i in order]
             self.names = [self.names[i] for i in order]
 
-    def name(self, pc):
+    def name(self, pc: int) -> str:
         i = bisect.bisect_right(self.addrs, pc) - 1
         return self.names[i] if i >= 0 else f"?{pc:#x}"
 
 
-def load_callstacks(capture_path):
+class Callstack(TypedDict):
+    kind: str
+    src: NotRequired[str]
+    frames: NotRequired[list[int]]
+
+
+def load_callstacks(capture_path: str | os.PathLike[str]) -> Iterator[Callstack]:
     with open(capture_path) as f:
         for line in f:
             line = line.strip()
             if not line or '"callstack"' not in line:
                 continue
             try:
-                o = json.loads(line)
-            except ValueError:
+                o = json_loads_object(line)
+            except (ValueError, TypeError):
                 continue
             if o.get("kind") == "callstack":
-                yield o
+                src = o.get("src", "?")
+                frames = o.get("frames", [])
+                if not isinstance(src, str) or not isinstance(frames, list):
+                    continue
+                if any(not isinstance(pc, int) for pc in frames):
+                    continue
+                yield cast(Callstack, o)
 
 
-def render_stacks(capture_path, sym, top=12):
+def render_stacks(capture_path: str | os.PathLike[str], sym: Symbolizer, top: int = 12) -> str:
     """Group identical (src, symbolized-stack) and print with fire counts."""
-    groups = collections.defaultdict(collections.Counter)
+    groups: collections.defaultdict[str, collections.Counter[tuple[str, ...]]] = collections.defaultdict(collections.Counter)
     for ev in load_callstacks(capture_path):
         names = tuple(sym.name(pc) for pc in ev.get("frames", []))
         groups[ev.get("src", "?")][names] += 1
-    out = []
+    out: list[str] = []
     for src in sorted(groups):
         stacks = groups[src]
         out.append(f"=== {src}: {sum(stacks.values())} fire(s), "
@@ -84,9 +100,9 @@ def render_stacks(capture_path, sym, top=12):
     return "\n".join(out)
 
 
-def call_graph(capture_path, sym):
+def call_graph(capture_path: str | os.PathLike[str], sym: Symbolizer) -> collections.Counter[tuple[str, str]]:
     """Aggregate caller→callee edges (chain = src leaf, then callers outward)."""
-    edges = collections.Counter()
+    edges: collections.Counter[tuple[str, str]] = collections.Counter()
     for ev in load_callstacks(capture_path):
         chain = [ev.get("src", "?")] + [sym.name(pc) for pc in ev.get("frames", [])]
         for i in range(len(chain) - 1):
@@ -95,7 +111,7 @@ def call_graph(capture_path, sym):
     return edges
 
 
-def render_graph(capture_path, sym, top=60):
+def render_graph(capture_path: str | os.PathLike[str], sym: Symbolizer, top: int = 60) -> str:
     edges = call_graph(capture_path, sym)
     out = [f"=== call graph: {len(edges)} distinct caller->callee edges ==="]
     for (caller, callee), c in edges.most_common(top):
@@ -103,7 +119,7 @@ def render_graph(capture_path, sym, top=60):
     return "\n".join(out)
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     graph = "--graph" in argv
     argv = [a for a in argv if a != "--graph"]

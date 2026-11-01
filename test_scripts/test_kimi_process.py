@@ -9,11 +9,16 @@ master fd leaks across runs.
 
     python3 test_scripts/test_kimi_process.py
 """
+
+from __future__ import annotations
+
+import errno
 import gc
 import os
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
@@ -21,23 +26,26 @@ sys.path.insert(0, os.path.join(_REPO, "kimi"))
 sys.path.insert(0, _REPO)
 
 try:
-    import pygit2  # noqa: F401
+    import importlib
+    importlib.import_module("pygit2")
 except ImportError:  # offline: caller-supplied workspaces never touch pygit2
     import types
     sys.modules["pygit2"] = types.ModuleType("pygit2")
 
 from pykimi.client import ask  # noqa: E402
 
-_failures = []
+from wirecap.types import json_load_object, json_object
+
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
 
 
-def _stub(td, name, body):
+def _stub(td: str, name: str, body: str):
     """A kimi stand-in. The real CLI's wiretap addon immediately reads the mp
     boot payload off WIRE_MP_BOOT_FD; the payload embeds the prompt (the
     process object is pickled whole), so a stub that never reads it would
@@ -53,7 +61,7 @@ def _stub(td, name, body):
     return path
 
 
-def test_argv_prompt_roundtrip(td):
+def test_argv_prompt_roundtrip(td: str) -> None:
     print("[offline] argv prompt reaches the CLI; env contract visible to it")
     ws = os.path.join(td, "ws1"); os.makedirs(ws)
     stub = _stub(td, "echo-stub",
@@ -71,20 +79,19 @@ def test_argv_prompt_roundtrip(td):
           "workspace not polluted")
 
 
-def test_mcp_json_written(td):
+def test_mcp_json_written(td: str) -> None:
     print("[offline] mcp_servers -> workspace-local .kimi-code/mcp.json")
     ws = os.path.join(td, "ws-mcp"); os.makedirs(ws)
     stub = _stub(td, "true-stub-mcp", "exit 0")
     ask("p", kimi_bin=stub, workspace=ws, timeout=10,
         mcp_servers={"blender": {"command": "uv", "args": ["run", "x"]}},
         capture=os.path.join(td, "cap-mcp.jsonl"))
-    import json
-    cfg = json.load(open(os.path.join(ws, ".kimi-code", "mcp.json")))
-    check(cfg["mcpServers"]["blender"]["command"] == "/usr/bin/env",
+    cfg = json_load_object(open(os.path.join(ws, ".kimi-code", "mcp.json")))
+    check(json_object(json_object(cfg["mcpServers"])["blender"])["command"] == "/usr/bin/env",
           "written + PYTHONHOME-wrapped")
 
 
-def test_print_mode_reject_is_not_silent(td):
+def test_print_mode_reject_is_not_silent(td: str) -> None:
     """The regression that shipped: `kimi -p --yolo` is rejected by the CLI, which
     exits 1 printing only to stderr — so a caller saw an empty answer with no clue
     why. This stub mimics that validator; the guard must stop the call before it
@@ -109,7 +116,7 @@ def test_print_mode_reject_is_not_silent(td):
     check(r.exit_status == 0, "same stub succeeds without the rejected flag")
 
 
-def test_timeout(td):
+def test_timeout(td: str) -> None:
     print("[offline] drain deadline -> timed_out")
     ws = os.path.join(td, "ws2"); os.makedirs(ws)
     stub = _stub(td, "sleep-stub", "sleep 60")
@@ -118,12 +125,12 @@ def test_timeout(td):
             capture=os.path.join(td, "cap2.jsonl"))
     took = time.monotonic() - t0
     check(r.timed_out is True, "timed_out set")
-    check(isinstance(r.exit_status, int) and r.exit_status < 0,
+    check(type(r.exit_status) is int and r.exit_status < 0,
           f"signal exit status ({r.exit_status})")
     check(took < 15, f"returned near the deadline ({took:.1f}s)")
 
 
-def test_group_sweep(td):
+def test_group_sweep(td: str) -> None:
     print("[offline] close() sweeps the process group (grandchildren die)")
     ws = os.path.join(td, "ws3"); os.makedirs(ws)
     pidf = os.path.join(td, "grandchild.pid")
@@ -145,7 +152,38 @@ def test_group_sweep(td):
     check(dead, "backgrounded grandchild reaped within 5s")
 
 
-def test_no_fd_leak(td):
+def test_pidfd_fallback(td: str) -> None:
+    print("[offline] missing pidfd polls child exit while a grandchild retains the PTY")
+    ws = os.path.join(td, "ws-no-pidfd")
+    os.makedirs(ws)
+    pidf = os.path.join(td, "no-pidfd-grandchild.pid")
+    stub = _stub(td, "no-pidfd-stub",
+                 f'trap "" HUP\nsleep 60 &\necho $! > "{pidf}"\n'
+                 'echo before-delay\nsleep 0.2\necho after-delay\nexit 7')
+    started = time.monotonic()
+    with patch("os.pidfd_open", side_effect=OSError(errno.ENOSYS, "pidfds unavailable"), create=True):
+        r = ask("p", kimi_bin=stub, workspace=ws, timeout=8,
+                capture=os.path.join(td, "no-pidfd.jsonl"))
+    elapsed = time.monotonic() - started
+    check("before-delay" in r.transcript and "after-delay" in r.transcript,
+          "PTY output is drained without being mistaken for process death")
+    check(not r.timed_out and r.exit_status == 7,
+          "polling detects and preserves the leader's exit status without PTY EOF")
+    check(elapsed < 6, f"leader exit returns before the deadline ({elapsed:.1f}s)")
+    pid = int(open(pidf).read().strip())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            check(True, "fallback close sweeps the grandchild holding the PTY")
+            break
+        time.sleep(0.1)
+    else:
+        check(False, "fallback close sweeps the grandchild holding the PTY")
+
+
+def test_no_fd_leak(td: str) -> None:
     print("[offline] no PTY master fd leak across runs")
     ws = os.path.join(td, "ws4"); os.makedirs(ws)
     stub = _stub(td, "true-stub", "exit 0")
@@ -161,13 +199,14 @@ def test_no_fd_leak(td):
     check(after <= before, f"fd count stable ({before} -> {after})")
 
 
-def main():
+def main() -> None:
     with tempfile.TemporaryDirectory() as td:
         test_argv_prompt_roundtrip(td)
         test_mcp_json_written(td)
         test_print_mode_reject_is_not_silent(td)
         test_timeout(td)
         test_group_sweep(td)
+        test_pidfd_fallback(td)
         test_no_fd_leak(td)
     print()
     if _failures:

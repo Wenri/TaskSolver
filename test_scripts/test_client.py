@@ -2,14 +2,17 @@
 """Tests for the pyagy public client (client.py).
 
 Offline (always run): AgyResponse primary-turn selection + usage summation + accessor
-properties, RewriteRule serialization, rewrite-spec preparation (rules file + str +
-<locals> rejection), instrumented resolution, and the transcript answer filter.
+properties, RewriteRule serialization, unsupported rewriting rejection, linked
+resolution, and the transcript answer filter.
 
 Live (skips cleanly per test_trampoline.py): a real ask() returns decoded turns with
-text/model/usage, and a RewriteRule redaction is reflected on the wire.
+text/model/usage.
 
     python3 test_scripts/test_client.py
 """
+
+from __future__ import annotations
+
 import gzip
 import json
 import os
@@ -23,31 +26,33 @@ sys.path.insert(0, _ANTIGRAVITY)
 sys.path.insert(0, _REPO)
 
 from pyagy import client as C  # noqa: E402
-from pyagy.client import AgyResponse, RewriteRule, ToolSpec  # noqa: E402
+from pyagy.client import AgyResponse, RewriteRule  # noqa: E402
+
+from wirecap.types import Event
 
 SHIM = os.path.join(_ANTIGRAVITY, "vendor", "libagy.so")
 AGY = os.path.expanduser(os.environ.get("AGY_BIN", os.path.join(_ANTIGRAVITY, "vendor", "agy")))
 
-_failures = []
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
 
 
-def _resp(turns, transcript="hi\n", instrumented=True):
+def _resp(turns: list[Event], transcript: str="hi\n", linked: bool=True):
     return AgyResponse(text=C._answer_text(transcript), transcript=transcript,
                        turns=turns, exit_status=0, capture_path=None,
-                       workspace="/tmp", instrumented=instrumented)
+                       workspace="/tmp", linked=linked)
 
 
-def test_response_accessors():
+def test_response_accessors() -> None:
     print("[offline] AgyResponse primary/usage/accessors")
     # usage is NORMALIZED by extract_usage to the neutral names shared with pycodex; the provider's
     # own dict rides along under "raw" (Gemini keeps per-modality/tool-use fields there).
-    turns = [
+    turns: list[Event] = [
         {"kind": "genai_turn", "text": "title",
          "usage": {"total_tokens": 58, "raw": {"totalTokenCount": 58}},
          "request": {"model": "flash-lite", "tools": [], "first_user_text": "t"}},
@@ -58,6 +63,7 @@ def test_response_accessors():
          "request": {"model": "flash", "tools": ["a", "b"], "first_user_text": "say zorple"}},
     ]
     r = _resp(turns)
+    assert r.primary is not None and r.request is not None
     check(r.primary["text"] == "ZORPLE", "primary: picks the max-token (agent) turn")
     check(r.model == "flash", "model: from primary request")
     check(r.request["tools"] == ["a", "b"], "request: from primary")
@@ -78,62 +84,63 @@ def test_response_accessors():
     check(r2.model == "gemini-default", "model-fallback: served model from response")
 
 
-def test_answer_filter():
+def test_answer_filter() -> None:
     print("[offline] transcript answer filter drops instrumentation noise")
     t = "[antigravity/py] worker ready (module=x)\r\nZORPLE\r\n[agy_process] smoke\r\n"
     check(C._answer_text(t) == "ZORPLE", "filter: keeps only the answer line")
 
 
-def test_rewrite_rule():
+def test_rewrite_rule() -> None:
     print("[offline] RewriteRule serialization")
     check(RewriteRule("Paris", "Tokyo").as_dict() ==
           {"find": "Paris", "replace": "Tokyo", "count": 0, "regex": False},
           "RewriteRule.as_dict: fields mapped to rewrite.py schema")
-    check(RewriteRule("a", "b", count=2, regex=True).as_dict()["regex"] is True,
+    check(RewriteRule("a", "b", count=2, regex=True).as_dict().get("regex") is True,
           "RewriteRule.as_dict: count/regex passed through")
 
 
-def test_prepare_rewrite():
-    print("[offline] rewrite-spec preparation")
-    import json
-    d = tempfile.mkdtemp()
-    env, path = C._prepare_rewrite([RewriteRule("x", "y")], d)
-    check(env.get("AGY_PROC_TLS_WRITE_SYNC") == "1", "rules: enables SYNC")
-    check(env.get("AGY_PROC_REWRITE_RULES") == path and os.path.exists(path),
-          "rules: rules file written + wired")
-    check(json.load(open(path))["rules"][0]["find"] == "x", "rules: content serialized")
-
-    env2, p2 = C._prepare_rewrite("mymod:myfunc", d)
-    check(env2.get("AGY_PROC_REWRITE") == "mymod:myfunc" and p2 is None,
-          "str spec: module:func wired, no rules file")
-
+def test_prepare_rewrite() -> None:
+    print("[offline] unsupported native rewriting fails before launch")
+    with tempfile.TemporaryDirectory() as directory:
+        for spec in ([RewriteRule("x", "y")], "mymod:myfunc"):
+            try:
+                C._check_rewrite(spec)
+                check(False, "rewrite rejected")
+            except NotImplementedError as exc:
+                check("unsupported" in str(exc), "rewrite rejected with clear error")
+        check(os.listdir(directory) == [], "unsupported rewrite creates no rule file")
     try:
-        C._prepare_rewrite(lambda data: data, d)   # <locals> callable
-        check(False, "locals: rejected")
-    except ValueError:
-        check(True, "locals: callable rejected with clear error")
+        C.Session(rewrite=[RewriteRule("x", "y")])
+        check(False, "session rewrite rejected")
+    except NotImplementedError:
+        check(True, "session rewrite rejected before provisioning")
+    from pyagy import _env
+    for key in ("AGY_PROC_TLS_WRITE_SYNC", "AGY_PROC_REWRITE_RULES", "AGY_PROC_REWRITE"):
+        try:
+            _env.linked_env(base={}, extra_env={key: "1"})
+            check(False, "legacy rewrite environment rejected")
+        except NotImplementedError:
+            check(True, "legacy rewrite environment rejected")
 
 
-def test_shim_overlays():
-    print("[offline] shim overlays + instrumented env (full hook union, no stage selector)")
+
+def test_shim_overlays() -> None:
+    print("[offline] shim overlays + linked env (full book set, no stage selector)")
     d = tempfile.mkdtemp()
-    env, rules = C._shim_overlays(None, d, stack=True, arg_probe=True, extra_env={"K": "v"})
+    env = C._shim_overlays(None, stack=True, arg_probe=True, extra_env={"K": "v"})
     check(env.get("AGY_PROC_STACK") == "1", "stack=True -> AGY_PROC_STACK=1")
     check(env.get("AGY_PROC_CGT_ARGS") == "1", "arg_probe=True -> AGY_PROC_CGT_ARGS=1")
-    check(env.get("K") == "v" and rules is None,
+    check(env.get("K") == "v",
           "extra_env passed through; no rewrite -> no rules file")
-    env2, r2 = C._shim_overlays(None, d, stack=False, arg_probe=False, extra_env=None)
+    env2 = C._shim_overlays(None, stack=False, arg_probe=False, extra_env=None)
     check("AGY_PROC_STACK" not in env2 and "AGY_PROC_CGT_ARGS" not in env2,
           "no overlays -> knobs absent")
-    env3, rules3 = C._shim_overlays([RewriteRule("x", "y")], d, False, False, None)
-    check(env3.get("AGY_PROC_TLS_WRITE_SYNC") == "1" and rules3 and os.path.exists(rules3),
-          "rewrite spec -> SYNC enabled + rules file written")
-    # AgyProcess always instruments: the shim installs the full hook union, gated only by
+    # AgyProcess always enables capture: the shim installs the full book set, gated only by
     # AGY_PROC_ENABLE (the removed AGY_PROC_STAGE selector must not reappear).
     from pyagy import _env
-    ienv = _env.instrumented_env(capture=os.path.join(d, "c.jsonl"))
+    ienv = _env.linked_env(capture=os.path.join(d, "c.jsonl"))
     check(ienv.get("AGY_PROC_ENABLE") == "1" and "AGY_PROC_STAGE" not in ienv,
-          "instrumented_env: AGY_PROC_ENABLE set, no stage selector")
+          "linked_env: AGY_PROC_ENABLE set, no stage selector")
 
 
 # synthetic funcmap for the .stacks/.call_graph decoders (link vaddr -> name)
@@ -141,7 +148,7 @@ _FUNCS = [(0x1000, "runtime.goexit"), (0x2000, "app.run"),
           (0x6000, "codeassistclient.(*CodeAssistClient).StreamGenerateContent")]
 
 
-def _synthetic_capture(d):
+def _synthetic_capture(d: str):
     """A capture + funcmap exercising every diagnostic accessor. Returns (cap, fm)."""
     cap = os.path.join(d, "diag.jsonl")
     fm = os.path.join(d, "funcmap.tsv.gz")
@@ -164,12 +171,12 @@ def _synthetic_capture(d):
     return cap, fm
 
 
-def _diag_resp(cap, fm):
+def _diag_resp(cap: str | None, fm: str | None):
     return AgyResponse(text="x", transcript="x", turns=[], exit_status=0,
-                       capture_path=cap, workspace="/tmp", instrumented=True, funcmap=fm)
+                       capture_path=cap, workspace="/tmp", linked=True, funcmap=fm)
 
 
-def test_diagnostic_accessors():
+def test_diagnostic_accessors() -> None:
     print("[offline] AgyResponse.rpc_trace / cgt_args / stacks / call_graph")
     d = tempfile.mkdtemp()
     cap, fm = _synthetic_capture(d)
@@ -182,17 +189,19 @@ def test_diagnostic_accessors():
     check(r.cgt_args == ["arg[0] *Request { model: gemini }", "arg[1] context.Context"],
           "cgt_args: non-empty reports collected in order")
 
+    assert r.stacks is not None
     check("2 fire(s), 1 distinct" in r.stacks, "stacks: identical stacks grouped")
     check("StreamGenerateContent" in r.stacks and "app.run" in r.stacks,
           "stacks: frames symbolized against funcmap")
 
     edges = r.call_graph
+    assert edges is not None
     check(edges[("app.run",
                  "codeassistclient.(*CodeAssistClient).StreamGenerateContent")] == 2,
           "call_graph: caller->callee edge counted")
 
 
-def test_diagnostic_graceful_empty():
+def test_diagnostic_graceful_empty() -> None:
     print("[offline] diagnostic accessors degrade when a kind/funcmap is absent")
     # no capture at all -> falsy/None
     r = _diag_resp(None, None)
@@ -210,15 +219,15 @@ def test_diagnostic_graceful_empty():
 
 
 # --- live --------------------------------------------------------------------
-def test_live_ask():
+def test_live_ask() -> None:
     print("[live] ask() end-to-end")
     if not (os.path.exists(AGY) and os.path.exists(SHIM)):
         print("NOTE: skipping — agy or shim missing")
         return
     from pyagy import ask
     r = ask("Reply with exactly the single word ZORPLE and nothing else.")
-    if not r.instrumented:
-        print(f"NOTE: skipping live asserts — not instrumented ({r.instrumented_reason})")
+    if not r.linked:
+        print(f"NOTE: skipping live asserts — not linked ({r.linked_reason})")
         return
     if "ZORPLE" not in r.text:
         print("NOTE: skipping — agy not authenticated (no answer)")
@@ -228,30 +237,15 @@ def test_live_ask():
     check(len(r.turns) >= 1, "live: at least one genai_turn decoded")
     check(r.model and "gemini" in r.model, "live: model id decoded (served modelVersion)")
     check(r.usage.total_tokens > 0, "live: usage decoded")
-    # Request side — captured off the wire via the tls_write entry-arg hook, bounded by the
-    # shim's per-fire read cap (CGT_RESP_CAP=16 KiB). A small request reassembles and yields
-    # tools/first_user_text; a full agent-context request can exceed the cap and not
-    # reassemble, so this is best-effort, not a guarantee. Gate the assertion accordingly.
+    # Request capture spans every TLS write chunk; the decoder may lack a completed
+    # request when capture begins mid-connection or the CLI exits during transmission.
     if r.request:
         check(r.request.get("tools") is not None, "live: request tools decoded")
     else:
-        print("NOTE: primary request exceeded the shim per-fire capture cap — request summary "
-              "unavailable (response side still fully decoded; .model came off the response)")
-
-    # SYNC egress rewrite (AGY_PROC_TLS_WRITE_SYNC) rewrote the wire request in-place via the
-    # gum interceptor's return path; that path is retired (gum destabilized agy), and the
-    # trampoline tls_write hook is entry-arg read-only. So wire rewrite is best-effort too —
-    # attempt it and report, but don't hard-fail the suite on the retired capability.
-    r2 = ask("Reply with exactly the single word ZORPLE and nothing else.",
-             rewrite=[RewriteRule("ZORPLE", "ZQRPLE")])
-    if "ZQRPLE" in r2.text:
-        print("  ok   live: SYNC egress rewrite reflected on the wire")
-    else:
-        print("NOTE: SYNC egress rewrite not reflected on the wire — the in-place rewrite "
-              "path was retired with gum; tls_write is now read-only capture")
+        print("NOTE: no complete request was captured")
 
 
-def main():
+def main() -> None:
     test_response_accessors()
     test_answer_filter()
     test_rewrite_rule()

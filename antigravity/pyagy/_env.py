@@ -1,20 +1,17 @@
-"""Environment + argv wiring for an instrumented agy run: run the linked ``vendor/agy`` host
-executable (which links ``vendor/libagy.so`` as its first ``DT_NEEDED`` dependency) and wire the
-in-process Python subsystem (``pyagy.agy_process``) + capture JSONL. Used by
-:class:`pyagy.agyprocess.AgyProcess` (the single agy launcher) and test_scripts/run-agy.sh.
+"""Launch the linked agy host and configure its embedded Python capture worker.
 
-Because ``vendor/agy`` is a normal ELF executable linked against ``libagy.so`` with a ``RUNPATH``,
-no ``LD_PRELOAD`` or ``ld.so --preload`` wrapper is needed, and child processes spawned by ``agy``
-do not inherit any preload environment variables.
+The host loads libagy through DT_NEEDED/RUNPATH; no preload wrapper is needed.
+Used by AgyProcess and test_scripts/run-agy.sh.
 """
 import os
+from collections.abc import Mapping, MutableMapping, Sequence
 
 from wirecap.runtime.vendor import vendored
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pyagy
 
 
-def _vendored(in_pkg_rel, sibling_rel):
+def _vendored(in_pkg_rel: str, sibling_rel: str) -> str:
     """agy-side binding of the shared resolver (wirecap.runtime.vendor)."""
     return vendored(_PKG_DIR, "pyagy", in_pkg_rel, sibling_rel)
 
@@ -25,27 +22,25 @@ LIBAGY = _vendored("vendor/libagy.so", "../vendor/libagy.so")
 SHIM = LIBAGY
 
 
-def preload_argv(agy_bin, agy_args, shim=None, env=None):
+def linked_argv(agy_bin: str | os.PathLike[str], agy_args: Sequence[str],
+                 env: MutableMapping[str, str] | None = None) -> list[str]:
     """Build the argv that runs ``agy_bin`` (linked directly against ``libagy.so``) and record
     ``AGY_PROC_REAL_EXE`` in ``env`` for the ``readlink_filter`` book."""
-    del shim
     env = os.environ if env is None else env
     env["AGY_PROC_REAL_EXE"] = os.path.abspath(agy_bin)
-    return [agy_bin, *agy_args]
+    return [os.fspath(agy_bin), *agy_args]
 
 
-def instrumented_env(capture="agy-capture.jsonl", log=None,
-                     module="pyagy.agy_process",
-                     base=None, extra_env=None):
-    """Environment for an instrumented agy run: points the shim's embedded interpreter at
-    ``module`` (default ``pyagy.agy_process``) and writes book events to the ``capture`` JSONL.
-    The shim installs the full working book union (wire + app + rpc) on every run — the only gate
-    is ``AGY_PROC_ENABLE`` (set here). This sets NO ``LD_PRELOAD``/``LD_LIBRARY_PATH``/``PYTHONPATH``:
-    the shim is injected via :func:`preload_argv` (the loader's ``--preload``/``--library-path``) and
-    the embedded interpreter finds pyagy/wirecap via ``site`` (see ``PYTHONHOME`` below), so nothing
-    shim-related leaks into agy's children. Mirrors run-agy.sh; ``extra_env`` (applied last) can
-    override any AGY_PROC* knob, and a ``None`` value removes that variable (e.g. the SSH_*
-    variables, which make agy skip its keyring login)."""
+def linked_env(capture: str | os.PathLike[str] = "agy-capture.jsonl",
+               log: str | os.PathLike[str] | None = None,
+               module: str = "pyagy.agy_process",
+               base: Mapping[str, str] | None = None,
+               extra_env: Mapping[str, str | None] | None = None) -> dict[str, str]:
+    """Enable books and configure the embedded worker's module and JSONL capture.
+
+    The interpreter finds pyagy/wirecap through site and PYTHONHOME. This adds no preload,
+    library-path or PYTHONPATH settings. extra_env applies last; None removes a variable.
+    """
     env = dict(base if base is not None else os.environ)
     env.update({
         "AGY_PROC_ENABLE": "1",
@@ -57,7 +52,7 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
         # WIRE_CAPTURE is the shared decode-layer name (pycodex uses it too); agy_process
         # still accepts the legacy AGY_PROC_CAPTURE as a fallback.
         "WIRE_CAPTURE": os.path.abspath(capture),
-        # install the os.OpenFile conversation-id probe (overlay) so instrumented runs learn
+        # install the os.OpenFile conversation-id probe (overlay) so linked runs learn
         # the exact conversation id in-process (agy doesn't expose it via env); newest-*.db-by-
         # mtime is the fallback. The file_open trampoline is installed only when this is set,
         # and its C-side path filter keeps it cheap (Python sees only conversation-store opens).
@@ -78,4 +73,7 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
             env.pop(key, None)
         else:
             env[key] = value
+    if any(env.get(key) not in (None, "", "0") for key in
+           ("AGY_PROC_TLS_WRITE_SYNC", "AGY_PROC_REWRITE_RULES", "AGY_PROC_REWRITE")):
+        raise NotImplementedError("agy request rewriting is unsupported by the current native trampoline")
     return env

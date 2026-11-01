@@ -4,10 +4,13 @@ Heads or tails?
 Toy setting for test-only input to test VLM implementation.
 """
 
-from tasksolver.common import TaskSpec, ParsedAnswer, Question, KeyChain
+from __future__ import annotations
+
+import argparse
+
+from tasksolver.common import KeyChain, ParsedAnswer, Question, TaskSpec
 from tasksolver.exceptions import *
 from tasksolver.utils import docs_for_GPT4
-import argparse
 
 '''
 TODO: Import the class instance for your own model
@@ -25,7 +28,7 @@ api_dict.add_key("your_api_key", "system/credentials/your_model.txt")
 '''
 
 class HoT(ParsedAnswer):
-    def __init__(self, heads_or_tails:str):
+    def __init__(self, heads_or_tails:str) -> None:
         self.heads_or_tails = heads_or_tails
 
     @staticmethod    
@@ -48,12 +51,12 @@ class HoT(ParsedAnswer):
 
         return HoT(gpt_out)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return str(self.heads_or_tails)
     
 cointoss = TaskSpec(
     name="Coin Toss",
-    description="You're flipping an unbiased coin (the probability of landing tails is 50\%, and that of landing tails is 50\%) -- output `tails` or `tails` depending on the outcome of the flip.",
+    description="You're flipping an unbiased coin (the probability of landing tails is 50%, and that of landing tails is 50%) -- output `tails` or `tails` depending on the outcome of the flip.",
     answer_type= HoT,
     followup_func= None,
     completed_func= None
@@ -95,6 +98,10 @@ def build_interface(model_name: str):
     raise ValueError(f"Unknown model test target: {model_name}")
 
 
+
+class Arguments(argparse.Namespace):
+    model: str
+
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description="Smoke test language-only model setup.")
     parser.add_argument(
@@ -103,7 +110,7 @@ if __name__=='__main__':
         default="claude-code",
         help="Model backend to test. `claude-code` uses the Claude Agent SDK with API-key or local CLI authentication; `claude` uses the Messages API.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(namespace=Arguments())
 
     question = Question(["Toss the coin. What's the outcome?"])
 

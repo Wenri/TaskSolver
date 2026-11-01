@@ -4,6 +4,9 @@ home-aware session-store readers. No codex binary, no network.
 
     python3 test_scripts/test_codex_argv.py
 """
+
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -20,19 +23,20 @@ sys.path.insert(0, _REPO)
 # `import pygit2` is only *used* at workspace-creation time — which this offline
 # suite never reaches. Stub it when absent so the suite runs without the dep.
 try:
-    import pygit2  # noqa: F401
+    import importlib
+    importlib.import_module("pygit2")
 except ImportError:
     import types
     sys.modules["pygit2"] = types.ModuleType("pygit2")
 
-from pycodex._env import codex_argv, instrumented_env  # noqa: E402
 from pycodex import config as codex_config  # noqa: E402
 from pycodex import sessions  # noqa: E402
+from pycodex._env import codex_argv, linked_env  # noqa: E402
 
-_failures = []
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
@@ -42,7 +46,7 @@ BIN = "/fake/codex"
 WS = "/tmp/ws"
 
 
-def test_argv_fresh():
+def test_argv_fresh() -> None:
     print("[offline] codex_argv: fresh one-shot")
     argv = codex_argv("hi", WS, model="m", codex_bin=BIN)
     check(argv == [BIN, "exec", "hi", "--skip-git-repo-check", "-C", WS, "-m", "m"],
@@ -51,7 +55,7 @@ def test_argv_fresh():
     check(argv[-1] == "--json", "extra_flags trail")
 
 
-def test_argv_stdin():
+def test_argv_stdin() -> None:
     print("[offline] codex_argv: prompt_via_stdin")
     argv = codex_argv("a long prompt", WS, codex_bin=BIN, prompt_via_stdin=True)
     check(argv == [BIN, "exec", "-", "--skip-git-repo-check", "-C", WS],
@@ -60,7 +64,7 @@ def test_argv_stdin():
     check(argv == [BIN, "p", "-C", WS], "TUI ignores prompt_via_stdin")
 
 
-def test_argv_resume_drops_C():
+def test_argv_resume_drops_C() -> None:
     print("[offline] codex_argv: non-interactive resume drops -C")
     sid = "0123456789abcdef0123456789abcdef"
     argv = codex_argv("more", WS, codex_bin=BIN, session_id=sid)
@@ -75,23 +79,23 @@ def test_argv_resume_drops_C():
     check("-C" in codex_argv("p", WS, codex_bin=BIN), "fresh keeps -C")
 
 
-def test_env_codex_home():
-    print("[offline] instrumented_env: codex_home injection + precedence")
+def test_env_codex_home() -> None:
+    print("[offline] linked_env: codex_home injection + precedence")
     with tempfile.TemporaryDirectory() as td:
-        env = instrumented_env(os.path.join(td, "c.jsonl"), base={},
+        env = linked_env(os.path.join(td, "c.jsonl"), base={},
                                codex_home=os.path.join(td, "home"))
         check(env.get("CODEX_HOME") == os.path.join(td, "home"), "kwarg injects")
-        env = instrumented_env(os.path.join(td, "c.jsonl"), base={},
+        env = linked_env(os.path.join(td, "c.jsonl"), base={},
                                extra_env={"CODEX_HOME": "/other"},
                                codex_home=os.path.join(td, "home"))
         check(env.get("CODEX_HOME") == os.path.join(td, "home"),
               "kwarg wins over extra_env")
-        env = instrumented_env(os.path.join(td, "c.jsonl"), base={},
+        env = linked_env(os.path.join(td, "c.jsonl"), base={},
                                extra_env={"CODEX_HOME": "/other"})
         check(env.get("CODEX_HOME") == "/other", "extra_env alone still works")
 
 
-def test_mcp_flags_wrap():
+def test_mcp_flags_wrap() -> None:
     print("[offline] pycodex.config.mcp_flags: PYTHONHOME unwrap")
     spec = {"command": "uv", "args": ["run", "blender-mcp"],
             "env": {"BLENDER_MCP_PORT": "9"}}
@@ -106,7 +110,7 @@ def test_mcp_flags_wrap():
     check(again == flags, "idempotent on pre-wrapped specs")
 
 
-def test_ask_mutual_exclusion():
+def test_ask_mutual_exclusion() -> None:
     print("[offline] ask: session_id + continue_latest rejected")
     from pycodex import client
     try:
@@ -118,7 +122,7 @@ def test_ask_mutual_exclusion():
         check(False, f"ValueError raised (got {type(exc).__name__})")
 
 
-def _rollout(root, day, ts, sid, cwd, when):
+def _rollout(root: str, day: str, ts: str, sid: str, cwd: str, when: float):
     d = os.path.join(root, "sessions", day)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, f"rollout-{ts}-{sid}.jsonl")
@@ -132,7 +136,7 @@ def _rollout(root, day, ts, sid, cwd, when):
     return path
 
 
-def test_sessions_home_aware():
+def test_sessions_home_aware() -> None:
     print("[offline] sessions readers honor home=")
     with tempfile.TemporaryDirectory() as td:
         home = os.path.join(td, "home")
@@ -145,7 +149,8 @@ def test_sessions_home_aware():
         check(sessions.latest_session_id(home=home) == sid_new, "newest wins")
         check(sessions.latest_session_id(home=home, cwd=cwd_a) == sid_old,
               "cwd filter")
-        check(sessions.find_rollout(sid_old, home=home).endswith(f"{sid_old}.jsonl"),
+        rollout = sessions.find_rollout(sid_old, home=home)
+        check(rollout is not None and rollout.endswith(f"{sid_old}.jsonl"),
               "find_rollout(home=)")
         tr = sessions.read_transcript(sid_new, home=home)
         check(len(tr) == 1 and tr[0]["content"] == f"hello from {sid_new}",
@@ -154,7 +159,7 @@ def test_sessions_home_aware():
               "empty store -> None")
 
 
-def test_sessions_reverted_rollout():
+def test_sessions_reverted_rollout() -> None:
     print("[offline] sessions: reverted rollouts keep the stable thread ID")
     # Current upstream's rollout_file_name_tests.rs uses these exact UUIDs.
     thread_id: Final = "019ff1a2-b3c4-7d5e-8f60-112233445566"
@@ -207,7 +212,7 @@ def test_sessions_reverted_rollout():
               "renamed fork's root session is not mistaken for its thread")
 
 
-def main():
+def main() -> None:
     test_argv_fresh()
     test_argv_stdin()
     test_argv_resume_drops_C()

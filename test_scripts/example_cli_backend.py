@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example / smoke test: drive an instrumented CLI as a TaskSolver-contract backend.
+"""Example / smoke test: drive a linked CLI as a TaskSolver-contract backend.
 
     pixi run python test_scripts/example_cli_backend.py --backend agy
     pixi run python test_scripts/example_cli_backend.py --backend codex
@@ -19,30 +19,36 @@ regression in the base shows up for whichever backend you can currently authenti
 Skips cleanly (exit 0, "NOTE: skipping") when the selected backend is unavailable — treat a
 skip as UNVERIFIED, not as a pass.
 """
+
+from __future__ import annotations
+
 import argparse
 import re
 import sys
+from collections.abc import Mapping
+from typing import cast
 
-from tasksolver.common import ParsedAnswer, Question, TaskSpec
+from tasksolver.common import ParsedAnswer, Question, ResponseMetadata, TaskSpec
 from tasksolver.exceptions import GPTOutputParseException
+from wirecap.decode.turns import Usage
 
 
 class NumberAnswer(ParsedAnswer):
-    def __init__(self, value):
+    def __init__(self, value: int) -> None:
         self.value = value
 
-    @classmethod
-    def parser(cls, raw: str):
-        m = re.search(r"-?\d+", raw or "")
+    @staticmethod
+    def parser(gpt_raw: str) -> NumberAnswer:
+        m = re.search(r"-?\d+", gpt_raw)
         if not m:
-            raise GPTOutputParseException(f"no number in {raw!r}")
-        return cls(int(m.group()))
+            raise GPTOutputParseException(f"no number in {gpt_raw!r}")
+        return NumberAnswer(int(m.group()))
 
-    def __str__(self):
+    def __str__(self) -> str:
         return str(self.value)
 
 
-def build_model(backend, task, timeout):
+def build_model(backend: str, task: TaskSpec, timeout: int):
     """Construct the backend directly (NOT via Agent): the agent.py dispatch branches pass
     timeout=1800, which is not what a smoke test wants."""
     if backend == "agy":
@@ -50,6 +56,7 @@ def build_model(backend, task, timeout):
         return AgyModel(api_key=None, task=task, model=None, timeout=timeout)
     if backend == "codex":
         import os
+
         from pycodex import CodexModel
         from pycodex._env import CODEX_BIN
         if not os.path.exists(CODEX_BIN):
@@ -62,17 +69,22 @@ def build_model(backend, task, timeout):
     raise SystemExit(f"unknown backend {backend!r}")
 
 
-def main():
+
+class Arguments(argparse.Namespace):
+    backend: str
+    timeout: int
+
+def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--backend", default="agy", choices=("agy", "codex", "claude-code"))
     ap.add_argument("--timeout", type=int, default=180)
-    args = ap.parse_args()
+    args = ap.parse_args(namespace=Arguments())
 
     task = TaskSpec(
         name="math",
         description="Answer the math question with only a number.",
         answer_type=NumberAnswer,
-        followup_func=lambda qs, ans: Question([]),
+        followup_func=lambda task, qs, ans, completed: Question([]),
         completed_func=lambda q, a: True,
     )
     model = build_model(args.backend, task, args.timeout)
@@ -92,11 +104,12 @@ def main():
               f"{type(e).__name__}: {str(e)[:200]}")
         return 0
 
-    m0 = meta[0] if isinstance(meta, list) and meta else meta
+    m0: ResponseMetadata = meta[0] if meta else {}
     print("backend      :", args.backend)
+    assert isinstance(parsed, NumberAnswer)
     print("parsed value :", parsed.value)
     print("raw content  :", repr((raw["content"] or "")[:80]))
-    print("metadata keys:", sorted(m0) if isinstance(m0, dict) else type(m0).__name__)
+    print("metadata keys:", sorted(m0))
 
     # the canonical 4-tuple contract holds regardless of whether the model answered
     assert isinstance(payload, dict) and "prompt" in payload, "payload is the request dict"
@@ -114,18 +127,18 @@ def main():
     return 0
 
 
-def _had_model_turn(m0):
+def _had_model_turn(m0: ResponseMetadata) -> bool:
     """Did the CLI actually complete a model turn? agy/codex expose a wirecap `Usage` (token
     counts) in their metadata; claude-code exposes the SDK result usage dictionary."""
-    if not isinstance(m0, dict):
-        return False
     u = m0.get("usage")
     if u is None:
         return False
-    total = getattr(u, "total_tokens", None)
-    if total is None and isinstance(u, dict):      # claude-code's raw CLI usage dict
-        total = sum(v for v in u.values() if isinstance(v, int))
-    return bool(total)
+    if isinstance(u, Usage):
+        return u.total_tokens > 0
+    if isinstance(u, dict):      # claude-code's raw CLI usage dict
+        return any(isinstance(v, int) and v > 0
+                   for v in cast(Mapping[str, object], u).values())
+    return False
 
 
 if __name__ == "__main__":

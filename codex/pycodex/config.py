@@ -9,10 +9,10 @@ different Python (``uv run``'s venv interpreter) — so by default every server
 command is wrapped ``/usr/bin/env -u PYTHONHOME …`` (idempotent).
 """
 
-from wirecap.runtime.mcp import codex_config_flags, env_wrapped, normalize_server_spec
+from wirecap.runtime.mcp import MCPServers, codex_config_flags, env_wrapped, normalize_server_spec
 
 
-def mcp_flags(servers, unset_pythonhome=True):
+def mcp_flags(servers: MCPServers, unset_pythonhome: bool = True) -> list[str]:
     """``-c mcp_servers.<name>=<TOML>`` flags for arbitrary ``{name: {command,
     args, env}}`` specs, PYTHONHOME-unwrapped by default (see module docstring).
     Server names must be bare TOML keys — enforced by the renderer."""

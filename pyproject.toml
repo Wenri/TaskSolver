@@ -1,13 +1,36 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = [
+    "setuptools>=61",
+    "lief",                    # write libagy.so's ELF layout
+    "pyelftools>=0.33,<0.34",   # read and validate ELF sections, symbols and relocations
+    "capstone>=5,<6",          # decode amd64 stack checks and frame prologues
+    "pwntools>=4.15,<5",       # assemble book jumps and PLT entries with GNU binutils
+]
 build-backend = "setuptools.build_meta"
+
+[tool.basedpyright]
+include = ["."]
+exclude = ["**/vendor/**", "**/build/**", "**/node_modules/**", ".pixi", ".git", "**/__pycache__"]
+extraPaths = [".", "antigravity", "claude", "codex", "kimi", "claude/vendor/sdk/src", "codex/vendor/sdk/python/src"]
+venvPath = ".pixi/envs"
+venv = "default"
+pythonVersion = "3.15"
+pythonPlatform = "Linux"
+typeCheckingMode = "strict"
+reportAny = "error"
+reportExplicitAny = "error"
+enableTypeIgnoreComments = false
+reportIgnoreCommentWithoutRule = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
+# The bridge deliberately uses CPython multiprocessing internals; their types are still checked.
+reportPrivateUsage = "none"
 
 [project]
 name = "tasksolver"
 version = "0.0.1"
-description = "Provider-agnostic VLM query flow with API, Claude Agent SDK, Codex SDK, instrumented CLI, and local HuggingFace backends."
+description = "Provider-agnostic VLM query flow with API, Claude Agent SDK, Codex SDK, linked CLI, and local HuggingFace backends."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.15"
 # Core deps are the ones imported unconditionally (Agent + common/event/keychain)
 # plus API clients and runtime dependencies for the SDK sources bundled here.
 # The consuming environment owns resolution within these compatibility bounds.
@@ -23,11 +46,10 @@ dependencies = [
     "anthropic",          # claude + kimi adapters
     # Runtime dependencies of the checked-in Claude Agent SDK (claude/vendor/sdk).
     "anyio>=4", "sniffio>=1", "mcp>=1.23,<3", "jsonschema>=4.20",
-    "typing-extensions>=4; python_version<'3.11'",
+    "typing-extensions>=4.13",
     "pydantic>=2.12", "packaging>=26.2", # official Codex Python SDK bundled from the pinned vendor tree
     "google-generativeai", # gemini adapter
     "pygit2",             # wirecap/runtime/workspace.py: scratch git workspace pyagy/pycodex run in
-    "lief",               # make_libagy.py: a source build converts the pinned agy into libagy.so
 ]
 
 [project.optional-dependencies]
@@ -81,6 +103,7 @@ include = ["tasksolver*", "wirecap*", "pyagy*", "pycodex*", "pykimi*", "pyclaude
 license-files = ["LICENSE", "codex/vendor/LICENSE", "codex/vendor/NOTICE", "claude/vendor/sdk/LICENSE"]
 
 [tool.setuptools.package-data]
+"*" = ["py.typed"]
 openai_codex = ["py.typed"]
 claude_agent_sdk = ["py.typed", "_bundled/claude"]
 
@@ -107,8 +130,7 @@ nodejs = ">=26,<27"
 # NOTE: bun was removed — it pins icu 75, which conflicts with boost 1.91 (icu 78, pulled in
 # for Boost.Thread); nodejs (what pymport uses) is icu-78 and coexists fine. Re-add bun in a
 # separate environment if needed so its icu pin doesn't clash with the default env's boost.
-# GNU make for node-gyp: pymport is compiled from source by node-gyp, which needs make (this host
-# has no system make). The antigravity shim now builds with cmake+ninja (below), not make.
+# GNU make for node-gyp's pymport build.
 make = ">=4"
 pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pymport)
 # Linux UAPI headers (linux/, asm/): glibc's <limits.h> needs <linux/limits.h>, but this
@@ -116,12 +138,8 @@ pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pym
 # build points -idirafter at this package's sysroot in place — no copy — at
 # $CONDA_PREFIX/x86_64-conda-linux-gnu/sysroot/usr/include.
 kernel-headers_linux-64 = ">=6"   # -> sysroot 2.39 (matches 3D-CoT; relaxing binutils would otherwise drop it to 2.28/kh-4.18)
-# Conda C/C++ compilers for the antigravity shim — the automatic build_py build AND manual
-# `pixi run build-shim`. Use them instead of a bare PATH `gcc`/`g++`: on a Nix host those are
-# Nix's, which bake /nix/store glibc rpaths into the shim and break its LD_PRELOAD. cmake picks
-# them up via $CXX/$CC exported by the env. GCC 15 supports constexpr-generated asm strings
-# in C++23. Keep the workspace and package build on the same compiler major; the CUDA
-# toolchain's gcc_impl constraint also permits GCC 15. All shim TUs remain C++23.
+# CMake uses conda's $CC/$CXX to avoid Nix glibc rpaths. GCC 15 supports agy's C++23
+# constexpr asm strings; keep the workspace and package build on the same compiler major.
 gcc_linux-64 = ">=15,<16"
 gxx_linux-64 = ">=15,<16"
 # Boost.Thread for the pybridge worker (its thread::attributes sets the libpython worker's
@@ -143,11 +161,14 @@ gdb = ">=18.1,<19"
 gh = ">=2.96.0,<3"
 glab = ">=1.106.0,<2"
 paramiko = ">=5.0.0,<6"
-# cmake + ninja build the antigravity shim (antigravity/CMakeLists.txt) — both the automatic
-# build_py hook (during `pixi install`) and the manual `pixi run build-shim`.
+basedpyright = ">=1.40.2,<2"
+# Native build tools, also available here for manual agy rebuilds.
 cmake = ">=4.3.4,<5"
 ninja = ">=1.11"
 py-lief = ">=1.0.0,<2"
+pyelftools = ">=0.33,<0.34"
+capstone = ">=5,<6"
+pwntools = ">=4.15,<5"
 rust = ">=1.99.1,<2"
 clang = ">=23.1.4,<24"
 libclang = ">=23.1.4,<24"
@@ -155,13 +176,7 @@ libcap = ">=2.78,<3"
 pygit2 = ">=1.19.3,<2"
 htop = ">=3.5.1,<4"
 
-# The antigravity shim build lives in antigravity/CMakeLists.txt (setup.py's build_py hook runs
-# `cmake -S antigravity -B antigravity/build -G Ninja && cmake --build …` during the package build,
-# so `pixi install` builds it). Manual rebuilds via the pixi tasks below:
-#   pixi run build-shim         # configure (fetch deps) + compile the shim
-#   pixi run shim-symbols       # ensure raw agy conversion + metadata are current, then rebuild
-#   pixi run shim-agy-update    # query the latest release manifest + print new pin values
-#   pixi run shim-books         # after editing procdef.h: regen pyagy's BOOKS mirror
+# setup.py's build_py step compiles the bundled native runtimes during package installation.
 [tool.pixi.package]
 name = "tasksolver"
 version = "0.0.1"
@@ -175,18 +190,18 @@ version = "*"
 [tool.pixi.package.build.config]
 noarch = false
 
-# The python backend builds without build isolation, so the [build-system] requirements must be
-# present in the package's host environment — plus `cmake`/`ninja` and `kernel-headers_linux-64`
-# (UAPI headers), which setup.py's build_py hook needs to build the antigravity shim. build_py
-# compiles against $CONDA_PREFIX's sysroot, so the headers must live in *this* (host) env, not
-# just the default one.
+# The backend builds without isolation: mirror [build-system].requires here, alongside native
+# tools and headers. setup.py selects this host environment's $PREFIX for native builds.
 [tool.pixi.package.host-dependencies]
 python = "3.15.*"
 pip = "*"
 setuptools = ">=61"
-cmake = ">=4.3.4,<5"          # drives the shim build (antigravity/CMakeLists.txt) in build_py
-ninja = ">=1.11"             # cmake generator for the shim build
-py-lief = ">=1.0.0,<2"   # make_libagy.py converts the upstream agy binary into libagy.so
+cmake = ">=4.3.4,<5"
+ninja = ">=1.11"
+py-lief = ">=1.0.0,<2"
+pyelftools = ">=0.33,<0.34"
+capstone = ">=5,<6"
+pwntools = ">=4.15,<5"
 kernel-headers_linux-64 = ">=6"   # -> sysroot 2.39 (matches 3D-CoT; relaxing binutils would otherwise drop it to 2.28/kh-4.18)
 gcc_linux-64 = ">=15,<16"   # same conda toolchain as the workspace, not the Nix gcc on PATH
 gxx_linux-64 = ">=15,<16"   # C++23 plus GCC's constexpr-generated asm strings
@@ -214,18 +229,14 @@ nodejs = ">=26,<27"
 # --library-path. The only env needs are the pymport dev-diagnostic tasks below, scoped to them.
 
 [tool.pixi.tasks]
+typecheck = "basedpyright"
 # node-gyp finds python3-embed via PKG_CONFIG_PATH when compiling pymport from source.
 npm-install = { cmd = "npm_config_build_from_source=true CXXFLAGS='-std=c++17' npm install", env = { PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig" } }
 # PYTHONHOME: the pymport-embedded interpreter needs it to find the conda stdlib.
 pymport-test = { cmd = "node -e \"const {pymport,proxify}=require('pymport'); const sys=proxify(pymport('sys')); console.log('Python',sys.version.toString()); const np=proxify(pymport('numpy')); console.log('numpy',np.__version__.toString());\"", env = { PYTHONHOME = "$CONDA_PREFIX" }, depends-on = ["npm-install"] }
 
-# `pixi install` is the canonical build — setup.py's build_py compiles the antigravity shim +
-# wirecap_bridge AND the codex CLI (see [tool.pixi.package.host-dependencies]). The tasks below are
-# NOT a second build path; they are shim iteration + agy-symbol maintenance that install doesn't do.
-# (There is no build-codex task on purpose: codex is built only by pixi install — a separate
-# default-env cargo build would thrash the install's host-env target/ fingerprints.)
-# `build-shim` is a fast in-place shim rebuild for C++ iteration (skips the package rebuild); the
-# cmake configure is idempotent (fetches vendored deps on first run), so each task re-runs it.
+# These tasks rebuild agy in place and maintain generated symbols without reinstalling the
+# package. Codex stays on the package build path to avoid conflicting Cargo fingerprints.
 build-shim = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build"
 shim-symbols = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target symbols && cmake --build antigravity/build"   # ensure library + metadata are current
 shim-agy-update = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target agy-update"   # query latest manifest + print new pins

@@ -42,6 +42,16 @@ pub fn spawn_response_stream(
     telemetry: Option<Arc<dyn SseTelemetry>>,
     turn_state: Option<Arc<OnceLock<String>>>,
 ) -> ResponseStream {
+    spawn_response_stream_with_capture(stream_response, idle_timeout, telemetry, turn_state, None)
+}
+
+pub(crate) fn spawn_response_stream_with_capture(
+    stream_response: StreamResponse,
+    idle_timeout: Duration,
+    telemetry: Option<Arc<dyn SseTelemetry>>,
+    turn_state: Option<Arc<OnceLock<String>>>,
+    capture: Option<codex_wirecap::ResponseCapture>,
+) -> ResponseStream {
     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
     let models_etag = stream_response
         .headers
@@ -94,6 +104,7 @@ pub fn spawn_response_stream(
             idle_timeout,
             telemetry,
             safety_buffering_treatment,
+            capture,
         )
         .await;
     });
@@ -566,6 +577,7 @@ pub async fn process_sse(
         idle_timeout,
         telemetry,
         SafetyBufferingTreatment::default(),
+        None,
     )
     .await;
 }
@@ -576,6 +588,7 @@ async fn process_sse_with_treatment(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     safety_buffering_treatment: SafetyBufferingTreatment,
+    capture: Option<codex_wirecap::ResponseCapture>,
 ) {
     let mut stream = stream.eventsource();
     let mut response_error: Option<ApiError> = None;
@@ -622,7 +635,9 @@ async fn process_sse_with_treatment(
         trace!("SSE event: {}", &sse.data);
 
         // wirecap capture: the raw ResponsesStreamEvent JSON (SSE transport). No-op unless enabled.
-        codex_wirecap::emit_event(sse.data.as_bytes());
+        if let Some(capture) = capture.as_ref() {
+            capture.event(sse.data.as_bytes());
+        }
 
         let event: ResponsesStreamEvent = match serde_json::from_str(&sse.data) {
             Ok(event) => event,

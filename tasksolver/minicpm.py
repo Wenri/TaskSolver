@@ -1,31 +1,22 @@
-import argparse
-import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
+from __future__ import annotations
 
-import json
 import random
-import re
-import torch
-import numpy as np
-from tqdm import tqdm
-import shortuuid
-import sys
-
-from transformers import AutoModel, AutoTokenizer, AutoProcessor, AutoModelForSeq2SeqLM
-
-from torch.utils.data import Dataset, DataLoader
-
-from PIL import Image
-import math
-
-from .gpt4v import TaskSpec, ParsedAnswer, Question
-from .exceptions import GPTOutputParseException, GPTMaxTriesExceededException
 import threading
-from typing import List, Tuple, Union
+import numpy as np
 from loguru import logger
-from copy import deepcopy
-import time
-import os
+from .common import TaskSpec, Question
+from .exceptions import GPTOutputParseException, GPTMaxTriesExceededException
+from .provider_types import BackendResult, BackendManyResults, parse_response
+from .hf_types import HFResult, completed_results, torch, transformers
+from wirecap.types import JSONObject
+from .hf_types import MiniCPMPayload
+from .hf_types import MiniCPMRemoteModel
+from PIL import Image
+from importlib import import_module
+from typing import cast
+from .hf_types import RemoteTransformersSDK
+
+AutoModel = cast(RemoteTransformersSDK[MiniCPMRemoteModel], import_module("transformers")).AutoModel
 
 seed = 42
 torch.manual_seed(seed)
@@ -43,10 +34,10 @@ class MiniCPMModel(object):
         self.task:TaskSpec = task
         self.model = self.get_model(model)
 
-        self.tokenizer = AutoTokenizer.from_pretrained('openbmb/MiniCPM-V-2_6-int4', trust_remote_code=True)
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained('openbmb/MiniCPM-V-2_6-int4', trust_remote_code=True)
 
-    
-    def get_model(self, model):
+
+    def get_model(self, model: str) -> MiniCPMRemoteModel:
         # Load the open-source model in
 
         if model == 'openbmb/MiniCPM-V-2_6-int4':
@@ -55,22 +46,20 @@ class MiniCPMModel(object):
             model_weights = model_weights.eval()
 
             return model_weights
-        
+
         else:
             raise ValueError(f"Such model {model} does not exist!")
 
-    def ask(self,  payload:dict, n_choices=1, temperature=0.7) -> Tuple[List[dict], List[dict]]:
+    def ask(self, payload: MiniCPMPayload, n_choices: int = 1, temperature: float = 0.7) -> tuple[list[JSONObject], list[object]]:
         """
-        args: 
+        args:
             payload: json dictionary, prepared by `prepare_payload`
         """
 
-        def minicpm_thread(self, idx, payload, results, temperature):
+        def minicpm_thread(self: MiniCPMModel, idx: int, payload: MiniCPMPayload, results: list[HFResult | None], temperature: float) -> None:
 
             # creation of payload
-            mod_payload = deepcopy(payload)
             messages = payload['messages']
-            max_tokens = payload['max_tokens']
 
 
             try:
@@ -82,16 +71,16 @@ class MiniCPMModel(object):
                 )
             except Exception as e:
                 raise e
-            
-            # print('outputs: ', output_text)
-            message = {'content' : output_text}
 
-            results[idx] = {"metadata": output_text, "message": message} 
+            # print('outputs: ', output_text)
+            message: JSONObject = {'content': output_text}
+
+            results[idx] = {"metadata": output_text, "message": message}
 
             return
 
         assert n_choices >= 1
-        results = [None]  * n_choices 
+        results: list[HFResult | None] = [None] * n_choices
         if n_choices > 1:
             minicpm_jobs = [threading.Thread(target=minicpm_thread,
                             args=(self, idx, payload, results, temperature))
@@ -103,23 +92,22 @@ class MiniCPMModel(object):
         else:
             minicpm_thread(self, 0, payload, results, temperature)
 
-        messages:List[dict] = [ res["message"] for res in results]
-        metadata:List[dict] = [ res["metadata"] for res in results]
+        complete = completed_results(results)
+        messages = [res["message"] for res in complete]
+        metadata = [res["metadata"] for res in complete]
         return messages, metadata
 
 
     @staticmethod
     def prepare_payload(question:Question,
-            max_tokens=1000,
+            max_tokens: int = 1000,
             verbose:bool=False,
-            prepend:Union[dict, None]=None,
-            **kwargs
-            ) -> dict:
+            prepend: object = None,
+            **kwargs: object
+            ) -> MiniCPMPayload:
 
-        image_dic = None
         text = ''
-        dic_list = question.get_json()
-        img_list = []
+        img_list: list[Image.Image | None] = []
         for dic in question.get_json():
             # The case of text
             if dic['type'] == 'text':
@@ -132,10 +120,10 @@ class MiniCPMModel(object):
         if len(img_list) == 0:
             img_list.append(Image.new('RGB', (512, 512), color = (255, 255, 255)))
 
-        content = [image for image in img_list]
+        content: list[Image.Image | str | None] = list(img_list)
         content.append(text)
 
-        payload = {
+        payload: MiniCPMPayload = {
             "messages": [
                 {
                     'role': 'user',
@@ -149,23 +137,22 @@ class MiniCPMModel(object):
         return payload
 
 
-    def rough_guess(self, question:Question, max_tokens=1000,
-                    max_tries=1, query_id:int=0,
-                    verbose=False, temperature=1,
-                    **kwargs):
-    
-        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None, 
+    def rough_guess(self, question:Question, max_tokens: int = 1000,
+                    max_tries: int = 1, query_id:int=0,
+                    verbose: bool = False, temperature: float = 1,
+                    **kwargs: object) -> BackendResult:
+
+        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None,
                                     model=self.model)
 
-        ok = False
         reattempt = 0
-        while not ok:
-            response, meta_data = self.ask(p, temperature=temperature) 
-            response = response[0] 
+        while True:
+            responses, meta_data = self.ask(p, temperature=temperature)
+            response = responses[0]
             # logger.info(f'response: {response}')
-            try: 
-                parsed_response = self.task.answer_type.parser(response["content"])
-            except GPTOutputParseException as e:
+            try:
+                parsed_response = parse_response(self.task, response)
+            except GPTOutputParseException:
                 # logger.warning(f"The response was not parseable:\n\n{response}\n\nBecause\n\n{e}")
                 # logger.warning(f"The response from LM was not parseable.")
                 pass
@@ -177,35 +164,34 @@ class MiniCPMModel(object):
                 # with open(error_saved, "w")  as f:
                 #     f.write(p_ans.code)
                 # logger.warning(f"The following was not parseable. Saved in {error_saved}.")
-                
+
                 reattempt += 1
                 if reattempt > max_tries:
                     logger.error(f"max tries ({max_tries}) exceeded.")
                     raise GPTMaxTriesExceededException
-             
+
                 logger.warning(f"Attempt failed: Reattempt #{reattempt} querying LLM")
                 continue
-            ok = True 
+            break
 
         return parsed_response, response, meta_data, p
 
-    def all_task_rough_guess(self, task, question:Question, max_tokens=1000,
-                    max_tries=1, query_id:int=0,
-                    verbose=False, temperature=1,
-                    **kwargs):
-    
-        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None, 
+    def all_task_rough_guess(self, task: TaskSpec, question:Question, max_tokens: int = 1000,
+                    max_tries: int = 1, query_id:int=0,
+                    verbose: bool = False, temperature: float = 1,
+                    **kwargs: object) -> BackendResult:
+
+        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None,
                                     model=self.model)
 
-        ok = False
         reattempt = 0
-        while not ok:
-            response, meta_data = self.ask(p, temperature=temperature) 
-            response = response[0] 
+        while True:
+            responses, meta_data = self.ask(p, temperature=temperature)
+            response = responses[0]
             # logger.info(f'response: {response}')
-            try: 
-                parsed_response = task.answer_type.parser(response["content"])
-            except GPTOutputParseException as e:
+            try:
+                parsed_response = parse_response(task, response)
+            except GPTOutputParseException:
                 # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
                 # logger.warning(f"The response from LM was not parseable.")
                 pass
@@ -217,22 +203,22 @@ class MiniCPMModel(object):
                 # with open(error_saved, "w")  as f:
                 #     f.write(p_ans.code)
                 # logger.warning(f"The following was not parseable. Saved in {error_saved}.")
-                
+
                 reattempt += 1
                 if reattempt > max_tries:
                     logger.error(f"max tries ({max_tries}) exceeded.")
                     raise GPTMaxTriesExceededException
-             
+
                 logger.warning(f"Attempt failed: reattempt #{reattempt} querying LLM")
                 continue
-            ok = True 
+            break
 
         return parsed_response, response, meta_data, p
 
     def many_rough_guesses(self, num_threads:int,
-                           question:Question, max_tokens=1000,
-                           verbose=False, max_tries=1, temperature=1
-                           ) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
+                           question:Question, max_tokens: int = 1000,
+                           verbose: bool = False, max_tries: int = 1, temperature: float = 1
+                           ) -> BackendManyResults:
         """
         Args:
             num_threads : number of independent threads.
@@ -243,20 +229,19 @@ class MiniCPMModel(object):
             return signature of `rough_guess()`
         """
 
-        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None, 
+        p = self.prepare_payload(question, max_tokens = max_tokens, verbose=verbose, prepend=None,
                                     model=self.model)
 
         #  TODO
         n_choices = num_threads
 
-        # TODO: wrap in robust-ask method, repeatedly asks until parseable output. 
-        ok = False
+        # TODO: wrap in robust-ask method, repeatedly asks until parseable output.
         reattempt = 0
-        while not ok:
+        while True:
             response, meta_data = self.ask(p, n_choices=n_choices, temperature=temperature)
             try:
-                parsed_response = [self.task.answer_type.parser(r["content"]) for r in response]
-            except GPTOutputParseException as e:
+                parsed_response = [parse_response(self.task, r) for r in response]
+            except GPTOutputParseException:
                 # logger.warning(f"The following was not parseable:\n\n{response}\n\nBecause\n\n{e}")
                 # logger.warning(f"The response from LM was not parseable.")
                 pass
@@ -266,19 +251,14 @@ class MiniCPMModel(object):
                 if reattempt > max_tries:
                     logger.error(f"max tries ({max_tries}) exceeded.")
                     raise GPTMaxTriesExceededException
-             
+
                 logger.warning(f"Attempt failed: Reattempt #{reattempt} querying LLM")
                 continue
-            ok = True 
+            break
 
         return parsed_response, response, meta_data, p
 
-    def run_once(self, question:Question, max_tokens=1000, temperature=1, **kwargs):
-        q = self.task.first_question(question) 
-        p_ans, ans, meta, p = self.rough_guess(q, max_tokens=max_tokens, temperature=temperature, **kwargs)
+    def run_once(self, question:Question, max_tokens: int = 1000, temperature: float = 1, *, max_tries: int = 1, query_id: int = 0, verbose: bool = False, **kwargs: object) -> BackendResult:
+        q = self.task.first_question(question)
+        p_ans, ans, meta, p = self.rough_guess(q, max_tokens=max_tokens, temperature=temperature, max_tries=max_tries, query_id=query_id, verbose=verbose, **kwargs)
         return p_ans, ans, meta, p
-
-
-
-
-

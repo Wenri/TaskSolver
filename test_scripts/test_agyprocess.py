@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """AgyProcess — agy driven as a multiprocessing.spawn-shaped child, streaming native
-Python objects home over a caller-owned result SimpleQueue. See plan why-make-agy-a-splendid-rainbow.md.
+Python objects home over a caller-owned result SimpleQueue.
 
 Needs the shim built for the RUNNING agy's build-id — uses the pinned vendor/agy
 (matches symbols.json). Stock-mp layering: the caller creates the SimpleQueue (a Pipe +
@@ -9,9 +9,13 @@ SemLocks, re-attached to the shared resource_tracker) and hands it to AgyProcess
 
     python3 test_scripts/test_agyprocess.py
 """
+
+from __future__ import annotations
 import os
 import sys
 import time
+from collections.abc import Sequence
+from typing import cast
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)                       # repo root holds the shared `wirecap` package
@@ -23,13 +27,17 @@ from pyagy.agyprocess import AgyProcess                       # noqa: E402
 from wirecap.decode.mp_child import _demo_target, _raise_target, stream_turns, DONE  # noqa: E402
 from pyagy.client import _new_channel, _close_channel, _ask_turn  # noqa: E402  (caller-side helpers)
 
-_fail = []
+from wirecap.runtime.session import ResultChannel
+from wirecap.types import Event
+
+_fail: list[str] = []
 
 
-def _drain(p, q, n=2, timeout=45):
+def _drain(p: AgyProcess, q: ResultChannel, n: int = 2, timeout: int = 45) -> list[object]:
     """Collect up to ``n`` RAW objects off the caller's queue (incl. the (DONE, code)
     sentinel), draining the PTY in the same wait via ``service_pty`` (no background thread)."""
-    got, end, reader = [], time.time() + timeout, q._reader
+    got: list[object] = []
+    end, reader = time.time() + timeout, q._reader
     while time.time() < end and len(got) < n:
         try:
             if p.service_pty(1.0, [reader]):
@@ -40,35 +48,41 @@ def _drain(p, q, n=2, timeout=45):
     return got
 
 
-def _teardown(p, q=None):
+def _teardown(p: AgyProcess, q: ResultChannel | None = None) -> None:
     try:
         p.terminate(); p.join(timeout=10)
     finally:
         try:
-            p._popen.close()
+            p.close()
         except Exception:
             pass
         if q is not None:
             _close_channel(q)
 
 
-def case_roundtrip():
+def _text(event: Event) -> str:
+    value = event.get("text", "")
+    assert isinstance(value, str), value
+    return value.strip()
+
+
+def case_roundtrip() -> None:
     q = _new_channel()
     p = AgyProcess(target=_demo_target, args=(q, "hi", 7)); p.start(); q._writer.close()
     got = _drain(p, q); _teardown(p, q)
-    obj = next((x for x in got if isinstance(x, dict)), None)
+    obj = next((cast(Event, x) for x in got if isinstance(x, dict)), None)
     done = any(x == (DONE, 0) for x in got)
     # parent_alive/ppid exercise the parent-death sentinel: parent_process() sees the controlling
     # process (our pid) and reports it alive (the boot pipe only EOFs when we die).
-    ok = obj is not None and obj.get("wire_mp") == "ok" and list(obj.get("args", ())) == ["hi", 7] \
-        and obj.get("py", "").startswith(f"{sys.version_info[0]}.{sys.version_info[1]}.") and done \
+    ok = obj is not None and obj.get("wire_mp") == "ok" and obj.get("args") == ("hi", 7) \
+        and str(obj.get("py", "")).startswith(f"{sys.version_info[0]}.{sys.version_info[1]}.") and done \
         and obj.get("parent_alive") is True and obj.get("ppid") == os.getpid()
     print(f"  {'ok  ' if ok else 'FAIL'} round-trip: native object + clean exitcode + parent sentinel  got={got}")
     if not ok:
         _fail.append("roundtrip")
 
 
-def case_exception():
+def case_exception() -> None:
     # target raises → mp's _bootstrap catches it and returns exitcode 1 (traceback to agy's
     # stderr); the parent sees (DONE, 1). (agy's own process exitcode is separate.)
     q = _new_channel()
@@ -80,7 +94,7 @@ def case_exception():
         _fail.append("exception")
 
 
-def case_stream():
+def case_stream() -> None:
     # The payoff: stream agy's DECODED model turns home as native objects. Needs a live
     # model turn (network/auth) + capture books (capture=True); agy occasionally exits before
     # completing a turn, so retry once. A turn with EMPTY text = a real decode bug (FAIL); no
@@ -90,19 +104,22 @@ def case_stream():
         p = AgyProcess(target=stream_turns, args=(q,),
                        agy_args=["--print", "What is 2+2? Reply with only the digits."])
         p.start(); q._writer.close()
-        turns, end, reader = [], time.time() + 75, q._reader
+        turns: list[Event] = []
+        end, reader = time.time() + 75, q._reader
         while time.time() < end:
             try:
                 if p.service_pty(1.0, [reader]):
                     while reader.poll(0):
                         o = q.get()
-                        if isinstance(o, dict) and o.get("kind") == "genai_turn":
-                            turns.append(o)
+                        if isinstance(o, dict):
+                            event = cast(Event, o)
+                            if event.get("kind") == "genai_turn":
+                                turns.append(event)
             except EOFError:
                 break
         _teardown(p, q)
         if turns:
-            has_text = any((t.get("text") or "").strip() for t in turns)
+            has_text = any(_text(t) for t in turns)
             print(f"  {'ok  ' if has_text else 'FAIL'} stream: {len(turns)} decoded genai_turn(s), "
                   f"text={'yes' if has_text else 'EMPTY'}")
             if not has_text:
@@ -111,7 +128,7 @@ def case_stream():
     print("  NOTE stream: agy produced no turn this run (live-model flake); decode path unexercised")
 
 
-def case_persistent():
+def case_persistent() -> None:
     # Persistent multi-turn: agy stays alive interactive; drive follow-ups with _ask_turn() and
     # collect the decoded turns per prompt. Flaky (two live turns), so PASS on both-turns-with-
     # text (context retained), else NOTE — decode itself is already asserted by case_stream.
@@ -123,8 +140,8 @@ def case_persistent():
     t2 = _ask_turn(p, q, "Now multiply that by 10. Reply with only the digits.")  # follow-up (context)
     _teardown(p, q)
 
-    def first_text(ts):
-        return next(((t.get("text") or "").strip() for t in ts if (t.get("text") or "").strip()), "")
+    def first_text(ts: Sequence[Event]) -> str:
+        return next((text for t in ts if (text := _text(t))), "")
     x1, x2 = first_text(t1), first_text(t2)
     if x1 and x2:
         print(f"  ok   persistent: 2-turn session t1={x1[:16]!r} t2={x2[:16]!r} (context retained)")

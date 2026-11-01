@@ -1,13 +1,15 @@
-# antigravity — bind custom network / MCP context / tools into `agy`
+# antigravity — capture `agy` traffic and supply tools / context
 
 `antigravity` instruments the **Antigravity CLI** (Google's agentic coding tool, codename *jetski*)
-so Python code can observe and modify it in-process, without its source or a plugin API.
+to capture model traffic and native agent events without its source or a plugin API. Python
+clients supply additional tools, context and system notifications through the CLI's supported
+interfaces.
 `symbols/make_libagy.py` converts the upstream PIE `agy` into `vendor/libagy.so`, patching each
 booked Go function with a jump to a host stub; a small C++23 host, `vendor/agy`, links it as its
 first `DT_NEEDED`, registers the stubs with Go's runtime and calls `agy_rt0_go`. Book events reach
 an embedded CPython interpreter on a worker thread, where your logic lives (`pyagy/agy_process/`).
 
-## Why the design looks like this
+## Binary constraints
 
 | Fact | Consequence |
 | --- | --- |
@@ -29,9 +31,10 @@ Everything is pinned to the agy BuildID (currently `85d3425a18a809e545747dcb9d87
                                  pyworker (16 MB stack, libpython 3.15) → pyagy.agy_process
 ```
 
-Handlers only copy and enqueue; Python runs on a dedicated thread Go's scheduler never sees.
-Books are `ASYNC` (capture) or `SYNC` (block for a verdict and rewrite the buffer in place, same
-length or shorter). A blocked `asmcgocall` book stalls the GC, so **SYNC callbacks must be fast**.
+Capture handlers copy and enqueue; Python runs on a dedicated thread Go's scheduler never sees.
+Capture books are `ASYNC`; the `SYNC` exit book waits for the final capture flush. TLS capture
+uses `asmcgocall` and never waits for Python: blocking there would stall Go's GC. Outbound request
+rewriting is unsupported and the Python API rejects it.
 
 `BOOKS` in `src/procdef.h` is the one table (`pyagy.BOOKS` mirrors it). Addresses come from the
 generated `symbols/symbols.json`; candidates for new books are in `symbols/funcmap.tsv.gz`. Go's
@@ -40,9 +43,9 @@ takes three); `R14` holds the goroutine and must never be clobbered.
 
 ## The cgocall-trampoline path
 
-Many useful boundaries park the goroutine, which may then resume on another thread, so a book must
-not depend on the OS thread or rewrite its return address (frida-gum's inline patching did both and
-failed 15–40% of turns). Every book is a static cgocall trampoline that reads entry arguments.
+Books use static entry trampolines: a goroutine may park and resume on another thread, so a book
+must not depend on its OS thread or rewrite its return address. Never book runtime-special
+functions such as `runtime.main`.
 
 The converter patches each target past its stack check (so `morestack` cannot re-enter the stub)
 with a jump to a `.plt.agy` entry whose GOT slot `ld.so` binds eagerly to `agy_stub__<id>`. The stub
@@ -52,12 +55,32 @@ and calls `runtime.cgocall` (`AGY_FULLGO`, GC-safe for functions that may park) 
 and either returns the handler's verdict or replays the original prologue and resumes through
 `agy_resume__<id>`.
 
+Go's register ABI has no ordinary callee-saved registers. The stub saves arguments because
+the interrupted function still needs its original inputs after the inserted runtime call. Its
+Go-stack frame is allocated after the preserved stack check and bounded by the compile-time
+invariant `AGY_FRAME <= 128`. The current frame is 112 bytes.
+
 Each `procdef.h` row reads `{id, mode, retcap, AGY_FULLGO(symbol)}` (or `AGY_ASMGO` / `AGY_OFF`).
 The generated `symbols_gen.h` holds the expected `AGY_BUILD_ID` and `AGY_STUBS`, one
-`X("id", go_frame)` per stubbed row. `goframe.cpp` expands it into the naked stub templates, whose
-asm a `consteval` builder writes at compile time, and into the `agy_stubs` table of entry and frame
-labels. `gomod.cpp` turns that table into the synthetic moduledata Go's GC unwinds the stubs with
-(see `gomod.h`); the frame layout is in `goframe.h`.
+`X("id", go_frame, reg_ptrmask, stack_args_size, stack_ptrmask)` per stubbed row.
+`goframe.cpp` expands it into the naked stub templates, whose asm a `consteval` builder writes
+at compile time, and into the `agy_stubs` table of entry and frame labels. `gomod.cpp` uses that
+table to register the synthetic moduledata Go needs to unwind and scan the stubs; the frame
+layout is in `goframe.h`.
+
+Go scans the pointer maps precisely, including functions marked `FuncFlagAsm`. The generator
+reads each target's original `ArgsPointerMaps[0]` and validates the register stores and reloads
+around `runtime.morestack_noctxt`. This identifies which saved registers hold pointers and
+which pointer arguments remain on the caller's stack. The synthetic locals map marks those
+saved register pointers and the initialized `&block` argument. Its argument map retains the
+stack-passed pointer bits; uninitialized register spill homes are never marked. Scalar words
+must stay unmarked. Unsupported spills, closure contexts and ambiguous layouts fail the build.
+
+The header also contains `AGY_PLANNER_RESPONSE_ITAB`, derived from the validated
+`Step.GetPlannerResponse` getter. App-response capture requires both the planner-response
+step type and this oneof type identity, then reads the fields verified by
+`CortexStepPlannerResponse.GetResponse`. It starts from the step argument in `RDI`; scratch
+registers and metadata strings do not supply answer text.
 
 ## Diagnostics
 
@@ -68,6 +91,7 @@ labels. `gomod.cpp` turns that table into the synthetic moduledata Go's GC unwin
 | backend RPC timeline (`CodeAssistClient.*`) | always on | `.rpc_trace` |
 | decoded answer at the app boundary (`updateWithStep`) | always on | `.app_text` |
 
+Native stack deduplication uses 1,024 bounded atomic slots shared by concurrent producers.
 Stacks need `symbols/funcmap.tsv.gz` (`pixi run shim-symbols`). Offline renderers:
 `python3 -m pyagy.agy_process.symbolize <capture.jsonl> [--graph]` and
 `python3 -m pyagy.agy_process.rpctrace <capture.jsonl> --stacks`.
@@ -76,8 +100,20 @@ Stacks need `symbols/funcmap.tsv.gz` (`pixi run shim-symbols`). Offline renderer
 
 agy is an MCP client, so new tools and context come from an MCP server, not from rewriting requests.
 `pyagy.config.write_mcp_config(tools, context)` registers `pyagy/agy_mcp_server.py` in
-`~/.gemini/config/mcp_config.json`, and `validate_server()` runs the handshake first; `config/mcp.json`
-is the manual template.
+`~/.gemini/config/mcp_config.json`; `config/mcp.json` is the manual template.
+`validate_server(timeout=15)` separately checks initialization and the tools/resources lists.
+The timeout covers the complete handshake, including partial replies; cleanup terminates and
+reaps the temporary server and removes any temporary spec.
+
+`ask()` and `Session` register `tools=` / `context=` under a generated name and remove that
+registration on cleanup. With `data_dir=`, these tools and `mcp_servers=` share a private
+`<data_dir>/.gemini/config/mcp_config.json`; caller-supplied servers remain there for resume
+and inspection. Without `data_dir`, temporary `mcp_servers=` entries use the global config.
+Cleanup restores overwritten entries only while their installed values remain unchanged,
+preserving edits made during the run. Overlapping registrations in one Python process may
+close in either order. Use separate `data_dir` homes for concurrent processes that would
+otherwise share server names. `AGY_MCP_CONFIG_PATH` selects the Python writer's path; it is
+not an agy CLI configuration-path override.
 
 ## Build & run
 
@@ -85,38 +121,61 @@ is the manual template.
 the install). CMake caches the pinned raw agy by its SHA512 in `build/`, and every conversion starts
 from it; `-DAGY_BIN=/path/to/raw-agy` selects a local copy.
 
+Run the source tools as `python3 -m symbols.<tool>` from `antigravity/`. LIEF writes the ELF
+layout; pyelftools reads and validates its metadata; Capstone validates Go stack checks, frame
+prologues, argument spills and the planner-response getter; pwntools assembles book jumps and
+`.plt.agy` entries. The Go `pclntab`/`moduledata` decoder remains specific to agy. These build-only
+libraries are declared in `[build-system].requires` and pixi's host/workspace dependencies. The source tools stay out of
+the wheel; embedded capture modules remain stdlib-only.
+
 ```bash
 pixi run shim-agy-update  # print new CMakeLists.txt pins from the latest release manifest
 pixi run shim-symbols     # ensure library + metadata are current, then recompile
 pixi run shim-books       # after editing src/procdef.h: regenerate pyagy's BOOKS mirror
 pixi run build-shim       # rebuild changed outputs
 pixi run python test_scripts/test_agy_stubs.py    # after stub or toolchain changes; no model calls
-pixi run python test_scripts/test_agy_symbols.py  # parser, resolver, generated sources, conversion
-pixi run test_scripts/run-agy.sh --version       # instrumented startup; writes antigravity.log
+pixi run python test_scripts/test_agy_symbols.py  # parser, resolver, GC maps, generated sources, conversion
+pixi run python test_scripts/test_appresponse.py  # native response packets, Unicode, caps, concurrent stacks
+pixi run python test_scripts/test_http1sse.py     # request/response matching and SSE decoding
+pixi run python test_scripts/test_config.py       # MCP setup, handshake deadlines and child cleanup
+pixi run python test_scripts/test_agy_system_message_api.py  # capture paths and MCP/session cleanup
+pixi run python test_scripts/test_rewrite.py      # standalone rule utility; no native rewriting
+pixi run test_scripts/run-agy.sh --version       # linked startup; writes antigravity.log
 ```
 
-The native code needs conda GCC 15 (constexpr asm strings, C++23). After a compiler-major change,
-clear the CMake caches but keep `build/antigravity-*.raw`.
+After source changes, run `pixi reinstall --locked tasksolver` in the consuming workspace
+to refresh its packaged native artifacts; editable Python imports alone do not rebuild them.
+The checks above need no provider credentials. Missing-artifact skips do not validate a build,
+and offline fixtures do not establish authenticated provider behavior.
 
-**Rules learned the hard way.** Never book runtime-special functions (`runtime.main`). Patch past
-the stack check. Use `AGY_FULLGO` for anything that may park. agy needs a real git workspace (an
-empty directory hangs at startup); sign-in works headlessly through its out-of-band OAuth code paste.
+The native code needs conda GCC 15 (C++23 with constexpr asm strings). The toolchain also supplies
+pwntools' GNU assembler/linker and C preprocessor. After a compiler-major change, clear the CMake
+caches but keep `build/antigravity-*.raw`.
+
+agy needs a real git workspace (an empty directory hangs at startup); headless sign-in uses an
+out-of-band OAuth code paste.
 
 ## Capturing model traffic
 
 The model endpoint is HTTP/1.1 + SSE (`POST /v1internal:streamGenerateContent?alt=sse`). The
-request comes from the `tls_write` book; the response arrives line by line through `resp_chunk`
-(`toStreamResponseChunk`) and `usage_delta`, because the decrypted bytes are a return value.
-`http1sse.py` decodes them, and `BaseCorrelator.feed_chunk` (`wirecap/decode/`) emits one
-`genai_turn` per request. agy's other connections are HTTP/2 (`h2reassemble.py`).
+request comes from the `tls_write` book; response events and usage arrive through `resp_chunk`
+(`toStreamResponseChunk`), which observes each decoded SSE data line. `http1sse.py` decodes
+them, and `BaseCorrelator.feed_chunk` (`wirecap/decode/`) groups them by response ID. Request
+matching distinguishes overlapping answer and session-title calls, including `flash` versus
+`flash-lite` models. agy's other connections are HTTP/2 (`h2reassemble.py`).
+
+Native `app_response_packet` and `resp_chunk_packet` events contain a 16-byte `AGTX` version-1
+header with the original payload length. The Python router validates and unwraps them before
+recording canonical `app_response` events or building `genai_turn` records. Separate packet
+kinds keep legacy raw payloads unambiguous, even when their text starts with `AGTX`.
 
 ## The `pyagy` client: interact / modify / decode
 
-One call sends a request, optionally modifies the prompt, tools or context, and returns the decoded
-answer with everything the run captured.
+One call sends a prompt with optional tools, context or system notifications, and returns the
+decoded answer with everything the run captured.
 
 ```python
-from pyagy import ask, Session, ToolSpec, ContextResource, RewriteRule
+from pyagy import ask, Session, ToolSpec, ContextResource
 
 r = ask("Summarize this repo.")                 # one turn; installs the full book union
 print(r.text)                                    # clean final answer (prefers app→wire→transcript)
@@ -128,27 +187,37 @@ print(r.rpc_trace)                               # labeled backend-RPC timeline
 
 with Session(tools=[ToolSpec("weather", handler="mytools:weather")]) as s:
     print(s.ask("Weather in Paris?").text)       # agy can call the injected tool
-    s.set_rewrite([RewriteRule("Paris", "Tokyo")])  # live, equal-length substitution
-    print(s.ask("And there?").text)
+    print(s.ask("And in Tokyo?").text)
 ```
 
-Every run installs all books, so one turn fills every surface below; a field is empty or `None`
-when the run captured nothing of that kind. `.text` prefers the app boundary, then the wire, then
-the PTY transcript, and reports which it used in `.source`.
+Every run installs the enabled books. A field is empty or `None` when the run captured nothing
+of that kind. `.text` prefers a complete app snapshot, then the wire, then the PTY transcript,
+and reports which it used in `.source`.
+
+`capture=False` disables JSONL output while decoded events still stream to the parent. A string
+`capture=` selects the output path for one-shot calls and sessions; parallel `ask_many()` calls
+insert an index before the filename extension so their captures remain separate.
 
 | surface | books | `AgyResponse` field |
 |---|---|---|
-| wire *(the `rewrite=` surface)* | egress `tls_write` + `resp_chunk` | `.turns` / `.request` / `.events` / `.usage` / `.model` |
+| wire | egress `tls_write` + `resp_chunk` | `.turns` / `.request` / `.events` / `.usage` / `.model` |
 | app boundary | framework consumer (`updateWithStep`) | `.app_text` (+ `.source=="app"`) |
+| response capture diagnostics | app and SSE payload framing | `.response_capture_errors` |
 | system notifications | native system-step serializers | `.system_messages` / `.system_message_errors` |
 | rpc trace | `CodeAssistClient.*` backend RPCs | `.rpc_trace` |
 | overlay `stack=True` | Go call-stack unwind at each fire | `.stacks` (rendered) / `.call_graph` (`Counter`) |
 | overlay `arg_probe=True` | arg-graph walk at entry | `.cgt_args` (list of reports) |
 
-- **Composable controls:** `rewrite=` (a `RewriteRule` list, a `"module:func"` string or
-  a callable) makes `tls_write` a live SYNC egress rewrite, equal-length only (a length-changing
-  rule is skipped and recorded as `rewrite_skip`); `tools=` / `context=` add an MCP server;
+- **Composable controls:** `tools=` / `context=` add an MCP server;
   `system_messages=` queues native harness notifications before the next model invocation.
+- Passing a rewrite specification through `rewrite=` or `Session.set_rewrite()` raises
+  `NotImplementedError`; enabling legacy rewrite environment settings is also rejected.
+  The standalone rule utility does not modify native traffic.
+- App snapshots and SSE JSON lines are captured atomically up to 1 MiB including their header.
+  Larger payloads or a smaller `WIRE_MAXCOPY` produce explicit capture errors; incomplete app
+  snapshots never replace a complete wire answer. `.response_capture_errors` retains the source,
+  available byte counts and error, including with `capture=False`; `AgyModel` returns
+  the same list in TaskSolver metadata. Legacy unframed captures remain readable.
 - **Introspection:** `from pyagy import BOOKS, by_mech, enabled_books, by_kind, sync_capable,
   DERIVED_KINDS`, the machine-readable mirror of `src/procdef.h`.
 - **Env knobs** (the kwargs set them; diagnostics are in the table above):
@@ -156,17 +225,16 @@ the PTY transcript, and reports which it used in `.source`.
   | env var | set by | effect |
   |---|---|---|
   | `AGY_PROC_ENABLE` | (auto) | the one gate: install all books |
-  | `AGY_PROC_TLS_WRITE_SYNC` | `rewrite=` | make `tls_write` a SYNC (modify) book |
-  | `AGY_PROC_REWRITE_RULES` / `AGY_PROC_REWRITE` | `rewrite=` | rules-file path / `module:func` |
   | `AGY_PROC_CONV_ID` | (auto) | enable the `file_open` book → `conversation_id` event |
   | `AGY_PROC_H2` / `WIRE_CORRELATE` | — | `=0` disables HTTP/2 reassembly / the turn correlator (shared `WIRE_*` names; legacy `AGY_PROC_*` accepted) |
 
-- **Always instrumented:** every launch goes through `AgyProcess` on the pinned `vendor/agy`. The
-  shim loads through agy's own `PT_INTERP` with `--preload` (`_env.preload_argv`), not
-  `LD_PRELOAD`, so the processes agy spawns never inherit it; `--library-path` resolves libpython.
-- **Tests:** offline `test_http1sse.py`, `test_config.py`, `test_client.py`,
-  `test_appresponse.py`, `test_rpctrace.py`, `test_symbolize.py`; live (skipping cleanly)
-  `test_rewrite.py`, `test_trampoline.py`, `test_agyprocess.py`, `test_agy_session.py`.
+- **Always linked:** `AgyProcess` launches the linked `vendor/agy` host directly.
+  Its `DT_NEEDED` and `RUNPATH` load libagy and the native dependencies; child processes
+  inherit no instrumentation preload settings.
+- **Additional offline checks:** `test_rpctrace.py` and `test_symbolize.py`.
+  `test_client.py` combines offline assertions with a live request; `test_trampoline.py`,
+  `test_agyprocess.py` and `test_agy_session.py` also exercise real provider calls. Their
+  authenticated checks require a working login; a skip is not a pass.
 
 ## System notifications
 

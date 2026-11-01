@@ -1,37 +1,51 @@
-"""WirePopen / WireProcess — the shared parent-side machinery for launching a wirecap-instrumented
-CLI as a ``multiprocessing.spawn`` child and streaming decoded turns home over a caller-owned
-``SimpleQueue``.
+"""Launch a linked CLI as a multiprocessing spawn child.
 
-Provider-neutral core extracted from pyagy's PtyPopen/AgyProcess. It owns the **boot channel** (a
-boot pipe carrying the pickled spawn payload + the resource_tracker fd, inherited across the host's
-``execve``) and the process lifecycle, via two hooks a subclass fills in:
-
-  * ``_resolve_launch(process_obj) -> (argv, base_env, workdir)`` — what binary to exec, with which env
-  * ``_spawn_child(argv, workdir, env, process_obj)`` — fork+exec the host; set ``self.pid`` + ``self.sentinel``
-
-The child side is :mod:`wirecap.decode.mp_child` (loaded into the host's embedded interpreter). pyagy
-adds a PTY (agy is a TUI); pycodex forks plainly (``codex exec`` is a non-TTY one-shot). Like
-``popen_spawn_posix`` this Popen owns the fork + fd inheritance but NOT the result queue: the caller
-creates the ``SimpleQueue``, passes it as a target arg, and drains it.
+WirePopen serializes the spawn payload and resource-tracker fd through a boot pipe
+that survives exec. The caller owns the result queue; the embedded worker lives in
+wirecap.decode.mp_child. Providers supply argv/environment resolution and spawning.
 """
+from __future__ import annotations
+
 import io
 import os
 import signal
 import time
+from collections.abc import Callable, Mapping
+from threading import Lock
+from typing import ClassVar, Protocol, cast
 
 from multiprocessing import (reduction, resource_tracker as _rtracker,
                              spawn as mp_spawn, util)
 from multiprocessing.context import SpawnProcess, set_spawning_popen
-from multiprocessing.popen_fork import Popen as _ForkPopen
-from multiprocessing.popen_spawn_posix import _DupFd
+from multiprocessing.popen_spawn_posix import Popen as _SpawnPopen, _DupFd
+from multiprocessing.process import BaseProcess
 
 
-def _close_wire(*fds):
-    """Finalizer: close the subclass teardown fds (agy: the PTY master, whose close SIGHUPs agy;
-    codex: the pidfd AND the master — see ``_teardown_fds``) + the boot pipe's write end (its EOF
-    is the in-host worker's parent-death sentinel). Module-level, closing over only fds (never the
-    Popen) so weakref GC still fires. Idempotent + one-shot; the caller's result queue is torn down
-    by the caller, not here."""
+type Target = Callable[..., object]
+
+# Inheritable flags belong to the parent process, including its shared tracker fd.
+_FORK_LOCK = Lock()
+
+
+class WirePopenHandle(Protocol):
+    pid: int
+    sentinel: int
+    @property
+    def status(self) -> int | None: ...
+    def exited(self) -> bool: ...
+    def poll(self, flag: int = os.WNOHANG) -> int | None: ...
+    def wait(self, timeout: float | None = None) -> int | None: ...
+    def terminate(self) -> None: ...
+    def kill(self) -> None: ...
+    def close(self, interrupt: bool = False, grace: float = 5.0) -> None: ...
+
+
+def _close_wire(*fds: int | None) -> None:
+    """Close owned descriptors; Finalize makes teardown one-shot without retaining Popen.
+
+    The boot writer signals parent death, alongside provider fds such as the PTY
+    master and pidfd. The caller owns the result queue separately.
+    """
     for fd in fds:
         if fd is None:
             continue
@@ -41,138 +55,151 @@ def _close_wire(*fds):
             pass
 
 
-class WirePopen(_ForkPopen):
+class WirePopen[ProcessT: BaseProcess = BaseProcess](_SpawnPopen):
     """``multiprocessing`` Popen that execs a foreign CLI (not python) as a spawn child, wiring the
     boot channel + result-queue fd inheritance. Subclass fills ``_resolve_launch`` + ``_spawn_child``
-    (and optionally ``_interrupt``). ``poll``/``wait``/``terminate``/``kill`` are inherited from
-    ``popen_fork`` and act on ``self.pid`` + ``self.sentinel``."""
-    method = "wire"
+    (and optionally ``_interrupt``). Both multiprocessing and capture APIs share
+    one reaping path; close also owns process-group and descriptor cleanup."""
+    method: ClassVar[str] = "wire"
+    status: int | None = None
+    pid: int = 0
+    returncode: int | None = None
+    _reaped = False
+    _wire_closed = False
     DupFd = _DupFd   # a pickled fd detaches to the same number (execve preserves inheritable fds)
 
-    def duplicate_for_child(self, fd):
+    def duplicate_for_child(self, fd: int) -> int:
         """Called via ``reduction.DupFd`` while pickling any fd-bearing object under
         ``set_spawning_popen`` (the caller's result SimpleQueue rides ``process_obj``'s args): make
         each fd survive the host's ``execve``. We exec directly, so inheritance is by the inheritable
         flag (not a passfds list as in ``popen_spawn_posix``)."""
+        self._inherited_fds.setdefault(fd, os.get_inheritable(fd))
         os.set_inheritable(fd, True)
         return fd
 
-    def exited(self):
-        """Reap the host non-blockingly; set ``self.status`` (raw waitpid status) + return True once
-        it has exited."""
-        try:
-            pid, st = os.waitpid(self.pid, os.WNOHANG)
-            if pid != 0:
-                self.status = st
-                return True
-            return False
-        except ChildProcessError:
-            return True
+    def poll(self, flag: int = os.WNOHANG) -> int | None:
+        """Reap once, keeping multiprocessing and capture exit statuses in sync."""
+        if not self._reaped:
+            try:
+                pid, status = os.waitpid(self.pid, flag)
+            except ChildProcessError:
+                self._reaped = True
+            else:
+                if pid:
+                    self.status = status
+                    self.returncode = os.waitstatus_to_exitcode(status)
+                    self._reaped = True
+        return self.returncode
 
-    # --- launch (generic; the fork+exec and the env/argv are subclass hooks) ---
-    def _launch(self, process_obj):
-        argv, base_env, workdir = self._resolve_launch(process_obj)   # subclass: what to exec + env
-        # The caller created the result SimpleQueue and put it in process_obj's args, so it rides the
-        # process_obj pickle below — this Popen never owns it. We still hand the child the
-        # resource_tracker fd so it re-attaches (needed for the queue's SemLocks) instead of booting
-        # its own.
-        tracker_fd = _rtracker.getfd()
-        os.set_inheritable(tracker_fd, True)
-        boot_r, boot_w = os.pipe()
-        os.set_inheritable(boot_r, True)             # boot_w left non-inheritable → parent-only sentinel
-        env = dict(base_env)
-        env["WIRE_MP_BOOT_FD"] = str(boot_r)         # the sole worker-channel signal into the host
-        # Build the boot payload BEFORE the fork: pickling process_obj under set_spawning_popen runs
-        # duplicate_for_child on the queue's pipe fds (carried in process_obj's args) so they survive
-        # execve, while its SemLocks pickle by name (the child sem_opens them). Order: tracker fd,
-        # prep, process_obj — the child re-attaches the tracker before rebuilding the queue. Payload
-        # << 64 KB → the later single write to boot_w is non-blocking even though the host reads late.
-        prep = mp_spawn.get_preparation_data(process_obj._name)
-        buf = io.BytesIO()
-        reduction.dump(tracker_fd, buf)              # int; installed onto the child's tracker first
-        set_spawning_popen(self)
+    def exited(self) -> bool:
+        self.poll()
+        return self._reaped
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        if timeout is None:
+            return self.poll(0)
+        # PTY readability can mean output, so it cannot guard a blocking waitpid.
+        deadline = time.monotonic() + timeout
+        while not self.exited():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(0.01, remaining))
+        return self.returncode
+
+    def _launch(self, process_obj: ProcessT) -> None:
+        self._inherited_fds: dict[int, bool] = {}
+        boot_r: int | None = None
+        boot_w: int | None = None
         try:
-            reduction.dump(prep, buf)
-            reduction.dump(process_obj, buf)
+            argv, base_env, workdir = self._resolve_launch(process_obj)
+            with _FORK_LOCK:
+                try:
+                    tracker_fd = _rtracker.getfd()
+                    assert tracker_fd is not None
+                    self.duplicate_for_child(tracker_fd)
+                    boot_r, boot_w = os.pipe()
+                    self.duplicate_for_child(boot_r)
+                    env = dict(base_env, WIRE_MP_BOOT_FD=str(boot_r))
+
+                    # Attach the tracker before unpickling queue SemLocks; pickling marks fds for exec.
+                    buf = io.BytesIO()
+                    reduction.dump(tracker_fd, buf)
+                    set_spawning_popen(self)
+                    try:
+                        reduction.dump(mp_spawn.get_preparation_data(process_obj.name), buf)
+                        reduction.dump(process_obj, buf)
+                    finally:
+                        set_spawning_popen(None)
+                    self._spawn_child(argv, workdir, env, process_obj)
+                finally:
+                    # Restore flags before another launch observes or changes them.
+                    for fd, inheritable in self._inherited_fds.items():
+                        try:
+                            os.set_inheritable(fd, inheritable)
+                        except OSError:
+                            pass
+                    self._inherited_fds.clear()
+            self.finalizer = util.Finalize(self, _close_wire, self._teardown_fds(boot_w))
+            boot_writer, boot_w = boot_w, None  # ownership moved to the finalizer
+            with os.fdopen(boot_writer, "wb", closefd=False) as stream:
+                stream.write(buf.getvalue())
+        except BaseException:
+            self._abort_launch()
+            raise
         finally:
-            set_spawning_popen(None)
-        # Subclass forks+execs the host (inheriting the now-inheritable queue fds, boot_r, tracker_fd)
-        # and sets self.pid + self.sentinel (a fd that goes readable on host death, for wait()).
-        self._spawn_child(argv, workdir, env, process_obj)
-        # Safety-net finalizer (mirrors popen_fork): via close() or GC of self — closes the teardown
-        # fd + boot_w (the parent-death sentinel). exitpriority None → NOT at the atexit sweep.
-        self.finalizer = util.Finalize(self, _close_wire, tuple(self._teardown_fds(boot_w)))
-        # Ship the payload to the host over the boot pipe, then keep boot_w open as the sentinel.
-        with os.fdopen(boot_w, "wb", closefd=False) as f:
-            f.write(buf.getvalue())
-        try:
-            os.close(boot_r)             # the host has its own inherited copy
-        except OSError:
-            pass
+            _close_wire(boot_r)
+            _close_wire(boot_w)
 
-    def _resolve_launch(self, process_obj):
-        """Subclass hook → ``(argv, base_env, workdir)``. The base adds ``WIRE_MP_BOOT_FD`` to env."""
+    def _wire_has_finalizer(self) -> bool:
+        return cast("util.Finalize[None] | None", self.finalizer) is not None
+
+    def _abort_launch(self) -> None:
+        self.close(grace=0.1)
+
+    def _resolve_launch(self, process_obj: ProcessT) -> tuple[list[str], dict[str, str], str]:
+        """Subclass method → ``(argv, base_env, workdir)``. The base adds ``WIRE_MP_BOOT_FD`` to env."""
         raise NotImplementedError
 
-    def _spawn_child(self, argv, workdir, env, process_obj):
-        """Subclass hook: fork + exec the host in ``workdir`` with ``env``/``argv``; set ``self.pid``
+    def _spawn_child(self, argv: list[str], workdir: str, env: dict[str, str],
+                     process_obj: ProcessT) -> None:
+        """Subclass method: fork + exec the host in ``workdir`` with ``env``/``argv``; set ``self.pid``
         and ``self.sentinel`` (a fd readable on host death). May init pre/post-fork state."""
         raise NotImplementedError
 
-    def _interrupt(self):
+    def _interrupt(self) -> None:
         """Optional graceful nudge before SIGTERM (agy: Ctrl-C its TUI). Default no-op."""
 
-    def _teardown_fds(self, boot_w):
-        """Hook: the fds the finalizer closes. Base = (sentinel, boot_w); a PTY flavour whose
+    def _teardown_fds(self, boot_w: int) -> tuple[int, ...]:
+        """Override: the fds the finalizer closes. Base = (sentinel, boot_w); a PTY flavour whose
         sentinel is NOT the master (codex's pidfd) adds the master so it cannot leak."""
         return (self.sentinel, boot_w)
 
-    def close(self, interrupt=False, grace=5.0):
-        """Tear down: optional ``_interrupt()``, leader SIGTERM, a BOUNDED reap (``grace`` seconds,
-        then SIGKILL + blocking reap — capturing ``self.status``), then a process-GROUP sweep, then
-        the finalizer (closes the teardown fds + boot_w). Safe if the host was already reaped.
+    def close(self, interrupt: bool = False, grace: float = 5.0) -> None:
+        """Stop the CLI, reap it, then sweep its process group and close owned fds."""
+        if self._wire_closed:
+            return
+        self._wire_closed = True
+        try:
+            if self.pid:
+                if not self.exited():
+                    if interrupt:
+                        self._interrupt()
+                    self.terminate()
+                    self.wait(timeout=grace)
+                    if not self._reaped:
+                        self.kill()
+                        self.wait()
+                self._sweep_group(grace)
+        finally:
+            # multiprocessing initializes this to None before calling _launch.
+            finalizer = cast("util.Finalize[None] | None", self.finalizer)
+            if finalizer is not None:
+                finalizer()
 
-        The group sweep runs on success paths too: PTY children are session leaders (pty.fork does
-        setsid), so ``killpg(pid)`` targets exactly the CLI's own tree — the MCP stdio servers and
-        shell/apply_patch grandchildren it spawned — and can never be the parent's group. Without
-        it, a CLI that exits (or is killed) leaves its MCP servers running."""
-        if getattr(self, "pid", None):
-            if interrupt:
-                self._interrupt()
-            try:
-                os.kill(self.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            reaped = False
-            deadline = time.monotonic() + grace
-            while time.monotonic() < deadline:
-                try:
-                    pid, st = os.waitpid(self.pid, os.WNOHANG)
-                except ChildProcessError:
-                    reaped = True
-                    break
-                if pid:
-                    self.status = st
-                    reaped = True
-                    break
-                time.sleep(0.05)
-            if not reaped:
-                try:
-                    os.kill(self.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                try:
-                    _, st = os.waitpid(self.pid, 0)
-                    self.status = st
-                except ChildProcessError:
-                    pass
-            self._sweep_group(grace)
-        if getattr(self, "finalizer", None) is not None:
-            self.finalizer()
-
-    def _sweep_group(self, grace=5.0):
+    def _sweep_group(self, grace: float = 5.0) -> None:
         """TERM → bounded wait → KILL the CLI's whole process group (see ``close``)."""
-        pid = getattr(self, "pid", None)
+        pid = self.pid
         if not pid or pid == os.getpgrp():
             return
         try:
@@ -192,38 +219,53 @@ class WirePopen(_ForkPopen):
             pass
 
 
-class WireProcess(SpawnProcess):
-    """``multiprocessing.Process``-shaped handle for a wirecap-instrumented CLI run. Like stock
+class WireProcess[PopenT: WirePopenHandle = WirePopenHandle](SpawnProcess):
+    """``multiprocessing.Process``-shaped handle for a wirecap-linked CLI run. Like stock
     ``Process`` it does NOT own the result channel: the caller passes a ``SimpleQueue`` via
     ``args=(q,)`` and drains it. Default target = ``wirecap.decode.mp_child.stream_turns``. Subclass
     provides ``_Popen`` (returns the provider's WirePopen) + its config attrs."""
 
-    def __init__(self, target=None, name=None, args=(), kwargs=None, daemon=None):
+    _popen: PopenT | None = None
+    _args: tuple[object, ...]
+    _name: str
+    _echo: bool = False
+
+    def __init__(self, target: Target | None = None, name: str | None = None,
+                 args: tuple[object, ...] = (), kwargs: Mapping[str, object] | None = None,
+                 daemon: bool | None = None) -> None:
         if target is None:               # default worker: stream the host's decoded answer home
             from wirecap.decode.mp_child import stream_turns
             target = stream_turns
         super().__init__(group=None, target=target, name=name,
                          args=args, kwargs=(kwargs or {}), daemon=daemon)
 
-    def reap(self):
+    def _wire_popen(self) -> PopenT:
+        if self._popen is None:
+            raise RuntimeError("process has not started")
+        return self._popen
+
+    def reap(self) -> bool:
         """Non-blocking reap so ``exit_status`` is set; True once the host has exited. The caller's
         collect loop calls this when the target signals done / the queue EOFs."""
-        return self._popen.exited()
+        return self._wire_popen().exited()
 
     @property
-    def exit_status(self):
+    def exit_status(self) -> int | None:
         """The host's DECODED exit code — ``os.waitstatus_to_exitcode`` of the raw waitpid status
         (negative for a signal), or None if not yet reaped. Decoded here so both providers report
         the same thing: the raw status made an exit(1) read as 256 on one side and 1 on the other,
         for a value both adapters render into the same user-facing sentence."""
-        st = getattr(self._popen, "status", None)
+        st = self._popen.status if self._popen is not None else None
         return os.waitstatus_to_exitcode(st) if st is not None else None
 
-    def close(self, **popen_kwargs):
+    def close(self, *, interrupt: bool = False, grace: float = 5.0) -> None:
         """Stop the host + close the channel. We reap the host ourselves (it owns its lifetime), so
         multiprocessing's active-children set never sees it exit — drop it, else this Process (and
         the result SimpleQueue it carries in ``args``, with its named semaphores) is pinned in
         ``_children`` and leaks until interpreter exit."""
-        self._popen.close(**popen_kwargs)
-        from multiprocessing.process import _children
-        _children.discard(self)
+        if self._popen is None:
+            return
+        self._popen.close(interrupt=interrupt, grace=grace)
+        from multiprocessing import process
+        children = cast(set[BaseProcess], getattr(process, "_children"))
+        children.discard(self)

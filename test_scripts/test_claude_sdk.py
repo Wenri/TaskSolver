@@ -12,16 +12,16 @@ import asyncio
 import base64
 import copy
 import io
-import json
 import os
-from pathlib import Path
 import sys
 import tempfile
 import textwrap
-from dataclasses import dataclass, field
-from types import SimpleNamespace
-from typing import Final
 import unittest
+from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Final, Literal, cast
 from unittest.mock import patch
 
 _ROOT: Final = Path(__file__).resolve().parents[1]
@@ -29,14 +29,16 @@ sys.path[:0] = [str(_ROOT / "claude"), str(_ROOT / "claude" / "vendor" / "sdk" /
                str(_ROOT / "codex"), str(_ROOT)]
 
 from PIL import Image
-
 from pyclaude import client
 from pyclaude.model import ClaudeAgentModel
+from pyclaude.types import AskOptions
+
 from tasksolver.agent import Agent
 from tasksolver.cli_backend import CLIBackendModel
 from tasksolver.common import ParsedAnswer, Question, TaskSpec
 from tasksolver.exceptions import GPTMaxTriesExceededException, GPTOutputParseException
 from tasksolver.keychain import KeyChain
+from wirecap.types import JSONObject, json_loads_object, json_object
 
 
 @dataclass
@@ -54,7 +56,7 @@ class ThinkingBlock:
 class ToolUseBlock:
     id: str
     name: str
-    input: dict
+    input: JSONObject
 
 
 @dataclass
@@ -66,7 +68,7 @@ class ToolResultBlock:
 
 @dataclass
 class AssistantMessage:
-    content: list
+    content: list[TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock]
     model: str = "claude-test-model"
     parent_tool_use_id: str | None = None
     error: str | None = None
@@ -74,14 +76,14 @@ class AssistantMessage:
 
 @dataclass
 class UserMessage:
-    content: str | list
+    content: str | list[TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock]
     parent_tool_use_id: str | None = None
 
 
 @dataclass
 class SystemMessage:
     subtype: str
-    data: dict
+    data: JSONObject
 
 
 @dataclass
@@ -93,30 +95,41 @@ class ResultMessage:
     num_turns: int = 1
     session_id: str = "session-one"
     total_cost_usd: float | None = 0.02
-    usage: dict = field(default_factory=lambda: {"input_tokens": 11, "output_tokens": 3})
+    usage: JSONObject = field(default_factory=lambda: {"input_tokens": 11, "output_tokens": 3})
     result: str | None = "4"
     structured_output: object = None
 
 
 class FakeOptions:
-    def __init__(self, **kwargs):
+    resume: str | None
+    env: dict[str, str]
+    mcp_servers: dict[str, dict[str, object]]
+    allowed_tools: list[str]
+    tools: list[str] | None
+    strict_mcp_config: bool
+
+    def __init__(self, **kwargs: object) -> None:
         self.__dict__.update(kwargs)
+
+
+type SDKMessage = AssistantMessage | UserMessage | SystemMessage | ResultMessage
+type SDKScript = Sequence[SDKMessage | BaseException | Literal["wait"]]
 
 
 class FakeSDK:
     """A stream script for each connection, with observable cleanup and options."""
 
-    def __init__(self, *scripts):
+    def __init__(self, *scripts: SDKScript) -> None:
         self.scripts: Final = list(scripts)
-        self.calls: Final = []
+        self.calls: Final[list[tuple[str | list[JSONObject], dict[str, object]]]] = []
         self.entered = 0
         self.exited = 0
         self.cancelled = 0
-        self.options: Final = []
+        self.options: Final[list[FakeOptions]] = []
         owner: Final = self
 
         class FakeClient:
-            def __init__(self, *, options):
+            def __init__(self, *, options: FakeOptions) -> None:
                 self.options: Final = options
                 self.script: Final = owner.scripts.pop(0)
                 owner.options.append(options)
@@ -125,20 +138,20 @@ class FakeSDK:
                 owner.entered += 1
                 return self
 
-            async def __aexit__(self, *_args):
+            async def __aexit__(self, *_args: object) -> None:
                 owner.exited += 1
 
-            async def query(self, prompt, **kwargs):
-                if hasattr(prompt, "__aiter__"):
+            async def query(self, prompt: str | AsyncIterable[JSONObject], **kwargs: object) -> None:
+                if not isinstance(prompt, str):
                     content = [item async for item in prompt]
                 else:
                     content = prompt
                 owner.calls.append((content, kwargs))
 
-            async def receive_response(self):
+            async def receive_response(self) -> AsyncIterator[SDKMessage]:
                 try:
                     for event in self.script:
-                        if event == "wait":
+                        if isinstance(event, str):
                             await asyncio.sleep(60)
                         elif isinstance(event, BaseException):
                             raise event
@@ -161,27 +174,30 @@ class FakeSDK:
 
 
 class NumberAnswer(ParsedAnswer):
-    def __init__(self, value):
+    def __init__(self, value: int) -> None:
         self.value: Final = value
 
-    @classmethod
-    def parser(cls, raw):
+    @staticmethod
+    def parser(gpt_raw: str) -> NumberAnswer:
         try:
-            return cls(int(raw))
+            return NumberAnswer(int(gpt_raw))
         except ValueError as exc:
             raise GPTOutputParseException("Expected an integer") from exc
 
-    def __str__(self):
+    def __str__(self) -> str:
         return str(self.value)
 
 
 def number_task():
+    def completed(_question: Question, _answer: ParsedAnswer) -> bool:
+        return True
+
     return TaskSpec("math", "Return an integer.", NumberAnswer,
-                    lambda *_: Question([]), lambda *_: True)
+                    lambda _task, _questions, _answers, _evaluations: Question([]), completed)
 
 
 class ClaudeSDKTests(unittest.TestCase):
-    def test_result_is_authoritative_and_preserves_metadata(self):
+    def test_result_is_authoritative_and_preserves_metadata(self) -> None:
         sdk: Final = FakeSDK([
             AssistantMessage([TextBlock("99"), ThinkingBlock("Visible thought")]),
             AssistantMessage([TextBlock("100")], parent_tool_use_id="child-agent"),
@@ -198,7 +214,7 @@ class ClaudeSDKTests(unittest.TestCase):
         self.assertIn("Visible thought", response.thoughts)
         self.assertEqual(sdk.entered, sdk.exited)
 
-    def test_no_terminal_result_rejects_intermediate_answer(self):
+    def test_no_terminal_result_rejects_intermediate_answer(self) -> None:
         sdk: Final = FakeSDK([AssistantMessage([TextBlock("99")])])
         with sdk.install(), self.assertRaises(client.ClaudeAgentError) as raised:
             client.ask("2 + 2")
@@ -206,7 +222,7 @@ class ClaudeSDKTests(unittest.TestCase):
         self.assertEqual(raised.exception.response.exit_status, 1)
         self.assertEqual(sdk.exited, 1)
 
-    def test_error_flag_overrides_success_subtype(self):
+    def test_error_flag_overrides_success_subtype(self) -> None:
         sdk: Final = FakeSDK([ResultMessage(subtype="success", is_error=True,
                                            result="Authentication failed")])
         with sdk.install(), self.assertRaises(client.ClaudeAgentError) as raised:
@@ -215,7 +231,7 @@ class ClaudeSDKTests(unittest.TestCase):
         self.assertEqual(raised.exception.response.session_id, "session-one")
         self.assertEqual(sdk.exited, 1)
 
-    def test_error_subtype_rejects_partial_reply(self):
+    def test_error_subtype_rejects_partial_reply(self) -> None:
         sdk: Final = FakeSDK([
             AssistantMessage([TextBlock("4")]),
             ResultMessage(subtype="error_max_turns", is_error=False, result=None),
@@ -223,7 +239,7 @@ class ClaudeSDKTests(unittest.TestCase):
         with sdk.install(), self.assertRaises(client.ClaudeAgentError):
             client.ask("2 + 2")
 
-    def test_explicit_empty_result_does_not_fall_back_to_progress(self):
+    def test_explicit_empty_result_does_not_fall_back_to_progress(self) -> None:
         sdk: Final = FakeSDK([
             AssistantMessage([TextBlock("Working on it")]), ResultMessage(result=""),
         ])
@@ -231,7 +247,7 @@ class ClaudeSDKTests(unittest.TestCase):
             response: Final = client.ask("2 + 2")
         self.assertEqual(response.text, "")
 
-    def test_missing_result_text_uses_latest_main_assistant_message(self):
+    def test_missing_result_text_uses_latest_main_assistant_message(self) -> None:
         sdk: Final = FakeSDK([
             AssistantMessage([TextBlock("Searching")]),
             AssistantMessage([TextBlock("4")]),
@@ -242,28 +258,52 @@ class ClaudeSDKTests(unittest.TestCase):
             response: Final = client.ask("2 + 2")
         self.assertEqual(response.text, "4")
 
-    def test_timeout_cancels_stream_and_closes_client(self):
+    def test_timeout_cancels_stream_and_closes_client(self) -> None:
         sdk: Final = FakeSDK([AssistantMessage([TextBlock("Working")]), "wait"])
-        with sdk.install(), self.assertRaises(TimeoutError) as raised:
+        with sdk.install(), self.assertRaises(client.ClaudeAgentTimeout) as raised:
             client.ask("2 + 2", timeout=0.02)
         self.assertTrue(raised.exception.response.timed_out)
         self.assertEqual(raised.exception.response.exit_status, 1)
         self.assertEqual(sdk.cancelled, 1)
         self.assertEqual(sdk.exited, 1)
 
-    def test_transport_failure_closes_client(self):
+    def test_transport_failure_closes_client(self) -> None:
         sdk: Final = FakeSDK([RuntimeError("transport disconnected")])
         with sdk.install(), self.assertRaisesRegex(RuntimeError, "transport disconnected"):
             client.ask("2 + 2")
         self.assertEqual(sdk.exited, 1)
 
-    def test_async_api(self):
+    def test_transport_failure_retains_discovered_session_and_exception(self) -> None:
+        class TransportError(RuntimeError):
+            response: object
+
+        failure = TransportError("transport disconnected")
+        native_response = {"error": "connection reset"}
+        failure.response = native_response
+        sdk = FakeSDK(
+            [SystemMessage("init", {"session_id": "interrupted-session"}),
+             AssistantMessage([TextBlock("Working")]), failure],
+            [ResultMessage(result="4", session_id="interrupted-session")],
+        )
+        with sdk.install(), client.Session() as session:
+            with self.assertRaises(TransportError) as raised:
+                session.ask("2 + 2")
+            self.assertIs(raised.exception, failure)
+            self.assertIs(raised.exception.response, native_response)
+            self.assertEqual(session.session_id, "interrupted-session")
+            self.assertEqual(session.history()[0].text, "Working")
+            self.assertEqual(session.history()[0].exit_status, 1)
+            self.assertEqual(session.ask("Continue").text, "4")
+        self.assertEqual(sdk.options[1].resume, "interrupted-session")
+        self.assertEqual(sdk.exited, 2)
+
+    def test_async_api(self) -> None:
         sdk: Final = FakeSDK([ResultMessage(result="4")])
         with sdk.install():
             response: Final = asyncio.run(client.ask_async("2 + 2"))
         self.assertEqual(response.text, "4")
 
-    def test_sync_api_inside_running_event_loop(self):
+    def test_sync_api_inside_running_event_loop(self) -> None:
         sdk: Final = FakeSDK([ResultMessage(result="4")])
 
         async def notebook_cell():
@@ -274,7 +314,7 @@ class ClaudeSDKTests(unittest.TestCase):
         self.assertEqual(response.text, "4")
         self.assertEqual(sdk.exited, 1)
 
-    def test_independent_samples(self):
+    def test_independent_samples(self) -> None:
         sdk: Final = FakeSDK([ResultMessage(result="3")], [ResultMessage(result="4")])
         with sdk.install():
             responses: Final = client.ask_many("2 + 2", 2)
@@ -282,15 +322,18 @@ class ClaudeSDKTests(unittest.TestCase):
         self.assertEqual(sdk.exited, 2)
         self.assertTrue(all(getattr(option, "resume", None) is None for option in sdk.options))
 
-    def test_parallel_samples_cannot_share_native_session(self):
+    def test_parallel_samples_cannot_share_native_session(self) -> None:
         sdk: Final = FakeSDK()
-        for kwargs in ({"session_id": "shared"}, {"sdk_options": {"resume": "shared"}},
-                       {"sdk_options": {"continue_conversation": True}}):
-            with self.subTest(kwargs=kwargs), sdk.install(), self.assertRaises(ValueError):
-                client.ask_many("hello", 2, **kwargs)
+        cases: tuple[tuple[str | None, dict[str, object] | None], ...] = (
+            ("shared", None), (None, {"resume": "shared"}),
+            (None, {"continue_conversation": True}),
+        )
+        for session_id, sdk_options in cases:
+            with self.subTest(session_id=session_id, sdk_options=sdk_options), sdk.install(), self.assertRaises(ValueError):
+                client.ask_many("hello", 2, session_id=session_id, sdk_options=sdk_options)
         self.assertEqual(sdk.entered, 0)
 
-    def test_session_resume_and_close(self):
+    def test_session_resume_and_close(self) -> None:
         sdk: Final = FakeSDK(
             [ResultMessage(result="4", session_id="native-first")],
             [ResultMessage(result="8", session_id="native-second")],
@@ -308,7 +351,32 @@ class ClaudeSDKTests(unittest.TestCase):
         self.assertEqual(sdk.options[1].resume, "native-first")
         self.assertEqual(sdk.exited, 2)
 
-    def test_failed_turn_retains_session_for_explicit_followup(self):
+    def test_session_consumes_constructor_bootstrap_flags(self) -> None:
+        initial_options: tuple[dict[str, object], ...] = (
+            {"continue_conversation": True}, {"session_id": "chosen-session"},
+        )
+        for options in initial_options:
+            sdk = FakeSDK(
+                [ResultMessage(result="4", session_id="chosen-session")],
+                [ResultMessage(result="8", session_id="chosen-session")],
+            )
+            original = dict(options)
+            with self.subTest(options=options), sdk.install(), client.Session(sdk_options=options) as session:
+                self.assertEqual(session.ask("2 + 2").text, "4")
+                self.assertEqual(session.ask("Double it").text, "8")
+                with self.assertRaisesRegex(ValueError, "resume cannot be combined"):
+                    session.ask("Conflicting new session", sdk_options={"session_id": "other"})
+            self.assertEqual(options, original)
+            first = cast(Mapping[str, object], vars(sdk.options[0]))
+            second = cast(Mapping[str, object], vars(sdk.options[1]))
+            for key, value in original.items():
+                self.assertEqual(first[key], value)
+            self.assertEqual(second["resume"], "chosen-session")
+            self.assertNotIn("session_id", second)
+            self.assertNotIn("continue_conversation", second)
+            self.assertEqual(sdk.entered, 2)
+
+    def test_failed_turn_retains_session_for_explicit_followup(self) -> None:
         sdk: Final = FakeSDK(
             [ResultMessage(is_error=True, result="Turn limit", session_id="failed-session")],
             [ResultMessage(result="4", session_id="failed-session")],
@@ -320,13 +388,13 @@ class ClaudeSDKTests(unittest.TestCase):
             self.assertEqual(session.ask("Continue").text, "4")
         self.assertEqual(sdk.options[1].resume, "failed-session")
 
-    def test_session_timeout_retains_discovered_resume_id(self):
+    def test_session_timeout_retains_discovered_resume_id(self) -> None:
         sdk: Final = FakeSDK(
             [SystemMessage("init", {"session_id": "interrupted-session"}), "wait"],
             [ResultMessage(result="4", session_id="interrupted-session")],
         )
         with sdk.install(), client.Session() as session:
-            with self.assertRaises(TimeoutError) as raised:
+            with self.assertRaises(client.ClaudeAgentTimeout) as raised:
                 session.ask("slow turn", timeout=0.02)
             self.assertEqual(raised.exception.response.session_id, "interrupted-session")
             self.assertTrue(session.history()[0].timed_out)
@@ -337,15 +405,18 @@ class ClaudeSDKTests(unittest.TestCase):
         self.assertEqual(sdk.options[1].resume, "interrupted-session")
         self.assertEqual(sdk.exited, 2)
 
-    def test_session_rejects_overlap_and_recovers_after_cancellation(self):
-        sdk: Final = FakeSDK(["wait"], [ResultMessage(result="4")])
+    def test_session_rejects_overlap_and_recovers_after_cancellation(self) -> None:
+        sdk: Final = FakeSDK(
+            [SystemMessage("init", {"session_id": "cancelled-session"}), "wait"],
+            [ResultMessage(result="4", session_id="cancelled-session")],
+        )
 
-        async def use_session():
+        async def use_session() -> None:
             async with client.Session() as session:
                 pending: Final = asyncio.create_task(session.ask_async("slow turn"))
                 try:
                     async with asyncio.timeout(1):
-                        while not sdk.entered:
+                        while not sdk.calls:
                             await asyncio.sleep(0)
                     with self.assertRaisesRegex(RuntimeError, "in progress"):
                         await session.ask_async("overlap")
@@ -355,13 +426,17 @@ class ClaudeSDKTests(unittest.TestCase):
                     pending.cancel()
                     with self.assertRaises(asyncio.CancelledError):
                         await pending
+                self.assertEqual(session.session_id, "cancelled-session")
+                self.assertEqual(session.history()[0].session_id, "cancelled-session")
+                self.assertEqual(session.history()[0].exit_status, 1)
                 self.assertEqual((await session.ask_async("new turn")).text, "4")
 
         with sdk.install():
             asyncio.run(use_session())
         self.assertEqual(sdk.exited, 2)
+        self.assertEqual(sdk.options[1].resume, "cancelled-session")
 
-    def test_key_and_environment_are_scoped_to_sdk(self):
+    def test_key_and_environment_are_scoped_to_sdk(self) -> None:
         sdk: Final = FakeSDK([ResultMessage()])
         previous: Final = os.environ.get("ANTHROPIC_API_KEY")
         extra: Final = {"CUSTOM_TEST_VAR": "value"}
@@ -374,7 +449,7 @@ class ClaudeSDKTests(unittest.TestCase):
         self.assertNotIn("test-secret", repr(response.request))
         self.assertNotIn("test-secret", repr(response.metadata()))
 
-    def test_mcp_options_preserve_caller_and_expose_requested_tools(self):
+    def test_mcp_options_preserve_caller_and_expose_requested_tools(self) -> None:
         sdk: Final = FakeSDK([ResultMessage()])
         servers: Final = {"math": {"command": "python", "args": ["server.py"],
                                   "env": {"PORT": "1234"}}}
@@ -389,12 +464,14 @@ class ClaudeSDKTests(unittest.TestCase):
         else:
             self.assertEqual(configured["command"], "python")
         self.assertNotIn("mcp__math__*", sdk.options[0].allowed_tools)
-        self.assertIn("Read", sdk.options[0].tools)
+        tools = sdk.options[0].tools
+        assert tools is not None
+        self.assertIn("Read", tools)
         self.assertTrue(sdk.options[0].strict_mcp_config)
 
-    def test_in_process_mcp_server_keeps_live_instance(self):
+    def test_in_process_mcp_server_keeps_live_instance(self) -> None:
         class LiveServer:
-            def __deepcopy__(self, _memo):
+            def __deepcopy__(self, _memo: dict[int, object]) -> None:
                 raise TypeError("Live servers cannot be copied")
 
         instance: Final = LiveServer()
@@ -404,7 +481,7 @@ class ClaudeSDKTests(unittest.TestCase):
             client.ask("hello", mcp_servers=servers)
         self.assertIs(sdk.options[0].mcp_servers["local"]["instance"], instance)
 
-    def test_tool_permissions_are_separate_from_tool_selection(self):
+    def test_tool_permissions_are_separate_from_tool_selection(self) -> None:
         sdk: Final = FakeSDK([ResultMessage()], [ResultMessage()])
         explicit: Final = ClaudeAgentModel(task=number_task(), tools=("Read",),
                                            allowed_tools=["Read", "mcp__math__*"])
@@ -417,7 +494,7 @@ class ClaudeSDKTests(unittest.TestCase):
         self.assertIsNone(sdk.options[1].tools)
         self.assertEqual(sdk.options[1].allowed_tools, [])
 
-    def test_multimodal_payload_and_canonical_model_result(self):
+    def test_multimodal_payload_and_canonical_model_result(self) -> None:
         sdk: Final = FakeSDK([
             AssistantMessage([ThinkingBlock("Visible thought")]), ResultMessage(result="4"),
         ])
@@ -425,39 +502,53 @@ class ClaudeSDKTests(unittest.TestCase):
         picture: Final = Image.new("RGB", (3, 2), color="red")
         with sdk.install():
             answer, raw, metadata, payload = model.run_once(Question(["How many?", picture]))
+        assert isinstance(answer, NumberAnswer)
         self.assertEqual(answer.value, 4)
         self.assertEqual(raw, {"role": "assistant", "content": "4"})
         self.assertEqual(answer.llm_response_metadata, metadata[0])
         self.assertIs(answer.request_payload, payload)
+        assert answer.explicit_reasoning_output is not None
         self.assertIn("Visible thought", answer.explicit_reasoning_output)
         self.assertEqual(metadata[0]["session_id"], "session-one")
-        blocks: Final = payload["prompt"]
-        self.assertEqual(sdk.calls[0][0][0]["message"]["content"], blocks)
-        self.assertIn("Return an integer.", "\n".join(
-            block["text"] for block in blocks if block["type"] == "text"))
+        blocks = payload["prompt"]
+        assert not isinstance(blocks, str)
+        recorded = sdk.calls[0][0]
+        assert isinstance(recorded, list)
+        self.assertEqual(json_object(recorded[0]["message"])["content"], blocks)
+        texts: list[str] = []
+        for block in blocks:
+            if block["type"] == "text":
+                text = block["text"]
+                assert isinstance(text, str)
+                texts.append(text)
+        self.assertIn("Return an integer.", "\n".join(texts))
         images: Final = [block for block in blocks if block["type"] == "image"]
         self.assertEqual(len(images), 1)
-        self.assertEqual(images[0]["source"]["media_type"], "image/png")
-        image_data: Final = base64.b64decode(images[0]["source"]["data"])
+        source = json_object(images[0]["source"])
+        self.assertEqual(source["media_type"], "image/png")
+        encoded = source["data"]
+        assert isinstance(encoded, str)
+        image_data: Final = base64.b64decode(encoded)
         with Image.open(io.BytesIO(image_data)) as decoded:
             self.assertEqual(decoded.size, (3, 2))
 
-    def test_parser_retry_and_exhaustion_keep_context(self):
+    def test_parser_retry_and_exhaustion_keep_context(self) -> None:
         sdk: Final = FakeSDK([ResultMessage(result="bad")], [ResultMessage(result="4")])
         model: Final = ClaudeAgentModel(task=number_task())
         with sdk.install():
             response: Final = model.run_once(Question(["2 + 2"]), max_tries=1)
+        assert isinstance(response[0], NumberAnswer)
         self.assertEqual(response[0].value, 4)
         self.assertEqual(sdk.exited, 2)
 
         failure: Final = FakeSDK([ResultMessage(result="bad")])
         with failure.install(), self.assertRaises(GPTMaxTriesExceededException) as raised:
             model.run_once(Question(["2 + 2"]), max_tries=0)
-        self.assertEqual(raised.exception.raw_response["content"], "bad")
-        self.assertEqual(raised.exception.response_metadata[0]["session_id"], "session-one")
-        self.assertIn("prompt", raised.exception.request_payload)
+        self.assertEqual(cast(Mapping[str, object], raised.exception.raw_response)["content"], "bad")
+        self.assertEqual(cast(list[Mapping[str, object]], raised.exception.response_metadata)[0]["session_id"], "session-one")
+        self.assertIn("prompt", cast(Mapping[str, object], raised.exception.request_payload))
 
-    def test_agent_claude_aliases_and_credentials(self):
+    def test_agent_claude_aliases_and_credentials(self) -> None:
         task: Final = number_task()
         for alias, expected in (
             ("claude-code", None), ("claude-agent", None),
@@ -469,38 +560,41 @@ class ClaudeSDKTests(unittest.TestCase):
         ):
             with self.subTest(alias=alias):
                 model = Agent("test-key", task, vision_model=alias).visual_interface
-                self.assertIsInstance(model, ClaudeAgentModel)
+                assert isinstance(model, ClaudeAgentModel)
                 self.assertEqual(model.model, expected)
                 self.assertEqual(model.api_key, "test-key")
 
         keys: Final = KeyChain().add_key("claude", "keychain-value")
         keyed: Final = Agent(keys, task, vision_model="claude-code").visual_interface
+        assert isinstance(keyed, ClaudeAgentModel)
         self.assertEqual(keyed.api_key, "keychain-value")
         absent: Final = Agent("missing/credential.txt", task,
                               vision_model="claude-agent").visual_interface
+        assert isinstance(absent, ClaudeAgentModel)
         self.assertIsNone(absent.api_key)
         mcp: Final = {"test": {"command": "python"}}
         scoped: Final = Agent(None, task, vision_model="claude-agent",
                               workspace="/tmp/example", mcp_servers=mcp).visual_interface
+        assert isinstance(scoped, ClaudeAgentModel)
         self.assertEqual(scoped.workspace, "/tmp/example")
         self.assertEqual(scoped.mcp_servers, mcp)
 
-    def test_agent_rejects_invalid_claude_aliases(self):
+    def test_agent_rejects_invalid_claude_aliases(self) -> None:
         for alias in ("claude-code-", "claude-agent-", "claude-code-4-6"):
             with self.subTest(alias=alias), self.assertRaises(ValueError):
                 Agent(None, number_task(), vision_model=alias)
 
-    def test_http_claude_alias_keeps_http_adapter(self):
+    def test_http_claude_alias_keeps_http_adapter(self) -> None:
         with patch("tasksolver.claude.ClaudeModel") as constructor:
             agent: Final = Agent("http-key", number_task(), vision_model="claude-sonnet-4-6")
-        self.assertIs(agent.visual_interface, constructor.return_value)
+        self.assertIs(agent.visual_interface, cast(object, constructor.return_value))
         self.assertEqual(constructor.call_args.args[0], "http-key")
         self.assertEqual(constructor.call_args.kwargs["model"], "claude-sonnet-4-6")
 
-    def test_codex_transport_aliases(self):
+    def test_codex_transport_aliases(self) -> None:
         class CapturedCodex(CLIBackendModel):
-            def __init__(self, api_key, task, **kwargs):
-                super().__init__(api_key=api_key, task=task, model=kwargs.pop("model"))
+            def __init__(self, api_key: str | None, task: TaskSpec, *, model: str | None, **kwargs: object) -> None:
+                super().__init__(api_key=api_key, task=task, model=model)
                 self.options: Final = kwargs
 
         with patch("pycodex.CodexModel", CapturedCodex):
@@ -512,12 +606,13 @@ class ClaudeSDKTests(unittest.TestCase):
             ):
                 with self.subTest(alias=alias):
                     adapter = Agent(None, number_task(), vision_model=alias).visual_interface
+                    assert isinstance(adapter, CapturedCodex)
                     self.assertEqual(adapter.model, model)
                     self.assertEqual(adapter.options["transport"], transport)
             with self.assertRaises(ValueError):
                 Agent(None, number_task(), vision_model="codex-sdk-")
 
-    def test_real_sdk_subprocess_protocol_and_timeout_cleanup(self):
+    def test_real_sdk_subprocess_protocol_and_timeout_cleanup(self) -> None:
         try:
             import claude_agent_sdk
         except ImportError:
@@ -565,17 +660,17 @@ class ClaudeSDKTests(unittest.TestCase):
                               "total_cost_usd": 0})
                 '''))
             executable.chmod(0o700)
-            kwargs: Final = dict(
-                workspace=directory, timeout=10,
-                extra_env={"TEST_CLAUDE_PID": str(pid_path),
-                           "TEST_CLAUDE_RECEIVED": str(received_path)},
-                sdk_options={"cli_path": str(executable)},
-            )
+            kwargs: AskOptions = {
+                "workspace": directory, "timeout": 10,
+                "extra_env": {"TEST_CLAUDE_PID": str(pid_path),
+                              "TEST_CLAUDE_RECEIVED": str(received_path)},
+                "sdk_options": {"cli_path": str(executable)},
+            }
             with patch.object(client, "_load_sdk", return_value=claude_agent_sdk):
                 response: Final = client.ask("2 + 2", **kwargs)
                 self.assertEqual(response.text, "4")
                 self.assertEqual(response.session_id, "stub-session")
-                self.assertEqual(json.loads(received_path.read_text())["message"]["content"],
+                self.assertEqual(json_object(json_loads_object(received_path.read_text())["message"])["content"],
                                  "2 + 2")
                 completed_pid: Final = int(pid_path.read_text())
                 with self.assertRaises(ProcessLookupError):

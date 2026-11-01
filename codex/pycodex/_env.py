@@ -1,7 +1,7 @@
-"""Environment + argv wiring for an instrumented codex run.
+"""Environment + argv wiring for a linked codex run.
 
-Unlike pyagy (which LD-preloads a shim into a closed Go binary), codex is built from source with
-the wirecap bridge compiled in — so there is no shim/preload. Everything else matches agy: the
+Codex is built from source with the wirecap bridge compiled in; agy links its converted Go
+binary into a C++ host. Their launchers share the same runtime: the
 launcher (``codexprocess.CodexPopen``, on the shared ``wirecap.runtime.pty`` bases) runs codex under
 a PTY and injects ``WIRE_MP_BOOT_FD`` so the bridge's ``wirecap.decode.mp_child`` streams decoded
 ``codex_turn``s home over a result queue. This module only builds the run env (the neutral ``WIRE_*``
@@ -10,13 +10,14 @@ launcher, and the bridge also records every turn to the ``WIRE_CAPTURE`` JSONL (
 authoritative for the returned turns).
 """
 import os
+from collections.abc import Mapping, Sequence
 
 from wirecap.runtime.vendor import vendored
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pycodex
 
 
-def _vendored(in_pkg_rel, sibling_rel):
+def _vendored(in_pkg_rel: str, sibling_rel: str) -> str:
     """codex-side binding of the shared resolver (wirecap.runtime.vendor). Now includes the
     sys.path fallback pyagy always had — a development checkout without the cargo output can
     reuse an installed wheel's binary."""
@@ -28,16 +29,18 @@ def _vendored(in_pkg_rel, sibling_rel):
 CODEX_BIN = _vendored("vendor/codex", "../vendor/codex-rs/target/release/codex")
 
 
-def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_env=None,
-                     codex_home=None):
+def linked_env(capture: str | os.PathLike[str], module: str = "pycodex.codex_process",
+               base: Mapping[str, str] | None = None,
+               extra_env: Mapping[str, str] | None = None,
+               codex_home: str | os.PathLike[str] | None = None) -> dict[str, str]:
     """Environment that enables the wirecap bridge in codex and points it at ``capture``.
 
     Sets the neutral bridge contract (``WIRE_ENABLE`` gates the bridge on; ``WIRE_MODULE`` is the
     dispatch module). No sys.path is injected: the bridge runs `site`, so the embedded interpreter
     imports pycodex/wirecap from its own env's site-packages — the same install the parent runs.
-    The binary bakes no RPATH and embeds the build env's libpython, so the caller's env must be
-    same-version with the build env: its ``LD_LIBRARY_PATH`` supplies libpython/Boost, and
-    ``PYTHONHOME`` points the embedded interpreter at that env's stdlib + site-packages.
+    The binary's RUNPATH resolves libpython/Boost relative to the packaged executable. The
+    caller must use the same Python minor version; ``PYTHONHOME`` selects that environment's
+    stdlib and site-packages for the embedded interpreter.
     ``OPENAI_API_KEY`` (if set) is inherited for API-key auth; otherwise codex uses its
     ``~/.codex/auth.json`` login."""
     env = dict(base if base is not None else os.environ)
@@ -57,9 +60,10 @@ def instrumented_env(capture, module="pycodex.codex_process", base=None, extra_e
     return env
 
 
-def codex_argv(prompt, workspace, model=None, extra_flags=None, codex_bin=None,
-               persistent=False, session_id=None, continue_latest=False,
-               prompt_via_stdin=False):
+def codex_argv(prompt: str | None, workspace: str, model: str | None = None,
+               extra_flags: Sequence[str] | None = None, codex_bin: str | None = None,
+               persistent: bool = False, session_id: str | None = None,
+               continue_latest: bool = False, prompt_via_stdin: bool = False) -> list[str]:
     """codex's argv tail. One-shot is ``codex exec <prompt> --skip-git-repo-check -C <ws>`` (run with
     stdin on /dev/null so ``exec`` doesn't block reading it) — the direct counterpart of agy's
     ``--print``. ``persistent=True`` launches the interactive TUI (bare ``codex <prompt>``), the
@@ -94,7 +98,7 @@ def codex_argv(prompt, workspace, model=None, extra_flags=None, codex_bin=None,
         elif continue_latest:
             argv += ["resume", "--last", *([prompt] if prompt else [])]
         else:
-            argv += [prompt]
+            argv += [prompt or ""]
         # -C/--cd is NOT marked global in exec's clap tree (mark_exec_global_args
         # covers only model/danger-bypass/bypass_hook_trust), so after the
         # `resume` subcommand token it is rejected — the resumed run's cwd is the

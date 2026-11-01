@@ -1,4 +1,4 @@
-"""KimiCodeModel — a TaskSolver-contract backend that drives the (instrumented) kimi-code CLI.
+"""KimiCodeModel — a TaskSolver-contract backend that drives the (linked) kimi-code CLI.
 
 The kimi subclass of :class:`tasksolver.cli_backend.CLIBackendModel`, sibling of
 ``pycodex.CodexModel`` / ``pyagy.AgyModel``: shells out to ``kimi -p`` in a git workspace and
@@ -11,17 +11,18 @@ plus the model name fully define the endpoint.
     model = KimiCodeModel(api_key=key, task=my_task, model="k3")
     parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 """
-from tasksolver.cli_backend import CLIBackendModel
+from tasksolver.cli_backend import CLIBackendModel, CLIPayload, string_prompt
 from tasksolver.common import TaskSpec
+from wirecap.runtime.mcp import MCPServers
 
-from .client import ask_many as _kimi_ask_many
+from .client import AskOptions, KimiResponse, ask_many as _kimi_ask_many
 
 #: The Anthropic-compatible coding endpoint the harness drives (kimi-code's env-family default
 #: target); override per-model with ``base_url=``/``provider_type=``.
 KIMI_CODE_BASE_URL = "https://api.kimi.com/coding"
 
 
-class KimiCodeModel(CLIBackendModel):
+class KimiCodeModel(CLIBackendModel[KimiResponse]):
     backend_label = "kimi-code"
     command_label = "kimi -p"
     generic_model_aliases = ("kimi-code",)
@@ -31,10 +32,11 @@ class KimiCodeModel(CLIBackendModel):
     #: many_rough_guesses(num_threads=n) costs n x wall time here, like codex.
     _client_ask_many = staticmethod(_kimi_ask_many)
 
-    def __init__(self, api_key: str = None, task: TaskSpec = None, model: str = None,
-                 workspace: str = None, timeout: int = 300, mcp_servers: dict = None,
-                 kimi_home: str = None, base_url: str = KIMI_CODE_BASE_URL,
-                 provider_type: str = "anthropic", yolo: bool = False):
+    def __init__(self, api_key: str | None = None, task: TaskSpec | None = None,
+                 model: str | None = None, workspace: str | None = None,
+                 timeout: float = 300, mcp_servers: MCPServers | None = None,
+                 kimi_home: str | None = None, base_url: str = KIMI_CODE_BASE_URL,
+                 provider_type: str = "anthropic", yolo: bool = False) -> None:
         # api_key feeds KIMI_MODEL_API_KEY (the env-family model definition); None relies on the
         # CLI's own login/config in $KIMI_CODE_HOME.
         if yolo:
@@ -55,9 +57,12 @@ class KimiCodeModel(CLIBackendModel):
         self.provider_type = provider_type
         self.yolo = False                     # retained for signature compat; see __init__
 
-    def _call_kwargs(self, payload: dict) -> dict:
-        kw = dict(workspace=payload.get("workspace") or self.workspace,
-                  model=self.model, timeout=self.timeout)
+    def _sample(self, payload: CLIPayload, n_choices: int) -> list[KimiResponse]:
+        return self._client_ask_many(string_prompt(payload), n_choices, **self._call_kwargs(payload))
+
+    def _call_kwargs(self, payload: CLIPayload) -> AskOptions:
+        kw: AskOptions = {"workspace": payload.get("workspace") or self.workspace,
+                          "model": self.model, "timeout": self.timeout}
         if self.mcp_servers:
             kw["mcp_servers"] = self.mcp_servers
         if self.kimi_home:

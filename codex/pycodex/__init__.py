@@ -2,7 +2,7 @@
 
 Runs the (patched, from-source) codex binary — which has the wirecap bridge compiled in — and
 reads the decoded ``codex_turn``s it writes to a capture JSONL. Unlike pyagy/agy this needs no
-LD_PRELOAD shim — codex is open source, so the capture hooks are patched into the vendored build
+ELF conversion: Codex is open source, so capture calls are patched into the vendored build
 (Phase 6). Everything else matches agy: codex runs under a PTY on the shared
 ``wirecap.runtime.pty`` bases and streams decoded turns home over the same embedded-worker
 mp-child channel. The capture JSONL stays AUTHORITATIVE for the returned turns (``codex exec``
@@ -19,6 +19,19 @@ interpreter loads) runs this package __init__, which must stay import-pure — s
 especially ``model``, which imports ``tasksolver``) are imported only on attribute access, never
 at package load. The in-process decode side is ``pycodex.codex_process``.
 """
+
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from wirecap.runtime.workspace import ensure_git_workspace as ensure_git_workspace
+    from .client import (CodexResponse as CodexResponse, Session as Session, Usage as Usage,
+                         ask as ask, ask_many as ask_many, continue_latest as continue_latest,
+                         resume as resume)
+    from .config import mcp_flags as mcp_flags
+    from .model import CodexModel as CodexModel
+    from .sdk import (CodexSDKResponse as CodexSDKResponse, SDKSession as SDKSession,
+                      ask_many_sdk as ask_many_sdk, ask_sdk as ask_sdk)
+    from .sessions import latest_session_id as latest_session_id, read_transcript as read_transcript
 
 _LAZY = {
     "ask": ".client",
@@ -46,16 +59,16 @@ _LAZY = {
 }
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> object:
     mod = _LAZY.get(name)
     if mod is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     import importlib
-    return getattr(importlib.import_module(mod, __name__), name)
+    return cast(object, getattr(importlib.import_module(mod, __name__), name))
 
 
-def __dir__():
+def __dir__() -> list[str]:
     return sorted(_LAZY)
 
 
-__all__ = sorted(_LAZY)   # so `from pycodex import *` binds the lazy names
+__all__ = ['CodexModel', 'CodexResponse', 'CodexSDKResponse', 'SDKSession', 'Session', 'Usage', 'ask', 'ask_many', 'ask_many_sdk', 'ask_sdk', 'continue_latest', 'ensure_git_workspace', 'latest_session_id', 'mcp_flags', 'read_transcript', 'resume']   # so `from pycodex import *` binds the lazy names

@@ -1,0 +1,11 @@
+from typing import Literal, overload
+
+@overload
+def asm(shellcode: str, vma: int = 0, extract: Literal[True] = True, shared: bool = False,
+        *, arch: str = ..., bits: int = ..., endian: str = ..., os: str = ...) -> bytes: ...
+@overload
+def asm(shellcode: str, vma: int, extract: Literal[False], shared: bool = False,
+        *, arch: str = ..., bits: int = ..., endian: str = ..., os: str = ...) -> str: ...
+@overload
+def asm(shellcode: str, vma: int = 0, *, extract: Literal[False], shared: bool = False,
+        arch: str = ..., bits: int = ..., endian: str = ..., os: str = ...) -> str: ...

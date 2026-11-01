@@ -773,6 +773,7 @@ async fn run_websocket_response_stream(
         // No request reached the backend, so this socket is still reusable.
         return Ok(());
     }
+    let capture = codex_wirecap::ResponseCapture::new(request_text.as_bytes());
     send_websocket_request(
         ws_stream,
         request_text,
@@ -840,7 +841,7 @@ async fn run_websocket_response_stream(
 
                 // wirecap capture: the raw ResponsesStreamEvent JSON (WebSocket transport — the
                 // DEFAULT for OpenAI + API key). Byte-identical to the SSE path → one decoder.
-                codex_wirecap::emit_event(text.as_bytes());
+                capture.event(text.as_bytes());
 
                 let event = match serde_json::from_str::<ResponsesStreamEvent>(&text) {
                     Ok(event) => event,

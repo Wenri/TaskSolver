@@ -3,7 +3,7 @@
 `pyclaude` is TaskSolver's Claude backend alongside `pycodex`, `pyagy`, and
 `pykimi`. It uses Anthropic's official Python Agent SDK and its bundled Claude
 Code executable. It does not need native instrumentation or a separate global CLI install.
-The existing `claude-code` model aliases now use this backend; the direct
+The `claude-code` and `claude-agent` model aliases select this backend; the direct
 Anthropic Messages adapter remains separate.
 
 The official Python SDK source is checked into `claude/vendor/sdk` at tag
@@ -52,8 +52,10 @@ Each call owns the complete SDK client lifecycle. A `Session` reopens a client
 and resumes its saved session ID for each follow-up; it does not keep a CLI
 process alive between turns. Claude stores the transcript on disk.
 `Session(session_id="...")` resumes a previously stored conversation.
-`session.history()` returns this object's responses. Concurrent turns on the
-same `Session` are rejected; independent sessions can run concurrently.
+`session.history()` returns this object's responses. Constructor SDK options that
+select a new or latest conversation apply to the first turn; later turns resume
+the learned ID. Concurrent turns on the same `Session` are rejected; independent
+sessions can run concurrently.
 The synchronous API works when the calling thread already has an event loop,
 although async applications should use `ask_async` to avoid blocking that loop.
 
@@ -61,12 +63,12 @@ although async applications should use `ask_async` to avoid blocking that loop.
 assistant message as a fallback. Intermediate narration is not mixed into the
 answer. Responses retain session ID, native usage, cost, thinking blocks, SDK
 messages, and terminal result metadata. `ClaudeAgentError.response` preserves
-failed-turn diagnostics. Timeouts raise `TimeoutError` after SDK cleanup, with
-partial diagnostics on its `response` attribute;
-transport and authentication exceptions propagate from the SDK.
+failed-turn diagnostics. Timeouts raise `ClaudeAgentTimeout` (a `TimeoutError`
+subclass) after SDK cleanup, with partial diagnostics on its `response` attribute.
+Transport, authentication and external cancellation exceptions propagate unchanged.
 Partial timeout responses have `timed_out=True` and `exit_status=1`.
-`Session` retains discovered session IDs and failed or timed-out responses in
-its history, so an explicit follow-up can resume a turn interrupted by a deadline.
+`Session` retains discovered session IDs and partial responses after failure,
+timeout or cancellation, so an explicit follow-up can resume the conversation.
 
 ## Tools, MCP, and options
 
@@ -141,12 +143,13 @@ Run these checks from the TaskSolver checkout:
 ```bash
 pixi run python test_scripts/test_claude_sdk.py
 pixi run python test_scripts/test_claude_bundle.py
+pixi run python test_scripts/test_chat_mode.py
 ```
 
 The SDK suite uses synthetic messages and the vendored SDK with a local protocol
-stub. It covers aliases, images, parsing and metadata, session resume, MCP
-permissions, concurrency, timeout cancellation and subprocess cleanup. The bundle
-suite checks download verification with synthetic bytes, package contents, and
+stub. It covers aliases, images, parsing and metadata, session resume after errors
+or cancellation, MCP permissions, concurrency, deadlines and subprocess cleanup.
+The bundle suite checks download verification with synthetic bytes, package contents, and
 the built executable's `--version` outside the checkout. These checks make no
 authenticated provider calls; the package check skips if the runtime is unbuilt.
 

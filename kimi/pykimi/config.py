@@ -16,7 +16,7 @@ import os
 import re
 import time
 
-from wirecap.runtime.mcp import env_wrapped, kimi_mcp_json, kimi_mcp_toml_lines, \
+from wirecap.runtime.mcp import MCPServers, env_wrapped, kimi_mcp_json, kimi_mcp_toml_lines, \
     normalize_server_spec
 
 from . import sessions as _sessions
@@ -25,7 +25,7 @@ __all__ = ["mcp_json", "kimi_mcp_toml_lines", "encode_workdir_key",
            "trust_workspace"]
 
 
-def mcp_json(servers, unset_pythonhome=True, indent=2):
+def mcp_json(servers: MCPServers, unset_pythonhome: bool = True, indent: int = 2) -> str:
     """The ``{"mcpServers": …}`` JSON document for arbitrary ``{name: {command, args, env}}``
     specs, PYTHONHOME-unwrapped by default (see module docstring). Write it to one of the paths
     the CLI discovers — :func:`pykimi.ask` uses the workspace-local ``.kimi-code/mcp.json``."""
@@ -45,14 +45,14 @@ def mcp_json(servers, unset_pythonhome=True, indent=2):
 _MAX_WORKDIR_SLUG_LENGTH = 40
 
 
-def _slugify_workdir_name(name):
+def _slugify_workdir_name(name: str) -> str:
     slug = re.sub(r"[^a-z0-9._-]+", "-", name.lower())
     slug = re.sub(r"^-+|-+$", "", slug)[:_MAX_WORKDIR_SLUG_LENGTH]
     slug = re.sub(r"^-+|-+$", "", slug)
     return "workspace" if slug in ("", ".", "..") else slug
 
 
-def encode_workdir_key(work_dir):
+def encode_workdir_key(work_dir: str | os.PathLike[str]) -> str:
     """The stable, opaque workspace id kimi-code derives for a working directory
     (``wd_<slug>_<sha256[:12]>``) — the key of its session buckets and trust
     records. Byte-exact port of ``encodeWorkDirKey`` (workdir-slug.ts)."""
@@ -63,7 +63,7 @@ def encode_workdir_key(work_dir):
     return f"wd_{slug}_{digest}"
 
 
-def trust_workspace(workspace, home=None):
+def trust_workspace(workspace: str | os.PathLike[str], home: str | os.PathLike[str] | None = None) -> str:
     """Pre-trust ``workspace`` in the kimi store rooted at ``home`` so the shell
     UI's folder-trust dialog never renders (a Session would otherwise block on it
     before the first turn; project-level MCP config is also gated on trust).

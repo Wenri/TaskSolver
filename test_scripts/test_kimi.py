@@ -4,12 +4,14 @@ emits decoded to a ``kimi_turn``), then — when a model is configured — a rea
 through the vendored, wiretap-patched bundle.
 
 Gated: skips cleanly (exit 0) if the built bundle/addon is missing (run ``pixi install`` — kimi
-is built by the install's build_py hook, like codex) or no model is configured
+is built by the install's build_py step, like codex) or no model is configured
 (``MOONSHOT_API_KEY`` / ``KIMI_MODEL_API_KEY``, or a ``kimi login`` config).
 
     python3 test_scripts/test_kimi.py
 """
-import json
+
+from __future__ import annotations
+
 import os
 import shutil
 import subprocess
@@ -22,19 +24,21 @@ _KIMI = os.path.join(_REPO, "kimi")
 sys.path.insert(0, _KIMI)
 sys.path.insert(0, _REPO)
 
-from pykimi import ask                                       # noqa: E402
+from pykimi import ask  # noqa: E402
 from pykimi._env import KIMI_MAIN, WIRE_NODE_ADDON, node_bin  # noqa: E402
 
-_failures = []
+from wirecap.types import json_loads_object, json_object
+
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
 
 
-def skip(msg):
+def skip(msg: str) -> None:
     print(f"NOTE: skipping — {msg}")
     print("PASS")
     sys.exit(0)
@@ -63,7 +67,7 @@ console.log("turn id", id);
 """
 
 
-def test_addon_in_node():
+def test_addon_in_node() -> None:
     """The wirecap bridge inside a REAL node process: start -> embedded interpreter imports
     pykimi.kimi_process -> synthetic request/events -> decoded kimi_turn in the capture JSONL.
     Everything but the CLI and the model."""
@@ -90,18 +94,18 @@ def test_addon_in_node():
         if not os.path.exists(cap):
             check(False, "capture JSONL written")
             return
-        turns = [json.loads(l) for l in open(cap) if '"kimi_turn"' in l]
+        turns = [json_loads_object(l) for l in open(cap) if '"kimi_turn"' in l]
         check(len(turns) == 1, "one kimi_turn decoded")
         if turns:
             t = turns[0]
             check(t["text"] == "pong" and t["model"] == "k-smoke-served"
-                  and t["usage"]["total_tokens"] == 5
-                  and t["request"]["model"] == "k-smoke", "turn assembled + paired")
-        raw = [json.loads(l) for l in open(cap)]
+                  and json_object(t["usage"])["total_tokens"] == 5
+                  and json_object(t["request"])["model"] == "k-smoke", "turn assembled + paired")
+        raw = [json_loads_object(l) for l in open(cap)]
         check(any(o.get("kind") == "kimi_wire" for o in raw), "kimi_wire recorded")
 
 
-def test_real_cli():
+def test_real_cli() -> None:
     print("[live] pykimi.ask() end-to-end through the vendored bundle")
     key = os.environ.get("KIMI_MODEL_API_KEY") or os.environ.get("MOONSHOT_API_KEY")
     model = os.environ.get("KIMI_MODEL_NAME") or "k3"
@@ -127,16 +131,16 @@ def test_real_cli():
     check(r.usage.total_tokens > 0, f"usage decoded (total={r.usage.total_tokens})")
     check(r.request is not None, "request summary decoded (paired)")
     first_user = (r.request or {}).get("first_user_text", "")
-    check("2+2" in first_user, "request first_user_text carries the prompt")
+    check(isinstance(first_user, str) and "2+2" in first_user, "request first_user_text carries the prompt")
     check(bool(r.session_id), f"store-read session id ({r.session_id})")
 
 
-def main():
+def main() -> None:
     if not os.environ.get("CONDA_PREFIX"):
         skip("CONDA_PREFIX unset — run under the pixi env (PYTHONHOME for the embedded interpreter)")
     if not os.path.exists(WIRE_NODE_ADDON):
         skip(f"wirecap_node addon missing ({WIRE_NODE_ADDON}) — run `pixi install` (kimi is\n"
-             f"       built by the install's build_py hook; there is deliberately no build task)")
+             f"       built by the install's build_py step; there is deliberately no build task)")
     if not shutil.which(node_bin()) and not os.path.exists(node_bin()):
         skip(f"node missing ({node_bin()})")
     test_addon_in_node()

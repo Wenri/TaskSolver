@@ -2,26 +2,50 @@
 General agents class
 """
 
-from .common import *
-from abc import abstractmethod
-from typing import Union, Dict, Final, Tuple
-from bson import ObjectId
-from .event import *
-from .keychain import KeyChain
-import os
-import time
+from __future__ import annotations
 
+from abc import abstractmethod
+from collections.abc import Callable
+from os import PathLike
+from typing import Final, Protocol, Self, cast
+import os
 import pickle
 
+from bson import ObjectId
+from loguru import logger
+from wirecap.runtime.mcp import MCPServers
+
+from .common import AgentCompletion, CompletionAnswer, ParsedAnswer, Question, TaskSpec
+from .event import EventCollection, EvaluateEvent, FeedbackEvent, InteractEvent, ThinkEvent
+from .keychain import KeyChain
+from .provider_types import BackendResult
+
+
+class ModelBackend(Protocol):
+    def run_once(self, question: Question, max_tokens: int = 1000) -> BackendResult: ...
+    def rough_guess(self, question: Question, max_tokens: int = 1000) -> BackendResult: ...
+
+
+class BackendFactory(Protocol):
+    def __call__(self, api_key: str | None, task: TaskSpec, **options: object) -> ModelBackend: ...
+
+
+def _backend(factory: object, api_key: str | None, task: TaskSpec,
+             options: dict[str, object]) -> ModelBackend:
+    # backend_options deliberately follows the selected provider's constructor API.
+    # Its constructor validates names and values at this dynamic dispatch boundary.
+    return cast(BackendFactory, factory)(api_key, task, **options)
+
+
 class Agent(object):
-    def __init__(self, api_key:Union[str, KeyChain, None], task:TaskSpec,
+    def __init__(self, api_key: str | KeyChain | None, task:TaskSpec,
                  vision_model:str="gpt-4-vision-preview",
-                 followup_func=None,
-                 session_token=None, *,
-                 mcp_servers:dict=None,
-                 workspace:str=None,
+                 followup_func: Callable[[Agent], Question] | None = None,
+                 session_token: str | None = None, *,
+                 mcp_servers: MCPServers | None = None,
+                 workspace: str | None = None,
                  chat:bool=False,
-                 backend_options:dict=None): 
+                 backend_options: dict[str, object] | None = None) -> None:
         """
         Args:
             api_key: openAI/Claude api key (None: the CLI backends' own login)
@@ -34,8 +58,9 @@ class Agent(object):
             backend_options: extra keyword arguments for a CLI backend's constructor (e.g.
                 ``effort``, ``thinking``, ``system_prompt``, ``timeout``).
         """
-        self.followup_func = followup_func 
-        self.api_key = api_key # if this is a string, then 
+        self.visual_interface: ModelBackend
+        self.followup_func = followup_func
+        self.api_key = api_key # if this is a string, then
         self.vision_model = vision_model
         self.task = task
         # MCP servers ({name: {command, args, env}}) and a working directory for
@@ -61,7 +86,7 @@ class Agent(object):
             if isinstance(api_key, KeyChain):
                 api_key = api_key["openai"]
             self.visual_interface = GPTModel(api_key, task, model=vision_model)
-        
+
         elif vision_model in ("claude-3-5-sonnet-latest", "claude-3-haiku-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest", 'claude-3-7-sonnet-latest', "claude-3.7-sonnet-latest", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-7", "claude-haiku-4-5", "claude-opus-4-5"):
             from .claude import ClaudeModel
 
@@ -111,7 +136,7 @@ class Agent(object):
                 api_key = api_key.keys.get("claude")
             if isinstance(api_key, str) and (os.sep in api_key or api_key.endswith(".txt")):
                 api_key = None
-            self.visual_interface = ClaudeCodeModel(api_key, task, **{
+            self.visual_interface = _backend(ClaudeCodeModel, api_key, task, {
                 "model": model, "mcp_servers": mcp_servers, "workspace": workspace,
                 "chat": chat, **backend_options})
 
@@ -129,7 +154,7 @@ class Agent(object):
                     f"Empty agy model suffix in {vision_model!r}; use `agy` or "
                     "`agy-<model>` (e.g. `agy-gemini-3-pro`)."
                 )
-            self.visual_interface = AgyModel(None, task, **{
+            self.visual_interface = _backend(AgyModel, None, task, {
                 "model": model, "timeout": 1800, "workspace": workspace,
                 "mcp_servers": mcp_servers, "chat": chat, **backend_options})
 
@@ -157,7 +182,7 @@ class Agent(object):
                 api_key = None
             if not api_key:
                 api_key = os.environ.get("OPENAI_API_KEY") or None
-            self.visual_interface = CodexModel(api_key, task, **{
+            self.visual_interface = _backend(CodexModel, api_key, task, {
                 "model": model, "timeout": 1800, "transport": "sdk", "workspace": workspace,
                 "mcp_servers": mcp_servers, "chat": chat, **backend_options})
 
@@ -187,7 +212,7 @@ class Agent(object):
             if chat:
                 raise ValueError("kimi-code has no chat mode; use the HTTP Kimi backend "
                                  "(e.g. `kimi2-6`) for plain chat calls")
-            self.visual_interface = KimiCodeModel(api_key, task, **{
+            self.visual_interface = _backend(KimiCodeModel, api_key, task, {
                 "model": model, "timeout": 1800, "workspace": workspace,
                 "mcp_servers": mcp_servers, **backend_options})
 
@@ -298,7 +323,7 @@ class Agent(object):
 
             logger.info(f"creating Phi-based agent of type: microsoft/Phi-3.5-vision-instruct.")
             self.visual_interface = PhiModel(task=task, model='microsoft/Phi-3.5-vision-instruct')
-            
+
         elif vision_model == 'llama':
             from .llama import LlamaModel
 
@@ -326,59 +351,61 @@ class Agent(object):
                 "mcp_servers/workspace/backend_options are only supported by the CLI backends "
                 f"(claude-code, agy, codex, kimi-code); {vision_model!r} cannot honor them")
 
-            
 
-         
+
+
         if session_token is None:
             self.session_token = str(ObjectId())
             self.event_buffer = EventCollection()
         else:
             raise NotImplementedError("Need to implement loading function for session_token")
 
-    def save(self, to):
+    def save(self, to: str | PathLike[str]) -> Self:
         with open(to, "wb") as f:
             pickle.dump(self, f)
         return self
 
     @staticmethod
-    def load(fp):
+    def load(fp: str | PathLike[str]) -> Agent:
         with open(fp, "rb") as f:
-            agent = pickle.load(f)
+            agent = cast(object, pickle.load(f))
+        if not isinstance(agent, Agent):
+            raise TypeError("the saved object is not an Agent")
         return agent
 
-    def clear_event_buffer(self):
+    def clear_event_buffer(self) -> None:
         # begins a new session, fresh session id and event_buffer objects.
         self.session_token = str(ObjectId())
         self.event_buffer = EventCollection()
 
-    def think(self, question:Question) -> Tuple[ParsedAnswer, Dict, Union[list, Dict, None], Dict]:
-        """ 
+    def think(self, question:Question) -> BackendResult:
+        """
         Adds a THINKING event to the event buffer.
-        
+
         Args:
             question: The question/task instance we seek to solve.
         """
 
         # make an initial guess if this is going to be the first try
-        if len(self.event_buffer.filter_to('ACT')) == 0: 
+        if len(self.event_buffer.filter_to('ACT')) == 0:
             p_ans, ans, meta, p = self.visual_interface.run_once(question)
         else:
             print('Into think')
             p_ans, ans, meta, p = self.visual_interface.rough_guess(question)
 
-        ev = ThinkEvent(session_token=self.session_token, 
-                        qa_sequence=[(question, p_ans)]) 
+        ev = ThinkEvent(session_token=self.session_token,
+                        qa_sequence=[(question, p_ans)])
         self.event_buffer.add_event(ev)
-    
-        # update events_collection
-        return p_ans, ans, meta, p 
-        
 
-    @abstractmethod 
-    def act(self, p_ans:ParsedAnswer):
+        # update events_collection
+        return p_ans, ans, meta, p
+
+
+    @abstractmethod
+    def act(self, p_ans: ParsedAnswer) -> object:
         """
         NEEDS to add an ACTION event to the event buffer.
-        
+
         Executes the action within the environment, resulting
         in some state change.
         This code is specific to the environment/task that it operates under.
@@ -387,46 +414,52 @@ class Agent(object):
 
 
     @abstractmethod
-    def observe(self, state:dict):
-        """ Observations 
+    def observe(self, state: dict[str, object]) -> object:
+        """ Observations
         NEEDS to add an OBSERVE event to the event buffer.
-        
+
         States are specific to the environment/task that it operates under.
-        """ 
+        """
         ...
 
 
-    def reflect(self) -> Union[None, Question]:
+    def reflect(self) -> Question | None:
         """ Reflections
-        Adds a REFLECT event to the event buffer.        
+        Adds a REFLECT event to the event buffer.
         """
 
         # have we finished the task?
 
         # evaluator fucntion (self.task.completed) gets the agent itself.
-        evaluation_question, evaluation_answer = self.task.completed(self)
+        if self.task.completed is None:
+            raise ValueError("this task does not define a completion function")
+        evaluation_question, evaluation_answer = cast(AgentCompletion, self.task.completed)(self)
         ev = EvaluateEvent(completion_question=evaluation_question,
                          completion_eval=evaluation_answer)
         # logger.info(f"evaluator says: {evaluation_answer.success()} -- {evaluation_answer}")
         self.event_buffer.add_event(ev)
+        if not isinstance(evaluation_answer, CompletionAnswer):
+            raise TypeError("an agent evaluation answer must define success()")
         if evaluation_answer.success():
             return None
 
         # followup func should take in the agent itself,
         # with access to all the events and internal states
         # that it contains, and ask good followup questions
-        # to itself. 
+        # to itself.
+        if self.followup_func is None:
+            raise ValueError("this agent does not define a follow-up function")
         followup = self.followup_func(self)
         ev = FeedbackEvent(feedback=followup)
         self.event_buffer.add_event(ev)
-        # otherwise  make the followup. 
+        # otherwise  make the followup.
         return followup
 
-    def interject(self, interjection:InteractEvent):
+    def interject(self, interjection: InteractEvent) -> Self:
         """ User interjects.
         Adds a INTERACT event to the event buffer
-        
-        Main responsibility of method is storage of 
+
+        Main responsibility of method is storage of
         user interactions.
         Composed of:
             1) User actions
@@ -435,23 +468,20 @@ class Agent(object):
                has failed.
         """
         self.event_buffer.add_event(interjection)
-        return self        
+        return self
 
-    def run(self):
+    def run(self) -> None:
         """ An interface to run the T/A/O/R/I loops
         T = think
         A = act
         O = observe
         R = reflect
         I = interaction/interjection
-        
+
         A usual flow over the different steps might look something
         like: TAORTAORTAORTAORI, with an interjection at the end
-        from the user as a way to teach the agent how to do the right 
+        from the user as a way to teach the agent how to do the right
         thing, as well as explanations for why.
         """
 
         raise NotImplementedError
-
-
-   

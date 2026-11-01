@@ -11,6 +11,9 @@ creating a REAL config dir and seeding the onboarding cache.
 
     python3 test_scripts/test_mcp_serializers.py
 """
+
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -26,19 +29,24 @@ sys.path.insert(0, _REPO)
 # `import pygit2` is only *used* at workspace-creation time — which this offline
 # test never does. Stub it when absent so the suite runs without the dep.
 try:
-    import pygit2  # noqa: F401
+    import importlib
+    importlib.import_module("pygit2")
 except ImportError:
     import types
     sys.modules["pygit2"] = types.ModuleType("pygit2")
 
+from pyagy import (
+    config,  # noqa: E402
+    conversations,  # noqa: E402
+)
+
 from wirecap.runtime import mcp  # noqa: E402
-from pyagy import config  # noqa: E402
-from pyagy import conversations  # noqa: E402
+from wirecap.types import json_array, json_load_object, json_loads_object, json_object
 
-_failures = []
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
@@ -49,7 +57,7 @@ SPEC = {"command": "/usr/bin/uv",
         "env": {"BLENDER_MCP_HOST": "127.0.0.1", "BLENDER_MCP_PORT": "9999"}}
 
 
-def test_normalize():
+def test_normalize() -> None:
     print("[offline] normalize_server_spec")
     out = mcp.normalize_server_spec({"command": "x"})
     check(out == {"command": "x", "args": [], "env": {}}, "defaults filled")
@@ -62,7 +70,7 @@ def test_normalize():
         check(True, "missing command rejected")
 
 
-def test_env_wrapped():
+def test_env_wrapped() -> None:
     print("[offline] env_wrapped idempotence")
     once = mcp.env_wrapped(SPEC)
     check(once["command"] == "/usr/bin/env"
@@ -75,7 +83,7 @@ def test_env_wrapped():
           "no vars = plain normalize")
 
 
-def test_codex_flags():
+def test_codex_flags() -> None:
     print("[offline] codex_config_flags")
     flags = mcp.codex_config_flags({"official-blender-mcp": SPEC})
     check(flags[0] == "-c" and flags[1].startswith("mcp_servers.official-blender-mcp="),
@@ -84,7 +92,7 @@ def test_codex_flags():
     check('"/usr/bin/uv"' in rendered and 'BLENDER_MCP_PORT = "9999"' in rendered,
           "inline TOML table")
     # strings go through JSON escaping so quoted paths survive
-    tricky = {"command": 'a"b', "args": [], "env": {}}
+    tricky: mcp.MCPServerSpec = {"command": 'a"b', "args": [], "env": {}}
     val = mcp.codex_config_flags({"s": tricky})[1]
     check('\\"' in val, "quotes escaped")
     try:
@@ -94,13 +102,13 @@ def test_codex_flags():
         check(True, "non-bare key rejected")
 
 
-def test_claude_args():
+def test_claude_args() -> None:
     print("[offline] claude_mcp_args")
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, "mcp-servers.json")
         args = mcp.claude_mcp_args({"blender": SPEC}, path)
         check(args == ["--mcp-config", path, "--strict-mcp-config"], "flags")
-        doc = json.load(open(path))
+        doc = json_load_object(open(path))
         check(doc == {"mcpServers": {"blender": mcp.normalize_server_spec(SPEC)}},
               "file content")
         # byte-parity with the historical harness writer
@@ -110,10 +118,10 @@ def test_claude_args():
         check(args == ["--mcp-config", path], "strict off")
 
 
-def test_qwen_fragment():
+def test_qwen_fragment() -> None:
     print("[offline] qwen_mcp_servers")
     frag = mcp.qwen_mcp_servers({"blender": SPEC})
-    check(frag["blender"]["trust"] is True and frag["blender"]["timeout"] == 60000,
+    check(frag["blender"].get("trust") is True and frag["blender"].get("timeout") == 60000,
           "trust+timeout added")
     check(frag["blender"]["command"] == SPEC["command"], "spec preserved")
     # byte-parity with the historical inline comprehension
@@ -123,53 +131,53 @@ def test_qwen_fragment():
           "byte-identical fragment")
 
 
-def test_kimi():
+def test_kimi() -> None:
     print("[offline] kimi serializations")
-    check(json.loads(mcp.kimi_mcp_json({"b": SPEC}))["mcpServers"]["b"]["command"]
+    check(json_object(json_object(json_loads_object(mcp.kimi_mcp_json({"b": SPEC}))["mcpServers"])["b"])["command"]
           == SPEC["command"], "mcp.json shape")
     lines = mcp.kimi_mcp_toml_lines()
     check(lines == ["[mcp]", "startup_timeout_ms = 120000",
                     "tool_timeout_ms = 900000"], "config.toml lines")
 
 
-def test_generic_writer_merge():
+def test_generic_writer_merge() -> None:
     print("[offline] write_mcp_servers_json merge semantics")
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, "cfg.json")
         json.dump({"mcpServers": {"keep": {"command": "k"}}, "other": 1},
                   open(path, "w"))
         mcp.write_mcp_servers_json({"new": SPEC}, path, merge=True)
-        doc = json.load(open(path))
-        check("keep" in doc["mcpServers"] and "new" in doc["mcpServers"]
+        doc = json_load_object(open(path))
+        check("keep" in json_object(doc["mcpServers"]) and "new" in json_object(doc["mcpServers"])
               and doc.get("other") == 1, "merge preserves entries + other keys")
         mcp.write_mcp_servers_json({"only": SPEC}, path, merge=False)
-        doc = json.load(open(path))
-        check(list(doc["mcpServers"]) == ["only"] and "other" not in doc,
+        doc = json_load_object(open(path))
+        check(list(json_object(doc["mcpServers"])) == ["only"] and "other" not in doc,
               "merge=False replaces")
 
 
-def test_pyagy_write_remove():
+def test_pyagy_write_remove() -> None:
     print("[offline] pyagy write_mcp_servers / remove_mcp_servers round-trip")
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, "mcp_config.json")
         config.write_mcp_servers({"blender": SPEC}, path=path, merge=False)
-        doc = json.load(open(path))
-        entry = doc["mcpServers"]["blender"]
+        doc = json_load_object(open(path))
+        entry = json_object(json_object(doc["mcpServers"])["blender"])
         check(entry["command"] == "/usr/bin/env"
-              and entry["args"][:2] == ["-u", "PYTHONHOME"],
+              and json_array(entry["args"])[:2] == ["-u", "PYTHONHOME"],
               "PYTHONHOME unwrap applied by default")
         config.write_mcp_servers({"plain": SPEC}, path=path,
                                  unset_pythonhome=False)
-        doc = json.load(open(path))
-        check(doc["mcpServers"]["plain"]["command"] == SPEC["command"]
-              and "blender" in doc["mcpServers"], "merge + opt-out of wrap")
+        doc = json_load_object(open(path))
+        check(json_object(json_object(doc["mcpServers"])["plain"])["command"] == SPEC["command"]
+              and "blender" in json_object(doc["mcpServers"]), "merge + opt-out of wrap")
         removed = config.remove_mcp_servers(["blender", "absent"], path=path)
-        doc = json.load(open(path))
-        check(removed == 1 and "blender" not in doc["mcpServers"]
-              and "plain" in doc["mcpServers"], "targeted removal")
+        doc = json_load_object(open(path))
+        check(removed == 1 and "blender" not in json_object(doc["mcpServers"])
+              and "plain" in json_object(doc["mcpServers"]), "targeted removal")
 
 
-def test_scoped_home():
+def test_scoped_home() -> None:
     print("[offline] prepare_scoped_home(link_global_config=False) + onboarding")
     with tempfile.TemporaryDirectory() as td:
         root = conversations.prepare_scoped_home(td, link_global_config=False)
@@ -188,7 +196,7 @@ def test_scoped_home():
               "later default call is a no-op on the real dir")
 
 
-def main():
+def main() -> None:
     test_normalize()
     test_env_wrapped()
     test_codex_flags()

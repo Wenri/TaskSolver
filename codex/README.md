@@ -1,4 +1,4 @@
-# Codex SDK and instrumented CLI
+# Codex SDK and linked CLI
 
 TaskSolver's `CodexModel` and `codex*` model IDs use the official Python SDK over
 `codex app-server`. The SDK and Rust CLI ship from the same vendored upstream
@@ -7,32 +7,29 @@ response and usage capture through `wirecap` and its embedded CPython bridge.
 Low-level `pycodex.ask` and `pycodex.Session` keep the exec/PTY interfaces.
 
 ## Layout
-- `vendor/` — the Codex repo, git-subtree'd (originally `rust-v0.143.0-alpha.38`, since bumped to
-  **0.166.0** (`rust-v0.166.0`, upstream commit
-  `6ff1e1c`) — see `codex-rs/Cargo.toml`; Apache-2.0; `LICENSE` preserved). Kept pristine except
+
+- `vendor/` — the Codex repo at **0.166.0** (`rust-v0.166.0`, upstream commit
+  `6ff1e1c`; Apache-2.0; `LICENSE` preserved), imported with git subtree. Kept pristine except
   our patch (below); `codex-rs/target/` is gitignored.
 - `pycodex/` — the Python wrapper: `ask()`/`CodexResponse`/`CodexModel` + the in-process decode
   side `codex_process` (the `WIRE_MODULE` the embedded interpreter loads) + the OpenAI-Responses
   turn decoder `responses_decode`. `sdk.py` integrates the official Python SDK with the same
-  instrumented binary, while `sdk_process.py` owns its subprocess group.
+  linked binary, while `sdk_process.py` owns its subprocess group.
 - `vendor/sdk/python/src/openai_codex/` — the official Python SDK from the same upstream
   snapshot, packaged unchanged with TaskSolver. Its dependencies are `pydantic>=2.12` and
   `packaging>=26.2`; TaskSolver supplies its own compiled CLI instead of installing the SDK's
   separate `openai-codex-cli-bin` runtime.
 
-## The patch (Phase 6)
-A new self-contained leaf crate `vendor/codex-rs/wirecap/` (FFI onto `libwirecap_bridge.a`, whose
-fat GCC LTO objects carry regular machine code that this Rust link uses; there is no cross-language
-LTO with the bridge yet) plus
-**three one-line emit sites** + `wire_start()` in `cli/src/main.rs`:
-- `core/src/client.rs` `build_responses_request()` → `codex_request` (the serialized `/v1/responses`).
-- `codex-api/src/sse/responses.rs` and `codex-api/src/endpoint/responses_websocket.rs` → `codex_event`
-  at each `ResponsesStreamEvent` deserialize. **Both** transports are patched (WebSocket is the
-  default for OpenAI; an SSE-only patch would miss it) — they carry byte-identical JSON, so one
-  decoder covers both.
+## The patch
+The `vendor/codex-rs/wirecap/` crate wraps `libwirecap_bridge.a`; its fat GCC LTO objects provide
+regular machine code for the Rust linker. `cli/src/main.rs` starts and stops the bridge.
+Each SSE or WebSocket transport owns a capture guard: it records the outgoing JSON before
+compression, tags response events with the same request ID, and emits `codex_end` on completion,
+error or cancellation. The Python decoder accumulates each ID separately, so concurrent
+requests cannot merge their text or exchange request metadata. Both transports use the same
+Responses event decoder.
 
-All new code is in the leaf crate (new files never conflict on `subtree pull`); the edits to
-existing vendored files are tiny and anchored on stable names, so bumping the pin stays cheap:
+Keep these transport-boundary patches when updating the vendored snapshot:
 
     git subtree pull --prefix codex/vendor https://github.com/openai/codex.git <newtag> --squash
 
@@ -60,8 +57,8 @@ the same environment; TaskSolver supplies both SDK source and runtime.
 ## Official Python SDK
 
 `ask_sdk()` and `SDKSession` use the [official Codex Python SDK](https://learn.chatgpt.com/docs/codex-sdk)
-to drive `codex app-server` over JSON-RPC. `CodexModel` and TaskSolver's existing Codex model
-aliases now use this SDK by default. The SDK shares the existing instrumented runtime and
+to drive `codex app-server` over JSON-RPC. `CodexModel` and TaskSolver's Codex model
+aliases use this SDK by default. The SDK shares the linked runtime and
 wire capture. The low-level `ask()` and `Session` retain their exec/PTY behavior:
 
 ```python
@@ -82,10 +79,10 @@ with SDKSession(workspace="/path/to/repo", session_id=reply.session_id) as sessi
                        "required": ["name"], "additionalProperties": False},
     )
 
-# Same TaskSolver parsing, retry and metadata contract as the existing adapter:
+# TaskSolver parsing, retry and metadata handling:
 model = CodexModel(task=my_task, workspace="/path/to/repo")
-# Explicit compatibility path:
-legacy = CodexModel(task=my_task, transport="exec", workspace="/path/to/repo")
+# Exec/PTY transport:
+exec_model = CodexModel(task=my_task, transport="exec", workspace="/path/to/repo")
 ```
 
 The SDK adapter authenticates a supplied or inherited `OPENAI_API_KEY` through the SDK's
@@ -108,19 +105,22 @@ unknown without captured model telemetry. SDK reasoning items are available as
 `explicit_reasoning_output` and in TaskSolver's response metadata.
 
 Each session has its own capture file. `codex_home=`, `workspace=`, `mcp_servers=`,
-`extra_env=`, `codex_bin=`, and `capture=<path>` work with the instrumented runtime;
+`extra_env=`, `codex_bin=`, and `capture=<path>` work with the linked runtime;
 `config_overrides` accepts TOML `key=value` strings. MCP commands use the same `PYTHONHOME`
 unwrap as the exec client. `session_id=` resumes that exact thread, while
 `continue_latest=True` selects the newest stored thread for the workspace and fails when
 none exists. Thread startup defaults to read-only sandboxing and denied escalations;
 `thread_options` accepts the official SDK's `Sandbox` and `ApprovalMode` enum values.
 
-`timeout` bounds initialization and each `SDKSession.ask` turn. A timeout returns
-`timed_out=True`, closes the session and reaps its process group, including MCP/tool children.
+`timeout` bounds initialization and each `SDKSession.ask` turn, including blocked
+prompt writes. A timed-out `ask` returns `timed_out=True`, closes the session and
+reaps its process group, including MCP/tool children.
 `CodexModel` converts this response into `TimeoutError` before task parsing.
 Failed or interrupted turns raise; they are not successful answers. Closing normally lets
 app-server drain native capture before cleaning up. Persistent sessions briefly wait for the
 asynchronous native recorder after each SDK result; the full capture file remains available.
+Concurrent turns on one session are rejected. Closing during an active turn interrupts it;
+a closed session must be replaced, using its `session_id` to resume if needed.
 
 For advanced controls, `session.client` and `session.thread` expose the official SDK objects:
 `session.thread.turn(prompt).stream()`, steering, interruption and other thread operations.
@@ -188,18 +188,17 @@ pixi run python test_scripts/test_responses_decode.py
 pixi run python test_scripts/test_wire_session.py
 pixi run python test_scripts/test_codex_sdk.py
 pixi run python test_scripts/test_codex_sdk_native.py
+pixi run python test_scripts/test_chat_mode.py
 ```
 
 These cover request arguments, MCP configuration, scoped and reverted session stores,
 response decoding, timeout/process cleanup, and the shared persistent-session loop.
-The 0.166.0 upgrade also passed the native build and the local mock-endpoint SDK/app-server
-checks (`test_codex_sdk_native.py`) exercising native request/response capture and session
-resume.
 These checks do not establish authenticated service compatibility. To check that separately
 after building and authenticating, run `pixi run python test_scripts/test_codex.py`; inspect
 its output because missing artifacts or authentication cause it to skip.
 
 The SDK protocol test uses a local stand-in app-server to verify typed input, structured
-output options, resumable threads, capture, timeout cleanup and error propagation. The native
-SDK smoke runs the bundled Codex against an isolated localhost Responses fixture, verifies
+output options, resumable threads, capture, startup/turn/blocked-write deadlines,
+concurrent close and error propagation. The native SDK smoke runs the bundled
+Codex against an isolated localhost Responses fixture, verifies
 wire capture and continued thread context, and uses a temporary empty `CODEX_HOME`.

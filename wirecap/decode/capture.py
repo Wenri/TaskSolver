@@ -10,40 +10,43 @@ stream-event JSON) drive the same machinery:
   * ``feed_request(req_repr, t, ...)`` / ``feed_events(events, t)`` — already-parsed dicts.
   * ``feed_chunk(data, t)`` — a raw response chunk the CLI's own stream parser already decoded.
 
-Why a response often arrives via ``feed_chunk`` rather than as ``feed("s2c", ...)``: HTTP/1.1 SSE
-is pull-based, so the decrypted inbound bytes are a RETURN value with no entry-arg source to hook.
-(agy's retired ``tls_read`` leave hook did feed s2c, and it destabilized agy's GC.) So the request
-side comes off the wire — agy's ``tls_write`` entry-arg hook, framed by ``feed("c2s", ...)`` — while
-the response side comes from the CLI's own SSE parser: agy's ``toStreamResponseChunk`` hands us each
-decoded ``data:`` line, codex's patched HTTP boundary hands us each stream event. ``feed_chunk``
-accumulates them and the turn is emitted at the terminal (``finishReason`` / ``completed``) event,
-paired with the pending request.
+agy's ``tls_write`` entry book supplies requests; its SSE parser supplies response ``data:``
+lines because decrypted reads return their bytes rather than receive them as entry arguments.
+Codex supplies events from its patched HTTP boundary. Responses accumulate until a terminal
+``finishReason`` / ``completed`` event and are paired with a pending request.
 
 Request↔response pairing is by **time** (nearest preceding request within a small window,
 preferring same host) — captures often key the two directions differently, so stream id
 can't pair them; a builder that can tell (``TurnBuilder.request_matches``) narrows the
-candidates first. Responses that overlap in time stay apart when the builder names their stream
-(``TurnBuilder.stream_key``): agy streams its session-title call alongside the answer turn, and
-one shared accumulator used to merge the two into a single turn paired with the title request.
-All provider-specific shaping is delegated to a ``TurnBuilder``.
+candidates first. ``TurnBuilder.stream_key`` keeps overlapping responses separate, including
+agy's simultaneous session-title and answer streams. Provider-specific shaping stays in the builder.
 """
+from collections.abc import Sequence
+from typing import Literal
+
 from . import http1sse
+from .h2reassemble import Reassembler
+from .turns import TurnBuilder
+from ..types import Direction, EventSink, JSONObject, StreamId
+
+type PendingRequest = tuple[float, str | None, StreamId, http1sse.Message | JSONObject | None]
 
 
 class BaseCorrelator:
-    def __init__(self, recorder, builder, reassembler=None):
+    def __init__(self, recorder: EventSink, builder: TurnBuilder,
+                 reassembler: Reassembler | None = None) -> None:
         self.rec = recorder
         self._builder = builder
         self.h2 = reassembler
-        self._kind = {}          # (dir, stream) -> "http1" | "h2"
-        self._pre = {}           # (dir, stream) -> bytearray (pre-classification buffer)
-        self._dec = {}           # (dir, stream) -> StreamDecoder (http1 only)
-        self._pending = []       # recent requests: [(t, host, stream_id, req_repr)]
-        self._acc = {}           # stream key -> events accumulated for an in-flight response
-        self._acc_t = {}         # stream key -> timestamp of its first accumulated event
+        self._kind: dict[tuple[Direction, StreamId], Literal["http1", "h2"]] = {}
+        self._pre: dict[tuple[Direction, StreamId], bytearray] = {}
+        self._dec: dict[tuple[Direction, StreamId], http1sse.StreamDecoder] = {}
+        self._pending: list[PendingRequest] = []
+        self._acc: dict[str | None, list[JSONObject]] = {}
+        self._acc_t: dict[str | None, float] = {}
 
     # --- raw-bytes path (wire capture) ---------------------------------------
-    def feed(self, direction, stream_id, data, t):
+    def feed(self, direction: Direction, stream_id: StreamId, data: bytes, t: float) -> None:
         # Ingress (s2c) may begin with a TLS-handshake plaintext prefix before the HTTP/1.1
         # status line — the decoder's header search skips it — so we always run the HTTP/1.1
         # decoder on s2c. Egress (c2s) opens cleanly with a request line or the h2 preface, so
@@ -68,7 +71,7 @@ class BaseCorrelator:
             return
         self._feed_http1(direction, stream_id, data, t)
 
-    def _feed_http1(self, direction, stream_id, data, t):
+    def _feed_http1(self, direction: Direction, stream_id: StreamId, data: bytes, t: float) -> None:
         dec = self._dec.get((direction, stream_id))
         if dec is None:
             dec = self._dec[(direction, stream_id)] = http1sse.StreamDecoder()
@@ -80,32 +83,29 @@ class BaseCorrelator:
                 self._emit_message(stream_id, t, msg)
 
     # --- pre-parsed path (patched-CLI capture) -------------------------------
-    def feed_request(self, req_repr, t, host=None, stream_id=None):
+    def feed_request(self, req_repr: http1sse.Message | JSONObject | None, t: float,
+                     host: str | None = None, stream_id: StreamId = None) -> None:
         """Track a pre-parsed request (e.g. a serialized request JSON) for pairing."""
         self._flush_unkeyed()
         self._remember(t, host, stream_id, req_repr)
 
-    def _flush_unkeyed(self):
+    def _flush_unkeyed(self) -> None:
         """A new request means an unkeyed response is over: flush it if it never hit a terminal
         event (aborted stream), so its events can't bleed into the next turn. Keyed responses
         cannot bleed and may still be streaming, so they wait for their own terminal event."""
         if self._acc.get(None):
             self._flush_events(None)
 
-    def feed_chunk(self, data, t):
-        """Accumulate one raw response chunk: parse it with the builder, then feed the events.
-
-        This is the entry point for a provider whose RESPONSE has no entry-arg byte source — the
-        CLI's own stream parser hands us each decoded chunk instead. agy's SSE ``data:`` lines
-        (``toStreamResponseChunk``) and codex's ``ResponsesStreamEvent``s both arrive this way."""
+    def feed_chunk(self, data: bytes, t: float) -> None:
+        """Parse and accumulate a chunk supplied by the CLI's response parser."""
         self.feed_events(self._builder.parse_events(data), t)
 
-    def feed_events(self, events, t):
+    def feed_events(self, events: Sequence[JSONObject], t: float) -> None:
         """Accumulate already-parsed stream events per response (``TurnBuilder.stream_key``);
         emit a response's turn at its terminal event."""
         if not events:
             return
-        groups = {}
+        groups: dict[str | None, list[JSONObject]] = {}
         for event in events:
             groups.setdefault(self._builder.stream_key(event), []).append(event)
         for key, group in groups.items():
@@ -116,14 +116,14 @@ class BaseCorrelator:
             if self._builder.is_terminal(acc):
                 self._flush_events(key)
 
-    def flush(self):
+    def flush(self) -> None:
         """Emit every response still accumulating (a capture that ended mid-stream)."""
         for key in list(self._acc):
             if self._acc.get(key):
                 self._flush_events(key)
 
     # --- turn emission --------------------------------------------------------
-    def _flush_events(self, key=None):
+    def _flush_events(self, key: str | None = None) -> None:
         events = self._acc.pop(key, [])
         t = self._acc_t.pop(key, None)
         req = self._match(t, None, events)
@@ -135,22 +135,27 @@ class BaseCorrelator:
         )
         self.rec.event(turn)
 
-    def _emit_message(self, resp_stream, resp_t, resp_msg):
+    def _emit_message(self, resp_stream: StreamId, resp_t: float,
+                      resp_msg: http1sse.Message) -> None:
         req = self._match(resp_t, resp_msg.headers.get("host"))
         turn = self._builder.build_from_message(
             (req[0], req[2], req[3]) if req else None, resp_t, resp_stream, resp_msg)
         self.rec.event(turn)
 
-    def _remember(self, t, host, stream_id, req_repr):
+    def _remember(self, t: float, host: str | None, stream_id: StreamId,
+                  req_repr: http1sse.Message | JSONObject | None) -> None:
         self._pending.append((t, host, stream_id, req_repr))
         if len(self._pending) > 32:                  # keep only the recent tail
             self._pending = self._pending[-32:]
 
-    def _match(self, resp_t, resp_host, events=None):
+    def _match(self, resp_t: float | None, resp_host: str | None,
+               events: Sequence[JSONObject] | None = None) -> PendingRequest | None:
         """Nearest preceding request within a small time window; prefer same host. Given the
         response ``events``, the builder's ``request_matches`` narrows the candidates first: to
         the requests it accepts if any, else to those it has no verdict on; if it rejects every
         one, time alone decides."""
+        if resp_t is None:
+            return None
         candidates = self._pending
         if events:
             verdicts = [self._builder.request_matches(entry[3], events) for entry in candidates]
@@ -158,9 +163,9 @@ class BaseCorrelator:
                 if keep in verdicts:
                     candidates = [e for e, v in zip(candidates, verdicts) if v is keep]
                     break
-        best = None
+        best: PendingRequest | None = None
         for entry in candidates:
-            qt, host, sid, req = entry
+            qt, host, _, _ = entry
             if qt > resp_t + 1.0:
                 continue
             if best is None or qt > best[0]:

@@ -1,4 +1,4 @@
-"""Structured Claude Agent SDK calls without wirecap or a separately installed CLI.
+"""Structured Claude Agent SDK calls using the bundled SDK and CLI.
 
 Every turn owns the full async SDK lifecycle. Session follow-ups resume the saved
 Claude session in a new SDK client, avoiding cross-task AnyIO lifecycle ownership.
@@ -7,7 +7,6 @@ Claude session in a new SDK client, avoiding cross-task AnyIO lifecycle ownershi
 from __future__ import annotations
 
 import asyncio
-import copy
 import importlib
 import json
 import os
@@ -15,12 +14,16 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields, is_dataclass
-from typing import Any, Final
+from collections.abc import AsyncIterator, Coroutine, Mapping
+from typing import Final, Self, Unpack, cast
+
+from wirecap.types import JSONObject, JSONValue, json_object
+from .types import AskOptions, MCPServers, Prompt, SDK, SDKOptionsFactory, SDKResultMessage, Tools
 
 
-def _load_sdk():
+def _load_sdk() -> SDK:
     try:
-        return importlib.import_module("claude_agent_sdk")
+        return cast(SDK, importlib.import_module("claude_agent_sdk"))
     except ImportError as exc:
         raise RuntimeError(
             "TaskSolver's vendored Claude Agent SDK is unavailable. "
@@ -28,34 +31,39 @@ def _load_sdk():
         ) from exc
 
 
-def _plain(value: Any) -> Any:
+def _plain(value: object) -> JSONValue:
     """Keep SDK messages and content blocks as serializable native metadata."""
     if is_dataclass(value) and not isinstance(value, type):
-        data: Final = {item.name: _plain(getattr(value, item.name)) for item in fields(value)}
+        data: JSONObject = {item.name: _plain(cast(object, getattr(value, item.name))) for item in fields(value)}
         name: Final = type(value).__name__.removesuffix("Message").removesuffix("Block")
         data.setdefault("type", re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower())
         return data
     if isinstance(value, dict):
-        return {key: _plain(item) for key, item in value.items()}
+        values = cast(Mapping[object, object], value)
+        if not all(isinstance(key, str) for key in values):
+            raise TypeError("SDK metadata keys must be strings")
+        return {str(key): _plain(item) for key, item in values.items()}
     if isinstance(value, (list, tuple)):
-        return [_plain(item) for item in value]
-    return value
+        return [_plain(item) for item in cast(list[object] | tuple[object, ...], value)]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    raise TypeError(f"SDK metadata cannot serialize {type(value).__name__}")
 
 
 @dataclass
 class ClaudeResponse:
-    """One completed SDK turn, retaining native usage and terminal metadata."""
+    """A captured SDK turn, including partial results and native metadata."""
 
     text: str = ""
     thoughts: list[str] = field(default_factory=list)
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    result: dict[str, Any] = field(default_factory=dict)
+    messages: list[JSONObject] = field(default_factory=list)
+    result: JSONObject = field(default_factory=dict)
     session_id: str | None = None
     model: str | None = None
-    usage: dict[str, Any] = field(default_factory=dict)
+    usage: JSONObject = field(default_factory=dict)
     total_cost_usd: float | None = None
     workspace: str | None = None
-    request: dict[str, Any] = field(default_factory=dict)
+    request: JSONObject = field(default_factory=dict)
     timed_out: bool = False
 
     @property
@@ -67,7 +75,7 @@ class ClaudeResponse:
         return int(self.timed_out or not self.result or bool(self.result.get("is_error"))
                    or self.result.get("subtype", "success") != "success")
 
-    def metadata(self) -> dict[str, Any]:
+    def metadata(self) -> dict[str, object]:
         return {
             **self.result,
             "result": self.text,
@@ -90,12 +98,20 @@ class ClaudeResponse:
 class ClaudeAgentError(RuntimeError):
     """A failed or incomplete SDK turn; ``response`` retains its diagnostics."""
 
-    def __init__(self, message: str, response: ClaudeResponse):
+    def __init__(self, message: str, response: ClaudeResponse) -> None:
         super().__init__(message)
         self.response = response
 
 
-def _tool_names(value: str | list[str] | tuple[str, ...] | None):
+class ClaudeAgentTimeout(TimeoutError):
+    """A timed-out SDK turn with its partial response."""
+
+    def __init__(self, *args: object, response: ClaudeResponse) -> None:
+        super().__init__(*args)
+        self.response = response
+
+
+def _tool_names(value: Tools) -> list[str] | None:
     if isinstance(value, str):
         return [part for part in re.split(r"[\s,]+", value) if part]
     return list(value) if value is not None else None
@@ -113,11 +129,20 @@ PARENT_SESSION_ENV: Final = (
 )
 
 
-def _options(sdk, *, model, workspace, api_key, extra_env, mcp_servers,
-             session_id, tools, allowed_tools, permission_mode, sdk_options):
-    options: Final = dict(sdk_options or {})
+def _options[OptionsT](sdk: SDKOptionsFactory[OptionsT], *, model: str | None, workspace: str | os.PathLike[str] | None,
+             api_key: str | None, extra_env: dict[str, str] | None, mcp_servers: MCPServers | None,
+             session_id: str | None, tools: Tools, allowed_tools: Tools,
+             permission_mode: str, sdk_options: dict[str, object] | None) -> OptionsT:
+    options: dict[str, object] = dict(sdk_options or {})
     env: Final = {name: "" for name in PARENT_SESSION_ENV if os.environ.get(name)}
-    env.update(options.get("env") or {})
+    configured_env = options.get("env")
+    if configured_env is not None:
+        if not isinstance(configured_env, Mapping):
+            raise TypeError("SDK env must map strings to strings")
+        for name, value in cast(Mapping[object, object], configured_env).items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise TypeError("SDK env must map strings to strings")
+            env[name] = value
     env.update(extra_env or {})
     if api_key is not None:
         env["ANTHROPIC_API_KEY"] = api_key
@@ -132,7 +157,7 @@ def _options(sdk, *, model, workspace, api_key, extra_env, mcp_servers,
         from wirecap.runtime.mcp import env_wrapped, normalize_server_spec
 
         # SDK in-process servers contain live objects that cannot be deep-copied.
-        servers: Final = {}
+        servers: dict[str, Mapping[str, object]] = {}
         for name, spec in mcp_servers.items():
             if spec.get("type", "stdio") == "stdio":
                 servers[name] = (env_wrapped(spec) if os.name == "posix"
@@ -149,13 +174,13 @@ def _options(sdk, *, model, workspace, api_key, extra_env, mcp_servers,
 
 
 async def ask_async(
-    prompt: str | list[dict[str, Any]], *, model: str | None = None,
-    workspace: str | os.PathLike | None = None, timeout: float | None = 300,
+    prompt: Prompt, *, model: str | None = None,
+    workspace: str | os.PathLike[str] | None = None, timeout: float | None = 300,
     api_key: str | None = None, extra_env: dict[str, str] | None = None,
-    mcp_servers: dict[str, Any] | None = None, session_id: str | None = None,
+    mcp_servers: MCPServers | None = None, session_id: str | None = None,
     tools: str | list[str] | tuple[str, ...] | None = ("Read",),
     allowed_tools: str | list[str] | tuple[str, ...] | None = ("Read",),
-    permission_mode: str = "default", sdk_options: dict[str, Any] | None = None,
+    permission_mode: str = "default", sdk_options: dict[str, object] | None = None,
 ) -> ClaudeResponse:
     """Run a text or Anthropic content-block prompt using the official SDK.
 
@@ -166,8 +191,6 @@ async def ask_async(
     """
     if timeout is not None and timeout <= 0:
         raise ValueError("timeout must be positive or None")
-    if not isinstance(prompt, (str, list)):
-        raise TypeError("prompt must be a string or a list of SDK content blocks")
     sdk: Final = _load_sdk()
     options: Final = _options(
         sdk, model=model, workspace=workspace, api_key=api_key, extra_env=extra_env,
@@ -176,22 +199,24 @@ async def ask_async(
     )
     response: Final = ClaudeResponse(
         model=model, workspace=os.fspath(workspace) if workspace is not None else None,
-        request={"prompt": copy.deepcopy(prompt), "model": model},
+        request={"prompt": _plain(prompt), "model": model},
     )
 
-    async def user_message():
-        yield {"type": "user", "message": {"role": "user", "content": copy.deepcopy(prompt)},
+    async def user_message() -> AsyncIterator[JSONObject]:
+        yield {"type": "user", "message": {"role": "user", "content": _plain(prompt)},
                "parent_tool_use_id": None}
 
-    async def run_turn():
-        terminal = None
+    async def run_turn() -> ClaudeResponse:
+        terminal: SDKResultMessage | None = None
         last_text = ""
         async with sdk.ClaudeSDKClient(options=options) as client:
             await client.query(prompt if isinstance(prompt, str) else user_message())
             async for message in client.receive_response():
-                response.messages.append(_plain(message))
+                response.messages.append(json_object(_plain(message)))
                 if isinstance(message, sdk.SystemMessage) and message.subtype == "init":
-                    response.session_id = message.data.get("session_id") or response.session_id
+                    session_id = message.data.get("session_id")
+                    if isinstance(session_id, str) and session_id:
+                        response.session_id = session_id
                 elif isinstance(message, sdk.AssistantMessage):
                     if message.parent_tool_use_id is not None:
                         continue
@@ -203,7 +228,7 @@ async def ask_async(
                                              if isinstance(block, sdk.ThinkingBlock))
                 elif isinstance(message, sdk.ResultMessage):
                     terminal = message
-                    response.result = _plain(message)
+                    response.result = json_object(_plain(message))
                     response.session_id = message.session_id
                     response.usage = dict(message.usage or {})
                     response.total_cost_usd = message.total_cost_usd
@@ -212,7 +237,8 @@ async def ask_async(
             response.text = last_text
             raise ClaudeAgentError("Claude Agent SDK ended without a terminal result", response)
         if terminal.is_error or terminal.subtype != "success":
-            details: Final = response.result.get("errors") or [response.text or terminal.subtype]
+            details = response.result.get("errors") or [response.text or terminal.subtype]
+            details = details if isinstance(details, list) else [details]
             raise ClaudeAgentError("Claude Agent SDK failed: " + "; ".join(map(str, details)),
                                    response)
         return response
@@ -226,11 +252,15 @@ async def ask_async(
             return await run_turn()
     except TimeoutError as exc:
         response.timed_out = True
-        setattr(exc, "response", response)
+        raise ClaudeAgentTimeout(*cast(tuple[object, ...], exc.args), response=response) from exc
+    except BaseException as exc:
+        # A transport error or external cancellation can arrive after init.
+        # Preserve that session without replacing the exception or its own response.
+        setattr(exc, "_claude_response", response)
         raise
 
 
-def _run_sync(coroutine):
+def _run_sync[T](coroutine: Coroutine[object, object, T]) -> T:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -240,15 +270,15 @@ def _run_sync(coroutine):
         return executor.submit(asyncio.run, coroutine).result()
 
 
-def ask(prompt: str | list[dict[str, Any]], **kwargs) -> ClaudeResponse:
+def ask(prompt: Prompt, **kwargs: Unpack[AskOptions]) -> ClaudeResponse:
     """Synchronous ``ask_async``, also usable inside an existing event loop."""
     return _run_sync(ask_async(prompt, **kwargs))
 
 
-def ask_many(prompt: str | list[dict[str, Any]], n: int, *, max_workers: int | None = None,
-             **kwargs) -> list[ClaudeResponse]:
+def ask_many(prompt: Prompt, n: int, *, max_workers: int | None = None,
+             **kwargs: Unpack[AskOptions]) -> list[ClaudeResponse]:
     """Sample independent conversations concurrently, preserving input order."""
-    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+    if isinstance(n, bool) or n < 1:
         raise ValueError("n must be a positive integer")
     if n > 1 and (kwargs.get("session_id") or
                   any((kwargs.get("sdk_options") or {}).get(name)
@@ -264,11 +294,12 @@ class Session:
     """Sequential turns resumed by ID; a fresh SDK client is opened per turn.
 
     The SDK stores the transcript locally. ``history()`` contains only responses
-    requested through this object, including a failed terminal response. Calls
+    requested through this object, including failed or interrupted turns. Calls
     on the same Session must not overlap; separate Sessions can run concurrently.
     """
 
-    def __init__(self, *, session_id: str | None = None, **kwargs):
+    def __init__(self, **kwargs: Unpack[AskOptions]) -> None:
+        session_id = kwargs.pop("session_id", None)
         self.session_id = session_id
         self._kwargs = kwargs
         self._history: list[ClaudeResponse] = []
@@ -279,18 +310,19 @@ class Session:
     def conversation_id(self) -> str | None:
         return self.session_id
 
-    async def ask_async(self, prompt: str | list[dict[str, Any]], **kwargs) -> ClaudeResponse:
+    async def ask_async(self, prompt: Prompt, **kwargs: Unpack[AskOptions]) -> ClaudeResponse:
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("Session already has a turn in progress")
         try:
             if self._closed:
                 raise RuntimeError("Session is closed")
-            options: Final = {**self._kwargs, **kwargs, "session_id": self.session_id}
+            options: AskOptions = {**self._kwargs, **kwargs, "session_id": self.session_id}
             try:
                 response = await ask_async(prompt, **options)
-            except (ClaudeAgentError, TimeoutError) as exc:
-                partial: Final = getattr(exc, "response", None)
-                if partial is not None:
+            except BaseException as exc:
+                partial = (exc.response if isinstance(exc, (ClaudeAgentError, ClaudeAgentTimeout))
+                           else cast(object, getattr(exc, "_claude_response", None)))
+                if isinstance(partial, ClaudeResponse):
                     self._remember(partial)
                 raise
             self._remember(response)
@@ -298,12 +330,19 @@ class Session:
         finally:
             self._lock.release()
 
-    def ask(self, prompt: str | list[dict[str, Any]], **kwargs) -> ClaudeResponse:
+    def ask(self, prompt: Prompt, **kwargs: Unpack[AskOptions]) -> ClaudeResponse:
         return _run_sync(self.ask_async(prompt, **kwargs))
 
     def _remember(self, response: ClaudeResponse) -> None:
         if response.session_id:
             self.session_id = response.session_id
+            # New/latest flags only select the first turn; later turns use its ID.
+            options = self._kwargs.get("sdk_options")
+            if options and ("session_id" in options or "continue_conversation" in options):
+                self._kwargs["sdk_options"] = {
+                    key: value for key, value in options.items()
+                    if key not in ("session_id", "continue_conversation")
+                }
         self._history.append(response)
 
     def history(self) -> list[ClaudeResponse]:
@@ -317,16 +356,16 @@ class Session:
         finally:
             self._lock.release()
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         if self._closed:
             raise RuntimeError("Session is closed")
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: object) -> None:
         self.close()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Self:
         return self.__enter__()
 
-    async def __aexit__(self, *_):
+    async def __aexit__(self, *_: object) -> None:
         self.close()

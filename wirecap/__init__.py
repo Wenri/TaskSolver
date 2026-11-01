@@ -7,7 +7,7 @@ Shared foundation for the CLI-wrapper subsystems (`pyagy` for the Go `agy` CLI u
   request/response ``BaseCorrelator``, HTTP/2 reassembly, the embedded-worker mp-child
   runner, and the ``TurnBuilder`` base (+ the shared ``Usage``/turn helpers). (Egress
   ``rewrite`` is NOT here — it is agy-specific and lives in ``pyagy.agy_process.rewrite``.) This layer is imported by the
-  embedded interpreter inside the instrumented CLI, so it MUST stay import-pure (stdlib +
+  embedded interpreter inside the linked CLI, so it MUST stay import-pure (stdlib +
   lazily-imported optionals only) — never import ``wirecap.runtime`` or ``tasksolver`` here.
 - ``wirecap.runtime`` — parent-side driver (PTY/pipe launch, terminal glue, the spawn-process
   handle, client drain loops, git-workspace scoping). Non-stdlib deps are fine here.

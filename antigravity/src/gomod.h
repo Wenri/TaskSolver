@@ -11,9 +11,11 @@
  *   locals scanned = [sp, fp - 16)      (the -16 skips the ret-addr and saved-BP slots)
  * A stub is entered past the target's stack check but before its frame allocation, so the entry
  * SP is still the target's and [entrySP] holds the target's return address: with spdelta ==
- * AGY_FRAME at the call, the unwind flows on to the target's caller. The all-ones locals map is
- * safe because findObject ignores non-pointers, and it keeps the saved argument registers and
- * the handler's read buffer alive across the cgo window.
+ * AGY_FRAME at the call, the unwind flows on to the target's caller. Each stub has precise
+ * maps derived from its target's entry argument map and morestack spill instructions. Saved
+ * pointer registers remain live in locals; initialized incoming stack arguments keep their
+ * original slots. Register spill space is still uninitialized and must not be scanned.
+ * FuncFlagAsm does not make scanning conservative: marking scalar words can be fatal.
  *
  * FuncID must stay 0: the asyncPreempt/debugCallV2 ids make the unwinder read the frame as an
  * injectedCall. FuncFlagAsm bars async preemption during the register saves and the displaced
@@ -58,7 +60,7 @@ typedef struct { uint32_t idx; uint8_t subbuckets[16]; } go_findfuncbucket;
 typedef struct {
     uint32_t entryOff;     /* start pc as offset from moduledata.text */
     int32_t  nameOff;      /* index into moduledata.funcnametab */
-    int32_t  args;         /* in/out arg size (0 for us -> no args map needed) */
+    int32_t  args;         /* initialized incoming stack-argument bytes */
     uint32_t deferreturn;
     uint32_t pcsp;         /* offset into moduledata.pctab of the SP-delta table */
     uint32_t pcfile;

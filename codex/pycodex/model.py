@@ -1,8 +1,8 @@
-"""CodexModel — a TaskSolver-contract backend that drives the (instrumented) codex CLI.
+"""CodexModel — a TaskSolver-contract backend that drives the (linked) codex CLI.
 
 The codex subclass of :class:`tasksolver.cli_backend.CLIBackendModel`, sibling of
 ``pyagy.AgyModel`` / ``tasksolver.claude_code.ClaudeCodeModel``: the official Python SDK drives
-the instrumented app-server in a workspace. ``transport="exec"`` retains the legacy exec
+the linked app-server in a workspace. ``transport="exec"`` retains the legacy exec
 transport. Unlike AgyModel, codex needs real auth — set
 ``OPENAI_API_KEY`` or ``codex login`` first (``api_key`` is passed through to the run env for the
 API-key path).
@@ -18,19 +18,29 @@ empty base instructions unless ``system_prompt`` is given, no tools and no injec
 ``"none"`` unless set. A turn that ran a command, edited a file or called a tool raises
 ``ChatModeViolation``.
 """
-import os
-from typing import Any, Final
+from __future__ import annotations
 
-from tasksolver.cli_backend import CLIBackendModel
+import os
+from collections.abc import Mapping, Sequence
+from typing import Final, Protocol, Unpack, cast
+
+from wirecap.runtime.mcp import MCPServers
+from wirecap.types import JSONObject
+from openai_codex._inputs import RunInput
+from .types import ModelSessionOptions, SDKAskOptions, SDKSessionOptions, ThreadOptions
+
+from tasksolver.cli_backend import CLIPayload, CLIBackendModel, string_prompt
 from tasksolver.common import TaskSpec
 
-from .client import ask_many as _codex_ask_many
+from .client import (AskOptions, CodexResponse, Session, SessionOptions,
+                     ask_many as _codex_ask_many)
+from .sdk import CodexSDKResponse, SDKSession, ask_many_sdk
 
 #: app-server config overrides for chat mode. With them (and :data:`CHAT_ENV`) the captured
 #: Responses request carries ``tools: []``, empty ``instructions`` and only the user message
 #: (checked against CLI 0.157.0 with a user config that enables plugins, memories, an MCP
 #: server and "ultra" reasoning).
-CHAT_CONFIG: Final[dict[str, Any]] = {
+CHAT_CONFIG: Final[JSONObject] = {
     **{f"features.{name}": False for name in (
         "shell_tool", "unified_exec", "view_image", "apps", "plugins", "tool_search",
         "image_generation", "goals", "memories", "multi_agent", "js_repl", "code_mode", "hooks",
@@ -66,12 +76,24 @@ def configured_mcp_servers(codex_home: str | None = None) -> list[str]:
     home: Final = codex_home or os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
     try:
         with open(os.path.join(home, "config.toml"), "rb") as f:
-            return list(tomllib.load(f).get("mcp_servers") or {})
+            config = cast(dict[str, object], tomllib.load(f))
+            servers = config.get("mcp_servers")
+            if not isinstance(servers, Mapping):
+                return []
+            return list(cast(Mapping[str, object], servers))
     except (OSError, tomllib.TOMLDecodeError):
         return []
 
 
-class CodexModel(CLIBackendModel):
+class _ExecSampler(Protocol):
+    def __call__(self, prompt: str, n: int, **kwargs: Unpack[AskOptions]) -> list[CodexResponse]: ...
+
+
+class _SDKSampler(Protocol):
+    def __call__(self, prompt: RunInput, n: int, **kwargs: Unpack[SDKAskOptions]) -> list[CodexSDKResponse]: ...
+
+
+class CodexModel(CLIBackendModel[CodexResponse]):
     backend_label = "codex"
     command_label = "codex exec"
     generic_model_aliases = ("codex", "codex-sdk")
@@ -83,15 +105,15 @@ class CodexModel(CLIBackendModel):
     vision_preamble = "The visual inputs are saved as local image files; read them when answering."
     #: NOTE pycodex.ask_many is SEQUENTIAL (codex writes one fixed capture path per workspace), so
     #: many_rough_guesses(num_threads=n) costs n x wall time here, unlike agy's parallel sampling.
-    _client_ask_many = staticmethod(_codex_ask_many)
+    _client_ask_many: object = staticmethod(_codex_ask_many)
 
     def __init__(self, api_key: str | None = None, task: TaskSpec | None = None,
                  model: str | None = None, workspace: str | None = None, timeout: int = 300,
-                 mcp_servers: dict[str, Any] | None = None,
+                 mcp_servers: MCPServers | None = None,
                  codex_home: str | None = None, transport: str = "sdk",
-                 sdk_options: dict[str, Any] | None = None,
+                 sdk_options: SDKAskOptions | None = None,
                  chat: bool = False, effort: str | None = None,
-                 system_prompt: str | None = None):
+                 system_prompt: str | None = None) -> None:
         # api_key = OPENAI_API_KEY for API-key auth (or None → codex login)
         super().__init__(api_key=api_key, task=task, model=model)
         if chat and transport != "sdk":
@@ -112,44 +134,53 @@ class CodexModel(CLIBackendModel):
         if transport not in ("exec", "sdk"):
             raise ValueError("transport must be 'exec' or 'sdk'")
         self.transport = transport
-        self.sdk_options = dict(sdk_options or {})
+        self.sdk_options: SDKAskOptions = {**(sdk_options or {})}
         if transport == "sdk":
-            from .sdk import ask_many_sdk
             self._client_ask_many = ask_many_sdk
             self.command_label = "codex app-server"
 
-    def ask(self, payload: dict, n_choices: int = 1):
-        if self.chat:
-            from openai_codex import ImageInput, TextInput
-            parts: Final = [TextInput(text=part["text"]) if part["type"] == "text"
-                            else ImageInput(url=part["url"]) for part in payload["content"]]
-            return super().ask({**payload, "prompt": parts}, n_choices=n_choices)
-        if self.transport == "sdk" and payload.get("image_paths"):
-            from openai_codex import LocalImageInput, TextInput
-            inputs: Final[list[TextInput | LocalImageInput]] = [TextInput(text=payload["prompt"])]
-            inputs.extend(LocalImageInput(path=os.path.abspath(path))
-                          for path in payload["image_paths"])
-            return super().ask({**payload, "prompt": inputs}, n_choices=n_choices)
-        return super().ask(payload, n_choices=n_choices)
-
-    def _finish(self, r):
+    def _finish(self, r: CodexResponse) -> dict[str, object]:
         if self.transport == "sdk" and r.timed_out:
             raise TimeoutError(f"Codex SDK timed out after {self.timeout}s")
         result: Final = super()._finish(r)
         if self.transport == "sdk":
+            sdk_response = cast(CodexSDKResponse, r)
             result.update(session_id=r.session_id, capture_path=r.capture_path,
                           timed_out=r.timed_out, turns=r.turns,
-                          sdk_result=r.sdk_result,
-                          explicit_reasoning_output=r.explicit_reasoning_output)
+                          sdk_result=sdk_response.sdk_result,
+                          explicit_reasoning_output=sdk_response.explicit_reasoning_output)
         return result
 
-    def _chat_violations(self, r) -> list:
-        items: Final = r.sdk_result.items if r.sdk_result is not None else []
+    def _chat_violations(self, r: CodexResponse) -> list[str]:
+        sdk_response = cast(CodexSDKResponse, r)
+        items = sdk_response.sdk_result.items if sdk_response.sdk_result is not None else []
         return [item.root.type for item in items if item.root.type not in _CHAT_ITEMS]
 
-    def _call_kwargs(self, payload: dict) -> dict:
-        kw: Final[dict[str, Any]] = dict(workspace=payload.get("workspace") or self.workspace,
-                                         model=self.model, timeout=self.timeout)
+    def _sample(self, payload: CLIPayload, n_choices: int) -> Sequence[CodexResponse]:
+        options = self._call_kwargs(payload)
+        if self.transport == "exec":
+            # The selected transport owns its callable and option schema.
+            return cast(_ExecSampler, self._client_ask_many)(
+                string_prompt(payload), n_choices, **cast(AskOptions, options))
+        from openai_codex import ImageInput, InputItem, LocalImageInput, TextInput
+        prompt: RunInput
+        if self.chat and "content" in payload:
+            prompt = [TextInput(text=part["text"]) if part["type"] == "text"
+                      else ImageInput(url=part["url"]) for part in payload["content"]]
+        elif self.chat:
+            prompt = [TextInput(text=string_prompt(payload))]
+        elif payload.get("image_paths"):
+            inputs: list[InputItem] = [TextInput(text=string_prompt(payload))]
+            inputs.extend(LocalImageInput(path=os.path.abspath(path))
+                          for path in payload.get("image_paths", []))
+            prompt = inputs
+        else:
+            prompt = string_prompt(payload)
+        return cast(_SDKSampler, self._client_ask_many)(prompt, n_choices, **options)
+
+    def _call_kwargs(self, payload: CLIPayload) -> SDKAskOptions:
+        kw: SDKAskOptions = {"workspace": payload.get("workspace") or self.workspace,
+                             "model": self.model, "timeout": self.timeout}
         if self.mcp_servers:
             kw["mcp_servers"] = self.mcp_servers
         if self.codex_home:
@@ -160,10 +191,10 @@ class CodexModel(CLIBackendModel):
             kw.update(self.sdk_options)
         effort: Final = self.effort or ("none" if self.chat else None)
         if self.chat:
-            config: Final = {**CHAT_CONFIG, "model_reasoning_effort": effort,
+            config: JSONObject = {**CHAT_CONFIG, "model_reasoning_effort": effort,
                              **{f"mcp_servers.{name}.enabled": False
                                 for name in configured_mcp_servers(self.codex_home)}}
-            thread: Final = dict(kw.get("thread_options") or {})
+            thread: ThreadOptions = {**(kw.get("thread_options") or {})}
             config.update(thread.pop("config", None) or {})
             kw["thread_options"] = {"ephemeral": True, "base_instructions": self.system_prompt or "",
                                     **thread, "config": config}
@@ -174,29 +205,24 @@ class CodexModel(CLIBackendModel):
             kw["turn_options"] = {"effort": effort, **(kw.get("turn_options") or {})}
         return kw
 
-    def session(self, **kwargs):
-        """A persistent SDK session, or legacy PTY session with ``transport='exec'``.
-        Inherits model, workspace, timeout, MCP and auth; kwargs override defaults."""
+    def session(self, **kwargs: Unpack[ModelSessionOptions]) -> SDKSession | Session:
+        """Create a session for the selected transport, inheriting model settings."""
         if self.transport == "sdk":
-            return self.sdk_session(**kwargs)
-        from .client import Session
-        kw: Final[dict[str, Any]] = dict(model=self.model, workspace=self.workspace,
-                                         timeout=self.timeout, mcp_servers=self.mcp_servers,
-                                         codex_home=self.codex_home)
+            return self.sdk_session(**cast(SDKSessionOptions, kwargs))
+        options: ModelSessionOptions = {
+            "model": self.model, "workspace": self.workspace, "timeout": self.timeout,
+            "mcp_servers": self.mcp_servers, "codex_home": self.codex_home,
+        }
         if self.api_key:
-            kw["extra_env"] = {"OPENAI_API_KEY": self.api_key}
-        kw.update(kwargs)
-        return Session(**kw)
+            options["extra_env"] = {"OPENAI_API_KEY": self.api_key}
+        options.update(kwargs)
+        return Session(**cast(SessionOptions, options))
 
-    def sdk_session(self, **kwargs):
-        """A persistent official-SDK thread using this model's capture/auth settings."""
-        from .sdk import SDKSession
-        kw: Final[dict[str, Any]] = dict(model=self.model, workspace=self.workspace,
-                                         timeout=self.timeout, mcp_servers=self.mcp_servers,
-                                         codex_home=self.codex_home)
-        if self.api_key:
-            kw["extra_env"] = {"OPENAI_API_KEY": self.api_key}
-        kw.update(self.sdk_options)
-        kw.pop("turn_options", None)
-        kw.update(kwargs)
-        return SDKSession(**kw)
+    def sdk_session(self, **kwargs: Unpack[SDKSessionOptions]) -> SDKSession:
+        """Create a persistent SDK thread with this model's capture and auth settings."""
+        options = self._call_kwargs({"prompt": ""})
+        if self.transport == "exec":
+            options.update(self.sdk_options)
+        options.pop("turn_options", None)
+        options.update(kwargs)
+        return SDKSession(**cast(SDKSessionOptions, options))

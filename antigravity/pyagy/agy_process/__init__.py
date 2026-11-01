@@ -6,10 +6,8 @@ event. This is where your custom logic lives.
 Contract:
   dispatch(kind: str, stream_id: int, data: bytes) -> bytes | None
     * ASYNC books (logging): return value is ignored — do fire-and-forget work.
-    * SYNC books (modify, e.g. tls_write when AGY_PROC_TLS_WRITE_SYNC=1): return
-      replacement bytes (must be <= original length for in-place rewrite) or None
-      to leave unchanged. Keep SYNC handlers fast/CPU-bound (they block a Go
-      goroutine — see README's GC-stall note).
+    * The SYNC exit book flushes capture before Go exits. TLS capture is ASYNC;
+      the current trampoline does not support outbound request rewriting.
 
 kind values with special handling: "tls_write" is recorded raw AND fed to the
 correlator as the model REQUEST (egress); the correlator sniffs each connection and
@@ -25,11 +23,18 @@ Knobs: AGY_PROC_H2=0 disables HTTP/2 reassembly; WIRE_CORRELATE=0 (legacy
 AGY_PROC_CORRELATE) disables the
 genai-turn correlator (raw capture only).
 """
+from __future__ import annotations
+
 import os
 import re
 import sys
+import struct
 import time
 import traceback
+from collections.abc import Callable, Mapping
+from typing import cast, overload
+
+from wirecap.types import Event
 
 from wirecap.decode.record import Recorder
 from wirecap.decode import h2reassemble as h2
@@ -37,12 +42,16 @@ from wirecap.decode.capture import BaseCorrelator
 from .http1sse import GenaiTurnBuilder
 from .system_messages import decode_system_message
 
-def _knob(name, default=None):
+@overload
+def _knob(name: str, default: str) -> str: ...
+@overload
+def _knob(name: str, default: None = None) -> str | None: ...
+def _knob(name: str, default: str | None = None) -> str | None:
     """Read a SHARED decode-layer knob: WIRE_<name>, falling back to the legacy AGY_PROC_<name>.
 
     These three (CAPTURE / PREVIEW / CORRELATE) configure wirecap.decode objects — the Recorder and
     BaseCorrelator — which pycodex spells WIRE_*, so agy now accepts the same names. They are
-    Python-only: the C shim reads AGY_PROC_{ENABLE,LOG,STACK,CONV_ID,TLS_WRITE_SYNC,REAL_EXE,FORCE,
+    Python-only: the C shim reads AGY_PROC_{ENABLE,LOG,STACK,CONV_ID,REAL_EXE,FORCE,
     CGT_*} and the bridge reads only WIRE_MODULE/WIRE_MAXCOPY, so that split stays as it is."""
     return os.environ.get("WIRE_" + name, os.environ.get("AGY_PROC_" + name, default))
 
@@ -56,76 +65,78 @@ _corr = (BaseCorrelator(_rec, GenaiTurnBuilder(), _reasm)
          if _knob("CORRELATE", "1") != "0" else None)
 
 
-def subscribe(fn):
+def subscribe(fn: Callable[[Event], object]) -> None:
     """Register an in-process consumer fn(obj) for every recorded/decoded event — used by
     AgyProcess targets (e.g. mp_child.stream_turns) to stream decoded turns home live."""
     _rec.subscribe(fn)
 
 
-def unsubscribe(fn):
+def unsubscribe(fn: Callable[[Event], object]) -> None:
     """Drop a consumer registered with :func:`subscribe` — a finished mp_child target calls this
     so the recorder stops feeding a queue nobody drains."""
     _rec.unsubscribe(fn)
 
-# SYNC egress rewrite registry (task #8). Lazily bound to keep import cheap and pure.
-_rewrite = None
-
-
-def _rewrite_egress(stream_id, data):
-    """Return replacement bytes (<= len(data)) for a model request, or None."""
-    global _rewrite
-    if _rewrite is None:
-        if not (os.environ.get("AGY_PROC_REWRITE_RULES") or os.environ.get("AGY_PROC_REWRITE")):
-            return None
-        from . import rewrite as _rw
-        _rewrite = _rw.RewriteRegistry.from_env(_rec)
-    return _rewrite.rewrite(stream_id, data)
-
-
-def on_tls_write(stream_id, data):
-    out = _rewrite_egress(stream_id, data)   # SYNC rewrite point (None unless configured)
+def on_tls_write(stream_id: int, data: bytes) -> None:
     _rec.record("tls_write", stream_id, data)
     if _corr:
-        # Feed the correlator what actually goes on the wire (post-rewrite), so a
-        # decoded genai_turn.request reflects the request as sent, not as authored.
-        _corr.feed("c2s", stream_id, out if out is not None else data, time.time())
-    return out
+        _corr.feed("c2s", stream_id, data, time.time())
 
 
-def on_tls_read(stream_id, data):
+def _response_payload(source: str, stream_id: int, data: bytes) -> bytes | None:
+    """Validate a native packet before it reaches the legacy raw-payload handler."""
+    original = None
+    if len(data) < 16:
+        error = "incomplete response capture header"
+    else:
+        version, original = struct.unpack_from("<IQ", data, 4)
+        if data[:4] != b"AGTX":
+            error = "invalid response capture header"
+        elif version != 1:
+            error = "unsupported response capture version"
+        elif len(data) - 16 != original:
+            error = "response capture size mismatch"
+        else:
+            return data[16:]
+    _rec.event({"kind": "response_capture_error", "capture_source": source,
+                "stream": stream_id, "error": error, "original_bytes": original,
+                "captured_bytes": max(0, len(data) - 16)})
+    return None
+
+
+def on_tls_read(stream_id: int, data: bytes) -> None:
     _rec.record("tls_read", stream_id, data)
     if _corr:
         _corr.feed("s2c", stream_id, data, time.time())
     return None
 
 
-def on_resp_chunk(stream_id, data):
+def on_resp_chunk(stream_id: int, data: bytes) -> None:
     # The wire RESPONSE: one decoded SSE `data:` line per fire (toStreamResponseChunk).
     # Hand it to the correlator, which accumulates the stream and emits a genai_turn at
     # the terminal event. stream_id is the Go string pointer (not a connection id) — agy
-    # runs one model turn at a time, so the correlator keys off arrival order, not id.
+    # overlaps model and title turns, so the decoder keys them by responseId.
     if _corr:
         _corr.feed_chunk(data, time.time())
     return None
 
 
-def on_http_rt(stream_id, data):
+def on_http_rt(stream_id: int, data: bytes) -> None:
     _rec.record("http_rt", stream_id, data)
     return None
 
 
-def on_dns(stream_id, data):
+def on_dns(stream_id: int, data: bytes) -> None:
     _rec.record("dns", stream_id, data)
     return None
 
 
-def on_smoke(stream_id, data):
+def on_smoke(stream_id: int, data: bytes) -> None:
     print("[agy_process] smoke book fired — end-to-end pipeline OK", file=sys.stderr, flush=True)
     _rec.record("smoke", stream_id, data)
     return None
 
 
-def on_exit(stream_id, data):
+def on_exit(stream_id: int, data: bytes) -> None:
     # os.Exit(code) fired — the clean end-of-capture marker. The exit code rode stream_id from the
     # C book, which SYNC-emits so this record is written (line-buffered → flushed) BEFORE agy's
     # exit_group syscall. A capture that ends without this marker was truncated (crash/kill).
@@ -144,10 +155,10 @@ def on_exit(stream_id, data):
 # their own dirs later). This is the exact, in-process id that agy doesn't expose via env.
 _CONV_UUID = re.compile(
     r"(?:conversations/|/brain/)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
-_seen_conv_ids = set()
+_seen_conv_ids: set[str] = set()
 
 
-def on_file_open(stream_id, data):
+def on_file_open(stream_id: int, data: bytes) -> None:
     m = _CONV_UUID.search(data.decode("utf-8", "replace"))
     if m:
         cid = m.group(1)
@@ -157,16 +168,16 @@ def on_file_open(stream_id, data):
     return None
 
 
-def on_readlink_filter(stream_id, data):
+def on_readlink_filter(stream_id: int, data: bytes) -> None:
     # The readlink_filter book (os.readlink) RETURN-substituted "/proc/self/exe" — which resolves to
-    # the loader under `ld.so --preload` — with the real agy path (`data`, from AGY_PROC_REAL_EXE), so
-    # os.Executable()/self-re-exec see agy, not ld.so. `data` is the substitute path we handed back.
+    # the host — with its launch path (`data`, from AGY_PROC_REAL_EXE), so
+    # os.Executable()/self-re-exec use the selected host.
     _rec.event({"kind": "readlink_filter", "requested": "/proc/self/exe",
                 "substitute": data.decode("utf-8", "replace")})
     return None
 
 
-def on_cgt_args(stream_id, data):
+def on_cgt_args(stream_id: int, data: bytes) -> None:
     # Diagnostic (AGY_PROC_CGT_ARGS): the C book already rendered a readable arg
     # report; print it in full (the raw recorder would truncate to the preview len)
     # and store the whole text so it survives in the capture JSONL.
@@ -176,7 +187,7 @@ def on_cgt_args(stream_id, data):
     return None
 
 
-def on_callstack(stream_id, data):
+def on_callstack(stream_id: int, data: bytes) -> None:
     # AGY_PROC_STACK: `data` = source-book kind (NUL-terminated) + packed u64 frame
     # link-vaddrs (pc - module_base). Record raw; symbolize offline via symbolize.py
     # (the funcmap is too big to load inside agy).
@@ -185,25 +196,35 @@ def on_callstack(stream_id, data):
     src = data[:nul].decode("utf-8", "replace") if nul >= 0 else "?"
     raw = data[nul + 1:] if nul >= 0 else b""
     m = len(raw) // 8
-    frames = list(struct.unpack("<%dQ" % m, raw[:m * 8])) if m else []
+    frames = list(cast(tuple[int, ...], struct.unpack("<%dQ" % m, raw[:m * 8]))) if m else []
     _rec.event({"kind": "callstack", "src": src, "frames": frames})
     return None
 
 
-def _on_model_text(kind):
+def _on_model_text(kind: str) -> Callable[[int, bytes], None]:
     # model-text leaf getters: `data` is the streamed assistant-text delta (a Go string).
     # Store the FULL text (the raw recorder would truncate to the preview len).
-    def handler(stream_id, data):
+    def handler(stream_id: int, data: bytes) -> None:
         _rec.event({"kind": kind, "stream": stream_id,
                     "text": data.decode("utf-8", "replace")})
         return None
     return handler
 
 
-def _on_system_message(source):
-    def handler(step_address, data):
+def _on_response_packet(source: str) -> Callable[[int, bytes], None]:
+    consume = on_resp_chunk if source == "resp_chunk" else _on_model_text(source)
+
+    def handler(stream_id: int, data: bytes) -> None:
+        payload = _response_payload(source, stream_id, data)
+        if payload is not None:
+            consume(stream_id, payload)
+    return handler
+
+
+def _on_system_message(source: str) -> Callable[[int, bytes], None]:
+    def handler(step_address: int, data: bytes) -> None:
         try:
-            event = decode_system_message(source, step_address, data)
+            event: Mapping[str, object] = decode_system_message(source, step_address, data)
         except ValueError as exc:
             event = {"kind": "system_message_capture_error", "capture_source": source,
                      "step_address": step_address, "error": str(exc), "captured_bytes": len(data)}
@@ -212,10 +233,12 @@ def _on_system_message(source):
     return handler
 
 
-_ROUTER = {
+_ROUTER: dict[str, Callable[[int, bytes], bytes | None]] = {
     "tls_write": on_tls_write,
     "tls_read": on_tls_read,
     "resp_chunk": on_resp_chunk,
+    "resp_chunk_packet": _on_response_packet("resp_chunk"),
+    "app_response_packet": _on_response_packet("app_response"),
     "http_rt": on_http_rt,
     "dns": on_dns,
     "smoke": on_smoke,
@@ -229,16 +252,14 @@ _ROUTER = {
     "resp_text": _on_model_text("resp_text"),
     "resp_thinking": _on_model_text("resp_thinking"),
     "resp_view": _on_model_text("resp_view"),
-    # Plan 7: the assembled assistant answer decoded at the shallow consumer boundary
-    # (updateWithStep, rsi+0x8) — the app-boundary RESPONSE. Stored full (not preview-
-    # truncated) so the client can prefer it over the wire-reassembled genai_turn.text.
+    # Assembled assistant answer at updateWithStep, validated before text decoding.
     "app_response": _on_model_text("app_response"),
     "system_message": _on_system_message("system_message"),
     "system_message_legacy": _on_system_message("system_message_legacy"),
 }
 
 
-def dispatch(kind, stream_id, data):
+def dispatch(kind: str, stream_id: int, data: bytes) -> bytes | None:
     try:
         handler = _ROUTER.get(kind)
         if handler is not None:

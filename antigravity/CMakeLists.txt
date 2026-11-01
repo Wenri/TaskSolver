@@ -1,6 +1,6 @@
 # antigravity — build `vendor/libagy.so` and the linked host executable (`vendor/agy`).
 #
-# Configure + build (both done by setup.py's build_py hook during `pixi install`, and by the
+# Configure + build (both done by setup.py's build_py step during `pixi install`, and by the
 # `build-shim` pixi task):
 #   cmake -S antigravity -B antigravity/build -G Ninja
 #   cmake --build antigravity/build
@@ -15,14 +15,11 @@ project(antigravity CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # for clangd (symlinked to the source root below)
 
-# The shim MUST link against the conda toolchain's glibc, not a Nix gcc on PATH: Nix's gcc bakes
-# /nix/store glibc rpaths that demand GLIBC_ABI_DT_X86_64_PLT (a symbol version the system libc
-# lacks), so LD_PRELOADing the shim then fails before main. The pixi/conda env exports
-# CXX=x86_64-conda-linux-gnu-c++, which CMake auto-selects on first configure — so configure INSIDE
-# the pixi env. Warn if we somehow didn't get the conda compiler.
+# Configure inside pixi so CMake selects the conda compiler. Nix GCC embeds glibc
+# rpaths whose symbol requirements can prevent the host from starting.
 if(NOT CMAKE_CXX_COMPILER MATCHES "conda")
   message(WARNING "CMAKE_CXX_COMPILER='${CMAKE_CXX_COMPILER}' is not a conda wrapper — on a Nix host "
-                  "this bakes /nix glibc rpaths that break the LD_PRELOAD. Configure inside the pixi env.")
+                  "this embeds /nix glibc rpaths that can break startup. Configure inside the pixi env.")
 endif()
 
 set(CONDA_PREFIX "$ENV{CONDA_PREFIX}")
@@ -31,25 +28,9 @@ if(NOT CONDA_PREFIX)
 endif()
 
 # ---- pinned agy release (keep these three in sync; then `pixi run shim-symbols`) ---------------
-# agy self-updates in the background, so a local install's build-id DRIFTS; we vendor a PINNED,
-# sha512-verified release and derive symbols.json from its converted layout. AGY_BIN is an escape
-# hatch: point it at a local raw agy build instead of downloading.
-#
-# The exact release URL and archive hash are pinned below; the updater manifest is consulted only
-# by the explicit agy-update target. The tarball member is `antigravity` (extracted below).
-#
-# Version history worth keeping: 1.1.6 (2026-07-24) added a client-side eligibility check that
-# hard-exited with "not currently available in your location" before any model call, which forced the
-# pin down to 1.1.5 for a while (bisected 1.1.1→1.1.8). That gate no longer fires as of 1.1.9
-# (2026-07-31) — so if a future release starts refusing to run, check for that message before
-# assuming the shim broke.
-#
-# NOTE the pin drifts on its own: agy's background self-updater REPLACES vendor/agy in place (it did
-# so mid-session on 2026-08-05, swapping 1.1.9 for 1.1.10 and breaking the build-id match), and
-# AGY_PROC_* setting AGY_CLI_DISABLE_AUTO_UPDATE=true no longer stops it. Symptom is the shim logging
-# "build-id not agy (running=… symbols=…); not hooking this process" and every hook silently not
-# firing. Rebuild the host (rm vendor/agy && pixi run build-shim); never use vendor/agy as
-# conversion input. `chmod a-w vendor/agy` blunts the in-place overwrite.
+# Cache the SHA512-verified upstream release; only agy-update consults the manifest.
+# AGY_BIN can select another raw binary. Never convert vendor/agy: it is the linked host.
+# If agy's self-updater replaces that host, remove vendor/agy and rebuild it.
 set(AGY_VERSION "1.4.11")
 set(AGY_URL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.11-5180209989812224/linux-x64/cli_linux_x64.tar.gz")
 set(AGY_SHA512 "2935601efa745ed6e314d32b415c71f44d9d455f0e6a2583372584be5a9074c28154cf81d5eec65b4416579453a3b3b05d3abe4d4f176754d5ef93a84af6cf28")
@@ -106,6 +87,7 @@ add_custom_command(
           "${CMAKE_SOURCE_DIR}/symbols/make_libagy.py"
           "${CMAKE_SOURCE_DIR}/symbols/build_symbols.py"
           "${CMAKE_SOURCE_DIR}/symbols/agyelf.py"
+          "${CMAKE_SOURCE_DIR}/symbols/x86.py"
           "${CMAKE_SOURCE_DIR}/symbols/__init__.py"
           "${CMAKE_SOURCE_DIR}/src/procdef.h"
   COMMENT "convert raw agy + capture metadata before patching"
@@ -129,8 +111,7 @@ if(NOT EXISTS "/usr/include/linux/limits.h")
 endif()
 message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 
-# NOTE: no python3-config probe here. No shim TU includes a Python header — CPython is embedded by
-# the SHARED bridge (wirecap/native), which does its own probe and carries the embed link flags.
+# wirecap/native discovers CPython and supplies its include/link flags.
 # ---- generate the BuildID, Go frames and stub ids from symbols.json + src/procdef.h -----------
 add_custom_command(
   OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
@@ -141,18 +122,16 @@ add_custom_command(
           "${CMAKE_SOURCE_DIR}/symbols/__init__.py"
           "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
           "${CMAKE_SOURCE_DIR}/symbols/agyelf.py"
+          "${CMAKE_SOURCE_DIR}/symbols/x86.py"
           "${CMAKE_SOURCE_DIR}/src/procdef.h"
   COMMENT "gen src/symbols_gen.h from symbols.json + src/procdef.h"
   VERBATIM)
 add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h")
 
-# ---- the shared native bridge (embedded CPython worker) — the wire_* C ABI the shim calls.
-# Extracted to wirecap/native so the codex build links the same bridge; built as a static lib
-# whose PUBLIC usage requirements (wirecap.h include + libpython embed + boost + rpath) flow into
-# the shim below. ------------------------------------------------------------------------------
+# ---- shared static bridge: CPython worker and wire_* C ABI ---------------------------------
 add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wirecap_bridge")
 
-# ---- the instrumented host executable: vendor/agy (links vendor/libagy.so first) --------------
+# ---- the linked host executable: vendor/agy (links vendor/libagy.so first) --------------
 # src/goframe.cpp derives active rows from BOOKS and instantiates naked templates;
 # symbols_gen.h supplies the expected BuildID, original Go frame sizes and literal stub ids.
 # GCC 15 constexpr asm emits the stubs; C++ owns the constexpr descriptor table and span API.
@@ -164,9 +143,7 @@ set_target_properties(agy PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor")
 
 target_compile_features(agy PRIVATE cxx_std_23)
-# All the shim's TUs are C++23. -Wno-deprecated-declarations: one std::auto_ptr warning from
-# Boost.Python (via the bridge's propagated includes). -Wno-missing-field-initializers: the shim uses
-# partial designated initializers pervasively (C's -Wextra exempts them, C++'s doesn't).
+# Suppress Boost.Python's std::auto_ptr warning and allow partial designated initializers.
 target_compile_options(agy PRIVATE
   -O2 -g -fPIC -Wall -Wextra -Wno-deprecated-declarations -Wno-missing-field-initializers
   -fvisibility=hidden -ffunction-sections -fdata-sections)
@@ -204,7 +181,6 @@ add_custom_target(agy-update
   COMMENT "query the LATEST release manifest + print new pin values for this CMakeLists"
   VERBATIM USES_TERMINAL)
 
-# ---- clangd: expose the compile db at the source root (dangling until the first configure writes
-# it, then resolves). gitignored. -----------------------------------------------------------------
+# ---- clangd: expose the generated compile database at the source root ----------------------
 file(CREATE_LINK "${CMAKE_BINARY_DIR}/compile_commands.json"
      "${CMAKE_SOURCE_DIR}/compile_commands.json" SYMBOLIC)

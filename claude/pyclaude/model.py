@@ -1,4 +1,4 @@
-"""TaskSolver's Claude Agent SDK adapter and legacy Claude Code contract."""
+"""TaskSolver's Claude Agent SDK adapter, including the public Claude Code aliases."""
 
 from __future__ import annotations
 
@@ -6,18 +6,26 @@ import base64
 import copy
 import functools
 import tempfile
-from typing import Any, Final
+from typing import Final, Unpack
 
-from tasksolver.cli_backend import CLIBackendModel
-from tasksolver.common import Question, TaskSpec
+from wirecap.types import JSONObject
+from .types import AskOptions, MCPServers, Tools
 
-from .client import Session, ask_many
+from tasksolver.cli_backend import CLIPayload, CLIBackendModel
+from tasksolver.common import Question, TaskSpec, image_media_type
 
-_DEFAULT_TOOLS: Final = object()
+from .client import ClaudeResponse, Session, ask_many
+
+
+class _DefaultTools:
+    pass
+
+
+_DEFAULT_TOOLS: Final = _DefaultTools()
 
 #: Claude Code environment for chat mode: no auto-memory, CLAUDE.md, bundled/policy skills, git
-#: instructions, claude.ai connector MCP servers, or non-essential traffic; a named session
-#: skips the per-call session-title request (checked through a logging proxy, CLI 2.1.281).
+#: instructions, claude.ai connector MCP servers, or non-essential traffic. Naming the session
+#: suppresses automatic session-title requests.
 CHAT_ENV: Final = {
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
@@ -32,7 +40,7 @@ CHAT_ENV: Final = {
 
 #: SDK options for chat mode: no filesystem settings (hooks, plugins, permissions, CLAUDE.md),
 #: no skills, one turn, and no transcript under ~/.claude/projects.
-CHAT_SDK_OPTIONS: Final = {
+CHAT_SDK_OPTIONS: Final[dict[str, object]] = {
     "setting_sources": [],
     "skills": [],
     "max_turns": 1,
@@ -49,7 +57,7 @@ def _chat_workspace() -> str:
     return tempfile.mkdtemp(prefix="tasksolver-claude-chat-")
 
 
-def thinking_config(thinking: Any) -> dict | None:
+def thinking_config(thinking: str | bool | int | JSONObject | None) -> JSONObject | None:
     """SDK ``thinking`` from a short form: ``"disabled"``/``False``, ``"adaptive"``/``True``,
     an int budget (``{"type": "enabled", "budget_tokens": n}``), a config dict, or ``None``
     (the CLI default)."""
@@ -64,34 +72,26 @@ def thinking_config(thinking: Any) -> dict | None:
     raise ValueError(f"unsupported thinking setting {thinking!r}")
 
 
-def _image_source(url: str) -> dict[str, str]:
+def _image_source(url: str) -> JSONObject:
     if not url.startswith("data:"):
         return {"type": "url", "url": url}
     header, separator, encoded = url.partition(",")
     if not separator or not header.endswith(";base64"):
         raise ValueError("Claude image inputs need base64 data URLs")
     data: Final = base64.b64decode(encoded, validate=True)
-    # Older Question versions labelled every data URL image/jpeg, even PNG bytes.
-    # Determine the actual media type instead of trusting the label.
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        media_type = "image/png"
-    elif data.startswith(b"\xff\xd8\xff"):
-        media_type = "image/jpeg"
-    elif data.startswith((b"GIF87a", b"GIF89a")):
-        media_type = "image/gif"
-    elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        media_type = "image/webp"
-    else:
+    # Validate the media type from the bytes; a data URL's MIME label can be wrong.
+    media_type = image_media_type(data, default="")
+    if not media_type:
         raise ValueError("Claude image inputs must be PNG, JPEG, GIF, or WebP")
     return {"type": "base64", "media_type": media_type, "data": encoded}
 
 
-class ClaudeAgentModel(CLIBackendModel):
-    """TaskSolver adapter; existing ``claude-code`` aliases use this SDK backend.
+class ClaudeAgentModel(CLIBackendModel[ClaudeResponse]):
+    """TaskSolver adapter for the ``claude-code`` and ``claude-agent`` aliases.
 
-    ``allowed_tools`` retains the old adapter's built-in tool restriction as
-    well as preapproving those tools. Pass ``tools=`` to select built-ins
-    separately from permission rules (for example when allowing MCP tools).
+    When ``tools`` is omitted, ``allowed_tools`` both selects built-ins and
+    preapproves them. Set ``tools`` to configure availability separately from
+    permission rules, for example when allowing MCP tools.
 
     ``chat=True`` makes each call a plain chat turn: no built-in tools, no MCP
     servers (``--strict-mcp-config`` with none), no filesystem settings, skills
@@ -114,14 +114,14 @@ class ClaudeAgentModel(CLIBackendModel):
 
     def __init__(self, api_key: str | None = None, task: TaskSpec | None = None,
                  model: str | None = None, *, workspace: str | None = None,
-                 timeout: float | None = 300, mcp_servers: dict | None = None,
+                 timeout: float | None = 300, mcp_servers: MCPServers | None = None,
                  allowed_tools: str | list[str] | None = "Read",
                  permission_mode: str = "acceptEdits",
-                 tools: Any = _DEFAULT_TOOLS,
+                 tools: Tools | _DefaultTools = _DEFAULT_TOOLS,
                  extra_env: dict[str, str] | None = None,
-                 sdk_options: dict[str, Any] | None = None,
-                 chat: bool = False, thinking: Any = None, effort: str | None = None,
-                 system_prompt: str | None = None):
+                 sdk_options: dict[str, object] | None = None,
+                 chat: bool = False, thinking: str | bool | int | JSONObject | None = None, effort: str | None = None,
+                 system_prompt: str | None = None) -> None:
         super().__init__(api_key=api_key, task=task, model=model)
         if chat:
             if mcp_servers:
@@ -134,12 +134,11 @@ class ClaudeAgentModel(CLIBackendModel):
             extra_env = {**CHAT_ENV, **(extra_env or {})}
             sdk_options = {**copy.deepcopy(CHAT_SDK_OPTIONS), **(sdk_options or {})}
             if workspace is None:
-                # keep the CLI out of the caller's working tree (the Environment reminder
-                # would otherwise describe it)
+                # Keep the caller's working tree out of the CLI's environment reminder.
                 workspace = _chat_workspace()
         self.chat = chat
         self.claude_key = api_key
-        # effort; the name predates the SDK's `effort` option
+        # Public attribute storing the SDK effort level.
         self.thinking_depth = effort
         self.thinking = thinking_config(thinking)
         self.system_prompt = system_prompt
@@ -148,16 +147,16 @@ class ClaudeAgentModel(CLIBackendModel):
         self.mcp_servers = mcp_servers
         self.allowed_tools = allowed_tools
         self.permission_mode = permission_mode
-        # The default matches legacy --tools <allowed_tools>. An explicit tools
-        # value allows callers to distinguish availability from auto-approval.
-        self.tools = allowed_tools if tools is _DEFAULT_TOOLS else tools
+        # Explicit tools separate availability from auto-approval.
+        self.tools: Tools = allowed_tools if isinstance(tools, _DefaultTools) else tools
         self.extra_env = extra_env
         self.sdk_options = sdk_options
 
     @classmethod
-    def prepare_payload(cls, question: Question, max_tokens=1000, verbose=False,
-                        prepend=None, workspace=None, **kwargs) -> dict:
-        content: Final = []
+    def prepare_payload(cls, question: Question, max_tokens: int = 1000, verbose: bool = False,
+                        prepend: object = None, workspace: str | None = None, inline: bool = False,
+                        **kwargs: object) -> CLIPayload:
+        content: list[JSONObject] = []
         for element in question.get_json():
             if element["type"] == "text":
                 content.append({"type": "text", "text": element["text"]})
@@ -168,7 +167,10 @@ class ClaudeAgentModel(CLIBackendModel):
         # SDK does not provide a per-answer max_tokens option.
         return {"prompt": content, "max_tokens": max_tokens, "workspace": workspace}
 
-    def _call_kwargs(self, payload: dict) -> dict:
+    def _sample(self, payload: CLIPayload, n_choices: int) -> list[ClaudeResponse]:
+        return self._client_ask_many(payload["prompt"], n_choices, **self._call_kwargs(payload))
+
+    def _call_kwargs(self, payload: CLIPayload | None = None) -> AskOptions:
         options: Final = dict(self.sdk_options or {})
         if self.thinking_depth:
             options["effort"] = self.thinking_depth
@@ -176,25 +178,31 @@ class ClaudeAgentModel(CLIBackendModel):
             options["thinking"] = self.thinking
         if self.system_prompt is not None:
             options["system_prompt"] = self.system_prompt
-        return dict(model=self.model, workspace=payload.get("workspace") or self.workspace,
-                    timeout=self.timeout, api_key=self.claude_key, extra_env=self.extra_env,
-                    mcp_servers=self.mcp_servers, tools=self.tools,
-                    allowed_tools=self.allowed_tools, permission_mode=self.permission_mode,
-                    sdk_options=options)
+        return {"model": self.model,
+                "workspace": (payload.get("workspace") if payload is not None else None) or self.workspace,
+                "timeout": self.timeout, "api_key": self.claude_key, "extra_env": self.extra_env,
+                "mcp_servers": self.mcp_servers, "tools": self.tools,
+                "allowed_tools": self.allowed_tools, "permission_mode": self.permission_mode,
+                "sdk_options": options}
 
-    def _finish(self, r) -> dict:
+    def _finish(self, r: ClaudeResponse) -> dict[str, object]:
         self._check_output(r)
         if self.chat:
             self._check_chat(r)
         return r.metadata()
 
-    def _chat_violations(self, r) -> list:
-        return [block.get("name") or block.get("type")
-                for message in r.messages if message.get("type") == "assistant"
-                for block in message.get("content") or []
-                if isinstance(block, dict) and block.get("type") in _TOOL_BLOCKS]
+    def _chat_violations(self, r: ClaudeResponse) -> list[str]:
+        violations: list[str] = []
+        for message in r.messages:
+            content = message.get("content")
+            if message.get("type") != "assistant" or not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in _TOOL_BLOCKS:
+                    violations.append(str(block.get("name") or block.get("type")))
+        return violations
 
-    def session(self, **kwargs) -> Session:
-        options: Final = self._call_kwargs({})
+    def session(self, **kwargs: Unpack[AskOptions]) -> Session:
+        options: AskOptions = self._call_kwargs()
         options.update(kwargs)
         return Session(**options)

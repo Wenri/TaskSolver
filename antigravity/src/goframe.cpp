@@ -114,12 +114,13 @@ struct agy_stub {
         __builtin_unreachable();
     }
 
-    static constexpr agy_stub_info info{&entry, &frame_start, &frame_end, &end};
+    static constexpr agy_stub_info info(uint32_t regs, uint32_t args, uint64_t stack)
+    { return {&entry, &frame_start, &frame_end, &end, regs, args, stack}; }
 };
 
 /* bk() rejects an unknown id; this catches one BOOKS has since turned off. GCC also needs
  * literal asm names on declarations, so each row binds its own boundary members here. */
-#define AGY_STUB_LABELS(id, go_frame)                                                        \
+#define AGY_STUB_LABELS(id, go_frame, reg_ptrmask, stack_args_size, stack_ptrmask)            \
     static_assert(BOOKS[bk(id)].mech != AGY_OFF, "symbols_gen.h stubs a disabled row: " id); \
     template<> const unsigned char agy_stub<bk(id), go_frame>::frame_start                   \
         __asm__("agy_pc__" id "_frame_start");                                               \
@@ -130,7 +131,8 @@ struct agy_stub {
 AGY_STUBS(AGY_STUB_LABELS)
 
 /* goframe.h sizes this BK_STUB_COUNT, so a list missing a row fails to compile. */
-#define AGY_STUB_INFO(id, go_frame) agy_stub<bk(id), go_frame>::info,
+#define AGY_STUB_INFO(id, go_frame, regs, args, stack) \
+    agy_stub<bk(id), go_frame>::info(regs, args, stack),
 extern constexpr agy_stub_info agy_stubs[] = { AGY_STUBS(AGY_STUB_INFO) };
 
 static_assert(std::size(agy_stubs) <= AGY_GOMOD_MAX_FUNCS,

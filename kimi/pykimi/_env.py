@@ -1,4 +1,4 @@
-"""Environment + argv wiring for an instrumented kimi-code run.
+"""Environment + argv wiring for a linked kimi-code run.
 
 kimi-code is a Node CLI, so unlike codex (bridge compiled into the binary) the wirecap bridge
 rides an N-API addon: the vendored source's wiretap patch loads ``$WIRE_NODE_ADDON`` when
@@ -12,13 +12,14 @@ and injects ``WIRE_MP_BOOT_FD`` so the bridge's ``wirecap.decode.mp_child`` stre
 """
 import os
 import shutil
+from collections.abc import Mapping, Sequence
 
 from wirecap.runtime.vendor import vendored
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pykimi
 
 
-def _vendored(in_pkg_rel, sibling_rel):
+def _vendored(in_pkg_rel: str, sibling_rel: str) -> str:
     """kimi-side binding of the shared resolver (wirecap.runtime.vendor)."""
     return vendored(_PKG_DIR, "pykimi", in_pkg_rel, sibling_rel)
 
@@ -32,7 +33,7 @@ KIMI_MAIN = _vendored("vendor/main.mjs", "../vendor/kimi-code/apps/kimi-code/dis
 WIRE_NODE_ADDON = _vendored("vendor/wirecap_node.node", "../native/build/wirecap_node.node")
 
 
-def node_bin():
+def node_bin() -> str:
     """The Node runtime for the bundle — the env's node (the addon links the env's libpython,
     same-env coupling as codex's gnu-dynamic build), else PATH."""
     conda = os.environ.get("CONDA_PREFIX")
@@ -43,8 +44,11 @@ def node_bin():
     return shutil.which("node") or "node"
 
 
-def instrumented_env(capture, module="pykimi.kimi_process", base=None, extra_env=None,
-                     kimi_home=None, model=None):
+def linked_env(capture: str | os.PathLike[str], module: str = "pykimi.kimi_process",
+               base: Mapping[str, str] | None = None,
+               extra_env: Mapping[str, str] | None = None,
+               kimi_home: str | os.PathLike[str] | None = None,
+               model: str | None = None) -> dict[str, str]:
     """Environment that enables the wiretap addon in kimi-code and points it at ``capture``.
 
     Sets the neutral bridge contract (``WIRE_ENABLE`` gates the addon load; ``WIRE_MODULE`` is the
@@ -89,8 +93,9 @@ def instrumented_env(capture, module="pykimi.kimi_process", base=None, extra_env
 PRINT_MODE_REJECTS = ("--yolo", "-y", "--auto", "--plan")
 
 
-def kimi_argv(prompt, extra_flags=None, kimi_bin=None, session_id=None,
-              continue_latest=False, persistent=False):
+def kimi_argv(prompt: str | None, extra_flags: Sequence[str] | None = None,
+              kimi_bin: str | None = None, session_id: str | None = None,
+              continue_latest: bool = False, persistent: bool = False) -> list[str]:
     """kimi-code's argv tail. One-shot print mode is ``kimi -p <prompt>`` — the counterpart of
     ``codex exec`` / ``agy --print``. ``persistent=True`` is shell mode, selected by the *absence*
     of ``-p``: the CLI opens its interactive TUI, takes no positional prompt (the caller types

@@ -1,17 +1,16 @@
-# kimi — instrument Moonshot's Kimi Code CLI (sibling of `codex/` and `antigravity/`)
+# Kimi Code linked CLI
 
-`antigravity/` wraps the closed-source Go `agy` CLI with an LD_PRELOAD shim; `codex/` patches
-OpenAI's open-source Rust codex at its HTTP boundary and compiles the wirecap bridge into the
-binary. `kimi/` does the same job for Moonshot's **open-source Node/TypeScript** Kimi Code CLI —
-built from source, capture hooks a small **source patch**, and because the host is Node (not a
-binary we compile), the embedded-CPython bridge rides an **N-API addon** the patched CLI loads at
-startup. All three share the `wirecap` package (decode + the embedded-CPython native bridge).
+`kimi/` builds Moonshot's Node/TypeScript Kimi Code CLI from source with a small
+capture patch. The CLI loads an N-API addon that embeds CPython and runs the shared
+`wirecap` decoder. `pykimi` exposes one-shot calls, persistent sessions and the
+TaskSolver `KimiCodeModel` adapter.
 
 ## Layout
+
 - `vendor/kimi-code/` — the Kimi Code monorepo, vendored at tag
   **`@moonshot-ai/kimi-code@2.4.1`** (`2c73f3f5`; MIT; `LICENSE` preserved). Kept pristine except
   our wiretap patch (below); `node_modules/`, `dist/`, and the build-time `vis-web-asset.ts` stub
-  are gitignored. The engine is `packages/agent-core-v2`; upstream removed the old v1 engine.
+  are gitignored. The engine is `packages/agent-core-v2`.
 - `native/` — `wirecap_node.cc` + `CMakeLists.txt`: the N-API addon that links
   `libwirecap_bridge.a` (its own copy — `CMakeLists.txt` adds `../../wirecap/native`) and exposes
   `start`/`ready`/`emitRequest`/`emitEvent`/`emitWire`/`shutdown` to JS. Port of codex's Rust
@@ -26,6 +25,7 @@ startup. All three share the `wirecap` package (decode + the embedded-CPython na
 A new self-contained emitter `packages/agent-core-v2/src/wiretap/wiretap.ts` (loads the addon
 from `$WIRE_NODE_ADDON` when `WIRE_ENABLE` is set; self-initializing on first import; emits are
 no-op-safe) plus **three one-line emit sites**:
+
 - `agent/llmRequester/llmRequesterService.ts` `run()` — after `recordRequest(logInput)` →
   `kimi_request` (the full normalized systemPrompt + tools + messages); inside the
   `for await (… request.requester.request(…))` loop → `kimi_event` per `ModelRequestEvent`
@@ -54,6 +54,7 @@ commit's diff against the old upstream tag shows them), and run
 
 ## Build + run
 Built by **`pixi install`** (setup.py's `_build_kimi`, after the shim so the bridge exists):
+
 1. the CLI bundle — `pnpm install --frozen-lockfile` then `tsdown` (invoked as
    `npx -y pnpm@<pin> …`, honoring the vendored `packageManager` field; conda-forge has no pnpm
    10). A stub `vis-web-asset.ts` is written so the vite/tailwind prebuild is skipped (breaks only
@@ -75,6 +76,9 @@ Model: `MOONSHOT_API_KEY`/`KIMI_MODEL_API_KEY` (the env-family definition — no
 
     from pykimi import ask
     r = ask("What is 2+2?", model="k3")   # -> KimiResponse(.text, .model, .usage, .request, .turns)
+
+`Agent(..., vision_model="kimi-code", chat=True)` is unsupported; use the HTTP
+Kimi adapter for plain chat calls.
 
 ## Transport
 `pykimi` drives the CLI through the **same wirecap mp-child machinery as codex/agy** (the shared
@@ -104,7 +108,8 @@ CLI auto-discovers (kimi-code has no MCP flag), wrapping every server command
 interpreter and hands it to the MCP servers it spawns, which breaks `uv run` venv interpreters —
 same policy as `pycodex.mcp_flags` / `pyagy.write_mcp_servers`); `capture=` accepts a path to keep
 the capture JSONL out of the workspace. A run that hits the drain deadline returns with
-`KimiResponse.timed_out=True` (and a negative `exit_status`) after the group teardown.
+`KimiResponse.timed_out=True` after the CLI and its process group are reaped.
+`exit_status` retains the process's exit status separately from the timeout flag.
 
 Print mode needs no approval flag: it forces `auto` permission and auto-approves every tool
 call for the turn. It also **rejects** `--yolo`/`-y`/`--auto`/`--plan` (`Cannot combine
@@ -127,10 +132,17 @@ with pykimi.Session(workspace="/w", model="k3") as s:
     a = s.ask("Create cube.py that makes a 2m cube.")
     b = s.ask("Now double its size.")          # same CLI process, full context
     sid = s.session_id                          # store-read after turn 1
-r = pykimi.resume(sid, workspace="/w").ask("And rename it big_cube.py.")
+with pykimi.resume(sid, workspace="/w") as resumed:
+    r = resumed.ask("And rename it big_cube.py.")
 ```
 
+Use a context manager or call `close()` to release the CLI, its descendants and
+the result channel. Closing is idempotent; failed startup also unwinds these
+resources. A closed or exited session rejects further turns; resume its ID in a
+new session.
+
 Shell-mode specifics, each with its own machinery here:
+
 - **No positional prompt**: turn 1 is *typed* like every follow-up
   (`WireSession._PREFILL_FIRST = False`); `kimi_argv(persistent=True)` rejects one.
 - **Bracketed paste**: kimi's editor submits on every typed newline, so
@@ -149,13 +161,9 @@ Shell-mode specifics, each with its own machinery here:
   results are folded per agent, including interrupted/resumed steps and messages injected
   while tools are pending; journals from separate agents do not share fold state.
 
-Transport note: `kimi acp` (a JSON-RPC agent protocol) would be architecturally cleaner — no
-PTY, no idle heuristics — but it is a fourth transport shape that bypasses
-`ask_turn`/`WirePtyProcess` entirely, defeating the shared-base symmetry with agy/codex. It is
-the documented fallback if PTY shell mode proves unreliable, not the default.
-
 ## Tests
-Offline, no node/bundle needed (`python3 test_scripts/<f>.py`):
+Offline, no node/bundle needed (`pixi run python test_scripts/<file>.py`):
+
 - `test_kimi_argv.py` — argv/env assembly, `KIMI_CODE_HOME`/`KIMI_MODEL_NAME` precedence, the
   `mcp_json` PYTHONHOME unwrap, and the session-store readers (index fold, tombstones, cwd
   filter, relocated home).
@@ -171,7 +179,7 @@ Offline, no node/bundle needed (`python3 test_scripts/<f>.py`):
   and multiple agents), and a stub-backed `Session` (typed turn 1, bracketed-paste framing
   on the raw PTY bytes, close sweep).
 - `test_wire_session.py` (repo root `test_scripts/`) — the shared `WireSession`/`ask_turn`
-  base all three providers' Sessions ride.
+  base, including failed startup, cleanup failures, idempotent close and exited-session guards.
 
 Offline, with Node and the built artifacts:
 
@@ -179,14 +187,15 @@ Offline, with Node and the built artifacts:
 pixi run python test_scripts/test_kimi_bundle.py
 ```
 
-This stages the artifacts through the package's bundling hook, then runs outside the
+This stages the artifacts through the package's bundling step, then runs outside the
 checkout with no `node_modules`: Python artifact resolution, CLI `--version`, and the sibling
 search worker opening an empty index. It catches missing npm dependencies or workers that a
 source-tree launch can hide. It skips when the build/runtime is absent and fails on a partial
-artifact set. The 2.1.1 upgrade passed this check and the wrapper's offline suites;
-authenticated model turns were not revalidated. `kimi vis` remains unavailable in this
-instrumented build because the web asset is stubbed.
+artifact set. These checks do not validate authenticated model calls, and a skip is not a
+pass. `kimi vis` remains unavailable in this linked build because the web asset is stubbed.
 
-Live (needs the built bundle + addon; skips cleanly = exit 0 otherwise):
+Live (needs the built bundle + addon):
+
 - `test_kimi.py` — the addon smoke inside a real node process (synthetic emits → `kimi_turn`),
-  then a real `kimi -p` turn when a model is configured.
+  then a real `kimi -p` turn when a model is configured. Inspect its output: missing artifacts
+  or model configuration cause skips, which do not establish provider compatibility.

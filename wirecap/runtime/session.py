@@ -1,37 +1,65 @@
-"""The shared persistent-session turn loop for the instrumented CLIs.
-
-pyagy and pycodex each grew a structurally identical `_ask_turn` (submit a
-prompt into a live TUI, drain decoded turns off the mp channel until the turn
-settles) and identical channel plumbing around a spawn-context SimpleQueue.
-This module is the single copy both delegate to; pykimi's Session builds on it
-directly.
-
-Parent-side runtime code: this imports only stdlib + `wirecap.decode.mp_child`
-sentinels (decode never imports back — the `python3 -S` purity probes guard
-that direction, not this one).
-"""
+"""Persistent-session lifecycle and turn collection for the linked CLIs."""
 
 from __future__ import annotations
 
 import multiprocessing as _mp
 import time
+from contextlib import ExitStack
+from collections.abc import Callable, Mapping, Sequence
+from multiprocessing.connection import Connection
+from types import TracebackType
+from typing import Literal, Protocol, Self, cast
+
+from ..types import Event
 
 from ..decode.mp_child import DONE as _DONE, EXC as _EXC
 
 _SPAWN = _mp.get_context("spawn")
 
-__all__ = ["new_channel", "close_channel", "ask_turn", "WireSession"]
+__all__ = ["ResultChannel", "TurnProcess", "SessionProcess", "TurnReason",
+           "new_channel", "close_channel", "ask_turn", "WireSession"]
 
 
-def new_channel():
+type TurnReason = Literal["turn", "idle", "deadline", "exit"]
+
+
+class ResultChannel(Protocol):
+    _reader: Connection
+    _writer: Connection
+    def get(self) -> object: ...
+    def put(self, obj: object) -> None: ...
+
+
+class TurnProcess(Protocol):
+    @property
+    def last_output(self) -> float: ...
+    @last_output.setter
+    def last_output(self, ts: float) -> None: ...
+    def service_pty(self, timeout: float, readers: Sequence[Connection | int]) -> bool: ...
+    def write(self, data: bytes) -> None: ...
+    def submit(self, prompt: str) -> None: ...
+    def reap(self) -> object: ...
+
+
+class SessionProcess(TurnProcess, Protocol):
+    _args: tuple[object, ...]
+    @property
+    def exit_status(self) -> int | None: ...
+    @property
+    def transcript(self) -> str: ...
+    def start(self) -> None: ...
+    def close(self, *, interrupt: bool = False, grace: float = 5.0) -> None: ...
+
+
+def new_channel() -> ResultChannel:
     """A spawn-context result SimpleQueue for one CLI run. The caller keeps the
     reader; the child (the CLI) inherits both ends across execve and drops the
     reader. Close the parent's writer right after ``proc.start()`` so the
     reader EOFs when the CLI dies (crash detection)."""
-    return _SPAWN.SimpleQueue()
+    return cast(ResultChannel, _SPAWN.SimpleQueue())
 
 
-def close_channel(q):
+def close_channel(q: ResultChannel) -> None:
     """Tear down the queue's pipe ends (idempotent). Its named SemLocks unlink
     via their own resource_tracker Finalize when ``q`` is GC'd; this just makes
     the fd close prompt."""
@@ -42,45 +70,19 @@ def close_channel(q):
             pass
 
 
-def ask_turn(proc, q, prompt=None, *, kinds, idle, pty_idle, timeout,
-             ready=2.5, pty_quiet=0.0, pending=None, event_kinds=()):
-    """One turn against a live interactive CLI: submit ``prompt``, then drain
-    decoded objects (of ``kinds``) off ``q`` until the turn settles. Returns
-    ``(objs, reason)``.
+def ask_turn(proc: TurnProcess, q: ResultChannel, prompt: str | None = None, *,
+             kinds: Sequence[str], idle: float, pty_idle: float, timeout: float,
+             ready: float = 2.5, pty_quiet: float = 0.0,
+             pending: Callable[[list[Event]], bool] | None = None,
+             event_kinds: Sequence[str] = ()) -> tuple[list[Event], TurnReason]:
+    """Submit a prompt and collect decoded objects until the turn settles.
 
-    The hoist of ``pyagy._ask_turn`` / ``pycodex._ask_turn`` — behaviour
-    identical at the historical defaults (``pty_quiet=0.0``, ``pending=None``),
-    with four additions the graded Session port needs:
-
-    * ``kinds`` is required-keyword: each provider names its own decoded-turn
-      kind(s); there is no sensible cross-provider default.
-    * the settle ``reason`` is returned instead of discarded — the caller's
-      return-code mapping depends on *why* the turn ended:
-        - ``"turn"``      a decoded turn arrived and the stream then stayed
-                          quiet for ``idle`` s — the normal boundary;
-        - ``"idle"``      no decoded turn, and the CLI's PTY stayed quiet for
-                          ``pty_idle`` s (auth prompt, spend cap, tool-only
-                          reply — something that never decodes);
-        - ``"deadline"``  ``timeout`` elapsed mid-turn — the caller should
-                          treat the turn as timed out, NOT as a clean answer;
-        - ``"exit"``      the CLI died or the in-CLI target signalled
-                          done/raised — nothing more will ever arrive.
-    * ``pty_quiet`` (seconds): suppress the ``idle`` settle while the PTY is
-      still painting. An agentic turn is many API responses — a decoded turn
-      followed by ``idle`` s of *stream* silence can still be mid-tool-call,
-      and both TUIs repaint while working, so "stream quiet AND terminal
-      quiet" is a far safer boundary. ``0.0`` preserves the historical break.
-    * ``pending`` (callable ``objs -> bool``): a deterministic "the last
-      decoded turn requested tool calls, so it cannot be the end" hook; while
-      it returns True the ``idle`` break is suppressed entirely (``timeout``
-      still applies — a hung tool must surface as ``"deadline"``, not ride
-      forever).
-    * ``event_kinds``: side events returned with the turn, such as system
-      notifications. They neither start nor reset the answer-settle timer.
-
-    ``ready`` waits for the TUI to settle (screen drawn / prior turn done)
-    before typing, so the prompt is not swallowed. ``prompt=None`` submits the
-    prefill already on the CLI's argv (a bare CR).
+    Reasons are ``turn`` (answer events quiet for ``idle``), ``idle`` (no
+    answer and PTY quiet for ``pty_idle``), ``deadline`` or ``exit``. The
+    ``pending`` predicate and ``pty_quiet`` delay answer settling while tools
+    are active. Side ``event_kinds`` are retained without resetting timers.
+    ``ready`` lets the TUI settle before typing; ``prompt=None`` submits its
+    argv prefill with a bare CR.
     """
     reader = q._reader
     rstart = time.time()
@@ -92,8 +94,10 @@ def ask_turn(proc, q, prompt=None, *, kinds, idle, pty_idle, timeout,
         proc.submit(prompt)              # type + submit a follow-up
     proc.last_output = time.time()       # measure idle from the submit, not the prior turn
 
-    got, last, start = [], None, time.time()
-    reason = "deadline"
+    got: list[Event] = []
+    last: float | None = None
+    start = time.time()
+    reason: TurnReason = "deadline"
     while time.time() - start < timeout:
         if proc.service_pty(0.2, [reader]):
             while reader.poll(0):
@@ -102,16 +106,17 @@ def ask_turn(proc, q, prompt=None, *, kinds, idle, pty_idle, timeout,
                 except EOFError:
                     proc.reap()          # the CLI exited — nothing more will ever arrive
                     return got, "exit"
-                if isinstance(o, tuple) and o and o[0] in (_DONE, _EXC):
+                if isinstance(o, tuple) and o and cast(tuple[object, ...], o)[0] in (_DONE, _EXC):
                     proc.reap()          # the in-CLI target finished/raised: the stream is
                     return got, "exit"   # over — end the turn, don't wait out pty_idle
                 if isinstance(o, dict):
-                    kind = o.get("kind")
+                    event = cast(Event, o)
+                    kind = event.get("kind")
                     if kind in kinds:
-                        got.append(o)
+                        got.append(event)
                         last = time.time()
                     elif kind in event_kinds:
-                        got.append(o)
+                        got.append(event)
         now = time.time()
         if last is not None and now - last >= idle:
             answers = [o for o in got if o.get("kind") in kinds]
@@ -127,53 +132,27 @@ def ask_turn(proc, q, prompt=None, *, kinds, idle, pty_idle, timeout,
     return got, reason
 
 
-class WireSession:
-    """Base for a multi-turn session over one live instrumented CLI.
+class WireSession[ResponseT, ProcessT: SessionProcess = SessionProcess]:
+    """Base for a multi-turn session over one live linked CLI.
 
-    A provider subclass supplies its process construction and response shape;
-    the base owns the lifecycle every provider had duplicated: lazy start on
-    the first ``ask``, the dead-process guard, the channel plumbing, the turn
-    loop (via :func:`ask_turn`), id latching, and idempotent ``close``.
+    Providers implement ``_make_process`` (with child ``max_wait=None``),
+    ``_latch_id`` and ``_build_response``. Optional startup/teardown hooks
+    manage provider resources; failed startup and ``close`` unwind them once.
+    Closed sessions cannot restart, but their ID and history remain readable.
 
-    Class attrs (each provider's turn-boundary personality):
-      ``_KINDS``          decoded-object kinds that count as this CLI's turns
-      ``_IDLE``           stream-settle seconds (no new decoded turn)
-      ``_PTY_IDLE``       PTY-idle seconds when no turn ever decodes
-      ``_READY``          TUI settle wait before typing (default 2.5)
-      ``_PTY_QUIET``      terminal-quiet gate on the idle break (default 0.0)
-      ``_PREFILL_FIRST``  True: the first prompt rides the CLI argv and turn 1
-                          submits the prefill (bare CR); False: the CLI takes
-                          no positional prompt and turn 1 types it like any
-                          follow-up (kimi shell mode)
-      ``_ID_KW``          the provider's native id spelling, for messages
+    ``_KINDS``/``_EVENT_KINDS`` select answers and side events. Timing defaults
+    ``_IDLE``, ``_PTY_IDLE``, ``_READY`` and ``_PTY_QUIET`` feed :func:`ask_turn`;
+    ``_pending`` prevents settling during tool calls. ``_PREFILL_FIRST`` puts
+    the first prompt on argv instead of typing it. ``_ID_KW`` names the native
+    resume argument; ``conversation_id`` remains an alias for ``session_id``.
 
-    Hooks (required): ``_make_process(prompt)`` builds the un-started process
-    (its mp args MUST carry ``max_wait=None`` — asserted below);
-    ``_latch_id()`` returns the native session/conversation id once known;
-    ``_build_response(objs, reason)`` shapes the provider Response.
-    Hooks (optional): ``_pre_start``, ``_post_start``, ``_teardown``,
-    ``_pending(objs)`` (tool-calls-outstanding — wired into ``ask_turn``), and
-    ``_load_capture_tail()`` when ``capture_tail=True`` is supported.
-
-    Naming: ``session_id`` is the cross-provider name and
-    ``conversation_id`` its permanent alias — constructor kwargs keep each
-    provider's own spelling (renaming those would break ``pyagy.resume``,
-    ``AgyModel.session()`` and every existing caller).
-
-    Capture authority: a Session's ``ask`` is **stream-authoritative** on
-    purpose. The one-shot ``ask()`` helpers prefer the capture JSONL because
-    an *exiting* CLI can drop the last streamed turn — a failure mode that
-    structurally cannot happen mid-session (the CLI is still alive when the
-    turn settles). And a Session's capture is *cumulative*: treating it as
-    authoritative would make turn N's response contain turns 1..N. Callers
-    that still want the capture's view opt in with ``capture_tail=True``,
-    which reads only the records appended since the previous turn (the
-    provider keeps the cursor) and falls back to the streamed objects when
-    the tail is empty.
+    Responses use streamed objects by default. ``capture_tail=True`` instead
+    uses each provider's ``_load_capture_tail`` cursor to read only newly
+    appended records, falling back to streamed objects when the tail is empty.
     """
 
-    _KINDS: tuple = ()
-    _EVENT_KINDS: tuple = ()
+    _KINDS: tuple[str, ...] = ()
+    _EVENT_KINDS: tuple[str, ...] = ()
     _IDLE = 8.0
     _PTY_IDLE = 25.0
     _READY = 2.5
@@ -182,68 +161,81 @@ class WireSession:
     _ID_KW = "session_id"
 
     # shared instance state (providers set the rest in their __init__)
-    _proc = None
-    _q = None
-    _id = None
+    _proc: ProcessT | None = None
+    _q: ResultChannel | None = None
+    _id: str | None = None
+    _closed = False
+    _ended = False
+    idle: float
+    timeout: float
     capture_tail = False
 
-    # -- hooks ----------------------------------------------------------------
-    def _make_process(self, prompt):
+    # -- provider methods ----------------------------------------------------------------
+    def _make_process(self, prompt: str | None) -> ProcessT:
         raise NotImplementedError
 
-    def _latch_id(self):
+    def _latch_id(self) -> str | None:
         raise NotImplementedError
 
-    def _build_response(self, objs, reason):
+    def _build_response(self, objs: list[Event], reason: TurnReason) -> ResponseT:
         raise NotImplementedError
 
-    def _read_history(self):
+    def _read_history(self) -> list[Mapping[str, object]]:
         return []
 
-    def _pre_start(self):
+    def _pre_start(self) -> None:
         pass
 
-    def _post_start(self):
+    def _post_start(self) -> None:
         pass
 
-    def _teardown(self):
+    def _teardown(self) -> None:
         pass
 
-    def _pending(self, objs):
+    def _pending(self, objs: list[Event]) -> bool:
         return False
 
-    def _load_capture_tail(self):
+    def _load_capture_tail(self) -> list[Event]:
         raise NotImplementedError(
             f"{type(self).__name__} does not support capture_tail")
 
     # -- lifecycle -------------------------------------------------------------
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None,
+                 traceback: TracebackType | None) -> None:
         self.close()
 
-    def _start(self, prompt):
-        self._pre_start()
-        self._q = new_channel()
-        self._proc = self._make_process(prompt)
-        # A Session's life IS the CLI's life: caller think-time between turns
-        # is unbounded, so the in-CLI target must have NO deadline — its exit
-        # is death-based (close()/GC kill the CLI, which ends the target; see
-        # mp_child's max_wait contract). A numeric deadline here would kill
-        # the bridge mid-session after that many seconds of *wall time*, not
-        # inactivity — the bug this assert keeps from coming back.
-        args = getattr(self._proc, "_args", None)
-        assert args and len(args) >= 3 and args[2] is None, \
-            "WireSession processes must be built with max_wait=None"
-        self._proc.start()
-        self._q._writer.close()   # parent reads only; reader EOFs on CLI death
-        self._post_start()
+    def _start(self, prompt: str | None) -> None:
+        try:
+            self._pre_start()
+            self._q = new_channel()
+            self._proc = self._make_process(prompt)
+            # Think-time between turns is unbounded; the child must have no deadline.
+            args = self._proc._args
+            assert args and len(args) >= 3 and args[2] is None, \
+                "WireSession processes must be built with max_wait=None"
+            self._proc.start()
+            self._q._writer.close()   # parent reads only; reader EOFs on CLI death
+            self._post_start()
+        except BaseException as error:
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                error.add_note(f"Session cleanup also failed: {cleanup_error!r}")
+            raise
 
-    def ask(self, prompt):
+    def ask(self, prompt: str) -> ResponseT:
         """Send ``prompt`` (starting the session on the first call) and return
         the provider Response for the turn it produced."""
-        if self._proc is not None and self._proc.exit_status is not None:
+        if self._closed:
+            raise RuntimeError(
+                f"this Session is closed; open a new Session "
+                f"(resume with {self._ID_KW}={self._id!r})")
+        if self._proc is not None:
+            self._proc.reap()  # Detect a CLI that died while the caller was between turns.
+        if self._proc is not None and (self._ended or self._proc.exit_status is not None):
             # The CLI died on an earlier turn (ask_turn reaped it). Every later
             # turn would silently return the stale transcript, so fail loudly —
             # resume in a fresh Session instead.
@@ -257,13 +249,15 @@ class WireSession:
             objs, reason = self._turn(first)
         else:
             objs, reason = self._turn(prompt)
+        self._ended = reason == "exit"
         if self.capture_tail:
             objs = self._load_capture_tail() or objs
         if self._id is None:
             self._id = self._latch_id()
         return self._build_response(objs, reason)
 
-    def _turn(self, prompt):
+    def _turn(self, prompt: str | None) -> tuple[list[Event], TurnReason]:
+        assert self._proc is not None and self._q is not None
         return ask_turn(self._proc, self._q, prompt, kinds=self._KINDS,
                         idle=self.idle, pty_idle=self._PTY_IDLE,
                         timeout=self.timeout, ready=self._READY,
@@ -271,7 +265,7 @@ class WireSession:
                         event_kinds=self._EVENT_KINDS)
 
     @property
-    def session_id(self):
+    def session_id(self) -> str | None:
         """The CLI's native session/conversation id — the resumed id, or the
         one latched after the first turn. Persist it to resume later."""
         return self._id
@@ -279,18 +273,21 @@ class WireSession:
     #: Cross-provider alias (agy spells it ``conversation_id``).
     conversation_id = session_id
 
-    def history(self):
+    def history(self) -> list[Mapping[str, object]]:
         """The stored transcript, read from the CLI's own store; empty until
         an id is known."""
         if not self._id:
             return []
         return self._read_history()
 
-    def close(self):
-        try:
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        queue, self._q = self._q, None
+        with ExitStack() as cleanup:
+            cleanup.callback(self._teardown)
+            if queue is not None:
+                cleanup.callback(close_channel, queue)
             if self._proc is not None:
                 self._proc.close(interrupt=True)
-        finally:
-            if self._q is not None:
-                close_channel(self._q)
-            self._teardown()

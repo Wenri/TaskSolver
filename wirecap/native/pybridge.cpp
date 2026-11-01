@@ -1,30 +1,17 @@
-/* pybridge.cpp — embedded CPython on a dedicated 16 MB-stack worker thread (Boost.Thread).
- *
- * C++23 TU, like the rest of the shim. Boost.Thread is used over std::thread because only
- * boost::thread::attributes can set the worker's 16 MB stack — libpython's C stack is deep and
- * std::thread/jthread expose no stack-size API. The exported API has C linkage (see wirecap.h)
- * so C/C++/Rust front-ends (the antigravity shim; the patched codex build) link against it.
- *
- * Boost.Python (bp::) handles the Python object/call/refcount layer (import, attrs, calling
- * dispatch, extracting the result) — RAII refcounting + error_already_set instead of manual
- * PyObject* / Py_DECREF / NULL checks. It does NOT wrap interpreter bootstrap or the GIL (no
- * gil.hpp in Boost 1.91), so Py_InitializeEx, PyEval_SaveThread, and PyGILState_Ensure/Release
- * stay raw C-API.
- *
- * The worker thread, its job queue, and the pinned dispatch callable are encapsulated in the
- * `PyBridge` class; a single Meyers-singleton instance (`bridge()`) backs the extern "C" entry
- * points. Ownership is RAII: jobs are held BY VALUE in a std::queue (input/result bytes are
- * std::vector); a SYNC job's completion rides std::promise/std::future (the emitter keeps the
- * promise on its stack, the job carries a pointer to it — so ASYNC pays no promise cost).
- * `dispatch_` stays a raw PyObject* on purpose (a bp::object member destroyed at exit would
- * Py_DECREF without the GIL in this never-Py_Finalize'd interp). */
-#define PY_SSIZE_T_CLEAN   /* required for "#" formats (y#) on Python 3.10+ */
+/* Shared CPython capture worker on a 16 MB Boost.Thread stack.
+ * Boost.Python objects stay inside GIL-held dispatch calls. The dispatch callable
+ * is pinned for the process lifetime because the host never finalizes CPython.
+ * Queued jobs own their payload; synchronous callers wait on a stack-owned promise.
+ * Shutdown refuses new jobs, drains accepted jobs, then joins the worker.
+ */
+#define PY_SSIZE_T_CLEAN   /* Py_ssize_t lengths in Python C-API formats */
 #include <boost/python.hpp>   /* pulls in Python.h first, with the right guards */
 #include "wirecap.h"
 
 #include <boost/thread.hpp>
 #include <boost/thread/condition_variable.hpp>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -85,24 +72,14 @@ private:
     boost::condition_variable qcv_;
     std::queue<job>           queue_;                  /* FIFO of pending jobs (by value; guarded by qmu_) */
     bool                      stop_ = false;           /* set by shutdown(); worker drains then exits */
-    int                       ready_ = -1;             /* -1 starting, 0 failed, 1 ready (write: qmu_) */
+    bool                      stopped_ = false;        /* join completed; guarded by qmu_ */
+    std::atomic<int>          ready_{-1};              /* readiness also read outside qmu_ by emitters */
     size_t                    maxcopy_ = 1u << 20;
     PyObject                 *dispatch_ = nullptr;     /* pyagy.agy_process.dispatch; strong raw ref */
 };
 
-/* The one instance — a Meyers singleton (thread-safe first-call init, no raw `new` to leak).
- * Cleanup is DETERMINISTIC via wire_shutdown() in BOTH consumers, and each reaches it differently:
- *   - agy calls it from the os.Exit hook (the "exit" branch in cgotrampoline.cpp) — the one
- *     teardown callback that fires under Go's os.Exit, which bypasses libc exit / __cxa_atexit
- *     (verified), so ~PyBridge does NOT run on agy's normal path.
- *   - codex calls codex_wirecap::shutdown() at the end of main() (cli/src/main.rs), after which
- *     libc exit runs ~PyBridge on an already-stopped bridge.
- * ~PyBridge remains the fallback for any path that skips both, where it join-then-destructs
- * safely. The residual corner: if that fallback dtor ran while another thread was still inside
- * bridge(), it would be a use-after-destruction. That is why codex — the more threaded consumer
- * (tokio) — calls shutdown() explicitly rather than relying on the dtor. Still uncovered on the
- * codex side: paths that std::process::exit (the interactive TUI's fatal-error exit, and
- * `codex debug`); `codex exec`, the path pycodex drives, returns from main normally. */
+/* Frontends stop the bridge before exiting: agy's os.Exit book, Codex main,
+ * and Kimi's addon cleanup. The destructor handles ordinary C++ exit paths. */
 PyBridge &bridge() { static PyBridge b; return b; }
 
 bool PyBridge::enqueue(job &&j)
@@ -204,7 +181,7 @@ void PyBridge::worker_main()
 
     {
         boost::unique_lock<boost::mutex> lk(qmu_);
-        ready_ = ok ? 1 : 0;
+        ready_ = ok && !stop_ ? 1 : 0;
         qcv_.notify_all();       /* wake start() (predicate: ready_ != -1) */
     }
     if (!ok) { PyEval_RestoreThread(saved); return; }
@@ -233,24 +210,28 @@ void PyBridge::worker_main()
 
 int PyBridge::start()
 {
-    try {
-        boost::thread::attributes attrs;
-        attrs.set_stack_size(16u * 1024 * 1024);  /* big stack for libpython */
-        worker_ = boost::thread(attrs, [this] { worker_main(); });
-        /* Kept joinable (not detached) so shutdown() can join it at os.Exit. */
-    } catch (const std::exception &e) {
-        PYLOG("boost::thread create failed: %s", e.what());
-        ready_ = 0;
-        return -1;
-    }
-
     boost::unique_lock<boost::mutex> lk(qmu_);
+    if (stop_) return -1;
+    if (!worker_.joinable() && ready_ == -1) {
+        try {
+            boost::thread::attributes attrs;
+            attrs.set_stack_size(16u * 1024 * 1024);
+            worker_ = boost::thread(attrs, [this] { worker_main(); });
+        } catch (const std::exception &e) {
+            PYLOG("boost::thread create failed: %s", e.what());
+            ready_ = 0;
+            qcv_.notify_all();
+            return -1;
+        }
+    }
     qcv_.wait(lk, [this] { return ready_ != -1; });
     return ready_ == 1 ? 0 : -1;
 }
 
 void PyBridge::emit(wire_event_t *ev)
 {
+    ev->verdict = 0;
+    ev->out_len = 0;
     if (ready_ != 1) return;
 
     /* One job for both modes; they differ only in whether a result promise is attached. */
@@ -281,7 +262,7 @@ void PyBridge::emit(wire_event_t *ev)
     }
 }
 
-/* Cooperative teardown, invoked from the os.Exit hook (the one callback that fires under agy's Go
+/* Cooperative teardown, invoked from the os.Exit book (the one callback that fires under agy's Go
  * exit). Idempotent. Order at os.Exit: the "exit" marker is SYNC-emitted first (worker alive),
  * THEN this runs — so the marker is recorded before the worker stops. New emits after stop_ are
  * refused by enqueue(), so no goroutine blocks on a dead worker. */
@@ -289,12 +270,20 @@ void PyBridge::shutdown()
 {
     {
         boost::unique_lock<boost::mutex> lk(qmu_);
-        if (stop_) return;   /* already shut down */
+        if (stop_) {
+            qcv_.wait(lk, [this] { return stopped_; });
+            return;
+        }
         stop_ = true;
         ready_ = 0;          /* ready() → false; emit() fast-path no-ops */
     }
     qcv_.notify_all();       /* wake the worker so it drains the queue and exits */
     if (worker_.joinable()) worker_.join();
+    {
+        boost::unique_lock<boost::mutex> lk(qmu_);
+        stopped_ = true;
+    }
+    qcv_.notify_all();
 }
 
 }  // anonymous namespace

@@ -7,11 +7,15 @@ addresses), per-source stack rendering, and caller→callee call-graph aggregati
 
     python3 test_scripts/test_symbolize.py
 """
+
+from __future__ import annotations
+
 import gzip
 import json
 import os
 import sys
 import tempfile
+from collections.abc import Mapping, Sequence
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)                       # repo root holds the shared `wirecap` package
@@ -21,10 +25,10 @@ sys.path.insert(0, _REPO)
 
 from pyagy.agy_process import symbolize as S  # noqa: E402
 
-_failures = []
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
@@ -41,7 +45,7 @@ FUNCS = [
 ]
 
 
-def _write_funcmap(path):
+def _write_funcmap(path: str) -> None:
     with gzip.open(path, "wt", encoding="utf-8") as f:
         for addr, nm in FUNCS:
             f.write(f"{addr:x}\t{nm}\n")
@@ -60,13 +64,13 @@ def test_bisect():
     return sym
 
 
-def _capture(path, events):
+def _capture(path: str, events: Sequence[Mapping[str, object]]) -> None:
     with open(path, "w") as f:
         for e in events:
             f.write(json.dumps(e) + "\n")
 
 
-def test_render_and_graph(sym):
+def test_render_and_graph(sym: S.Symbolizer) -> None:
     print("[offline] stack rendering + call-graph aggregation")
     d = tempfile.mkdtemp()
     cap = os.path.join(d, "cap.jsonl")
@@ -92,7 +96,7 @@ def test_render_and_graph(sym):
     check(("app.readLoop", "app.frame") in edges, "graph: distinct edges present")
 
 
-def test_import_purity():
+def test_import_purity() -> None:
     print("[offline] symbolize is NOT auto-loaded by the embedded agy_process")
     code = ("import sys; sys.path[:0] = [%r, %r]; import pyagy.agy_process; "
             "assert 'pyagy.agy_process.symbolize' not in sys.modules; "
@@ -104,7 +108,7 @@ def test_import_purity():
         print(r.stderr)
 
 
-def main():
+def main() -> None:
     sym = test_bisect()
     test_render_and_graph(sym)
     test_import_purity()

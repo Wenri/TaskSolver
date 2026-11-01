@@ -28,14 +28,38 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass
+from typing import TypedDict, cast
+
+from wirecap.types import JSONObject, JSONValue, json_array, json_load, json_loads_object, json_object
+
+type PathInput = str | os.PathLike[str]
+
+
+class ConversationSnapshot(TypedDict):
+    mtimes: dict[str, float]
+
+
+class TranscriptTurn(TypedDict):
+    step_index: JSONValue
+    role: str
+    type: JSONValue
+    status: JSONValue
+    created_at: JSONValue
+    content: str
+
+
+class HistoryEntry(TypedDict):
+    workspace: str | None
+    display: JSONValue
+    timestamp: JSONValue
 
 # The throwaway-git-workspace helper is provider-neutral (agy + codex both need one) and lives in
 # the shared runtime package; re-exported here so pyagy.ensure_git_workspace and _pty's import are
 # unchanged.
-from wirecap.runtime.workspace import ensure_git_workspace  # noqa: F401
+from wirecap.runtime.workspace import ensure_git_workspace as ensure_git_workspace
 
 
-def _gemini_dir(home=None):
+def _gemini_dir(home: PathInput | None = None) -> str:
     """agy's base config dir: ``<home>/.gemini`` when a scoped ``home`` is given (an HOME
     override), else ``$HOME/.gemini`` — agy's hardcoded default. (GEMINI_DIR/GEMINI_HOME env
     are NOT honored by the binary at runtime, so scoping is done via HOME, not those.)"""
@@ -44,7 +68,7 @@ def _gemini_dir(home=None):
     return os.path.expanduser("~/.gemini")
 
 
-def store_root(app_data_dir=None, home=None):
+def store_root(app_data_dir: str | None = None, home: PathInput | None = None) -> str:
     """The antigravity-cli data root. ``app_data_dir`` mirrors agy's ``--app_data_dir``
     (relative to the gemini dir, default ``antigravity-cli``); ``home`` scopes the whole
     gemini tree (as an HOME override would)."""
@@ -54,15 +78,15 @@ def store_root(app_data_dir=None, home=None):
     return os.path.join(_gemini_dir(home), adir)
 
 
-def conversations_dir(app_data_dir=None, home=None):
+def conversations_dir(app_data_dir: str | None = None, home: PathInput | None = None) -> str:
     return os.path.join(store_root(app_data_dir, home), "conversations")
 
 
-def db_path(conversation_id, app_data_dir=None, home=None):
+def db_path(conversation_id: str, app_data_dir: str | None = None, home: PathInput | None = None) -> str:
     return os.path.join(conversations_dir(app_data_dir, home), f"{conversation_id}.db")
 
 
-def transcript_path(conversation_id, app_data_dir=None, home=None):
+def transcript_path(conversation_id: str, app_data_dir: str | None = None, home: PathInput | None = None) -> str:
     return os.path.join(store_root(app_data_dir, home), "brain", conversation_id,
                         ".system_generated", "logs", "transcript.jsonl")
 
@@ -71,14 +95,14 @@ def transcript_path(conversation_id, app_data_dir=None, home=None):
 class ConversationInfo:
     id: str
     last_modified: float = 0.0          # epoch seconds (db mtime, or summaries last_modified)
-    step_count: int = None              # rows in the `steps` table (turns), best-effort
+    step_count: int | None = None              # rows in the `steps` table (turns), best-effort
     title: str = ""                     # first user prompt (cleaned), truncated
     preview: str = ""                   # first user prompt (cleaned), longer
-    workspace: str = None               # from history.jsonl, best-effort
-    status: str = None
+    workspace: str | None = None               # from history.jsonl, best-effort
+    status: str | None = None
     db: str = ""
 
-    def __str__(self):
+    def __str__(self) -> str:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.last_modified)) \
             if self.last_modified else "?"
         n = "?" if self.step_count is None else self.step_count
@@ -86,7 +110,7 @@ class ConversationInfo:
 
 
 # --- low-level readers (all best-effort, read-only) --------------------------
-def _ro_connect(path):
+def _ro_connect(path: PathInput) -> sqlite3.Connection | None:
     """Open a SQLite DB read-only (respects any WAL of a live agy). None on failure."""
     if not os.path.exists(path):
         return None
@@ -96,12 +120,12 @@ def _ro_connect(path):
         return None
 
 
-def _step_count(path):
+def _step_count(path: PathInput) -> int | None:
     con = _ro_connect(path)
     if con is None:
         return None
     try:
-        return con.execute("select count(*) from steps").fetchone()[0]
+        return cast(tuple[int], con.execute("select count(*) from steps").fetchone())[0]
     except sqlite3.Error:
         return None
     finally:
@@ -111,7 +135,7 @@ def _step_count(path):
 _TAGS = ("<USER_REQUEST>", "</USER_REQUEST>")
 
 
-def _clean_user_text(content):
+def _clean_user_text(content: str) -> str:
     """Pull the human prompt out of a transcript USER_INPUT ``content`` blob (agy wraps it
     in ``<USER_REQUEST>`` plus ``<ADDITIONAL_METADATA>``/``<USER_SETTINGS_CHANGE>`` sections)."""
     if not content:
@@ -127,14 +151,14 @@ def _clean_user_text(content):
     return text.strip()
 
 
-def read_transcript(conversation_id, app_data_dir=None, home=None):
+def read_transcript(conversation_id: str, app_data_dir: str | None = None, home: PathInput | None = None) -> list[TranscriptTurn]:
     """Parsed human-readable turns for a conversation, or ``[]``. Each item:
     ``{step_index, role, type, status, created_at, content}`` where ``role`` is
     ``"user"`` for USER_INPUT else ``"agent"`` and ``content`` is cleaned of agy's tags."""
     path = transcript_path(conversation_id, app_data_dir, home)
     if not os.path.exists(path):
         return []
-    turns = []
+    turns: list[TranscriptTurn] = []
     try:
         with open(path, errors="replace") as f:
             for line in f:
@@ -142,11 +166,13 @@ def read_transcript(conversation_id, app_data_dir=None, home=None):
                 if not line:
                     continue
                 try:
-                    obj = json.loads(line)
+                    obj = json_loads_object(line)
                 except ValueError:
                     continue
                 is_user = obj.get("type") == "USER_INPUT"
                 content = obj.get("content", "")
+                if not isinstance(content, str):
+                    continue
                 turns.append({
                     "step_index": obj.get("step_index"),
                     "role": "user" if is_user else "agent",
@@ -160,18 +186,18 @@ def read_transcript(conversation_id, app_data_dir=None, home=None):
     return turns
 
 
-def _first_user_text(conversation_id, app_data_dir=None, home=None):
+def _first_user_text(conversation_id: str, app_data_dir: str | None = None, home: PathInput | None = None) -> str:
     for t in read_transcript(conversation_id, app_data_dir, home):
         if t["role"] == "user" and t["content"]:
             return t["content"]
     return ""
 
 
-def _history_index(app_data_dir=None, home=None):
+def _history_index(app_data_dir: str | None = None, home: PathInput | None = None) -> dict[str, HistoryEntry]:
     """``{conversation_id: {"workspace", "display", "timestamp"}}`` from history.jsonl
     (interactive input log; last entry per id wins). Best-effort → ``{}``."""
     path = os.path.join(store_root(app_data_dir, home), "history.jsonl")
-    idx = {}
+    idx: dict[str, HistoryEntry] = {}
     if not os.path.exists(path):
         return idx
     try:
@@ -181,12 +207,13 @@ def _history_index(app_data_dir=None, home=None):
                 if not line:
                     continue
                 try:
-                    obj = json.loads(line)
+                    obj = json_loads_object(line)
                 except ValueError:
                     continue
                 cid = obj.get("conversationId")
-                if cid:
-                    idx[cid] = {"workspace": obj.get("workspace"),
+                if isinstance(cid, str) and cid:
+                    workspace = obj.get("workspace")
+                    idx[cid] = {"workspace": workspace if isinstance(workspace, str) else None,
                                 "display": obj.get("display"),
                                 "timestamp": obj.get("timestamp")}
     except OSError:
@@ -195,7 +222,7 @@ def _history_index(app_data_dir=None, home=None):
 
 
 # --- summaries index (used only when populated) ------------------------------
-def _from_summaries(limit, app_data_dir, home):
+def _from_summaries(limit: int | None, app_data_dir: str | None, home: PathInput | None) -> list[ConversationInfo] | None:
     """Rows from ``conversation_summaries.db`` if it has any (it's empty on installs with a
     failed migration — then this returns ``None`` and the caller falls back to mtime scan)."""
     path = os.path.join(store_root(app_data_dir, home), "conversation_summaries.db")
@@ -203,17 +230,17 @@ def _from_summaries(limit, app_data_dir, home):
     if con is None:
         return None
     try:
-        rows = con.execute(
+        rows = cast(list[tuple[str, str | None, str | None, int | None, str | int | float | None, str | None, str | None]], con.execute(
             "select conversation_id, title, preview, step_count, last_modified_time, "
             "workspace_uris, status from conversation_summaries "
-            "order by last_modified_time desc").fetchall()
+            "order by last_modified_time desc").fetchall())
     except sqlite3.Error:
         con.close()
         return None
     con.close()
     if not rows:
         return None
-    out = []
+    out: list[ConversationInfo] = []
     for cid, title, preview, step_count, lmt, wuris, status in rows:
         out.append(ConversationInfo(
             id=cid, title=(title or preview or "")[:80], preview=preview or title or "",
@@ -222,7 +249,7 @@ def _from_summaries(limit, app_data_dir, home):
     return out[:limit] if limit else out
 
 
-def _epoch(datetime_str):
+def _epoch(datetime_str: str | int | float | None) -> float:
     """Best-effort ISO/sqlite-datetime → epoch seconds; 0.0 on failure."""
     if not datetime_str:
         return 0.0
@@ -237,18 +264,19 @@ def _epoch(datetime_str):
 
 
 # --- public listing / resolution ---------------------------------------------
-def _all_db_paths(app_data_dir=None, home=None):
+def _all_db_paths(app_data_dir: str | None = None, home: PathInput | None = None) -> list[str]:
     return glob.glob(os.path.join(conversations_dir(app_data_dir, home), "*.db"))
 
 
-def _safe_mtime(path):
+def _safe_mtime(path: PathInput) -> float:
     try:
         return os.path.getmtime(path)
     except OSError:
         return 0.0
 
 
-def list_conversations(limit=None, app_data_dir=None, enrich=True, home=None):
+def list_conversations(limit: int | None = None, app_data_dir: str | None = None,
+                       enrich: bool = True, home: PathInput | None = None) -> list[ConversationInfo]:
     """Past conversations, newest first. Prefers ``conversation_summaries.db`` when populated;
     otherwise enumerates ``conversations/*.db`` by mtime (the reliable path — the summaries
     table is empty on this install). ``enrich`` reads each returned conversation's step count
@@ -262,7 +290,7 @@ def list_conversations(limit=None, app_data_dir=None, enrich=True, home=None):
     if limit:
         paths = paths[:limit]
     hist = _history_index(app_data_dir, home) if enrich else {}
-    out = []
+    out: list[ConversationInfo] = []
     for p in paths:
         cid = os.path.splitext(os.path.basename(p))[0]
         info = ConversationInfo(id=cid, last_modified=_safe_mtime(p), db=p)
@@ -271,12 +299,13 @@ def list_conversations(limit=None, app_data_dir=None, enrich=True, home=None):
             text = _first_user_text(cid, app_data_dir, home)
             info.title = text[:80]
             info.preview = text[:200]
-            info.workspace = (hist.get(cid) or {}).get("workspace")
+            history = hist.get(cid)
+            info.workspace = history["workspace"] if history else None
         out.append(info)
     return out
 
 
-def latest_conversation_id(app_data_dir=None, home=None):
+def latest_conversation_id(app_data_dir: str | None = None, home: PathInput | None = None) -> str | None:
     """The conversation ID with the newest ``conversations/*.db`` mtime, or ``None``."""
     paths = _all_db_paths(app_data_dir, home)
     if not paths:
@@ -285,7 +314,7 @@ def latest_conversation_id(app_data_dir=None, home=None):
 
 
 # --- resolving the ID a run just created / continued -------------------------
-def snapshot(app_data_dir=None, home=None):
+def snapshot(app_data_dir: str | None = None, home: PathInput | None = None) -> ConversationSnapshot:
     """Record ``{conversation_id: mtime}`` for every stored conversation *now*. Pass to
     :func:`capture_conversation_id` after a run to find which conversation it created (new
     id) or continued (mtime advanced)."""
@@ -293,7 +322,7 @@ def snapshot(app_data_dir=None, home=None):
                        for p in _all_db_paths(app_data_dir, home)}}
 
 
-def _id_from_capture(capture_path):
+def _id_from_capture(capture_path: PathInput | None) -> str | None:
     """First ``{"kind":"conversation_id","id":...}`` event in the capture JSONL, or ``None``.
     Emitted by the file_open book (AGY_PROC_CONV_ID) from the conversation-store path — exact
     and in-process. FIRST = the main/top-level conversation (its store opens before any
@@ -306,20 +335,23 @@ def _id_from_capture(capture_path):
                 if '"conversation_id"' not in line:
                     continue
                 try:
-                    obj = json.loads(line)
+                    obj = json_loads_object(line)
                 except ValueError:
                     continue
-                if obj.get("kind") == "conversation_id" and obj.get("id"):
-                    return obj["id"]
+                conversation_id = obj.get("id")
+                if obj.get("kind") == "conversation_id" and isinstance(conversation_id, str) and conversation_id:
+                    return conversation_id
     except OSError:
         return None
     return None
 
 
-def capture_conversation_id(snapshot=None, capture_path=None, app_data_dir=None, home=None):
+def capture_conversation_id(snapshot: ConversationSnapshot | None = None,
+                            capture_path: PathInput | None = None, app_data_dir: str | None = None,
+                            home: PathInput | None = None) -> str | None:
     """Resolve the conversation a just-finished run created or continued, most-reliable first:
       1. a ``conversation_id`` event from the file_open book in the capture JSONL (exact,
-         in-process — needs AGY_PROC_CONV_ID + an instrumented run);
+         in-process — needs AGY_PROC_CONV_ID + a linked run);
       2. vs the pre-run ``snapshot``: the newest conversation that is NEW or whose mtime
          advanced (covers both create and resume);
       3. else the newest conversation overall.
@@ -340,7 +372,8 @@ def capture_conversation_id(snapshot=None, capture_path=None, app_data_dir=None,
 
 
 # --- write side: workspace trust + repo-scoped data dir ----------------------
-def trust_workspace(workspace, home=None, app_data_dir=None):
+def trust_workspace(workspace: PathInput | None, home: PathInput | None = None,
+                    app_data_dir: str | None = None) -> bool:
     """Add ``workspace`` (absolute) to ``trustedWorkspaces`` in the (scoped or global)
     ``settings.json`` — the same thing accepting agy's interactive "trust this folder" menu
     persists, so a live/interactive session won't block on it. Idempotent + atomic;
@@ -350,11 +383,11 @@ def trust_workspace(workspace, home=None, app_data_dir=None):
     ws = os.path.abspath(workspace)
     path = os.path.join(store_root(app_data_dir, home), "settings.json")
     try:
-        data = {}
+        data: JSONObject = {}
         if os.path.exists(path):
             with open(path, errors="replace") as f:
-                data = json.load(f) or {}
-        tw = data.get("trustedWorkspaces") or []
+                data = json_object(json_load(f) or {})
+        tw = json_array(data.get("trustedWorkspaces") or [])
         if ws in tw:
             return True
         tw.append(ws)
@@ -369,7 +402,7 @@ def trust_workspace(workspace, home=None, app_data_dir=None):
         return False
 
 
-def seed_onboarding(store_root_path):
+def seed_onboarding(store_root_path: PathInput) -> str:
     """Mark a (scoped) agy store as already onboarded. Idempotent.
 
     agy's first-run wizard is not one of the prompts the PTY layer auto-answers
@@ -387,7 +420,8 @@ def seed_onboarding(store_root_path):
     return marker
 
 
-def prepare_scoped_home(data_dir, app_data_dir=None, link_global_config=True):
+def prepare_scoped_home(data_dir: PathInput, app_data_dir: str | None = None,
+                        link_global_config: bool = True) -> str:
     """Scope agy's data dir to ``data_dir`` (a project repo): a run launched with
     ``HOME=data_dir`` keeps its whole conversation store under ``data_dir/.gemini/`` instead
     of the global ``~/.gemini``. agy reads GeminiDir as ``$HOME/.gemini`` and looks for its
@@ -409,7 +443,7 @@ def prepare_scoped_home(data_dir, app_data_dir=None, link_global_config=True):
     root = store_root(app_data_dir, home=data_dir)       # <data_dir>/.gemini/<app_data_dir>
     os.makedirs(root, exist_ok=True)
 
-    def _link(src, dst):
+    def _link(src: str, dst: str) -> None:
         if os.path.exists(src) and not os.path.lexists(dst):
             try:
                 os.symlink(src, dst)
@@ -428,10 +462,10 @@ def prepare_scoped_home(data_dir, app_data_dir=None, link_global_config=True):
     # trust_workspace) — only if absent, so we never clobber a scoped store agy already owns.
     settings = os.path.join(root, "settings.json")
     if not os.path.exists(settings):
-        seed = {}
+        seed: JSONObject = {}
         try:
             with open(os.path.join(real_app, "settings.json"), errors="replace") as f:
-                g = json.load(f) or {}
+                g = json_object(json_load(f) or {})
             for k in ("model", "enableTelemetry"):
                 if k in g:
                     seed[k] = g[k]
@@ -446,13 +480,15 @@ def prepare_scoped_home(data_dir, app_data_dir=None, link_global_config=True):
     return root
 
 
-def scope_for_run(workspace, data_dir=None, trust=True, app_data_dir=None):
+def scope_for_run(workspace: PathInput | None, data_dir: PathInput | None = None,
+                  trust: bool = True, app_data_dir: str | None = None) -> tuple[PathInput | None, dict[str, str]]:
     """Prep native-store scoping + workspace trust for one run. If ``data_dir`` is set, seed a
     repo-scoped agy home (login preserved). Pre-trust ``workspace`` in the (scoped or global)
     ``settings.json`` unless ``trust=False``. Returns ``(home, env_overrides)`` — ``home`` is
     ``data_dir`` (or None), ``env_overrides`` sets ``HOME`` for the child so agy uses the
     scoped tree. Thread ``home`` back into the store readers/capture."""
-    home, env_overrides = None, {}
+    home: PathInput | None = None
+    env_overrides: dict[str, str] = {}
     if data_dir:
         prepare_scoped_home(data_dir, app_data_dir)
         home = data_dir

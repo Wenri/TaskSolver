@@ -1,50 +1,39 @@
-"""setup.py — metadata lives in pyproject.toml; this adds the native build hooks.
+"""Build and bundle the native runtimes described in pyproject.toml.
 
-Both native targets are built as part of the tasksolver package build, so one `pixi install`
-produces everything (the package is arch-specific — linux-64; see
-[tool.pixi.package.build.config] noarch=false):
+CMake produces the agy host, libagy.so and wirecap bridge; Cargo links that bridge
+into Codex. Kimi builds its Node bundle and native addon. Claude's pinned executable
+is verified and staged with its SDK. Native failures fail the package build.
 
-  1. the antigravity host executable `antigravity/vendor/agy` + converted shared library
-     `antigravity/vendor/libagy.so` (which also builds the shared `wirecap_bridge` static lib),
-     via CMake + Ninja; and
-  2. the vendored, wirecap-patched codex CLI `codex/vendor/codex-rs/target/release/codex`
-     (gnu-dynamic, linking the bridge from step 1 + libpython), via Cargo. This runs AFTER the
-     shim so `libwirecap_bridge.a` exists for codex's build.rs.
-
-Both are REQUIRED and fail the build loudly if the toolchain (cmake/ninja/cargo/boost/libclang/
-kernel-headers) or network (the agy download) is missing. There is NO opt-out: skipping either
-would ship a wheel whose `agy*`/`codex*` backends don't work — a broken package, not a lighter
-one — so a tasksolver build always produces the natives or fails. (This hook only runs when
-building from source; installing a prebuilt wheel does not trigger it.)
-
-After building, `_bundle_artifacts` copies the shim + agy into `pyagy/vendor/` and the
-(debug-stripped) codex into `pycodex/vendor/` INSIDE the wheel (build_lib), so the wheel is
-self-contained — the runtime resolver (`pyagy/pycodex/_env.py:_vendored`) finds them there (or, in
-a source/editable checkout, in the sibling `vendor/`). The artifacts are ALWAYS packaged, never
-supplied externally — there is no env-var override. `BinaryDistribution` forces the platform+ABI
-wheel tag.
+Artifacts are copied into each provider's vendor directory in the wheel. The wheel
+uses a platform and Python ABI tag because its runtimes embed CPython.
 """
 import json
 import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
+from typing import NotRequired, TypedDict, cast
 
 from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py
 
 
+class PackageManifest(TypedDict):
+    packageManager: NotRequired[str]
+
+
 class BinaryDistribution(Distribution):
     """Force a non-purelib, platform+ABI-tagged wheel. The natives are produced by the build_py
-    hook (not setuptools ext_modules), so setuptools would otherwise tag the wheel py3-none-any;
-    has_ext_modules=True flips Root-Is-Purelib to false and yields e.g. cp313-cp313-linux_x86_64,
+    step (not setuptools ext_modules), so setuptools would otherwise tag the wheel py3-none-any;
+    has_ext_modules=True flips Root-Is-Purelib to false and yields e.g. cp315-cp315-linux_x86_64,
     which correctly pins the wheel to the interpreter its bundled libpython was built against."""
 
-    def has_ext_modules(self):
+    def has_ext_modules(self) -> bool:
         return True
 
 
-def native_build_env():
+def native_build_env() -> dict[str, str]:
     """Environment for the native build steps.
 
     The CMake and Cargo builds take python3, python3-config, Boost, libclang and the N-API
@@ -58,7 +47,7 @@ def native_build_env():
     return env
 
 
-def cmake_python_args(env):
+def cmake_python_args(env: Mapping[str, str]) -> list[str]:
     """Name the embedded interpreter on every configure. The CMake build dirs are shared with
     `pixi run build-shim`, and a PY3CONFIG cached from another env would embed that env's
     libpython (a different minor version after a Python bump)."""
@@ -67,7 +56,9 @@ def cmake_python_args(env):
 
 
 class BuildPyNative(build_py):
-    def run(self):
+    build_lib: str
+
+    def run(self) -> None:
         root = os.path.dirname(os.path.abspath(__file__))
         env = native_build_env()
         try:
@@ -86,7 +77,7 @@ class BuildPyNative(build_py):
             # natives. SystemExit is not an Exception, so the build fails loudly as documented.
             raise SystemExit(f"[setup] native build failed: {exc}") from exc
 
-    def _build_antigravity_shim(self, root, env):
+    def _build_antigravity_shim(self, root: str, env: Mapping[str, str]) -> None:
         if not os.path.isdir(os.path.join(root, "antigravity")):
             return  # antigravity/ absent (degenerate checkout with the source tree missing)
         # CMake + Ninja (both pixi host-dependencies) run the whole chain: configure caches the
@@ -99,7 +90,7 @@ class BuildPyNative(build_py):
         subprocess.run(["cmake", "--build", build], cwd=root, env=env, check=True)
         sys.stderr.write("[setup] vendor/agy + vendor/libagy.so + wirecap_bridge built\n")
 
-    def _build_codex(self, root, env):
+    def _build_codex(self, root: str, env: Mapping[str, str]) -> None:
         codex_rs = os.path.join(root, "codex", "vendor", "codex-rs")
         if not os.path.isdir(codex_rs):
             return  # codex-rs absent (degenerate checkout with the source tree missing)
@@ -115,7 +106,7 @@ class BuildPyNative(build_py):
                        cwd=codex_rs, env=env, check=True)
         sys.stderr.write("[setup] codex built (gnu-dynamic, wirecap-patched)\n")
 
-    def _build_kimi(self, root, env):
+    def _build_kimi(self, root: str, env: Mapping[str, str]) -> None:
         vendor = os.path.join(root, "kimi", "vendor", "kimi-code")
         if not os.path.isdir(vendor):
             return  # kimi-code absent (degenerate checkout with the source tree missing)
@@ -124,7 +115,7 @@ class BuildPyNative(build_py):
         #    pnpm 10). The vis-web asset is stubbed — it only feeds `kimi vis` — so the
         #    vite/tailwind prebuild is skipped; invoking tsdown directly (not `pnpm run build`)
         #    also skips the darwin/win32 native-asset copy and the dist-web check, neither of
-        #    which the instrumented Linux CLI needs. tsdown produces
+        #    which the linked Linux CLI needs. tsdown produces
         #    dist/main.mjs plus its sibling search-worker.mjs, which the ESM runtime resolves
         #    beside the main bundle. The minidb worker remains SEA-only.
         #    Idempotent: pnpm/tsdown no-op when nothing changed.
@@ -134,7 +125,7 @@ class BuildPyNative(build_py):
             with open(stub, "w") as f:
                 f.write("export const VIS_WEB_GZIP_B64 = '';\n")
         with open(os.path.join(vendor, "package.json")) as f:
-            pin = json.load(f).get("packageManager", "pnpm@10").split("+")[0]
+            pin = cast(PackageManifest, json.load(f)).get("packageManager", "pnpm@10").split("+")[0]
         pnpm = ["npx", "-y", pin]
         app = os.path.join(vendor, "apps", "kimi-code")
         # A build has no TTY, so pnpm must relink node_modules without asking (it aborts instead).
@@ -156,7 +147,7 @@ class BuildPyNative(build_py):
         subprocess.run(["cmake", "--build", build], cwd=root, env=env, check=True)
         sys.stderr.write("[setup] kimi-code bundle + wirecap_node.node built\n")
 
-    def _bundle_artifacts(self, root):
+    def _bundle_artifacts(self, root: str) -> None:
         # Make the wheel self-contained: copy the native artifacts from their sibling vendor/
         # build dirs into the package tree under build_lib, so bdist_wheel zips them in and the
         # runtime resolver (_vendored) finds them at pyagy/vendor/… and pycodex/vendor/…. The

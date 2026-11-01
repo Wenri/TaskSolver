@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live end-to-end test for pycodex: a real ``codex exec`` turn, instrumented by the compiled-in
+"""Live end-to-end test for pycodex: a real ``codex exec`` turn, linked by the compiled-in
 wirecap bridge, decoded to a ``codex_turn``.
 
 Gated: skips cleanly (exit 0) if the built codex binary is missing (run ``pixi install`` — there is no build-codex task by design)
@@ -7,7 +7,9 @@ or codex isn't authenticated. Needs codex auth (``OPENAI_API_KEY`` or ``codex lo
 
     python3 test_scripts/test_codex.py
 """
-import json
+
+from __future__ import annotations
+
 import os
 import sys
 
@@ -17,29 +19,29 @@ _CODEX = os.path.join(_REPO, "codex")
 sys.path.insert(0, _CODEX)
 sys.path.insert(0, _REPO)
 
-from pycodex import ask                      # noqa: E402
-from pycodex._env import CODEX_BIN           # noqa: E402
+from pycodex import ask  # noqa: E402
+from pycodex._env import CODEX_BIN  # noqa: E402
 
-_failures = []
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
 
 
-def skip(msg):
+def skip(msg: str) -> None:
     print(f"NOTE: skipping — {msg}")
     print("PASS")
     sys.exit(0)
 
 
-def main():
+def main() -> None:
     print("[live] pycodex.ask() end-to-end")
     if not os.path.exists(CODEX_BIN):
         skip(f"codex binary missing ({CODEX_BIN}) — run `pixi install` (codex is built by the\n"
-             f"       install's build_py hook; there is deliberately no build-codex task)")
+             f"       install's build_py step; there is deliberately no build-codex task)")
     if not os.environ.get("CONDA_PREFIX"):
         skip("CONDA_PREFIX unset — run under the pixi env (PYTHONHOME for the embedded interpreter)")
 
@@ -54,7 +56,7 @@ def main():
     check(r.request is not None, "request summary decoded (paired)")
     # the request the model saw carries our prompt
     first_user = (r.request or {}).get("first_user_text", "")
-    check("2+2" in first_user, "request first_user_text carries the prompt")
+    check(isinstance(first_user, str) and "2+2" in first_user, "request first_user_text carries the prompt")
 
     print()
     if _failures:

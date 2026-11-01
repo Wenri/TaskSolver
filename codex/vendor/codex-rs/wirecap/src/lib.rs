@@ -2,9 +2,8 @@
 //! `libwirecap_bridge.a`), which embeds CPython on a worker thread and calls the Python
 //! `dispatch(kind, stream_id, data)` on the module named by `WIRE_MODULE`.
 //!
-//! This is the codex analog of the antigravity shim's `wire_emit` call sites: instead of
-//! LD_PRELOAD/gum hooking a closed binary, the vendored codex source calls [`emit`] at its
-//! HTTP boundary (the `/v1/responses` request + each streamed `ResponsesStreamEvent`).
+//! Capture calls sit at the HTTP boundary: the `/v1/responses` request and each streamed
+//! `ResponsesStreamEvent` share a [`ResponseCapture`] for exact request correlation.
 //!
 //! Fully gated: [`start`] no-ops unless `WIRE_ENABLE` is set, and [`emit`] no-ops until the
 //! bridge reports ready — so a normal `codex` run (outside pycodex) never spins up libpython.
@@ -39,13 +38,7 @@ pub fn start() {
     });
 }
 
-/// Cooperatively stop + join the bridge worker. Call once at the very end of `main()`, mirroring
-/// [`start`] — this is the deterministic teardown the bridge documents (agy reaches it from its
-/// os.Exit hook, since Go's os.Exit bypasses libc exit entirely).
-///
-/// Without it the bridge is only torn down by `~PyBridge` at libc exit, which its own comments call
-/// a fallback and warn is a use-after-destruction hazard if another thread is still inside
-/// `bridge()` — a live risk for codex, which is the more threaded of the two consumers (tokio).
+/// Drain accepted captures and join the bridge worker at the end of `main()`.
 ///
 /// No-op unless [`start`] actually ran, so a plain `codex` run (no WIRE_ENABLE) never touches
 /// libpython. NOTE this does not cover the paths that call `std::process::exit` (the interactive
@@ -59,9 +52,9 @@ pub fn shutdown() {
 }
 
 /// Emit a capture event (ASYNC). No-op until the bridge is ready.
-pub fn emit(kind: &CStr, stream_id: u64, data: &[u8]) {
-    // SAFETY: wire_ready/wire_emit_async are the bridge's C ABI; `data`/`kind` outlive the call
-    // (the bridge copies the bytes before returning). ASYNC → no GIL on this thread.
+pub fn emit(kind: &'static CStr, stream_id: u64, data: &[u8]) {
+    // SAFETY: the bridge copies data before returning, but borrows kind until dispatch.
+    // The static lifetime keeps that queued pointer valid. No GIL is taken here.
     unsafe {
         if wire_ready() == 0 {
             return;
@@ -70,15 +63,25 @@ pub fn emit(kind: &CStr, stream_id: u64, data: &[u8]) {
     }
 }
 
-/// Emit the model REQUEST body (`/v1/responses` JSON), starting a new turn id. Returns that id
-/// so the response events of the same turn can be tagged with it.
-pub fn emit_request(body: &[u8]) -> u64 {
-    let id = TURN.fetch_add(1, Ordering::Relaxed) + 1;
-    emit(c"codex_request", id, body);
-    id
+/// Capture one transport request and its response, including cancellation/error cleanup.
+pub struct ResponseCapture {
+    id: u64,
 }
 
-/// Emit one streamed response event (`ResponsesStreamEvent` JSON), tagged with the current turn.
-pub fn emit_event(body: &[u8]) {
-    emit(c"codex_event", TURN.load(Ordering::Relaxed), body);
+impl ResponseCapture {
+    pub fn new(body: &[u8]) -> Self {
+        let id = TURN.fetch_add(1, Ordering::Relaxed) + 1;
+        emit(c"codex_request", id, body);
+        Self { id }
+    }
+
+    pub fn event(&self, body: &[u8]) {
+        emit(c"codex_event", self.id, body);
+    }
+}
+
+impl Drop for ResponseCapture {
+    fn drop(&mut self) {
+        emit(c"codex_end", self.id, &[]);
+    }
 }

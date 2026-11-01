@@ -8,7 +8,7 @@ class ToolCallException(Exception):
 
 
 class GPTOutputParseException(Exception):
-    """ 
+    """
     @GPT4-doc-begin
     raised in parsers when input is not parseable.
     @GPT4-doc-end
@@ -26,25 +26,25 @@ class GPTServerError(Exception):
 
 
 class GPTMaxTriesExceededException(Exception):
-    """ 
+    """
     @GPT4-doc-begin
     raised in ask() when max attempt threshold has been exceeded.
     @GPT4-doc-end
     """
     def __init__(
         self,
-        *args,
-        raw_response=None,
-        response_metadata=None,
-        request_payload=None,
-    ):
+        *args: object,
+        raw_response: object = None,
+        response_metadata: object = None,
+        request_payload: object = None,
+    ) -> None:
         super().__init__(*args)
         self.raw_response = raw_response
         self.response_metadata = response_metadata
         self.request_payload = request_payload
 
 class InvalidParsedAnswer(Exception):
-    """ 
+    """
     @GPT4-doc-begin
     raised in the visualizer when input ParsedAnswer can't be made into
     a valid visualization.
@@ -53,7 +53,7 @@ class InvalidParsedAnswer(Exception):
     pass
 
 class UnreadableGPTDocumentation(Exception):
-    """ 
+    """
     @GPT4-doc-begin
     raised when the documentation of a specified function cannot be read
     by GPT-4V, either because the documentation doesn't exist or the proper

@@ -11,6 +11,9 @@ tests touch `wirecap.decode` with no provider package involved.
 Stdlib-only, and it asserts that too: wirecap.decode must import under `python3 -S` with
 no third-party module and no tasksolver, because the CLI's embedded interpreter imports it.
 """
+
+from __future__ import annotations
+
 import os
 import subprocess
 import sys
@@ -19,19 +22,19 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
 sys.path.insert(0, _REPO)
 
-from wirecap.decode import http1sse as h        # noqa: E402
-from wirecap.decode.turns import Usage, primary_turn, sum_usage   # noqa: E402
+from wirecap.decode import http1sse as h  # noqa: E402
+from wirecap.decode.turns import Usage, primary_turn, sum_usage  # noqa: E402
 
-_fail = []
+_fail: list[str] = []
 
 
-def check(cond, label):
+def check(cond: object, label: str) -> None:
     print(f"  {'ok  ' if cond else 'FAIL'} {label}")
     if not cond:
         _fail.append(label)
 
 
-def test_inflate():
+def test_inflate() -> None:
     print("[wirecap] inflate: gzip / deflate / passthrough")
     import gzip
     import zlib
@@ -43,7 +46,7 @@ def test_inflate():
           "inflate: undecodable body returned unchanged (never raises)")
 
 
-def test_classify():
+def test_classify() -> None:
     print("[wirecap] classify: http1 vs h2, per direction")
     check(h.classify("c2s", b"POST /v1/x HTTP/1.1\r\n") == "http1", "classify: c2s request → http1")
     check(h.classify("c2s", b"PRI * HTTP/2.0\r\n\r\n") == "h2", "classify: c2s preface → h2")
@@ -51,7 +54,7 @@ def test_classify():
     check(h.classify("c2s", b"PO") is None, "classify: too-few bytes stays undecided")
 
 
-def test_usage_shared():
+def test_usage_shared() -> None:
     print("[wirecap] Usage / primary_turn / sum_usage (shared by both providers)")
     turns = [
         {"kind": "t", "usage": {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11}},
@@ -72,10 +75,10 @@ def test_usage_shared():
           "Usage: legacy prompt_tokens/candidates_tokens aliases")
     check(primary_turn([]) is None and sum_usage([]).total_tokens == 0,
           "empty: safe defaults")
-    check(isinstance(Usage(), Usage), "Usage: constructible with no args")
+    check(type(Usage()) is Usage, "Usage: constructible with no args")
 
 
-def test_purity():
+def test_purity() -> None:
     print("[wirecap] purity: wirecap.decode imports stdlib-only under python3 -S")
     code = ("import sys; sys.path.insert(0, %r); "
             "import wirecap.decode.http1sse, wirecap.decode.turns, wirecap.decode.capture, "

@@ -4,7 +4,7 @@ import os
 import sys
 
 
-def main():
+def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit("usage: python -m pycodex.sdk_process CODEX [ARGS...]")
     os.setsid()

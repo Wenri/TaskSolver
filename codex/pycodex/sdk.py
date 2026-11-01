@@ -1,4 +1,4 @@
-"""Official Codex Python SDK over the bundled, instrumented app-server.
+"""Official Codex Python SDK over the bundled, linked app-server.
 
 The SDK handles typed threads, structured inputs and JSON-RPC. TaskSolver adds
 capture, workspace/MCP configuration, a deadline and process-group cleanup.
@@ -15,18 +15,24 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Final, Self, Unpack, cast
+
+from wirecap.runtime.mcp import MCPServers
+from .types import (ResumeThreadOptions, SDKAskOptions, SDKSessionOptions,
+                    StartThreadOptions, ThreadOptions, TurnOptions, SDKTurnOptions)
 
 from wirecap.decode.turns import Usage
 from wirecap.runtime.workspace import ensure_git_workspace
 
-from ._env import CODEX_BIN, instrumented_env
+from ._env import CODEX_BIN, linked_env
 from .client import CodexResponse, _load_capture
 from .config import mcp_flags
-from .sessions import latest_session_id, read_transcript
+from .sessions import TranscriptRow, latest_session_id, read_transcript
 
 if TYPE_CHECKING:
-    from openai_codex import Thread, TurnResult
+    from openai_codex import Codex, CodexConfig, Thread, TurnResult
+    from openai_codex._inputs import RunInput
 
 
 @dataclass
@@ -36,12 +42,12 @@ class CodexSDKResponse(CodexResponse):
     sdk_result: TurnResult | None = None
 
     @property
-    def explicit_reasoning_output(self):
+    def explicit_reasoning_output(self) -> str:
         if self.sdk_result is None:
             return ""
         from openai_codex.generated.v2_all import ReasoningThreadItem
 
-        fragments: Final = []
+        fragments: list[str] = []
         for wrapped in self.sdk_result.items:
             item = wrapped.root
             if isinstance(item, ReasoningThreadItem):
@@ -50,7 +56,7 @@ class CodexSDKResponse(CodexResponse):
         return "\n\n".join(fragments)
 
     @property
-    def usage(self):
+    def usage(self) -> Usage:
         if self.turns:
             return super().usage
         if self.sdk_result is None or self.sdk_result.usage is None:
@@ -61,10 +67,10 @@ class CodexSDKResponse(CodexResponse):
                      output_tokens=usage.output_tokens,
                      reasoning_output_tokens=usage.reasoning_output_tokens,
                      total_tokens=usage.total_tokens,
-                     raw=usage.model_dump(by_alias=True, mode="json"))
+                     raw=cast(dict[str, object], usage.model_dump(by_alias=True, mode="json")))
 
 
-def _sdk_client(config):
+def _sdk_client(config: CodexConfig) -> Codex:
     # Keep the client reachable before initialize() waits for an RPC response,
     # so a startup timeout can close it too. This small lifecycle adapter is
     # tied to the pristine SDK shipped alongside our pinned CLI source.
@@ -76,7 +82,7 @@ def _sdk_client(config):
     return client
 
 
-def _stop_client(client, *, force=False):
+def _stop_client(client: Codex, *, force: bool = False) -> int | None:
     transport: Final = client._client
     proc: Final = transport._proc
     if proc is None:
@@ -128,17 +134,21 @@ class SDKSession:
     A timeout closes the session; its stored thread can be resumed explicitly.
     """
 
-    def __init__(self, *, model=None, workspace=None, timeout=300,
-                 codex_bin=None, extra_env=None, mcp_servers=None,
-                 codex_home=None, session_id=None, continue_latest=False,
-                 capture=True, config_overrides=(), thread_options=None):
+    def __init__(self, *, model: str | None = None,
+                 workspace: str | os.PathLike[str] | None = None, timeout: float = 300,
+                 codex_bin: str | os.PathLike[str] | None = None,
+                 extra_env: Mapping[str, str] | None = None, mcp_servers: MCPServers | None = None,
+                 codex_home: str | os.PathLike[str] | None = None,
+                 session_id: str | None = None, continue_latest: bool = False,
+                 capture: bool | str | os.PathLike[str] = True,
+                 config_overrides: Sequence[str] = (), thread_options: ThreadOptions | None = None) -> None:
         if session_id and continue_latest:
             raise ValueError("session_id and continue_latest are mutually exclusive")
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         from openai_codex import ApprovalMode, CodexConfig, Sandbox
 
-        self.workspace = ensure_git_workspace(workspace)
+        self.workspace = ensure_git_workspace(os.fspath(workspace) if workspace is not None else None)
         self.timeout = timeout
         self.codex_home = os.path.abspath(codex_home) if codex_home else None
         self._session_id = session_id
@@ -146,9 +156,9 @@ class SDKSession:
             self._session_id = latest_session_id(home=self.codex_home, cwd=self.workspace)
             if not self._session_id:
                 raise ValueError("No saved Codex session exists in this workspace")
-        self._thread_options: dict[str, Any] = dict(model=model, cwd=self.workspace,
-                                                   sandbox=Sandbox.read_only,
-                                                   approval_mode=ApprovalMode.deny_all)
+        self._thread_options: ThreadOptions = {"model": model, "cwd": self.workspace,
+                                                   "sandbox": Sandbox.read_only,
+                                                   "approval_mode": ApprovalMode.deny_all}
         self._thread_options.update(thread_options or {})
         self._lock = threading.Lock()
         self._close_lock = threading.Lock()
@@ -168,7 +178,7 @@ class SDKSession:
                 fd, self.capture_path = tempfile.mkstemp(
                     prefix="codex-sdk-", suffix=".jsonl", dir=self.workspace)
                 os.close(fd)
-        env: Final = instrumented_env(self.capture_path or os.devnull,
+        env: Final = linked_env(self.capture_path or os.devnull,
                                       extra_env=extra_env, codex_home=self.codex_home)
         # The SDK uses plain stdio, with capture rather than the mp-child stream.
         env.pop("WIRE_MP_BOOT_FD", None)
@@ -183,7 +193,7 @@ class SDKSession:
             # official login RPC must use the process-local credential store,
             # never replace a caller's existing on-disk or keyring login.
             flags.extend(["--config", 'cli_auth_credentials_store="ephemeral"'])
-        binary: Final = os.path.abspath(os.fspath(codex_bin or CODEX_BIN))
+        binary: Final[str] = os.path.abspath(os.fspath(codex_bin or CODEX_BIN))
         if not os.path.isfile(binary):
             raise FileNotFoundError(f"Codex binary not found: {binary}; run pixi install")
         config: Final = CodexConfig(
@@ -194,7 +204,7 @@ class SDKSession:
             client_version="0.166.0")
         self._client = _sdk_client(config)
 
-    def _start(self):
+    def _start(self) -> None:
         if self._closed:
             raise RuntimeError("SDKSession is closed; resume its session_id in a new session")
         if self._started:
@@ -209,16 +219,16 @@ class SDKSession:
         if self._api_key:
             self._client.login_api_key(self._api_key)
         if self._session_id:
-            self._thread = self._client.thread_resume(self._session_id, **self._thread_options)
+            self._thread = self._client.thread_resume(self._session_id, **cast(ResumeThreadOptions, self._thread_options))
         else:
-            self._thread = self._client.thread_start(**self._thread_options)
+            self._thread = self._client.thread_start(**cast(StartThreadOptions, self._thread_options))
         self._session_id = self._thread.id
         self._started = True
 
-    def _bounded(self, operation):
+    def _bounded[T](self, operation: Callable[[], T]) -> tuple[T | None, bool]:
         expired: Final = threading.Event()
 
-        def expire():
+        def expire() -> None:
             expired.set()
             self.close(force=True)
 
@@ -237,43 +247,48 @@ class SDKSession:
             timer.join()
         return result, expired.is_set()
 
-    def _ensure_started(self):
+    def _ensure_started(self) -> None:
         _, timed_out = self._bounded(self._start)
         if timed_out:
             raise TimeoutError("Codex SDK startup timed out")
 
     @property
-    def client(self):
+    def client(self) -> Codex:
         """Official ``openai_codex.Codex`` client (lazy startup)."""
         self._ensure_started()
         return self._client
 
     @property
-    def thread(self):
+    def thread(self) -> Thread:
         """Official ``openai_codex.Thread`` (lazy startup)."""
         self._ensure_started()
+        assert self._thread is not None
         return self._thread
 
     @property
-    def session_id(self):
+    def session_id(self) -> str | None:
         return self._session_id
 
     @property
-    def conversation_id(self):
+    def conversation_id(self) -> str | None:
         return self.session_id
 
-    def history(self):
+    def history(self) -> list[TranscriptRow]:
         return read_transcript(self.session_id, home=self.codex_home) if self.session_id else []
 
-    def ask(self, prompt, **turn_options):
+    def ask(self, prompt: RunInput, **turn_options: Unpack[TurnOptions]) -> CodexSDKResponse:
         """Run one SDK turn, returning native capture plus its typed result."""
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("An SDKSession supports one active ask at a time")
         try:
-            def run():
+            def run() -> TurnResult:
                 self._start()
                 assert self._thread is not None
-                result: Final = self._thread.run(prompt, **turn_options)
+                from openai_codex.types import ReasoningEffort
+                effort = turn_options.get("effort")
+                options: SDKTurnOptions = {**turn_options,
+                    "effort": ReasoningEffort(effort) if effort is not None else None}
+                result: Final = self._thread.run(prompt, **options)
                 if result.status.value != "completed":
                     raise RuntimeError(f"Codex SDK turn ended with status {result.status.value}")
                 return result
@@ -300,21 +315,25 @@ class SDKSession:
         finally:
             self._lock.release()
 
-    def close(self, *, force=False):
+    def close(self, *, force: bool = False) -> None:
         with self._close_lock:
             if self._closed:
                 return
             self._closed = True
-            self._exit_status = _stop_client(self._client, force=force) or 0
+            # An active ask may hold stdin's buffer lock while writing. Kill it
+            # before closing stdin, or close would also block the deadline's cleanup.
+            self._exit_status = _stop_client(
+                self._client, force=force or self._lock.locked()) or 0
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: object) -> None:
         self.close()
 
 
-def ask_sdk(prompt, *, turn_options=None, **kwargs):
+def ask_sdk(prompt: RunInput, *, turn_options: TurnOptions | None = None,
+            **kwargs: Unpack[SDKSessionOptions]) -> CodexSDKResponse:
     """One-shot SDK turn; ``kwargs`` configure :class:`SDKSession`."""
     with SDKSession(**kwargs) as session:
         response: Final = session.ask(prompt, **(turn_options or {}))
@@ -324,6 +343,6 @@ def ask_sdk(prompt, *, turn_options=None, **kwargs):
     return response
 
 
-def ask_many_sdk(prompt, n=1, **kwargs):
+def ask_many_sdk(prompt: RunInput, n: int = 1, **kwargs: Unpack[SDKAskOptions]) -> list[CodexSDKResponse]:
     """Sequential independent SDK threads, matching ``pycodex.ask_many``."""
     return [ask_sdk(prompt, **kwargs) for _ in range(n)]

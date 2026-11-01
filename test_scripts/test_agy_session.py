@@ -9,7 +9,9 @@ recall is a soft NOTE — matching test_agyprocess.py. Uses the pinned vendor/ag
 
     python3 test_scripts/test_agy_session.py
 """
-import json
+
+from __future__ import annotations
+import shutil
 import os
 import subprocess
 import sys
@@ -27,20 +29,22 @@ from pyagy import conversations as C                    # noqa: E402
 from pyagy import _env                                  # noqa: E402
 
 WORD = "BANANA"
-_fail = []
+_fail: list[str] = []
 
 
-def _recalled(text):
+from wirecap.types import json_load_object
+
+
+def _recalled(text: str) -> bool:
     return WORD in (text or "").upper()
 
 
-def case_store_read():
+def case_store_read() -> None:
     # Read-only view of agy's real store — no live turn; always deterministic.
     infos = pyagy.list_conversations(limit=3)
     latest = pyagy.latest_conversation_id()
-    ok = isinstance(infos, list) and latest is not None and all(i.id for i in infos)
+    ok = latest is not None and all(i.id for i in infos)
     tr = pyagy.read_transcript(latest) if latest else []
-    ok = ok and isinstance(tr, list)
     print(f"  {'ok  ' if ok else 'FAIL'} store-read: {len(infos)} conversation(s), "
           f"latest={latest}, transcript={len(tr)} turns")
     if infos:
@@ -49,7 +53,7 @@ def case_store_read():
         _fail.append("store_read")
 
 
-def case_ask_resume():
+def case_ask_resume() -> None:
     # The core proof: resume a stored conversation in one-shot --print mode (deterministic
     # process exit; the reliable path). Hard-assert id capture + id continuity; soft-note recall.
     r1 = pyagy.ask(f"Remember this: the secret code word is {WORD}. Reply with only: OK",
@@ -72,7 +76,7 @@ def case_ask_resume():
               f"got {r2.text[-60:]!r}")
 
 
-def case_continue_latest():
+def case_continue_latest() -> None:
     # --continue resumes the most recent conversation.
     s = pyagy.continue_latest(idle=8.0, timeout=120, skip_permissions=True)
     try:
@@ -88,7 +92,7 @@ def case_continue_latest():
         s.close()
 
 
-def case_session_resume():
+def case_session_resume() -> None:
     # Live interactive Session across TWO processes: seed in one, resume by id in a fresh
     # Session. Soft-note recall (interactive + live model). Hard-assert id continuity.
     s1 = pyagy.Session(idle=8.0, timeout=120, skip_permissions=True)
@@ -115,7 +119,7 @@ def case_session_resume():
         s2.close()
 
 
-def case_agymodel_resume():
+def case_agymodel_resume() -> None:
     # AgyModel opt-in multi_turn: two calls continue ONE conversation (latched id).
     from pyagy import AgyModel
     m = AgyModel(model=None, multi_turn=True)
@@ -134,7 +138,7 @@ def case_agymodel_resume():
         print(f"  NOTE agymodel: {type(e).__name__}: {e} (live-model flake)")
 
 
-def case_agyprocess_resume():
+def case_agyprocess_resume() -> None:
     # AgyProcess with the default target exposes a resumable conversation_id. Needs the shim.
     # The caller owns the result queue (stock-mp style) and drains it via client._collect.
     if not os.path.exists(_env.SHIM):
@@ -160,8 +164,8 @@ def case_agyprocess_resume():
         _close_channel(q)
 
 
-def case_scoped():
-    # Scope the whole conversation store to a project repo (HOME override + seeded login):
+def case_scoped() -> None:
+    # Scope the whole conversation store to a project repo (HOME override + seeded login).
     # the conversation lands UNDER the repo, the global store is untouched, and login survives.
     # Hard-assert isolation/placement/login; soft-note the model recall.
     scope = tempfile.mkdtemp(prefix="pyagy-scope-")
@@ -187,10 +191,10 @@ def case_scoped():
         print(f"  FAIL scoped: {type(e).__name__}: {e}")
         _fail.append("scoped")
     finally:
-        __import__("shutil").rmtree(scope, ignore_errors=True)
+        shutil.rmtree(scope, ignore_errors=True)
 
 
-def case_trust():
+def case_trust() -> None:
     # Pre-trust writes the workspace into settings.json trustedWorkspaces (deterministic), so an
     # interactive Session in a FRESH workspace runs WITHOUT --dangerously-skip-permissions and
     # doesn't hang on the folder-trust menu.
@@ -199,9 +203,11 @@ def case_trust():
     subprocess.run(["git", "commit", "--allow-empty", "-qm", "x"], cwd=fresh, check=False)
     settings = os.path.join(C.store_root(), "settings.json")
 
-    def trusted():
+    def trusted() -> bool:
         try:
-            return fresh in (json.load(open(settings)).get("trustedWorkspaces") or [])
+            with open(settings) as stream:
+                workspaces = json_load_object(stream).get("trustedWorkspaces")
+            return isinstance(workspaces, list) and fresh in workspaces
         except (OSError, ValueError):
             return False
 
@@ -219,7 +225,7 @@ def case_trust():
         print(f"       NOTE trust live: {type(e).__name__}: {e} (flake)")
     finally:
         s.close()
-        __import__("shutil").rmtree(fresh, ignore_errors=True)
+        shutil.rmtree(fresh, ignore_errors=True)
 
 
 if __name__ == "__main__":

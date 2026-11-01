@@ -1,6 +1,6 @@
 """Resolve a native artifact that ships WITH its Python package — never an external path.
 
-Both providers vendor large native artifacts (agy + the LD_PRELOAD shim; the from-source codex) and
+Both providers vendor large native artifacts (the linked agy host + library; the from-source codex) and
 resolve them the same three ways, so the lookup lives here once:
 
   1. in-package — a self-contained wheel bundles the artifact under the package itself
@@ -13,13 +13,13 @@ resolve them the same three ways, so the lookup lives here once:
 
 There is deliberately NO env override: the artifacts are build-id/ABI coupled to the package (the
 shim's symbol offsets are resolved against exactly the vendored agy), so pointing this at an
-arbitrary binary produces a silently non-hooking run.
+arbitrary binary produces a run without active books.
 """
 import os
 import sys
 
 
-def vendored(pkg_dir, pkg_name, in_pkg_rel, sibling_rel):
+def vendored(pkg_dir: str, pkg_name: str, in_pkg_rel: str, sibling_rel: str) -> str:
     """Resolve ``in_pkg_rel`` for the package rooted at ``pkg_dir`` (import name ``pkg_name``).
 
     Returns the first of the three candidates that exists, else the sibling path — so the caller

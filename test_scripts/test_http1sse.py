@@ -8,11 +8,16 @@ stream classification, and the *Conn/*halfConn cross-stream correlation.
 
     python3 test_scripts/test_http1sse.py
 """
+
+from __future__ import annotations
+
 import gzip
 import json
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
+from typing import cast
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)                       # repo root holds the shared `wirecap` package
@@ -21,12 +26,15 @@ sys.path.insert(0, _ANTIGRAVITY)
 sys.path.insert(0, _REPO)
 
 from pyagy.agy_process import http1sse as h  # noqa: E402
-from wirecap.decode import capture           # noqa: E402  (shared correlator)
 
-_failures = []
+from wirecap.decode import capture  # noqa: E402  (shared correlator)
+from wirecap.decode.http1sse import Message
+from wirecap.types import Event, JSONObject, json_loads_object
+
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
@@ -38,7 +46,7 @@ def chunked(body: bytes) -> bytes:
 
 
 # --- build the fixture -------------------------------------------------------
-REQUEST_JSON = {
+REQUEST_JSON: JSONObject = {
     "project": "projects/demo",
     "requestId": "req-abc-123",
     "model": "models/gemini-3-pro",
@@ -81,7 +89,7 @@ RESPONSE_BYTES = (
 )
 
 
-def test_request_decode():
+def test_request_decode() -> None:
     print("[request] POST streamGenerateContent body")
     dec = h.StreamDecoder()
     msgs = dec.feed(REQUEST_BYTES)
@@ -90,7 +98,7 @@ def test_request_decode():
     check(m.is_request and m.method == "POST", "request: parsed as POST")
     check(h.is_generate_content(m.start_line), "request: recognized as generateContent")
     check(m.headers.get("host") == "daily-cloudcode-pa.googleapis.com", "request: Host header")
-    body = json.loads(m.body)
+    body = json_loads_object(m.body)
     check(body["requestId"] == "req-abc-123", "request: body JSON round-trips")
     s = h.summarize_request(body)
     check(s["model"] == "models/gemini-3-pro", "request: model extracted")
@@ -100,10 +108,10 @@ def test_request_decode():
           "request: systemInstruction length")
 
 
-def test_response_decode_incremental():
+def test_response_decode_incremental() -> None:
     print("[response] chunked SSE, fed one byte at a time")
     dec = h.StreamDecoder()
-    done = []
+    done: list[Message] = []
     for i in range(len(RESPONSE_BYTES)):       # byte-at-a-time stresses reassembly
         done += dec.feed(RESPONSE_BYTES[i:i + 1])
     check(len(done) == 1, "response: one message after full stream")
@@ -116,14 +124,14 @@ def test_response_decode_incremental():
     check(h.extract_usage(events).get("total_tokens") == 13, "response: usage extracted")
 
 
-def test_inflate_gzip():
+def test_inflate_gzip() -> None:
     print("[inflate] gzip content-encoding")
     raw = gzip.compress(b'{"hello":"world"}')
     check(h.inflate(raw, "gzip") == b'{"hello":"world"}', "inflate: gzip round-trip")
     check(h.inflate(b"plain", "") == b"plain", "inflate: passthrough on no encoding")
 
 
-def test_classify():
+def test_classify() -> None:
     print("[classify] http1 vs h2 sniffing")
     check(h.classify("c2s", b"POST /x HTTP/1.1\r\n") == "http1", "classify: c2s POST → http1")
     check(h.classify("c2s", b"PRI * HTTP/2.0\r\n\r\n") == "h2", "classify: c2s preface → h2")
@@ -131,15 +139,15 @@ def test_classify():
     check(h.classify("c2s", b"PO") is None, "classify: too-few bytes undecided")
 
 
-def test_correlator_cross_stream():
+def test_correlator_cross_stream() -> None:
     print("[correlator] *Conn (c2s) vs *halfConn (s2c) — different stream ids")
 
     class FakeRec:
-        def __init__(self):
-            self.events = []
+        def __init__(self) -> None:
+            self.events: list[Event] = []
 
-        def event(self, obj):
-            self.events.append(obj)
+        def event(self, obj: Mapping[str, object]) -> None:
+            self.events.append(dict(obj))
 
     rec = FakeRec()
     corr = capture.BaseCorrelator(rec, h.GenaiTurnBuilder(), reassembler=None)
@@ -153,23 +161,23 @@ def test_correlator_cross_stream():
         check(turn["text"] == "ZORPLE", "correlator: assembled text")
         check(turn["req_stream"] == 0xAAAA and turn["resp_stream"] == 0xBBBB,
               "correlator: paired across distinct stream ids")
-        check(turn.get("request", {}).get("requestId") == "req-abc-123",
+        check(cast(Mapping[str, object], turn["request"]).get("requestId") == "req-abc-123",
               "correlator: request summary attached")
-        check(turn["usage"].get("total_tokens") == 13, "correlator: usage attached")
+        check(cast(Mapping[str, object], turn["usage"]).get("total_tokens") == 13, "correlator: usage attached")
 
 
-def test_correlator_resp_chunk():
+def test_correlator_resp_chunk() -> None:
     print("[correlator] live resp_chunk path — request off the wire, response via SSE lines")
 
     class FakeRec:
-        def __init__(self):
-            self.events = []
+        def __init__(self) -> None:
+            self.events: list[Event] = []
 
-        def event(self, obj):
-            self.events.append(obj)
+        def event(self, obj: Mapping[str, object]) -> None:
+            self.events.append(dict(obj))
 
     # The response side no longer arrives on s2c (that transport read is retired); agy's
-    # toStreamResponseChunk hook hands us each decoded `data:` line one at a time.
+    # toStreamResponseChunk book hands us each decoded `data:` line one at a time.
     resp_lines = [
         b'data: ' + json.dumps({"response": {"modelVersion": "gemini-3-pro", "candidates": [
             {"content": {"parts": [{"text": "ZOR"}]}}]}}).encode(),
@@ -194,16 +202,16 @@ def test_correlator_resp_chunk():
         check(turn["text"] == "ZORPLE", "resp_chunk: text assembles across lines")
         check(turn["finish_reason"] == "STOP", "resp_chunk: finishReason STOP")
         check(turn["model"] == "gemini-3-pro", "resp_chunk: served model decoded from response")
-        check(turn["usage"].get("total_tokens") == 13, "resp_chunk: usage extracted")
+        check(cast(Mapping[str, object], turn["usage"]).get("total_tokens") == 13, "resp_chunk: usage extracted")
         check(turn["req_stream"] == 0xAAAA, "resp_chunk: paired with the wire request")
-        check(turn.get("request", {}).get("requestId") == "req-abc-123",
+        check(cast(Mapping[str, object], turn["request"]).get("requestId") == "req-abc-123",
               "resp_chunk: request summary attached")
     # a trailing [DONE] after the finishReason emit must not start/emit a second turn
     check(len([e for e in rec.events if e.get("kind") == "genai_turn"]) == 1,
           "resp_chunk: [DONE] after finish does not emit a second turn")
 
 
-def _request_bytes(model, request_id):
+def _request_bytes(model: str, request_id: str) -> bytes:
     body = json.dumps({**REQUEST_JSON, "model": model, "requestId": request_id}).encode()
     return (b"POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1\r\n"
             b"Host: daily-cloudcode-pa.googleapis.com\r\n"
@@ -211,54 +219,54 @@ def _request_bytes(model, request_id):
             b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
 
 
-def _chunk(response_id, model, text=None, finish=None, total=None):
-    cand = {"content": {"parts": [{"text": text}] if text is not None else []}}
+def _chunk(response_id: str, model: str, text: str | None=None, finish: str | None=None, total: int | None=None) -> bytes:
+    cand: JSONObject = {"content": {"parts": [{"text": text}] if text is not None else []}}
     if finish:
         cand["finishReason"] = finish
-    response = {"responseId": response_id, "modelVersion": model, "candidates": [cand]}
+    response: JSONObject = {"responseId": response_id, "modelVersion": model, "candidates": [cand]}
     if total is not None:
         response["usageMetadata"] = {"totalTokenCount": total}
     return b"data: " + json.dumps({"response": response}).encode()
 
 
-def test_correlator_overlapping_streams():
+def test_correlator_overlapping_streams() -> None:
     print("[correlator] overlapping responses (agy's title call during a turn) stay apart")
 
     class FakeRec:
-        def __init__(self):
-            self.events = []
+        def __init__(self) -> None:
+            self.events: list[Event] = []
 
-        def event(self, obj):
-            self.events.append(obj)
+        def event(self, obj: Mapping[str, object]) -> None:
+            self.events.append(dict(obj))
 
-        def record(self, *a, **k):
+        def record(self, *a: object, **k: object) -> None:
             pass
 
     rec = FakeRec()
     corr = capture.BaseCorrelator(rec, h.GenaiTurnBuilder(), reassembler=None)
     # the answer request, then agy's title request, then their responses interleaved; the
     # answer ends first while the title call is still streaming its thoughts
-    corr.feed("c2s", 0xA1, _request_bytes("gemini-3.8-flash", "answer"), t=100.0)
+    corr.feed("c2s", 0xA1, _request_bytes("gemini-3.5-flash", "answer"), t=100.0)
     corr.feed("c2s", 0xB2, _request_bytes("gemini-3.5-flash-lite", "title"), t=100.1)
     for i, ln in enumerate([
             _chunk("T", "gemini-3.5-flash-lite", text="Thinking about a title..."),
-            _chunk("A", "gemini-3.8-flash", text="Score: "),
+            _chunk("A", "gemini-3.5-flash", text="Score: "),
             _chunk("T", "gemini-3.5-flash-lite", text=" still thinking"),
-            _chunk("A", "gemini-3.8-flash", text="0.8", finish="STOP", total=900),
+            _chunk("A", "gemini-3.5-flash", text="0.8", finish="STOP", total=900),
             _chunk("T", "gemini-3.5-flash-lite", text="Keypoint Judge", finish="STOP", total=60)]):
         corr.feed_chunk(ln, t=100.5 + i * 0.01)
     turns = [e for e in rec.events if e.get("kind") == "genai_turn"]
     check(len(turns) == 2, "overlap: one genai_turn per responseId")
     by_model = {t["model"]: t for t in turns}
-    answer, title = by_model.get("gemini-3.8-flash"), by_model.get("gemini-3.5-flash-lite")
+    answer, title = by_model.get("gemini-3.5-flash"), by_model.get("gemini-3.5-flash-lite")
     check(answer is not None and answer["text"] == "Score: 0.8",
           "overlap: the answer's text holds only the answer's parts")
-    check(answer is not None and answer.get("request", {}).get("requestId") == "answer",
+    check(answer is not None and cast(Mapping[str, object], answer["request"]).get("requestId") == "answer",
           "overlap: the answer pairs with its own request, though the title request is newer")
-    check(title is not None and title.get("request", {}).get("requestId") == "title",
+    check(title is not None and cast(Mapping[str, object], title["request"]).get("requestId") == "title",
           "overlap: the title call pairs with the title request")
 
-    # a response cut off before its terminal event is emitted by flush() (agy's exit hook)
+    # a response cut off before its terminal event is emitted by flush() (agy's exit book)
     rec2 = FakeRec()
     corr2 = capture.BaseCorrelator(rec2, h.GenaiTurnBuilder(), reassembler=None)
     corr2.feed("c2s", 0xC3, _request_bytes("gemini-3.5-flash-lite", "title"), t=200.0)
@@ -270,26 +278,26 @@ def test_correlator_overlapping_streams():
     check(len(cut) == 1 and cut[0]["text"] == "partial", "flush: the cut-off response is emitted")
 
 
-def test_thought_parts_are_reasoning():
+def test_thought_parts_are_reasoning() -> None:
     print("[response] thought parts go to reasoning, not the answer")
-    events = [{"response": {"candidates": [{"content": {"parts": [
+    events: list[JSONObject] = [{"response": {"candidates": [{"content": {"parts": [
         {"text": "**Assessing** the pair", "thought": True}, {"text": "Score: 0.8"}]}}]}}]
     turn = h.build_turn_from_events(events, 1.0, None, None)
     check(turn["text"] == "Score: 0.8", "thoughts: the answer holds only answer parts")
     check(turn["reasoning"] == "**Assessing** the pair", "thoughts: reasoning holds the thought parts")
 
 
-def test_client_answer_is_primary_turn():
+def test_client_answer_is_primary_turn() -> None:
     print("[client] AgyResponse.text is the primary turn, not the longest text")
     from pyagy.client import AgyResponse
-    objs = [{"kind": "genai_turn", "text": "A long streamed title-call thought " * 5,
+    objs: list[Event] = [{"kind": "genai_turn", "text": "A long streamed title-call thought " * 5,
              "usage": {"total_tokens": 60}},
             {"kind": "genai_turn", "text": "Score: 0.8", "usage": {"total_tokens": 900}}]
     r = AgyResponse.from_objs(objs, "", exit_status=0, capture_path=None, workspace="/tmp")
     check(r.text == "Score: 0.8" and r.source == "wire", "client: answer from the primary turn")
 
 
-def test_import_purity():
+def test_import_purity() -> None:
     print("[purity] agy_process imports under python3 -S with no tasksolver")
     code = ("import sys; sys.path[:0] = [%r, %r]; import pyagy.agy_process; "
             "assert 'tasksolver' not in sys.modules; print('pure')" % (_REPO, _ANTIGRAVITY))
@@ -301,7 +309,7 @@ def test_import_purity():
         print(r.stderr)
 
 
-def main():
+def main() -> None:
     test_request_decode()
     test_response_decode_incremental()
     test_inflate_gzip()

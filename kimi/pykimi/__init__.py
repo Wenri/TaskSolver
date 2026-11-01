@@ -22,6 +22,19 @@ especially ``model``, which imports ``tasksolver``) are imported only on attribu
 at package load. The in-process decode side is ``pykimi.kimi_process``.
 """
 
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from wirecap.runtime.workspace import ensure_git_workspace as ensure_git_workspace
+    from .client import (KimiResponse as KimiResponse, Session as Session, Usage as Usage,
+                         ask as ask, ask_many as ask_many, continue_latest as continue_latest,
+                         resume as resume)
+    from .config import (encode_workdir_key as encode_workdir_key, kimi_mcp_toml_lines as kimi_mcp_toml_lines,
+                         mcp_json as mcp_json, trust_workspace as trust_workspace)
+    from .model import KimiCodeModel as KimiCodeModel
+    from .sessions import (find_session_dir as find_session_dir, latest_session_id as latest_session_id,
+                           read_transcript as read_transcript, read_wire as read_wire)
+
 _LAZY = {
     "ask": ".client",
     "ask_many": ".client",
@@ -47,16 +60,16 @@ _LAZY = {
 }
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> object:
     mod = _LAZY.get(name)
     if mod is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     import importlib
-    return getattr(importlib.import_module(mod, __name__), name)
+    return cast(object, getattr(importlib.import_module(mod, __name__), name))
 
 
-def __dir__():
+def __dir__() -> list[str]:
     return sorted(_LAZY)
 
 
-__all__ = sorted(_LAZY)   # so `from pykimi import *` binds the lazy names
+__all__ = ['KimiCodeModel', 'KimiResponse', 'Session', 'Usage', 'ask', 'ask_many', 'continue_latest', 'encode_workdir_key', 'ensure_git_workspace', 'find_session_dir', 'kimi_mcp_toml_lines', 'latest_session_id', 'mcp_json', 'read_transcript', 'read_wire', 'resume', 'trust_workspace']   # so `from pykimi import *` binds the lazy names

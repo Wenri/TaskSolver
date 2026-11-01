@@ -1,7 +1,13 @@
+from __future__ import annotations
+
+from wirecap.types import JSONObject, JSONValue
+from .provider_types import BackendResult, BackendManyResults
+from anthropic.types import ContentBlockParam
+from .provider_types import AnthropicPayload, ThreadResult, completed_results, media_type, object_list
 import os
 import threading
 from copy import deepcopy
-from typing import List, Tuple, Union
+from typing import Literal, cast
 
 import anthropic
 from loguru import logger
@@ -23,13 +29,13 @@ KIMI_MODEL_ALIASES = {
 }
 
 
-def resolve_moonshot_api_key(explicit_api_key=None):
+def resolve_moonshot_api_key(explicit_api_key: str | None = None) -> str | None:
     if explicit_api_key:
         return explicit_api_key
     return os.environ.get("MOONSHOT_API_KEY")
 
 
-def resolve_moonshot_model_name(vision_model=None):
+def resolve_moonshot_model_name(vision_model: str | None = None) -> str:
     if not vision_model:
         return KIMI_DEFAULT_MODEL
     return KIMI_MODEL_ALIASES.get(vision_model.strip(), KIMI_DEFAULT_MODEL)
@@ -38,12 +44,12 @@ def resolve_moonshot_model_name(vision_model=None):
 class KimiModel(object):
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None,
         task: TaskSpec,
         model: str = KIMI_DEFAULT_MODEL,
         thinking: bool = False,
     ):
-        self.moonshot_key: str = api_key
+        self.moonshot_key: str | None = api_key
         self.task: TaskSpec = task
         self.model: str = model
         self.thinking: bool = thinking
@@ -54,41 +60,41 @@ class KimiModel(object):
         )
 
     @staticmethod
-    def _combine_text_blocks(content_blocks) -> Union[str, None]:
-        text_blocks = []
-        for block in content_blocks or []:
+    def _combine_text_blocks(content_blocks: JSONValue) -> str | None:
+        text_blocks: list[str] = []
+        for block in object_list(content_blocks):
             if block.get("type") == "text":
                 text = block.get("text", "")
-                if text:
+                if isinstance(text, str) and text:
                     text_blocks.append(text)
         if not text_blocks:
             return None
         return "\n".join(text_blocks).strip()
 
     @staticmethod
-    def _combine_thinking_blocks(content_blocks) -> Union[str, None]:
-        thinking_blocks = []
-        for block in content_blocks or []:
+    def _combine_thinking_blocks(content_blocks: JSONValue) -> str | None:
+        thinking_blocks: list[str] = []
+        for block in object_list(content_blocks):
             if block.get("type") == "thinking":
                 thinking = block.get("thinking", "")
-                if thinking:
+                if isinstance(thinking, str) and thinking:
                     thinking_blocks.append(thinking)
         if not thinking_blocks:
             return None
         return "\n\n".join(thinking_blocks).strip()
 
     @staticmethod
-    def _summarize_empty_response(response: dict, model: str, max_tokens: int) -> str:
+    def _summarize_empty_response(response: JSONObject, model: str, max_tokens: int) -> str:
         stop_reason = response.get("stop_reason")
-        content_types = [block.get("type") for block in response.get("content", [])]
+        content_types = [block.get("type") for block in object_list(response.get("content"))]
         return (
             "Kimi returned no visible text content "
             f"for model={model}. Requested max_tokens={max_tokens}. "
             f"stop_reason={stop_reason!r}, content_types={content_types}."
         )
 
-    def ask(self, payload: dict, n_choices=1) -> Tuple[List[dict], List[dict]]:
-        def kimi_thread(idx, request_payload, results):
+    def ask(self, payload: AnthropicPayload, n_choices: int = 1) -> tuple[list[JSONObject], list[JSONObject]]:
+        def kimi_thread(idx: int, request_payload: AnthropicPayload, results: list[ThreadResult | None]) -> None:
             mod_payload = deepcopy(request_payload)
 
             with self.client.messages.stream(
@@ -99,16 +105,16 @@ class KimiModel(object):
                 stream.until_done()
                 raw_response = stream.get_final_message()
 
-            response = raw_response.dict()
+            response = cast(JSONObject, raw_response.model_dump())
             text_content = self._combine_text_blocks(response.get("content"))
             thinking_content = self._combine_thinking_blocks(response.get("content"))
-            message = {"role": response.get("role", "assistant"), "content": text_content}
+            message: JSONObject = {"role": response.get("role", "assistant"), "content": text_content}
             metadata = response.copy()
             metadata["explicit_reasoning_output"] = thinking_content
             results[idx] = {"message": message, "metadata": metadata}
 
         assert n_choices >= 1
-        results = [None] * n_choices
+        results: list[ThreadResult | None] = [None] * n_choices
         if n_choices > 1:
             kimi_jobs = [
                 threading.Thread(target=kimi_thread, args=(idx, payload, results))
@@ -121,25 +127,27 @@ class KimiModel(object):
         else:
             kimi_thread(0, payload, results)
 
-        messages: List[dict] = [res["message"] for res in results]
-        metadata: List[dict] = [res["metadata"] for res in results]
+        complete = completed_results(results)
+        messages = [res["message"] for res in complete]
+        metadata = [res["metadata"] for res in complete]
         return messages, metadata
 
     @staticmethod
     def prepare_payload(
         question: Question,
-        max_tokens=100000,
+        max_tokens: int = 100000,
         verbose: bool = False,
-        prepend: Union[dict, None] = None,
-        **kwargs,
-    ) -> dict:
-        content = []
+        prepend: object = None,
+        **kwargs: object,
+    ) -> AnthropicPayload:
+        content: list[ContentBlockParam] = []
         dic_list = question.get_json()
         for dic in dic_list:
             if dic["type"] == "text":
-                content.append(dic)
+                content.append({"type": "text", "text": dic["text"]})
             elif dic["type"] == "image_url":
                 base64enc_image = dic["image_url"]["url"].split(",", 1)[1]
+                image_format: Literal["jpeg", "png", "gif", "webp"]
                 if base64enc_image.startswith("/9j/"):
                     image_format = "jpeg"
                 elif base64enc_image.startswith("iVBORw0KGgo"):
@@ -156,13 +164,13 @@ class KimiModel(object):
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": f"image/{image_format}",
+                            "media_type": media_type(image_format),
                             "data": base64enc_image,
                         },
                     }
                 )
 
-        payload = {
+        payload: AnthropicPayload = {
             "messages": {
                 "role": "user",
                 "content": content,
@@ -174,12 +182,12 @@ class KimiModel(object):
     def rough_guess(
         self,
         question: Question,
-        max_tokens=100000,
-        max_tries=1,
+        max_tokens: int = 100000,
+        max_tries: int = 1,
         query_id: int = 0,
-        verbose=False,
-        **kwargs,
-    ):
+        verbose: bool = False,
+        **kwargs: object,
+    ) -> BackendResult:
         p = self.prepare_payload(
             question,
             max_tokens=max_tokens,
@@ -188,14 +196,14 @@ class KimiModel(object):
             model=self.model,
         )
 
-        ok = False
         reattempt = 0
-        while not ok:
-            response, meta_data = self.ask(p)
-            response = response[0]
+        while True:
+            responses, meta_data = self.ask(p)
+            response = responses[0]
+            content: JSONValue = None
             try:
                 content = response.get("content")
-                if content is None:
+                if not isinstance(content, str):
                     raise GPTOutputParseException(
                         self._summarize_empty_response(meta_data[0], self.model, p["max_tokens"])
                     )
@@ -217,7 +225,7 @@ class KimiModel(object):
 
                 logger.warning(f"Reattempt #{reattempt} querying LLM")
                 continue
-            ok = True
+            break
 
         return parsed_response, response, meta_data, p
 
@@ -225,10 +233,10 @@ class KimiModel(object):
         self,
         num_threads: int,
         question: Question,
-        max_tokens=100000,
-        verbose=False,
-        max_tries=1,
-    ) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
+        max_tokens: int = 100000,
+        verbose: bool = False,
+        max_tries: int = 1,
+    ) -> BackendManyResults:
         p = self.prepare_payload(
             question,
             max_tokens=max_tokens,
@@ -237,15 +245,16 @@ class KimiModel(object):
             model=self.model,
         )
 
-        ok = False
         reattempt = 0
-        while not ok:
+        while True:
             response, meta_data = self.ask(p, n_choices=num_threads)
+            content: JSONValue = None
+            idx = 0
             try:
-                parsed_response = []
+                parsed_response: list[ParsedAnswer] = []
                 for idx, message in enumerate(response):
                     content = message.get("content")
-                    if content is None:
+                    if not isinstance(content, str):
                         raise GPTOutputParseException(
                             self._summarize_empty_response(meta_data[idx], self.model, p["max_tokens"])
                         )
@@ -268,10 +277,10 @@ class KimiModel(object):
 
                 logger.warning(f"Reattempt #{reattempt} querying LLM")
                 continue
-            ok = True
+            break
 
         return parsed_response, response, meta_data, p
 
-    def run_once(self, question: Question, max_tokens=100000, **kwargs):
+    def run_once(self, question: Question, max_tokens: int = 100000, *, max_tries: int = 1, query_id: int = 0, verbose: bool = False, **kwargs: object) -> BackendResult:
         q = self.task.first_question(question)
-        return self.rough_guess(q, max_tokens=max_tokens, **kwargs)
+        return self.rough_guess(q, max_tokens=max_tokens, max_tries=max_tries, query_id=query_id, verbose=verbose)

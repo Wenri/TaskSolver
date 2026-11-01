@@ -6,6 +6,9 @@ time-ordered, labeled, and counted.
 
     python3 test_scripts/test_rpctrace.py
 """
+
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -19,16 +22,16 @@ sys.path.insert(0, _REPO)
 
 from pyagy.agy_process import rpctrace  # noqa: E402
 
-_failures = []
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
 
 
-def main():
+def main() -> None:
     d = tempfile.mkdtemp()
     cap = os.path.join(d, "c.jsonl")
     events = [

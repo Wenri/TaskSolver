@@ -5,7 +5,7 @@ GENERATED — do not edit by hand. Regenerate with::
     pixi run shim-books
 
 `pyagy.BOOKS` is a public introspection surface, so this file is checked in and ships in the
-wheel. Stdlib-pure: agy_process imports it inside the instrumented CLI's embedded interpreter.
+wheel. Stdlib-pure: agy_process imports it inside the linked CLI's embedded interpreter.
 
 Each row mirrors one C row:
   id      the row's name, the `bk("id")` key at the C call sites
@@ -16,7 +16,19 @@ Each row mirrors one C row:
   retcap  return-capture policy (0 none, <0 special, >0 min bytes); every retcap != 0 row is off
 """
 
-BOOKS = [
+from typing import Literal, TypedDict
+
+
+class Book(TypedDict):
+    id: str
+    symbol: str
+    mode: Literal["async", "sync"]
+    kind: str
+    mech: Literal["off", "fullcgo", "asmcgo"]
+    retcap: int
+
+
+BOOKS: list[Book] = [
     {"id": 'smoke', "symbol": 'os.Getenv',
      "mode": 'async', "kind": 'smoke', "mech": 'asmcgo', "retcap": 0},
     {"id": 'exit', "symbol": 'os.Exit',
@@ -103,24 +115,24 @@ BOOKS = [
 
 #: kinds the Python layer DERIVES rather than receiving straight from a book.
 DERIVED_KINDS = ("genai_turn", "h2msg", "conversation_id", "callstack", "app_response",
-                 "system_message_capture_error")
+                 "system_message_capture_error", "response_capture_error")
 
 
-def by_mech(mech):
+def by_mech(mech: str) -> list[Book]:
     """Rows whose install mechanism is `mech` ("off" / "fullcgo" / "asmcgo")."""
     return [h for h in BOOKS if h["mech"] == mech]
 
 
-def by_kind(kind):
+def by_kind(kind: str) -> list[Book]:
     """Rows emitting `kind`."""
     return [h for h in BOOKS if h["kind"] == kind]
 
 
-def enabled_books():
+def enabled_books() -> list[Book]:
     """Rows actually installed at runtime (everything not mech="off")."""
     return [h for h in BOOKS if h["mech"] != "off"]
 
 
-def sync_capable():
-    """Rows whose dispatch can return replacement bytes (mode="sync")."""
+def sync_capable() -> list[Book]:
+    """Rows that wait for dispatch completion (mode="sync")."""
     return [h for h in BOOKS if h["mode"] == "sync"]

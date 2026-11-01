@@ -12,8 +12,11 @@ egress if those kinds are present, so a combined capture reads as one timeline.
 Stdlib only. CLI:
     python3 -m pyagy.agy_process.rpctrace <capture.jsonl> [funcmap.tsv.gz] [--stacks]
 """
-import json
+import os
 import sys
+from collections.abc import Iterator, Sequence
+
+from wirecap.types import JSONObject, json_loads_object
 
 # rpc_<kind> -> readable RPC name (mirrors the CodeAssistClient books in procdef.h).
 RPC_KINDS = {
@@ -36,38 +39,42 @@ CONTEXT_KINDS = {
 }
 
 
-def _events(capture_path):
+def _events(capture_path: str | os.PathLike[str]) -> Iterator[JSONObject]:
     with open(capture_path) as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                o = json.loads(line)
-            except ValueError:
+                o = json_loads_object(line)
+            except (ValueError, TypeError):
                 continue
             if "t" in o:
                 yield o
 
 
-def trace(capture_path, funcmap=None, with_stacks=False):
+def trace(capture_path: str | os.PathLike[str], funcmap: str | os.PathLike[str] | None = None,
+          with_stacks: bool = False) -> str:
     # optional stack enrichment: map (src rpc kind) -> the first symbolized stack seen
-    stacks = {}
+    stacks: dict[str, list[str]] = {}
     if with_stacks:
         try:
             from .symbolize import Symbolizer
             sym = Symbolizer(funcmap)
             for o in _events(capture_path):
-                if o.get("kind") == "callstack" and o.get("src", "").startswith("rpc_"):
-                    stacks.setdefault(o["src"], [sym.name(pc) for pc in o.get("frames", [])])
+                source, frames = o.get("src"), o.get("frames", [])
+                if (o.get("kind") == "callstack" and isinstance(source, str)
+                        and source.startswith("rpc_") and isinstance(frames, list)):
+                    stacks.setdefault(source, [sym.name(pc) for pc in frames if isinstance(pc, int)])
         except Exception as e:
             print(f"(stack enrichment unavailable: {e})", file=sys.stderr)
 
-    rows = []
-    t0 = None
-    counts = {}
+    rows: list[tuple[float, str, str]] = []
+    counts: dict[str, int] = {}
     for o in _events(capture_path):
-        k = o.get("kind")
+        k, timestamp = o.get("kind"), o["t"]
+        if not isinstance(k, str) or not isinstance(timestamp, (int, float)):
+            continue
         if k in RPC_KINDS:
             label = "RPC  " + RPC_KINDS[k]
         elif k in CONTEXT_KINDS:
@@ -75,7 +82,7 @@ def trace(capture_path, funcmap=None, with_stacks=False):
         else:
             continue
         counts[k] = counts.get(k, 0) + 1
-        rows.append((o["t"], k, label))
+        rows.append((timestamp, k, label))
 
     rows.sort(key=lambda r: r[0])            # authoritative fire order (concurrent goroutines)
     t0 = rows[0][0] if rows else 0
@@ -94,7 +101,7 @@ def trace(capture_path, funcmap=None, with_stacks=False):
     return "\n".join(out)
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     with_stacks = "--stacks" in argv
     argv = [a for a in argv if a != "--stacks"]

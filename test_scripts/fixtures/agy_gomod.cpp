@@ -18,7 +18,7 @@ static uintptr_t entry(const agy_stub_info &s) { return (uintptr_t)s.entry; }
 static agy_stub_info stub(uintptr_t pc, uintptr_t size, uintptr_t lo, uintptr_t hi)
 {
     return {(void (*)(void))pc, (const unsigned char *)(pc + lo),
-            (const unsigned char *)(pc + hi), (const unsigned char *)(pc + size)};
+            (const unsigned char *)(pc + hi), (const unsigned char *)(pc + size), 0, 0, 0};
 }
 
 /* Independent translations of runtime.moduledata.textOff/textAddr and findfunc.
@@ -124,9 +124,6 @@ static void check_registered(std::vector<agy_stub_info> stubs)
     CHECK(!findfunc(md->minpc - 1) && !findfunc(md->maxpc));
     auto table = (const go_functab *)md->ftab.ptr;
     auto sections = (const go_textsect *)md->textsectmap.ptr;
-    auto map = (const go_stackmap *)md->gofunc;
-    CHECK(map->n == 1 && map->nbit == (AGY_FRAME - 8) / 8);
-    CHECK(map->bytedata[0] == 0xff && map->bytedata[1] == 0x1f);
     uint32_t logical = 0;
     for (size_t i = 0; i < stubs.size(); i++) {
         const auto &s = stubs[i];
@@ -139,8 +136,24 @@ static void check_registered(std::vector<agy_stub_info> stubs)
         CHECK(fn->funcID == 0 && fn->flag == GO_FUNCFLAG_ASM);
         CHECK(fn->npcdata == 0 && fn->nfuncdata == 2);
         const auto *funcdata = (const uint32_t *)((const uint8_t *)fn + sizeof(go_func));
-        CHECK(funcdata[GO_FUNCDATA_ArgsPointerMaps] == UINT32_MAX);
-        CHECK(funcdata[GO_FUNCDATA_LocalsPointerMaps] == 0);
+        CHECK(fn->args == (int32_t)s.stack_args_size);
+        auto args = (const go_stackmap *)(md->gofunc + funcdata[GO_FUNCDATA_ArgsPointerMaps]);
+        auto locals = (const go_stackmap *)(md->gofunc + funcdata[GO_FUNCDATA_LocalsPointerMaps]);
+        CHECK(args != locals);
+        CHECK(args->n == 1 && args->nbit == fn->args / 8);
+        CHECK(locals->n == 1 && locals->nbit == (AGY_FRAME - 8) / 8);
+        uint64_t arg_mask = 0, local_mask = 0;
+        std::memcpy(&arg_mask, args->bytedata, sizeof(arg_mask));
+        std::memcpy(&local_mask, locals->bytedata, sizeof(local_mask));
+        CHECK(arg_mask == s.stack_ptrmask);
+        CHECK(local_mask == ((uint64_t)s.reg_ptrmask << 3 | 2));
+        CHECK((local_mask & ((1u << 0) | (1u << 2) | (1u << 12))) == 0);
+        // No stale RDX/scalar is promoted to a pointer; each incoming stack root survives.
+        for (unsigned word = 0; word < (unsigned)locals->nbit; word++) {
+            bool pointer = word == 1 || (3 <= word && word < 12
+                                            && (s.reg_ptrmask >> (word - 3) & 1));
+            CHECK(((local_mask >> word) & 1) == pointer);
+        }
         for (uintptr_t pc = begin; pc < end; pc++) {
             CHECK(findfunc(pc) == fn);
             int expected = (uintptr_t)s.frame_start <= pc && pc < (uintptr_t)s.frame_end ? AGY_FRAME : 0;
@@ -169,9 +182,14 @@ int main(int argc, char **argv)
         CHECK(argc == 3);
         FILE *file = std::fopen(argv[2], "r");
         CHECK(file);
-        unsigned long long pc, lo, hi, end;
-        while (std::fscanf(file, "%llx %llx %llx %llx", &pc, &lo, &hi, &end) == 4)
-            stubs.push_back(stub(pc, end - pc, lo - pc, hi - pc));
+        unsigned long long pc, lo, hi, end, stack;
+        unsigned regs, args;
+        while (std::fscanf(file, "%llx %llx %llx %llx %x %x %llx",
+                           &pc, &lo, &hi, &end, &regs, &args, &stack) == 7) {
+            auto row = stub(pc, end - pc, lo - pc, hi - pc);
+            row.reg_ptrmask = regs; row.stack_args_size = args; row.stack_ptrmask = stack;
+            stubs.push_back(row);
+        }
         CHECK(std::feof(file) && !stubs.empty());
         std::fclose(file);
         check_registered(stubs);
@@ -182,7 +200,11 @@ int main(int argc, char **argv)
         for (unsigned i = 0; i < 28; i++) {
             // Vary frame boundaries and lengths; cross several bucket/subbucket boundaries.
             uintptr_t size = i == 11 ? 5003 : 37 + i * 13;
-            stubs.push_back(stub(pc, size, 1 + i, size - 3));
+            auto row = stub(pc, size, 1 + i, size - 3);
+            row.reg_ptrmask = (i * 23) & 0x1ff;
+            row.stack_args_size = 8 * (i % 9);
+            row.stack_ptrmask = 0x55 & ((1ull << (i % 9)) - 1);
+            stubs.push_back(row);
             pc += size + (i % 3 ? 0 : 0x100003);
         }
         std::reverse(stubs.begin(), stubs.end());
@@ -191,7 +213,17 @@ int main(int argc, char **argv)
         return 0;
     }
     stubs.push_back(stub(0x100000, 201, 20, 173));
-    if (!std::strcmp(argv[1], "single")) {
+    if (!std::strcmp(argv[1], "single") || !std::strcmp(argv[1], "serializer")
+            || !std::strcmp(argv[1], "map_capacity")) {
+        if (!std::strcmp(argv[1], "serializer")) {
+            stubs[0].reg_ptrmask = 1;
+            stubs[0].stack_args_size = 200;
+            stubs[0].stack_ptrmask = 0xaa801a;
+        } else if (!std::strcmp(argv[1], "map_capacity")) {
+            stubs[0].reg_ptrmask = 0x1ff;
+            stubs[0].stack_args_size = 512;
+            stubs[0].stack_ptrmask = UINT64_MAX;
+        }
         check_registered(stubs);
         return 0;
     }
@@ -202,6 +234,13 @@ int main(int argc, char **argv)
     else if (!std::strcmp(argv[1], "module_overlap")) stubs[0] = stub(0x1ff0, 201, 20, 173);
     else if (!std::strcmp(argv[1], "count")) stubs.resize(AGY_GOMOD_MAX_FUNCS + 1, stubs[0]);
     else if (!std::strcmp(argv[1], "size")) stubs[0] = stub(0x100000, AGY_GOMOD_MAX_TEXT_SIZE + 1, 20, 173);
+    else if (!std::strcmp(argv[1], "bad_regs")) stubs[0].reg_ptrmask = 0x200;
+    else if (!std::strcmp(argv[1], "bad_args_alignment")) stubs[0].stack_args_size = 9;
+    else if (!std::strcmp(argv[1], "bad_args_size")) stubs[0].stack_args_size = 520;
+    else if (!std::strcmp(argv[1], "bad_args_mask")) {
+        stubs[0].stack_args_size = 8; stubs[0].stack_ptrmask = 2;
+    }
+    else if (!std::strcmp(argv[1], "empty_args_mask")) stubs[0].stack_ptrmask = 1;
     else CHECK(false);
     CHECK(agy_gomod_register(stubs) < 0);
     CHECK(!agy_firstmoduledata.next);  // invalid metadata must never reach the runtime

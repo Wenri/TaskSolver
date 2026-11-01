@@ -1,6 +1,6 @@
 /* wirecap.h — the shared native bridge: embed CPython on a dedicated large-stack worker
- * thread and dispatch capture events to it. Linked by every instrumentation front-end
- * (the antigravity LD_PRELOAD shim; the patched codex build), which fills a wire_event_t
+ * thread and dispatch capture events to it. Linked by the agy host, Codex and Kimi addon,
+ * whose capture code fills a wire_event_t
  * and calls wire_emit(); all Python runs on the worker thread (16 MB stack, single
  * PyThreadState). See antigravity/README "Why a dedicated worker thread".
  *
@@ -20,7 +20,7 @@ extern "C" {
 typedef enum { WIRE_ASYNC = 0, WIRE_SYNC = 1 } wire_mode_t;
 
 typedef struct {
-    const char *kind;      /* event tag → dispatch(kind, ...) (e.g. "tls_write", "resp_chunk") */
+    const char *kind;      /* process-lifetime event tag (e.g. a static "tls_write" literal) */
     uint64_t    stream_id; /* conn/transport/turn id, for per-stream reassembly */
     const uint8_t *data;   /* borrowed; valid for the call. SYNC: the bridge may REWRITE it in place
                             * (equal-or-shorter) with the worker's replacement — see verdict below. */
@@ -37,7 +37,8 @@ typedef struct {
  *   WIRE_MODULE     python module to import (default "pyagy.agy_process"); resolved from the
  *                   embedded interpreter's own site-packages (site runs; PYTHONHOME selects the env)
  *   WIRE_MAXCOPY    max bytes copied per event (default 1<<20)
- * Returns 0 on success. Never aborts the host on failure. */
+ * Repeated calls share the same worker. Returns 0 on success, -1 on initialization
+ * failure or after shutdown; a stopped interpreter is not restarted. */
 int  wire_start(void);
 
 /* Emit an event. ASYNC: copies data, enqueues, returns immediately.
@@ -52,7 +53,7 @@ int  wire_ready(void);
 
 /* Cooperatively stop + join the worker (idempotent). REQUIRED of every front-end at teardown —
  * relying on the ~PyBridge fallback risks destructing while another thread is still inside
- * bridge(). agy calls it from its os.Exit hook (after the end-of-capture marker is emitted, since
+ * bridge(). agy calls it from its os.Exit book (after the end-of-capture marker is emitted, since
  * Go's os.Exit bypasses libc exit); codex calls it at the end of main(). */
 void wire_shutdown(void);
 

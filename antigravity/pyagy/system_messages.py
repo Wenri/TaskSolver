@@ -5,7 +5,10 @@ Python process. A notification is a native ``CortexStepSystemMessage`` delivered
 before the target conversation's next model invocation. It neither wakes an idle
 agent nor changes the provider's system prompt.
 """
+from __future__ import annotations
+
 from contextlib import contextmanager
+from collections.abc import Callable, Generator, Sequence
 import fcntl
 import hashlib
 import json
@@ -18,6 +21,17 @@ import stat
 import sys
 import tempfile
 import time
+from typing import TYPE_CHECKING, Literal, TextIO, cast, overload
+
+if TYPE_CHECKING:
+    from wirecap.types import JSONObject, JSONValue
+
+type StatKey = tuple[int, int, int, int, int, int]
+type ConfigSnapshot = tuple[StatKey, bytes] | None
+
+
+class _Unchecked:
+    pass
 
 
 CHANNEL_ENV = "TASKSOLVER_SYSTEM_MESSAGE_CHANNEL"
@@ -25,19 +39,19 @@ MAX_MESSAGE_BYTES = 256 * 1024
 MAX_BATCH_BYTES = 1024 * 1024
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 CONFIG_RETRIES = 5
-_UNCHECKED = object()
+_UNCHECKED = _Unchecked()
 
 
 class _ConfigChanged(RuntimeError):
     pass
 
 
-def _stat_key(value):
+def _stat_key(value: os.stat_result) -> StatKey:
     return (value.st_dev, value.st_ino, value.st_mode, value.st_size,
             value.st_mtime_ns, value.st_ctime_ns)
 
 
-def _config_snapshot(path):
+def _config_snapshot(path: Path) -> ConfigSnapshot:
     """Read bytes and identity together, rejecting changes during the read."""
     try:
         before = path.lstat()
@@ -58,33 +72,47 @@ def _config_snapshot(path):
     return _stat_key(current), raw
 
 
-def _check_config(path, expected):
+def _check_config(path: Path, expected: ConfigSnapshot) -> None:
     if _config_snapshot(path) != expected:
         raise _ConfigChanged("hooks.json changed before replacement")
 
 
-def _retry_config(update):
+def _retry_config[T](update: Callable[[], T]) -> T:
     for attempt in range(CONFIG_RETRIES):
         try:
             return update()
         except _ConfigChanged:
             if attempt + 1 == CONFIG_RETRIES:
                 raise
+    raise AssertionError("CONFIG_RETRIES must be positive")
 
 
 @contextmanager
-def _lock(path):
+def _lock(path: str | os.PathLike[str]) -> Generator[None]:
     with open(path, "a", encoding="utf-8") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         yield
 
 
-def _load(path):
+def _load(path: str | os.PathLike[str]) -> JSONObject:
     with open(path, encoding="utf-8") as stream:
-        return json.load(stream)
+        return _object(cast("JSONValue", json.load(stream)))
 
 
-def _write(path, value, *, expected=_UNCHECKED):
+def _object(value: JSONValue) -> JSONObject:
+    if not isinstance(value, dict):
+        raise ValueError("expected a JSON object")
+    return value
+
+
+def _array(value: JSONValue) -> list[JSONValue]:
+    if not isinstance(value, list):
+        raise ValueError("expected a JSON array")
+    return value
+
+
+def _write(path: str | os.PathLike[str], value: JSONObject, *,
+           expected: ConfigSnapshot | _Unchecked = _UNCHECKED) -> None:
     """Replace a complete JSON document; readers never see a partial write."""
     path = Path(path)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
@@ -96,7 +124,7 @@ def _write(path, value, *, expected=_UNCHECKED):
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        if expected is not _UNCHECKED:
+        if not isinstance(expected, _Unchecked):
             # Editors do not share our flock. Merge again when their changes are
             # detected; an uncooperative write after this check can still race.
             _check_config(path, expected)
@@ -106,7 +134,11 @@ def _write(path, value, *, expected=_UNCHECKED):
             os.unlink(name)
 
 
-def _conversation(value, *, optional=False):
+@overload
+def _conversation(value: object, *, optional: Literal[False] = False) -> str: ...
+@overload
+def _conversation(value: object, *, optional: Literal[True]) -> str | None: ...
+def _conversation(value: object, *, optional: bool = False) -> str | None:
     if value is None and optional:
         return None
     if not isinstance(value, str) or not value.strip() or len(value) > 256:
@@ -114,7 +146,7 @@ def _conversation(value, *, optional=False):
     return value
 
 
-def _message(text, conversation_id):
+def _message(text: object, conversation_id: object) -> tuple[str, str | None]:
     if not isinstance(text, str) or not text.strip():
         raise ValueError("system message must be a nonempty string")
     if len(text.encode("utf-8")) > MAX_MESSAGE_BYTES:
@@ -125,13 +157,13 @@ def _message(text, conversation_id):
     return text, target
 
 
-def _step_json(text):
+def _step_json(text: str) -> str:
     # agy 1.4.11's ScrubInternalFields panics on the otherwise valid metadata
     # map[string]string. Keep IDs local; agy attributes the step to our hook.
     return json.dumps({"systemMessage": {"systemMessage": text}}, ensure_ascii=False)
 
 
-def _batch_json(steps):
+def _batch_json(steps: Sequence[str]) -> str:
     """Encode already serialized steps, including all separators and the newline."""
     return '{"injectSteps": [' + ", ".join(steps) + "]}\n" if steps else "{}\n"
 
@@ -145,7 +177,7 @@ class SystemMessageChannel:
     stdout may already have reached agy. ``close`` removes the private queue.
     """
 
-    def __init__(self, workspace, *, conversation_id=None):
+    def __init__(self, workspace: str | os.PathLike[str], *, conversation_id: str | None = None) -> None:
         self.workspace = Path(workspace).resolve()
         if not self.workspace.is_dir():
             raise ValueError("system-message workspace must be an existing directory")
@@ -160,7 +192,7 @@ class SystemMessageChannel:
         })
         self._closed = False
         self._started = False
-        self._spec = None
+        self._spec: JSONObject | None = None
         self._config = self.workspace / ".agents" / "hooks.json"
         lock_root = Path(tempfile.gettempdir()) / f"tasksolver-hook-locks-{os.getuid()}"
         lock_root.mkdir(mode=0o700, exist_ok=True)
@@ -171,27 +203,28 @@ class SystemMessageChannel:
         self._config_lock = lock_root / (digest + ".lock")
         self._registration = lock_root / (digest + ".json")
 
-    def _check_open(self):
+    def _check_open(self) -> None:
         if self._closed:
             raise RuntimeError("system-message channel is closed")
 
-    def _read_config(self):
+    def _read_config(self) -> tuple[JSONObject, ConfigSnapshot]:
         snapshot = _config_snapshot(self._config)
-        value = json.loads(snapshot[1]) if snapshot is not None else {}
+        value = cast("JSONValue", json.loads(snapshot[1])) if snapshot is not None else {}
         if not isinstance(value, dict):
             raise ValueError("hooks.json must contain an object")
         return value, snapshot
 
-    def _registrations(self, config, snapshot):
+    def _registrations(self, config: JSONObject, snapshot: ConfigSnapshot) -> JSONObject:
         registry = _load(self._registration) if self._registration.exists() else {}
-        entries = [key for key in registry.get("entries", []) if key in config]
+        entries = [key for key in _array(registry.get("entries", []))
+                   if isinstance(key, str) and key in config]
         if not entries:
             return {"entries": [], "created_config": snapshot is None,
                     "created_agents": not self._config.parent.exists()}
-        registry["entries"] = entries
+        registry["entries"] = [key for key in entries]
         return registry
 
-    def start(self):
+    def start(self) -> dict[str, str]:
         """Register a native hook and return the environment for this agy child."""
         self._check_open()
         if self._started:
@@ -203,7 +236,7 @@ class SystemMessageChannel:
         ])
         self._spec = {"PreInvocation": [{"type": "command", "command": command,
                                           "timeout": 10}]}
-        def register():
+        def register() -> None:
             config, snapshot = self._read_config()
             if self._key in config:
                 raise RuntimeError("system-message hook name collision")
@@ -212,7 +245,7 @@ class SystemMessageChannel:
             created_agents = not self._config.parent.exists()
             self._config.parent.mkdir(parents=True, exist_ok=True)
             config[self._key] = self._spec
-            registry["entries"].append(self._key)
+            _array(registry["entries"]).append(self._key)
             try:
                 _write(self._registration, registry)
                 _write(self._config, config, expected=snapshot)
@@ -232,7 +265,7 @@ class SystemMessageChannel:
         self._started = True
         return {CHANNEL_ENV: self._token}
 
-    def bind_main(self, conversation_id):
+    def bind_main(self, conversation_id: str) -> None:
         """Supply the actual main conversation ID, including resumed sessions."""
         self._check_open()
         conversation_id = _conversation(conversation_id)
@@ -245,12 +278,12 @@ class SystemMessageChannel:
             _write(self._queue / "state.json", state)
 
     @property
-    def main_conversation_id(self):
+    def main_conversation_id(self) -> str | None:
         self._check_open()
         with _lock(self._queue / ".lock"):
-            return _load(self._queue / "state.json").get("main_conversation_id")
+            return _conversation(_load(self._queue / "state.json").get("main_conversation_id"), optional=True)
 
-    def send(self, text, *, conversation_id=None):
+    def send(self, text: object, *, conversation_id: str | None = None) -> str:
         """Queue a notification for the main agent or a specific conversation ID."""
         self._check_open()
         text, target = _message(text, conversation_id)
@@ -262,7 +295,7 @@ class SystemMessageChannel:
             })
         return message_id
 
-    def status(self, message_id):
+    def status(self, message_id: object) -> JSONObject:
         """Return queue/emission state without claiming successful native insertion."""
         self._check_open()
         if not isinstance(message_id, str) or len(message_id) != 32 or any(
@@ -276,16 +309,16 @@ class SystemMessageChannel:
         return {k: value[k] for k in ("id", "state", "target", "conversation_id", "error")
                 if k in value}
 
-    def close(self):
+    def close(self) -> None:
         if self._closed:
             return
         try:
             if self._started:
                 with _lock(self._config_lock):
-                    registry = (_load(self._registration) if self._registration.exists()
-                                else {"entries": []})
+                    registry: JSONObject = (_load(self._registration) if self._registration.exists()
+                                            else {"entries": []})
 
-                    def unregister():
+                    def unregister() -> None:
                         config, snapshot = self._read_config()
                         # Preserve a user edit to even our entry; never delete by name alone.
                         if config.get(self._key) == self._spec:
@@ -308,7 +341,7 @@ class SystemMessageChannel:
                         raise
                     finally:
                         if not conflicted:
-                            registry["entries"] = [key for key in registry["entries"]
+                            registry["entries"] = [key for key in _array(registry["entries"])
                                                    if key != self._key]
                             if registry["entries"]:
                                 _write(self._registration, registry)
@@ -318,14 +351,21 @@ class SystemMessageChannel:
             self._closed = True
             shutil.rmtree(self._queue)
 
-    def __enter__(self):
+    def __enter__(self) -> SystemMessageChannel:
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: object) -> None:
         self.close()
 
 
-def _deliver(queue, payload, output):
+def _message_order(message: JSONObject) -> tuple[int, str]:
+    created, message_id = message["created_ns"], message["id"]
+    if not isinstance(created, int) or not isinstance(message_id, str):
+        raise ValueError("invalid queued message identity")
+    return created, message_id
+
+
+def _deliver(queue: Path, payload: JSONObject, output: TextIO) -> None:
     """Claim and emit a batch while holding the queue lock across the stdout flush."""
     conversation = _conversation(payload.get("conversationId"))
     parent = payload.get("parentConversationId")
@@ -344,7 +384,7 @@ def _deliver(queue, payload, output):
             if main is not None:
                 state["main_conversation_id"] = main
                 _write(state_path, state)
-        pending = []
+        pending: list[tuple[Path, JSONObject]] = []
         for path in (queue / "messages").glob("*.json"):
             message = _load(path)
             if message.get("state") != "pending":
@@ -352,8 +392,9 @@ def _deliver(queue, payload, output):
             target = message.get("target") or main
             if target == conversation:
                 pending.append((path, message))
-        pending.sort(key=lambda pair: (pair[1]["created_ns"], pair[1]["id"]))
-        batch, steps = [], []
+        pending.sort(key=lambda pair: _message_order(pair[1]))
+        batch: list[tuple[Path, JSONObject]] = []
+        steps: list[str] = []
         size = len(_batch_json([""]).encode("utf-8"))
         for path, message in pending:
             try:
@@ -382,12 +423,17 @@ def _deliver(queue, payload, output):
             _write(path, message)
 
 
-def _main(argv=None):
+def _main(argv: Sequence[str] | None = None) -> int:
     import argparse
+
+    class Arguments(argparse.Namespace):
+        channel: str = ""
+        token: str = ""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channel", required=True)
     parser.add_argument("--token", required=True)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argv, namespace=Arguments())
     if os.environ.get(CHANNEL_ENV) != args.token:
         print("{}")
         return 0
@@ -395,7 +441,7 @@ def _main(argv=None):
         raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
         if len(raw) > MAX_INPUT_BYTES:
             raise ValueError("hook input is too large")
-        payload = json.loads(raw)
+        payload = cast("JSONValue", json.loads(raw))
         if not isinstance(payload, dict):
             raise ValueError("hook input must be an object")
         _deliver(Path(args.channel), payload, sys.stdout)

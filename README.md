@@ -14,7 +14,7 @@ One `Agent`, many backends — selected by the `vision_model` id. Provider adapt
 | Anthropic | `claude-sonnet-4-6`, `claude-opus-4-7`, `claude-haiku-4-5` | Anthropic Messages API |
 | Claude Agent SDK | `claude-code`, `claude-code-sonnet-4-6`, `claude-agent-opus` | official Python SDK and its bundled Claude Code CLI (`pyclaude`); existing aliases retained |
 | Antigravity CLI | `agy`, `antigravity`, `agy-gemini-3-pro` | bundled `agy` CLI and matching capture shim under a PTY (`pyagy`) |
-| Codex SDK | `codex`, `codex-gpt-5-codex`, `codex-sdk` | official Python SDK over the instrumented Codex app-server (`pycodex`) |
+| Codex SDK | `codex`, `codex-gpt-5-codex`, `codex-sdk` | official Python SDK over the linked Codex app-server (`pycodex`) |
 | Kimi Code CLI | `kimi-code`, `kimi-code-k3` | vendored Node CLI under a PTY (`pykimi`), wirecap bridge via an N-API addon; built from source by `pixi install` |
 | vLLM (OpenAI-compatible) | `qwen3`, `qwen3-5`, `qwen3-6` | OpenAI client with a custom `base_url` |
 | Moonshot / Kimi (HTTP) | `kimi2-6`, `kimi-k2.7-code` | Anthropic-compatible endpoint (the HTTP `KimiModel`, distinct from the `kimi-code` CLI) |
@@ -29,13 +29,13 @@ dependencies:
 | CLI | Pinned version | Integration and build notes |
 | --- | --- | --- |
 | Antigravity (`agy`) | **1.4.11** | [BuildID-matched shim and symbol map](antigravity/README.md) |
-| Codex | **0.166.0** (`rust-v0.166.0`) | [Rust source hooks and session-store compatibility](codex/README.md) |
+| Codex | **0.166.0** (`rust-v0.166.0`) | [Rust source capture and session-store compatibility](codex/README.md) |
 | Kimi Code | **2.4.1** (`@moonshot-ai/kimi-code@2.4.1`) | [Node bundle, search worker, and native addon](kimi/README.md) |
 | Claude Code | **2.1.316**, with Agent SDK **0.2.176** | [Vendored Python SDK and checksum-verified executable](claude/README.md) |
 
 ## Install
 
-TaskSolver uses [pixi](https://pixi.sh) for a managed Python 3.15 environment:
+TaskSolver requires Python 3.15 and uses [pixi](https://pixi.sh) for its managed environment:
 
 ```bash
 pixi install                                              # build + install the default env
@@ -64,10 +64,16 @@ Credentials are supplied via a `KeyChain` (loading files like `system/credential
 From the TaskSolver checkout, these checks run without provider credentials or model calls:
 
 ```bash
+pixi run typecheck
+
+# SDKs and chat behavior
 pixi run python test_scripts/test_claude_sdk.py
 pixi run python test_scripts/test_claude_bundle.py
 pixi run python test_scripts/test_codex_sdk.py
 pixi run python test_scripts/test_codex_sdk_native.py
+pixi run python test_scripts/test_chat_mode.py
+
+# Exec/PTY clients and packaged Kimi runtime
 pixi run python test_scripts/test_codex_argv.py
 pixi run python test_scripts/test_codex_process.py
 pixi run python test_scripts/test_responses_decode.py
@@ -75,19 +81,39 @@ pixi run python test_scripts/test_kimi_argv.py
 pixi run python test_scripts/test_kimi_decode.py
 pixi run python test_scripts/test_kimi_process.py
 pixi run python test_scripts/test_kimi_session.py
-pixi run python test_scripts/test_wire_session.py
 pixi run python test_scripts/test_kimi_bundle.py
+
+# Shared process, native bridge and framing
+pixi run python test_scripts/test_wire_session.py
+pixi run python test_scripts/test_wire_process.py
+pixi run python test_scripts/test_wire_bridge.py
+pixi run python test_scripts/test_wirecap_framing.py
+
+# Agy build metadata, native readers and configuration
+pixi run python test_scripts/test_agy_symbols.py
+pixi run python test_scripts/test_agy_stubs.py
+pixi run python test_scripts/test_appresponse.py
+pixi run python test_scripts/test_config.py
 pixi run python test_scripts/test_system_messages.py
 pixi run python test_scripts/test_agy_system_message_queue.py
 pixi run python test_scripts/test_agy_system_message_api.py
 ```
 
+`typecheck` runs BasedPyright in strict mode over all project Python, including build
+tools, examples and tests. Vendored sources and generated build directories are excluded.
+Both inferred and explicit `Any` are errors. `typings/` declares the third-party APIs
+used by build tools and optional decoders; JSON and process boundaries use explicit data types.
+The six first-party runtime packages ship `py.typed` markers for downstream checking.
+
 The Claude bundle check needs its downloaded runtime; the Kimi bundle check needs its built
 artifacts and Node. They verify package contents and runtime behavior outside the checkout.
-The Codex native SDK check needs the built binary and uses a localhost Responses fixture.
+The native bridge and agy checks need the pixi C++ toolchain. Agy's stub checks exercise the
+built host, including GC-stress startup. The Codex native SDK check uses a localhost Responses
+fixture to verify capture, overlapping requests, resume, and synthetic API-key handling.
 A skipped test does not verify an unbuilt artifact. See the backend READMEs for live smoke
-tests, which require provider access. These SDK integrations were checked with builds and
-offline fixtures; authenticated provider calls were not run.
+tests, which require provider access. Offline SDK fixtures do not establish authenticated
+provider behavior; agy's `test_client.py` includes a live request and is listed separately
+in its backend README.
 
 ## Usage
 
@@ -98,14 +124,14 @@ from tasksolver.common import TaskSpec, ParsedAnswer, Question, KeyChain
 from tasksolver.exceptions import GPTOutputParseException
 
 class HeadsOrTails(ParsedAnswer):
-    def __init__(self, value): self.value = value
+    def __init__(self, value: str) -> None: self.value = value
     @staticmethod
     def parser(raw: str) -> "HeadsOrTails":
         out = raw.strip().strip(".,").lower()
         if out not in ("heads", "tails"):
             raise GPTOutputParseException("expected `heads` or `tails`")
         return HeadsOrTails(out)
-    def __str__(self): return self.value
+    def __str__(self) -> str: return self.value
 
 task = TaskSpec(name="Coin Toss", description="Flip a fair coin; reply `heads` or `tails`.",
                 answer_type=HeadsOrTails, followup_func=None, completed_func=None)
@@ -144,8 +170,8 @@ The official [Codex Python SDK](https://learn.chatgpt.com/docs/codex-sdk#python-
 is integrated into `CodexModel`, `pycodex.ask_sdk`, and `pycodex.SDKSession`.
 Both `codex*` and `codex-sdk*` Agent IDs select the SDK transport.
 `CodexModel(transport="exec")` and the lower-level `pycodex.ask`/`Session` retain
-the instrumented exec and PTY interfaces. It uses the same
-bundled instrumented binary and preserves wire captures alongside SDK results.
+the linked exec and PTY interfaces. It uses the same
+bundled linked binary and preserves wire captures alongside SDK results.
 See [Codex usage](codex/README.md). The SDK source ships from the existing pinned
 Codex vendor tree as `openai_codex`; TaskSolver supplies its runtime, avoiding a
 second CLI download. Both SDKs are shipped as source inside TaskSolver;
@@ -214,7 +240,7 @@ cleanup — don't run parallel sessions that way.
 
 ## Antigravity (`agy`) instrumentation
 
-[`antigravity/`](antigravity/) is a subsystem that instruments Google's Antigravity CLI (`agy`) in-process (converting the Go PIE binary into `vendor/libagy.so` and linking a C++23 host executable `vendor/agy` with bidirectional `ld` / `ld.so`-bound static cgocall trampolines plus an embedded CPython), and exposes `agy` as a TaskSolver backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the static cgocall-trampoline hook mechanism (`src/gocall.cpp` + `src/gomod.cpp`), current build/validation notes, and the historical WSL1/cloud-kernel investigations.
+[`antigravity/`](antigravity/) links Google's Antigravity CLI (`agy`) in-process (converting the Go PIE binary into `vendor/libagy.so` and linking a C++23 host executable `vendor/agy` with bidirectional `ld` / `ld.so`-bound static cgocall trampolines plus an embedded CPython), and exposes `agy` as a TaskSolver backend (`pyagy.AgyModel`, mirroring `ClaudeCodeModel`). See [`antigravity/README.md`](antigravity/README.md) for the design, the static cgocall trampoline books (`src/gocall.cpp` + `src/gomod.cpp`), current build/validation notes, and the historical WSL1/cloud-kernel investigations.
 
 `pyagy` also captures agy's own system notifications and interagent messages in
 `AgyResponse.system_messages`, with capture errors in `.system_message_errors`.

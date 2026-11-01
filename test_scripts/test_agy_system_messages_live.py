@@ -7,37 +7,62 @@ No credentials or native artifacts means a failure, never a passing skip. The
 proof checks native observations and actual outgoing requests; model obedience
 is not an assertion. A scoped conversation store preserves the user's sessions.
 """
+
+from __future__ import annotations
 import argparse
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+from typing import TypedDict, cast
 
-from pyagy import Session, ask, prepare_scoped_home
+from wirecap.types import JSONObject, JSONValue, json_array, json_object
+
+from pyagy import AgyResponse, Session, ask, prepare_scoped_home
 
 
-def check_message(response, marker):
-    observed = [m for m in response.system_messages if marker in m["text"]]
+def check_message(response: AgyResponse, marker: str) -> JSONObject:
+    observed = [m for m in response.system_messages if marker in str(m["text"])]
     assert observed, f"missing native system-message observation for {marker}"
     assert all(not m["truncated"] for m in observed), "unexpected capture truncation"
-    requests = [t["request_full"]["request"] for t in response.turns
-                if t.get("request_full", {}).get("request")]
-    parts = [p.get("text", "") for r in requests for c in r.get("contents", [])
-             for p in c.get("parts", [])]
+    requests: list[JSONObject] = []
+    for turn in response.turns:
+        full = json_object(cast(JSONValue, turn.get("request_full", {})))
+        request = full.get("request")
+        if request:
+            requests.append(json_object(request))
+    parts: list[str] = []
+    for request in requests:
+        for content in json_array(request.get("contents", [])):
+            for part in json_array(json_object(content).get("parts", [])):
+                value = json_object(part).get("text", "")
+                assert isinstance(value, str), value
+                parts.append(value)
     assert any(marker in p and "<SYSTEM_MESSAGE>" in p for p in parts), \
         f"notification missing from model request for {marker}"
     assert not any(marker in json.dumps(r.get("systemInstruction", {})) for r in requests), \
         "notification unexpectedly changed the provider system prompt"
     return {"observations": len(observed),
-            "sources": sorted({m["capture_source"] for m in observed}),
+            "sources": [source for source in sorted({str(m["capture_source"]) for m in observed})],
             "native_and_wire_verified": True}
 
 
-def main():
+class LiveOptions(TypedDict):
+    workspace: str
+    data_dir: str
+    timeout: float
+    extra_env: dict[str, str | None]
+
+
+
+class Arguments(argparse.Namespace):
+    output_dir: Path | None
+
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(namespace=Arguments())
     root = args.output_dir or Path(tempfile.mkdtemp(prefix="agy-system-api-live-"))
     root.mkdir(parents=True, exist_ok=True)
     workspace = root / "workspace"
@@ -45,10 +70,12 @@ def main():
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
     state = root / "state"
     prepare_scoped_home(str(state), link_global_config=False)
-    options = dict(workspace=str(workspace), data_dir=str(state), timeout=180,
-                   extra_env={key: None for key in os.environ if key.startswith("SSH_")})
+    options: LiveOptions = {
+        "workspace": str(workspace), "data_dir": str(state), "timeout": 180,
+        "extra_env": {key: None for key in os.environ if key.startswith("SSH_")},
+    }
     prompt = "Acknowledge the latest harness notification briefly. Do not use tools."
-    proof = {}
+    proof: JSONObject = {}
     response = ask(prompt, system_messages=["ONE_SHOT_NOTIFICATION_83542"], **options)
     assert response.exit_status == 0, response.transcript[-2000:]
     proof["one_shot"] = check_message(response, "ONE_SHOT_NOTIFICATION_83542")
@@ -67,7 +94,7 @@ def main():
         second = session.ask(prompt)
         proof["session_second"] = check_message(second, "SESSION_SECOND_NOTIFICATION_94317")
         assert session.system_message_status(second_id)["state"] == "emitted"
-        assert not any("SESSION_SECOND_NOTIFICATION_94317" in m["text"]
+        assert not any("SESSION_SECOND_NOTIFICATION_94317" in str(m["text"])
                        for m in first.system_messages), "earlier response mutated"
         assert first.capture_path is None and second.capture_path is None
     assert not (workspace / ".agents" / "hooks.json").exists()

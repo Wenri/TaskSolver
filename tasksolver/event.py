@@ -3,12 +3,16 @@ The atomic unit of a memory is an event.
 A collection of events form an EventCollection.
 """
 
+from __future__ import annotations
+
 import json
-from typing import List, Tuple, Union
+import os
+from pathlib import Path
+from typing import cast
+from wirecap.types import JSONObject, json_load_object
 from .common import Question, ParsedAnswer
 from bson import ObjectId
 import datetime
-import time
 
 # TODO consider how to embed images in json files too.
 def file_location_type(path:str) -> str:
@@ -16,38 +20,38 @@ def file_location_type(path:str) -> str:
     """
     if path.startswith('http://') or path.startswith('https://'):
         return 'url'
-    return 'local' 
+    return 'local'
 
-def read_event_file(file_location:str) -> dict:
+def read_event_file(file_location: str) -> JSONObject:
     """ Event files loaded as json
     """
     with open(file_location, 'r') as f:
-        values = json.load(f)
+        values = json_load_object(f)
     return values
 
-def write_event_file(file_location:str, values: dict): 
+def write_event_file(file_location: str, values: dict[str, object]) -> str:
     """ Event files stored as json.
     """
-    prepare_dir_of(file_location)
     if file_location_type(file_location) == 'local':
+        Path(file_location).parent.mkdir(parents=True, exist_ok=True)
         with open(file_location, 'w') as f:
             json.dump(values,f)
     else:
-        raise NotImplementedError(f'Uncaught file location type {fl_type}')
+        raise NotImplementedError(f'Uncaught file location type {file_location_type(file_location)}')
     return file_location
 
 
 class EventCollection(object):
     """ Class used for data processing from event files
     """
-    def __init__(self):
+    def __init__(self) -> None:
         self.id = str(ObjectId())
-        self.events = []
+        self.events: list[Event] = []
 
     def load_from_session(self, event_dir:str, session_token:str) -> "EventCollection":
         if file_location_type (event_dir) == 'local':
             assert os.path.exists(os.path.join(event_dir, session_token)), f'{os.path.join(event_dir, session_token)} does not exist'
-            
+
             for event_file in os.listdir(os.path.join(event_dir, session_token)):
                 # try:
                 new_event = Event().load_from_event_file(os.path.join(event_dir, session_token, event_file))
@@ -62,7 +66,6 @@ class EventCollection(object):
         return self
 
     def add_event(self, event:"Event") -> "EventCollection":
-        assert isinstance(event, Event), f"invalid type {type(event)} for EventCollection"
         self.events.append(event)
         return self
 
@@ -79,57 +82,60 @@ class EventCollection(object):
     def  __len__(self) -> int:
         return len(self.events)
 
-    def filter_to(self, label:Union[str, list[str]]):
+    def filter_to(self, label: str | list[str]) -> list[Event]:
         if isinstance(label, str):
             label = [label]
-        
-        permissible_classes = []
-        for l in label: 
+
+        permissible_classes: list[type[Event]] = []
+        for l in label:
             assert l in TYPE2CLASS, f"unknown type {label}"
             permissible_classes.append(TYPE2CLASS[l])
-             
+
         filtered_events = [ev for ev in self.events if isinstance(ev, tuple(permissible_classes))]
         return filtered_events
 
 
 class Event(object):
-    def __init__(self, session_token:str = None):
+    def __init__(self, session_token: str | None = None) -> None:
         self.session_token = session_token
         self.timestamp = str(datetime.datetime.now())
         self.type = 'EVENT'
 
     # comparison methods for sorting
-    def __lt__(self, obj: "Event") -> bool:
+    def __lt__(self, obj: object) -> bool:
         if not isinstance(obj, Event): raise ValueError(f'Invalid comparison of type {type(obj)}')
         return self.timestamp < obj.timestamp
-    def __gt__(self, obj: "Event") -> bool:
+    def __gt__(self, obj: object) -> bool:
         if not isinstance(obj, Event): raise ValueError(f'Invalid comparison of type {type(obj)}')
         return self.timestamp > obj.timestamp
-    def __le__(self, obj: "Event") -> bool:
+    def __le__(self, obj: object) -> bool:
         if not isinstance(obj, Event): raise ValueError(f'Invalid comparison of type {type(obj)}')
         return self.timestamp <= obj.timestamp
-    def __ge__(self, obj: "Event") -> bool:
+    def __ge__(self, obj: object) -> bool:
         if not isinstance(obj, Event): raise ValueError(f'Invalid comparison of type {type(obj)}')
         return self.timestamp >= obj.timestamp
-    def __eq__(self, obj: "Event") -> bool:
+    def __eq__(self, obj: object) -> bool:
         if not isinstance(obj, Event): raise ValueError(f'Invalid comparison of type {type(obj)}')
-        return self.timestamp == obj.timestamp 
+        return self.timestamp == obj.timestamp
 
-    def load_from_event_params(self, **kwargs) -> "Event": 
+    def load_from_event_params(self, **kwargs: object) -> "Event":
         for key in kwargs:
             setattr(self, key, kwargs[key])
         return self
 
     def load_from_event_file(self, filepath: str) -> "Event":
-        fields = read_event_file(filepath) 
-        return TYPE2CLASS[fields['type']]().load_from_event_params(**fields) 
+        fields = read_event_file(filepath)
+        event_type = fields['type']
+        if not isinstance(event_type, str):
+            raise TypeError('event type must be a string')
+        return TYPE2CLASS[event_type]().load_from_event_params(**fields)
 
-    def export(self) -> dict:
-        return vars(self)
+    def export(self) -> dict[str, object]:
+        return cast(dict[str, object], vars(self))
 
     def save_to_event_file(self, filepath: str) -> str:
-        attr_dict = self.export() 
-        if hasattr(self, 'latency') and self.latency is None:
+        attr_dict = self.export()
+        if getattr(self, 'latency', False) is None:
             raise ValueError("Forgot to call .tick and .tock?")
         write_event_file(filepath, attr_dict)
         return filepath
@@ -143,17 +149,16 @@ class Event(object):
 
 
 class ThinkEvent(Event):
-    def __init__(self, session_token:str = None, qa_sequence:List[Tuple[Question, ParsedAnswer]]=None):
+    def __init__(self, session_token: str | None = None, qa_sequence: list[tuple[Question, ParsedAnswer]] | None = None) -> None:
         super().__init__(session_token)
-        assert isinstance(qa_sequence, list), "qa_sequence should be least, even if len 1."
-        assert all([isinstance(el, tuple) for el in qa_sequence]), "Elements of qa_sequence should be tuple."
+        assert qa_sequence is not None, "qa_sequence must be a list, even if length 1."
 
         self.qa_sequence = qa_sequence
 
     @property
     def description(self) -> str:
         st = ""
-        for idx, qa in enumerate(qa_sequence):
+        for idx, qa in enumerate(self.qa_sequence):
             q, a = qa
             st += f"#### Question {idx}\n"
             st += str(q)
@@ -162,9 +167,9 @@ class ThinkEvent(Event):
             st += str(a)
             st += "\n"
         return st
-        
+
 class ActEvent(Event):
-    def __init__(self, session_token:str = None):
+    def __init__(self, session_token: str | None = None) -> None:
         super().__init__(session_token)
 
     @property
@@ -174,8 +179,8 @@ class ActEvent(Event):
 class ActErrorEvent(Event):
     """ Event of an error in the execution of an action.
     """
-    def __init__(self, session_token:str = None,
-                 exception:Exception=None):
+    def __init__(self, session_token: str | None = None,
+                 exception: Exception | None = None) -> None:
         super().__init__(session_token)
         self.exception = exception
 
@@ -183,25 +188,25 @@ class ActErrorEvent(Event):
     def description(self) -> str:
         raise NotImplementedError
 
-    
-class ObserveEvent(Event): 
-    def __init__(self, session_token:str = None):
+
+class ObserveEvent(Event):
+    def __init__(self, session_token: str | None = None) -> None:
         super().__init__(session_token)
-    
+
     @property
     def description(self) -> str:
         raise NotImplementedError
 
 class EvaluateEvent(Event):
-    def __init__(self, session_token:str = None,
-                 completion_question:Question = None,
-                 completion_eval:ParsedAnswer = None):
+    def __init__(self, session_token: str | None = None,
+                 completion_question: Question | None = None,
+                 completion_eval: ParsedAnswer | None = None) -> None:
         super().__init__(session_token)
-        assert isinstance(completion_question, Question) 
+        assert isinstance(completion_question, Question)
         assert isinstance(completion_eval, ParsedAnswer)
         self.completion_question = completion_question
         self.completion_eval = completion_eval
-    
+
     @property
     def description(self) -> str:
         st = "## Evaluation Question\n"
@@ -212,13 +217,12 @@ class EvaluateEvent(Event):
         st += "\n"
         st += str(self.completion_eval)
         st += "\n"
-        return st 
+        return st
 
 class FeedbackEvent(Event):
-    def __init__(self, session_token:str = None,
-                 feedback:Union[None, Question]=None):
+    def __init__(self, session_token: str | None = None,
+                 feedback: Question | None = None) -> None:
         super().__init__(session_token)
-        assert isinstance(feedback, Question) or feedback is None
         self.feedback = feedback
 
     @property
@@ -230,7 +234,7 @@ class FeedbackEvent(Event):
 
 
 class InteractEvent(Event):
-    def __init__(self, session_token:str = None):
+    def __init__(self, session_token: str | None = None) -> None:
         super().__init__(session_token)
 
     @property
@@ -238,10 +242,10 @@ class InteractEvent(Event):
         raise NotImplementedError
 
 
-TYPE2CLASS = {
-'EVENT': Event, 
+TYPE2CLASS: dict[str, type[Event]] = {
+'EVENT': Event,
 # TAORI events
-'THINK': ThinkEvent, 
+'THINK': ThinkEvent,
 'ACT': ActEvent,
 'ACTERROR': ActErrorEvent,
 'OBSERVE': ObserveEvent,

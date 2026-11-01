@@ -62,6 +62,11 @@ static size_t put_step(uint8_t *p, int32_t dval, uint32_t dpc)
     return n;
 }
 
+/* One precise entry map per function; Go treats set bits as definite pointers. */
+struct pointer_map { int32_t n, nbit; uint64_t bits; };
+static_assert(offsetof(pointer_map, bits) == sizeof(go_stackmap));
+static_assert(sizeof(pointer_map::bits) == AGY_GOMOD_MAX_MAPBYTES);
+
 /* Logical offsets bound the bucket array by code size, however far apart the stubs link. */
 static struct {
     go_moduledata md;
@@ -72,7 +77,7 @@ static struct {
     alignas(uint32_t) uint8_t pcln[AGY_GOMOD_MAX_FUNCS * AGY_FUNC_STRIDE];
     uint8_t names[32];   /* "\0agy_cgo_tramp\0" */
     uint8_t pctab[1 + AGY_GOMOD_MAX_FUNCS * 32];  /* three steps: at most six u32 varints + terminator */
-    alignas(uint32_t) uint8_t smap[sizeof(go_stackmap) + AGY_GOMOD_MAX_MAPBYTES];
+    pointer_map maps[AGY_GOMOD_MAX_FUNCS][2];  /* args, locals */
 } g_mod;
 
 int agy_gomod_register(std::span<const agy_stub_info> stubs)
@@ -82,13 +87,19 @@ int agy_gomod_register(std::span<const agy_stub_info> stubs)
         GLOG("invalid stub count or repeated module registration (nfunc=%zu)", nstubs);
         return -1;
     }
-    struct range { uintptr_t entry, frame_start, frame_end, end; };
+    struct range { uintptr_t entry, frame_start, frame_end, end; const agy_stub_info *stub; };
     std::array<range, AGY_GOMOD_MAX_FUNCS> ranges;
     uint32_t text_size = 0;
     for (size_t i = 0; i < nstubs; ++i) {
         const auto &s = stubs[i];
         auto &r = ranges[i];
-        r = {(uintptr_t)s.entry, (uintptr_t)s.frame_start, (uintptr_t)s.frame_end, (uintptr_t)s.end};
+        r = {(uintptr_t)s.entry, (uintptr_t)s.frame_start, (uintptr_t)s.frame_end, (uintptr_t)s.end, &s};
+        const uint32_t arg_bits = s.stack_args_size / 8;
+        if (s.reg_ptrmask & ~0x1ffu || s.stack_args_size % 8 || arg_bits > 64
+                || (arg_bits < 64 && s.stack_ptrmask >> arg_bits)) {
+            GLOG("invalid precise pointer map for stub %zu", i);
+            return -5;
+        }
         if (!r.entry || r.entry >= r.frame_start || r.frame_start >= r.frame_end || r.frame_end >= r.end) {
             GLOG("invalid linked boundaries for stub %zu", i);
             return -2;
@@ -128,19 +139,11 @@ int agy_gomod_register(std::span<const agy_stub_info> stubs)
     auto *md = &g_mod.md;
     auto *ph = &g_mod.ph;
     auto *ftab = g_mod.ftab;
-    auto *smap = (go_stackmap *)g_mod.smap;
     ph->magic = GO_PCLNTAB_MAGIC_GO120;
     ph->minLC = 1;
     ph->ptrSize = 8;
     ph->nfunc = (intptr_t)nstubs;
     std::memcpy(g_mod.names + 1, "agy_cgo_tramp", 13);
-
-    const int nbit = (AGY_FRAME - 8) / 8;
-    const int mapbytes = (nbit + 7) / 8;
-    smap->n = 1;
-    smap->nbit = nbit;
-    std::memset(smap->bytedata, 0xff, mapbytes);
-    if (nbit % 8) smap->bytedata[mapbytes - 1] = (uint8_t)((1u << (nbit % 8)) - 1);
 
     size_t po = 1;
     uint32_t logical = 0;
@@ -152,13 +155,21 @@ int agy_gomod_register(std::span<const agy_stub_info> stubs)
         auto *f = (go_func *)(g_mod.pcln + i * AGY_FUNC_STRIDE);
         f->entryOff = logical;
         f->nameOff = 1;
+        f->args = (int32_t)r.stub->stack_args_size;
         f->pcsp = (uint32_t)po;
         f->funcID = 0;
         f->flag = GO_FUNCFLAG_ASM;
         f->nfuncdata = 2;
         auto *fd = (uint32_t *)(g_mod.pcln + i * AGY_FUNC_STRIDE + sizeof(go_func));
-        fd[GO_FUNCDATA_ArgsPointerMaps] = UINT32_MAX;
-        fd[GO_FUNCDATA_LocalsPointerMaps] = 0;
+        const uint32_t maps_offset = (uint32_t)(i * sizeof(g_mod.maps[0]));
+        fd[GO_FUNCDATA_ArgsPointerMaps] = maps_offset;
+        fd[GO_FUNCDATA_LocalsPointerMaps] = maps_offset + sizeof(pointer_map);
+        g_mod.maps[i][0] = {1, f->args / 8, r.stub->stack_ptrmask};
+        // Slot 1 is cgocall's block pointer. Slots 3..11 hold the nine GP arguments.
+        // The function address, control word, RDX scratch and saved BP are not roots.
+        g_mod.maps[i][1] = {1, (AGY_FRAME - 8) / 8,
+                            ((uint64_t)r.stub->reg_ptrmask << (AGY_OFF_RAX / 8))
+                            | (1ull << (AGY_OFF_ARG / 8))};
 
         // Go's pcsp value changes after each stack adjustment instruction ends.
         po += put_step(g_mod.pctab + po, 1, (uint32_t)(r.frame_start - r.entry));
@@ -194,15 +205,15 @@ int agy_gomod_register(std::span<const agy_stub_info> stubs)
     md->findfunctab = (uintptr_t)g_mod.fft;
     md->minpc = md->text = region_base;
     md->maxpc = md->etext = region_end;
-    md->gofunc = (uintptr_t)smap;
+    md->gofunc = (uintptr_t)g_mod.maps;
     md->bad = 1;   // modulesinit skips it; findfunc still walks it.
     std::atomic_ref<go_moduledata *>(tail->next).store(md, std::memory_order_release);
 
     if (std::getenv("AGY_PROC_ENABLE") && !std::getenv("_AGY_SBOXSERVE")) {
         GLOG("registered synthetic moduledata on agy_firstmoduledata (%p): %zu funcs, "
-             "%u code bytes, text=[%#lx,%#lx), frame=%u, nbit=%d",
+             "%u code bytes, text=[%#lx,%#lx), frame=%u, precise pointer maps",
              (void *)fmd, nstubs, text_size, (unsigned long)region_base, (unsigned long)region_end,
-             AGY_FRAME, nbit);
+             AGY_FRAME);
     }
     return 0;
 }

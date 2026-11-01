@@ -9,9 +9,11 @@ builder (e.g. ``pyagy.agy_process.http1sse`` for agy's genai shape).
 
 Stdlib-only (brotli imported lazily), so it is safe to load inside the embedded interpreter.
 """
-import json
 import re
 import zlib
+from typing import Literal
+
+from ..types import Direction, JSONObject, json_loads
 
 # Request line OR response status line. `.search` skips any TLS-handshake plaintext
 # prefix that may precede the first HTTP message on the read side.
@@ -28,26 +30,26 @@ class Message:
 
     __slots__ = ("start_line", "headers", "body")
 
-    def __init__(self, start_line, headers, body):
+    def __init__(self, start_line: str, headers: dict[str, str], body: bytes) -> None:
         self.start_line = start_line
         self.headers = headers
         self.body = body
 
     @property
-    def is_request(self):
+    def is_request(self) -> bool:
         return not self.start_line.startswith("HTTP/1.1")
 
     @property
-    def method(self):
+    def method(self) -> str | None:
         return self.start_line.split(" ", 1)[0] if self.is_request else None
 
     @property
-    def path(self):
+    def path(self) -> str | None:
         parts = self.start_line.split(" ")
         return parts[1] if self.is_request and len(parts) > 1 else None
 
     @property
-    def status(self):
+    def status(self) -> int | None:
         if self.is_request:
             return None
         parts = self.start_line.split(" ")
@@ -57,22 +59,22 @@ class Message:
             return None
 
     @property
-    def content_type(self):
+    def content_type(self) -> str:
         return self.headers.get("content-type", "")
 
     @property
-    def is_event_stream(self):
+    def is_event_stream(self) -> bool:
         return "event-stream" in self.content_type or self.body[:6] == b"data: "
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Message {self.start_line!r} ctype={self.content_type!r} body={len(self.body)}B>"
 
 
-def parse_headers(head_bytes):
+def parse_headers(head_bytes: bytes) -> tuple[str, dict[str, str]]:
     """Split a raw header block (start line + fields, no trailing CRLFCRLF) into
     ``(start_line, {lowercased_name: value})``."""
     lines = head_bytes.decode("latin1").split("\r\n")
-    headers = {}
+    headers: dict[str, str] = {}
     for ln in lines[1:]:
         if ":" in ln:
             k, v = ln.split(":", 1)
@@ -80,10 +82,11 @@ def parse_headers(head_bytes):
     return lines[0], headers
 
 
-def dechunk(buf, start):
+def dechunk(buf: bytes | bytearray, start: int) -> tuple[bytes | None, int]:
     """De-chunk ``transfer-encoding: chunked`` starting at ``buf[start:]``.
     Returns ``(decoded_bytes, consumed)`` where ``consumed`` counts bytes from
-    ``start`` through the 0-terminator, or ``(None, 0)`` if not yet complete."""
+    ``start`` through the final trailer CRLF, or ``(None, 0)`` for incomplete or
+    malformed framing."""
     out = bytearray()
     i = start
     n_buf = len(buf)
@@ -91,24 +94,31 @@ def dechunk(buf, start):
         j = buf.find(b"\r\n", i)
         if j < 0:
             return None, 0
-        try:
-            size = int(bytes(buf[i:j]).split(b";")[0], 16)
-        except ValueError:
+        size_text, separator, _ = bytes(buf[i:j]).partition(b";")
+        if separator:
+            size_text = size_text.rstrip(b" \t")  # RFC 9112 permits BWS before extensions.
+        if re.fullmatch(rb"[0-9a-fA-F]+", size_text) is None:
             return None, 0
+        size = int(size_text, 16)
         i = j + 2
         if size == 0:
-            # Final (empty-trailer) chunk: one more CRLF closes the message.
-            end = buf.find(b"\r\n", i)
-            if end < 0:
-                return None, 0
-            return bytes(out), (end + 2) - start
+            # Trailers belong to this message; only an empty line closes them.
+            while True:
+                end = buf.find(b"\r\n", i)
+                if end < 0:
+                    return None, 0
+                if end == i:
+                    return bytes(out), (end + 2) - start
+                i = end + 2
         if n_buf - i < size + 2:
+            return None, 0
+        if buf[i + size:i + size + 2] != b"\r\n":
             return None, 0
         out += buf[i:i + size]
         i += size + 2
 
 
-def inflate(body, encoding):
+def inflate(body: bytes, encoding: str) -> bytes:
     """Content-decode a body per ``content-encoding`` (gzip/br/deflate). Returns the
     body unchanged on any failure or unknown encoding."""
     try:
@@ -124,20 +134,29 @@ def inflate(body, encoding):
     return body
 
 
-def parse_sse(body):
-    """Parse an SSE ``text/event-stream`` body into the list of JSON objects carried
-    by its ``data:`` lines (``[DONE]`` sentinels skipped)."""
-    events = []
-    for chunk in re.split(rb"\r?\n\r?\n", body):
-        for ln in chunk.split(b"\n"):
-            ln = ln.strip()
-            if ln.startswith(b"data:"):
-                payload = ln[5:].strip()
-                if payload and payload != b"[DONE]":
-                    try:
-                        events.append(json.loads(payload))
-                    except ValueError:
-                        pass
+def parse_sse(body: bytes) -> list[JSONObject]:
+    """Parse JSON event data, joining an event's ``data:`` fields with newlines.
+
+    Accept a final event without its blank separator: native response books also
+    pass individual, already-delimited SSE lines here. ``[DONE]`` is skipped.
+    """
+    events: list[JSONObject] = []
+    data: list[bytes] = []
+    for line in [*re.split(rb"\r\n|\r|\n", body.removeprefix(b"\xef\xbb\xbf")), b""]:
+        if line:
+            field, _, value = line.partition(b":")
+            if field == b"data":
+                data.append(value.removeprefix(b" "))
+            continue
+        payload = b"\n".join(data)
+        data.clear()
+        if payload and payload != b"[DONE]":
+            try:
+                event = json_loads(payload)
+                if isinstance(event, dict):
+                    events.append(event)
+            except ValueError:
+                pass
     return events
 
 
@@ -146,14 +165,14 @@ class StreamDecoder:
     ``Message`` objects as their framing closes. Feed bytes in order via ``feed``;
     iterate the returned messages."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.buf = bytearray()
         self.pos = 0            # scan start: bytes before here are consumed/discarded
 
-    def feed(self, data):
+    def feed(self, data: bytes) -> list[Message]:
         """Append ``data`` and return a list of newly-completed ``Message``s."""
         self.buf += data
-        done = []
+        done: list[Message] = []
         while True:
             msg, end = self._try_one()
             if msg is None:
@@ -166,7 +185,7 @@ class StreamDecoder:
             self.pos = 0
         return done
 
-    def _try_one(self):
+    def _try_one(self) -> tuple[Message | None, int]:
         m = _HDR.search(self.buf, self.pos)
         if not m:
             return None, self.pos
@@ -183,10 +202,13 @@ class StreamDecoder:
                 return None, self.pos      # need more chunk data
             end = bstart + consumed
         elif "content-length" in headers:
+            length = headers["content-length"]
+            if re.fullmatch(r"[0-9]+", length) is None:
+                return None, self.pos
             try:
-                n = int(headers["content-length"])
+                n = int(length)
             except ValueError:
-                n = 0
+                return None, self.pos
             if len(self.buf) - bstart < n:
                 return None, self.pos      # body not fully arrived
             raw = bytes(self.buf[bstart:bstart + n])
@@ -207,7 +229,7 @@ class StreamDecoder:
         return Message(start_line, headers, body), end
 
 
-def classify(direction, buf):
+def classify(direction: Direction, buf: bytes) -> Literal["http1", "h2"] | None:
     """Sniff whether a plaintext stream is HTTP/1.1 (a request/response endpoint) or
     HTTP/2 (a gRPC connection). Returns ``"http1"``, ``"h2"``, or ``None`` (undecided —
     feed more bytes)."""

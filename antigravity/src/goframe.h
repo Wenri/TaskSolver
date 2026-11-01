@@ -13,8 +13,13 @@
 #define AGY_GOFRAME_H
 
 #include "procdef.h"
+#include <cstdint>
 
 #define AGY_FRAME        112   /* bytes the stub subtracts from rsp */
+
+/* The preserved Go stack check covers one StackSmall frame (128 bytes) plus the
+ * runtime gateway's NOSPLIT chain. Keep our frame within that allowance. */
+static_assert(AGY_FRAME <= 128, "stub frame exceeds Go's StackSmall allowance");
 
 #define AGY_OFF_FN         0   /* cgocall arg 0: the C handler */
 #define AGY_OFF_ARG        8   /* cgocall arg 1: &block */
@@ -39,6 +44,9 @@
 struct agy_stub_info {
     void (*entry)(void);
     const unsigned char *frame_start, *frame_end, *end;
+    uint32_t reg_ptrmask;      /* bits 0..8: RAX,RBX,RCX,RDI,RSI,R8,R9,R10,R11 */
+    uint32_t stack_args_size;  /* initialized incoming args; excludes register spills */
+    uint64_t stack_ptrmask;    /* bit 0 is the word at entrySP+8 */
 };
 
 /* Defined in goframe.cpp, one entry per stub, in BOOKS order. */

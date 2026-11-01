@@ -1,6 +1,12 @@
+from __future__ import annotations
+
+from wirecap.types import JSONObject, JSONValue
+from .provider_types import BackendResult, BackendManyResults, response_text
+from openai.types.chat import ChatCompletionMessageParam
+from .provider_types import OpenAIPayload, openai_messages, object_list
 import os
 from urllib.parse import urlparse
-from typing import List, Tuple, Union
+from typing import TypedDict, cast
 
 from loguru import logger
 from openai import OpenAI
@@ -41,13 +47,18 @@ QWEN3_MODEL_ENV_VARS = (
 )
 
 
+class ChoiceState(TypedDict):
+    message: JSONObject
+    finish_reason: JSONValue
+
+
 class VLLMModel(object):
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None,
         task: TaskSpec,
         model: str = DEFAULT_QWEN3_MODEL,
-        base_url: str = None,
+        base_url: str | None = None,
     ):
         self.api_key = api_key
         self.task = task
@@ -58,7 +69,7 @@ class VLLMModel(object):
     def _normalize_max_tokens(self, max_tokens: int) -> int:
         return max(max_tokens, MIN_QWEN3_MAX_TOKENS)
 
-    def _default_extra_body(self) -> dict:
+    def _default_extra_body(self) -> JSONObject:
         return {
             "chat_template_kwargs": {
                 "enable_thinking": self.thinking_depth is not None,
@@ -66,13 +77,12 @@ class VLLMModel(object):
         }
 
     @staticmethod
-    def _extract_message_text(message: dict):
+    def _extract_message_text(message: JSONObject) -> JSONValue:
         content = message.get("content")
         if isinstance(content, list):
             content = "".join(
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict)
+                text for part in object_list(content)
+                if isinstance(text := part.get("text"), str)
             )
 
         if content:
@@ -81,9 +91,8 @@ class VLLMModel(object):
         reasoning = message.get("reasoning_content")
         if isinstance(reasoning, list):
             reasoning = "".join(
-                part.get("text", "")
-                for part in reasoning
-                if isinstance(part, dict)
+                text for part in object_list(reasoning)
+                if isinstance(text := part.get("text"), str)
             )
 
         if isinstance(reasoning, str) and "```python" in reasoning:
@@ -92,7 +101,7 @@ class VLLMModel(object):
         return content
 
     @staticmethod
-    def _summarize_empty_response(message: dict, model: str, max_tokens: int) -> str:
+    def _summarize_empty_response(message: JSONObject, model: str, max_tokens: int) -> str:
         finish_reason = message.get("finish_reason")
         has_reasoning = bool(message.get("reasoning_content"))
         return (
@@ -101,7 +110,7 @@ class VLLMModel(object):
             f"finish_reason={finish_reason!r}, reasoning_content_present={has_reasoning}."
         )
 
-    def ask(self, payload: dict, n_choices=1) -> Tuple[dict, dict]:
+    def ask(self, payload: OpenAIPayload, n_choices: int = 1) -> tuple[list[JSONObject], JSONValue]:
         client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -118,7 +127,7 @@ class VLLMModel(object):
             stream_options={"include_usage": True},
         )
 
-        choice_state = {
+        choice_state: dict[int, ChoiceState] = {
             i: {
                 "message": {
                     "role": "assistant",
@@ -128,86 +137,67 @@ class VLLMModel(object):
             }
             for i in range(n_choices)
         }
-        usage = None
+        usage: JSONValue = None
 
         for chunk in stream:
-            chunk_dict = chunk.dict()
+            chunk_dict = cast(JSONObject, chunk.model_dump())
 
             if chunk_dict.get("usage"):
                 usage = chunk_dict["usage"]
 
-            for choice in chunk_dict["choices"]:
+            for choice in object_list(chunk_dict["choices"]):
                 index = choice["index"]
+                if not isinstance(index, int):
+                    raise TypeError("choice index must be an integer")
                 delta = choice["delta"]
+                if not isinstance(delta, dict):
+                    raise TypeError("choice delta must be an object")
 
                 if delta.get("role"):
                     choice_state[index]["message"]["role"] = delta["role"]
 
                 if delta.get("content"):
-                    choice_state[index]["message"]["content"] += delta["content"]
+                    text = delta["content"]
+                    if not isinstance(text, str):
+                        raise TypeError("content delta must be text")
+                    message = choice_state[index]["message"]
+                    message["content"] = response_text(message) + text
 
                 if delta.get("reasoning_content"):
                     message = choice_state[index]["message"]
-                    message["reasoning_content"] = (
-                        message.get("reasoning_content", "") + delta["reasoning_content"]
-                    )
+                    previous = message.get("reasoning_content", "")
+                    addition = delta["reasoning_content"]
+                    if not isinstance(previous, str) or not isinstance(addition, str):
+                        raise TypeError("reasoning deltas must be text")
+                    message["reasoning_content"] = previous + addition
 
                 if choice.get("finish_reason"):
                     choice_state[index]["finish_reason"] = choice["finish_reason"]
 
-        response = {
-            "choices": [
-                {
-                    "message": choice_state[i]["message"],
-                    "finish_reason": choice_state[i]["finish_reason"],
-                }
-                for i in range(n_choices)
-            ],
-            "usage": usage,
-        }
-
-        messages = []
-        for choice in response["choices"]:
-            message = choice["message"]
-            message["finish_reason"] = choice.get("finish_reason")
+        messages: list[JSONObject] = []
+        for index in range(n_choices):
+            state = choice_state[index]
+            message = state["message"]
+            message["finish_reason"] = state["finish_reason"]
             message["explicit_reasoning_output"] = extract_explicit_reasoning_output(message)
             message["content"] = self._extract_message_text(message)
             messages.append(message)
-
-        return messages, response.get("usage")
+        return messages, usage
 
     @staticmethod
-    def prepare_payload(
-        question: Question,
-        verbose: bool = False,
-        prepend: Union[dict, None] = None,
-        model: str = DEFAULT_QWEN3_MODEL,
-        max_tokens: int = 4096,
-    ) -> dict:
-        question_dicts = question.get_json()
-
-        for part in question_dicts:
-            if part["type"] == "image_url":
-                del part["image"]
-
-        payload = [{"role": "user", "content": question_dicts}]
-        if prepend is not None:
-            payload = [prepend] + payload
-
-        return {
-            "model": model,
-            "messages": payload,
-            "max_tokens": max_tokens,
-        }
+    def prepare_payload(question: Question, verbose: bool = False,
+                        prepend: ChatCompletionMessageParam | None = None,
+                        model: str = DEFAULT_QWEN3_MODEL, max_tokens: int = 4096) -> OpenAIPayload:
+        return {"model": model, "messages": openai_messages(question, prepend), "max_tokens": max_tokens}
 
     def many_rough_guesses(
         self,
         num_threads: int,
         question: Question,
-        max_tokens=4096,
-        verbose=False,
-        max_tries=1,
-    ) -> List[Tuple[ParsedAnswer, str, dict, dict]]:
+        max_tokens: int = 4096,
+        verbose: bool = False,
+        max_tries: int = 1,
+    ) -> BackendManyResults:
         p = self.prepare_payload(
             question,
             verbose=verbose,
@@ -216,15 +206,14 @@ class VLLMModel(object):
             max_tokens=self._normalize_max_tokens(max_tokens),
         )
 
-        ok = False
         reattempt = 0
-        while not ok:
+        while True:
             response, meta_data = self.ask(p, n_choices=num_threads)
             try:
-                parsed_response = []
+                parsed_response: list[ParsedAnswer] = []
                 for message in response:
                     content = message.get("content")
-                    if content is None:
+                    if not isinstance(content, str):
                         raise GPTOutputParseException(self._summarize_empty_response(
                             message,
                             self.model,
@@ -245,18 +234,18 @@ class VLLMModel(object):
 
                 logger.warning(f"Reattempt #{reattempt} querying LLM")
                 continue
-            ok = True
+            break
 
         return parsed_response, response, meta_data, p
 
     def rough_guess(
         self,
         question: Question,
-        max_tokens=4096,
-        verbose=False,
-        max_tries=1,
+        max_tokens: int = 4096,
+        verbose: bool = False,
+        max_tries: int = 1,
         query_id: int = 0,
-    ) -> Tuple[ParsedAnswer, str, dict, dict]:
+    ) -> BackendResult:
         p = self.prepare_payload(
             question,
             verbose=verbose,
@@ -265,14 +254,13 @@ class VLLMModel(object):
             max_tokens=self._normalize_max_tokens(max_tokens),
         )
 
-        ok = False
         reattempt = 0
-        while not ok:
-            response, meta_data = self.ask(p)
-            response = response[0]
+        while True:
+            responses, meta_data = self.ask(p)
+            response = responses[0]
             try:
                 content = response.get("content")
-                if content is None:
+                if not isinstance(content, str):
                     raise GPTOutputParseException(self._summarize_empty_response(
                         response,
                         self.model,
@@ -291,19 +279,18 @@ class VLLMModel(object):
 
                 logger.warning(f"Reattempt #{reattempt} querying LLM")
                 continue
-            ok = True
+            break
         return parsed_response, response, meta_data, p
 
-    def run_once(self, question: Question, max_tokens=4096, **kwargs):
+    def run_once(self, question: Question, max_tokens: int = 4096, *, max_tries: int = 1, query_id: int = 0, verbose: bool = False, **kwargs: object) -> BackendResult:
         q = self.task.first_question(question)
-        return self.rough_guess(q, max_tokens=max_tokens, **kwargs)
+        return self.rough_guess(q, max_tokens=max_tokens, max_tries=max_tries, query_id=query_id, verbose=verbose)
 
 
-def resolve_qwen3_api_key(explicit_api_key=None):
+def resolve_qwen3_api_key(explicit_api_key: str | None = None) -> str | None:
     if explicit_api_key:
         if (
-            isinstance(explicit_api_key, str)
-            and not os.path.exists(explicit_api_key)
+            not os.path.exists(explicit_api_key)
             and ("/" in explicit_api_key or explicit_api_key.endswith(".txt"))
         ):
             return os.environ.get("VLLM_API_KEY")
@@ -311,7 +298,7 @@ def resolve_qwen3_api_key(explicit_api_key=None):
     return os.environ.get("VLLM_API_KEY")
 
 
-def resolve_qwen3_base_url():
+def resolve_qwen3_base_url() -> str | None:
     for env_var in QWEN3_BASE_URL_ENV_VARS:
         value = os.environ.get(env_var)
         if value:
@@ -319,11 +306,11 @@ def resolve_qwen3_base_url():
     return None
 
 
-def resolve_qwen3_builtin_endpoint(vision_model: str):
+def resolve_qwen3_builtin_endpoint(vision_model: str) -> dict[str, str] | None:
     return QWEN3_BUILTIN_ENDPOINTS.get((vision_model or "").strip().lower())
 
 
-def resolve_qwen3_model_name(base_url=None):
+def resolve_qwen3_model_name(base_url: str | None = None) -> str:
     for env_var in QWEN3_MODEL_ENV_VARS:
         value = os.environ.get(env_var)
         if value:

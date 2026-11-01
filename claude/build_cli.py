@@ -9,11 +9,36 @@ import platform
 import runpy
 import tempfile
 import urllib.request
+from collections.abc import Mapping
+from http.client import HTTPResponse
 from pathlib import Path
-from typing import Final
+from typing import Final, TypedDict, cast
 
 
-def matches(path: Path, pin: dict) -> bool:
+class CLIPin(TypedDict):
+    version: str
+    url: str
+    sha256: str
+    size: int
+
+
+def _load_pin(path: Path) -> CLIPin:
+    manifest = cast(object, json.loads(path.read_text()))
+    if not isinstance(manifest, dict):
+        raise ValueError("Claude CLI manifest must be an object")
+    cli = cast(dict[str, object], manifest)["cli"]
+    if not isinstance(cli, dict):
+        raise ValueError("Claude CLI pin must be an object")
+    data = cast(dict[str, object], cli)
+    version, url, digest, size = data["version"], data["url"], data["sha256"], data["size"]
+    if not isinstance(version, str) or not isinstance(url, str) or not isinstance(digest, str):
+        raise ValueError("Claude CLI pin needs string version, URL and SHA256")
+    if not isinstance(size, int) or isinstance(size, bool):
+        raise ValueError("Claude CLI pin needs an integer size")
+    return {"version": version, "url": url, "sha256": digest, "size": size}
+
+
+def matches(path: Path, pin: CLIPin) -> bool:
     if not path.is_file() or path.stat().st_size != pin["size"]:
         return False
     digest: Final = hashlib.sha256()
@@ -25,9 +50,9 @@ def matches(path: Path, pin: dict) -> bool:
 
 def build() -> Path:
     root: Final = Path(__file__).resolve().parent
-    pin: Final = json.loads((root / "vendor.json").read_text())["cli"]
+    pin: Final = _load_pin(root / "vendor.json")
     package: Final = root / "vendor/sdk/src/claude_agent_sdk"
-    sdk_version: Final = runpy.run_path(str(package / "_cli_version.py"))["__cli_version__"]
+    sdk_version: Final = cast(Mapping[str, object], runpy.run_path(str(package / "_cli_version.py")))["__cli_version__"]
     if sdk_version != pin["version"]:
         raise RuntimeError("Claude CLI pin does not match the vendored SDK")
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
@@ -42,7 +67,7 @@ def build() -> Path:
     temporary: Final = Path(name)
     try:
         with os.fdopen(descriptor, "wb") as output:
-            with urllib.request.urlopen(pin["url"], timeout=60) as response:
+            with cast(HTTPResponse, urllib.request.urlopen(pin["url"], timeout=60)) as response:
                 while block := response.read(1024 * 1024):
                     output.write(block)
         if not matches(temporary, pin):

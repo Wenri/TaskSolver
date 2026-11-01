@@ -2,19 +2,20 @@
 """Offline official-SDK protocol, capture, timeout and cleanup checks."""
 from __future__ import annotations
 
-import json
 import os
+import signal
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
-from typing import Final
+from typing import Final, TypedDict
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 for directory in (ROOT, ROOT / "codex", ROOT / "codex/vendor/sdk/python/src"):
     sys.path.insert(0, str(directory))
 
-from openai_codex import LocalImageInput, TextInput
+from openai_codex import LocalImageInput, TextInput, TurnResult
 from openai_codex.errors import InvalidRequestError
 from pycodex import SDKSession, ask_sdk
 
@@ -108,12 +109,23 @@ for line in sys.stdin:
 '''
 
 
-def running(pid):
+from wirecap.types import json_array, json_loads_object, json_object
+
+
+class TestOptions(TypedDict):
+    codex_bin: str
+    workspace: str
+    codex_home: str
+    extra_env: dict[str, str]
+    timeout: float
+
+
+def running(pid: int) -> bool:
     path: Final = Path(f"/proc/{pid}/stat")
     return path.exists() and path.read_text().split(") ", 1)[1][0] != "Z"
 
 
-def main():
+def main() -> None:
     with tempfile.TemporaryDirectory(prefix="tasksolver-sdk-test-") as directory:
         root: Final = Path(directory)
         stub: Final = root / "codex"
@@ -129,24 +141,29 @@ def main():
         env: Final = {"STUB_LOG": str(log), "STUB_CHILD": str(child_file),
                       "OPENAI_API_KEY": "", "CODEX_API_KEY": "", "CODEX_ACCESS_TOKEN": "",
                       "PYTHONPATH": os.pathsep.join(map(str, (ROOT, ROOT / "codex")))}
-        options: Final = dict(codex_bin=str(stub), workspace=str(workspace),
-                              codex_home=str(home), extra_env=env, timeout=5)
+        options: Final[TestOptions] = {"codex_bin": str(stub), "workspace": str(workspace),
+                                       "codex_home": str(home), "extra_env": env, "timeout": 5}
         response: Final = ask_sdk("hello", **options,
                                   mcp_servers={"demo": {"command": "python", "args": ["demo.py"]}},
                                   config_overrides=('model_reasoning_effort="low"',))
         assert response.text == "answer-1" and response.model == "mock-model"
         assert response.session_id == "0199aabb-1234-7123-8123-123456789abc"
         assert len(response.turns) == 1 and response.usage.total_tokens == 14
+        assert response.sdk_result is not None
         assert response.sdk_result.final_response == response.text
         assert not response.timed_out and response.exit_status == 0
-        records = [json.loads(line) for line in log.read_text().splitlines()]
+        records = [json_loads_object(line) for line in log.read_text().splitlines()]
         launched: Final = records[0]
         assert launched["pid"] == launched["pgid"]
         assert launched["cwd"] == str(workspace) and launched["home"] == str(home)
-        assert "PYTHONHOME" in " ".join(launched["argv"])
-        start: Final = next(r["params"] for r in records if r.get("method") == "thread/start")
+        launch_args = json_array(launched["argv"])
+        assert all(isinstance(arg, str) for arg in launch_args)
+        assert "PYTHONHOME" in " ".join(arg for arg in launch_args if isinstance(arg, str))
+        start: Final = json_object(next(r["params"] for r in records if r.get("method") == "thread/start"))
         assert start["sandbox"] == "read-only" and start["approvalPolicy"] == "never"
-        assert not running(launched["pid"])
+        launched_pid = launched["pid"]
+        assert isinstance(launched_pid, int)
+        assert not running(launched_pid)
         print("ok one-shot: official JSON-RPC, native capture, MCP/home/config, isolated process")
 
         with SDKSession(**options) as session:
@@ -159,37 +176,40 @@ def main():
             assert session.thread.id == session.session_id
             events: Final = list(session.thread.turn("stream").stream())
             assert events[-1].method == "turn/completed"
-        records = [json.loads(line) for line in log.read_text().splitlines()]
-        turns: Final = [r["params"] for r in records if r.get("method") == "turn/start"]
-        assert turns[-2]["input"][1] == {"type": "localImage", "path": "/tmp/image.png"}
+        records = [json_loads_object(line) for line in log.read_text().splitlines()]
+        turns: Final = [json_object(r["params"]) for r in records if r.get("method") == "turn/start"]
+        assert json_array(turns[-2]["input"])[1] == {"type": "localImage", "path": "/tmp/image.png"}
         assert turns[-2]["outputSchema"] == {"type": "object"}
         print("ok multi-turn: typed images, output schema, stream, per-turn capture")
 
         resumed: Final = ask_sdk("resume", **options, session_id=response.session_id, capture=False)
         assert resumed.session_id == response.session_id and resumed.turns == []
         assert resumed.usage.total_tokens == 14 and resumed.capture_path == ""
-        records = [json.loads(line) for line in log.read_text().splitlines()]
+        records = [json_loads_object(line) for line in log.read_text().splitlines()]
         assert any(r.get("method") == "thread/resume" for r in records)
         print("ok resume and SDK token accounting with capture disabled")
 
-        authenticated: Final = ask_sdk("key", **{**options,
-            "extra_env": {**env, "OPENAI_API_KEY": "sk-synthetic-protocol-test"}},
+        auth_options: TestOptions = {**options,
+            "extra_env": {**env, "OPENAI_API_KEY": "sk-synthetic-protocol-test"}}
+        authenticated: Final = ask_sdk("key", **auth_options,
             config_overrides=('cli_auth_credentials_store="file"',))
         assert authenticated.text == "answer-1"
-        records = [json.loads(line) for line in log.read_text().splitlines()]
+        records = [json_loads_object(line) for line in log.read_text().splitlines()]
         login: Final = next(r for r in records if r.get("method") == "account/login/start")
-        assert login["params"]["apiKey"] == "sk-synthetic-protocol-test"
+        assert json_object(login["params"])["apiKey"] == "sk-synthetic-protocol-test"
         launch_with_key: Final = [r for r in records if "argv" in r][-1]
-        assert launch_with_key["argv"][-4] == 'cli_auth_credentials_store="ephemeral"'
+        assert json_array(launch_with_key["argv"])[-4] == 'cli_auth_credentials_store="ephemeral"'
         print("ok environment API key uses SDK login with forced ephemeral storage")
 
         from pycodex import CodexModel
         model: Final = CodexModel(model="codex-sdk", workspace=str(workspace),
                                  sdk_options={"codex_bin": str(stub), "extra_env": env,
                                               "codex_home": str(home)})
-        messages, metadata = model.ask({"prompt": "model"})
+        messages, metadata = model.ask({"prompt": "model", "max_tokens": 256, "workspace": str(workspace)})
         assert messages[0]["content"] == "answer-1"
-        assert metadata[0]["sdk_result"].final_response == "answer-1"
+        sdk_result = metadata[0]["sdk_result"]
+        assert isinstance(sdk_result, TurnResult)
+        assert sdk_result.final_response == "answer-1"
         assert metadata[0]["session_id"] and metadata[0]["turns"]
         assert metadata[0]["explicit_reasoning_output"] == "A synthetic summary."
         assert model.model is None
@@ -199,18 +219,18 @@ def main():
         from tasksolver.common import ParsedAnswer, Question, TaskSpec
 
         class Answer(ParsedAnswer):
-            def __init__(self, text):
+            def __init__(self, text: str) -> None:
                 self.text = text
 
             @staticmethod
-            def parser(text):
-                return Answer(text)
+            def parser(gpt_raw: str) -> Answer:
+                return Answer(gpt_raw)
 
-            def __str__(self):
+            def __str__(self) -> str:
                 return self.text
 
         model.task = TaskSpec("sdk", "Describe the image", Answer,
-                              lambda *_: None, lambda *_: True)
+                              None, None)
         previous_cwd: Final = os.getcwd()
         os.chdir(root)
         try:
@@ -221,29 +241,68 @@ def main():
         assert str(answer) == "answer-1" and raw["content"] == "answer-1"
         assert answer.explicit_reasoning_output == "A synthetic summary."
         assert answer.request_payload == payload and attached[0]["session_id"]
-        assert len(payload["image_paths"]) == 1
-        records = [json.loads(line) for line in log.read_text().splitlines()]
-        image_turn: Final = [r["params"] for r in records if r.get("method") == "turn/start"][-1]
-        assert image_turn["input"][1]["type"] == "localImage"
-        assert Path(image_turn["input"][1]["path"]).is_absolute()
-        assert Path(image_turn["input"][1]["path"]).is_file()
+        assert "image_paths" in payload and len(payload["image_paths"]) == 1
+        records = [json_loads_object(line) for line in log.read_text().splitlines()]
+        image_turn: Final = json_object([r["params"] for r in records if r.get("method") == "turn/start"][-1])
+        image_input = json_object(json_array(image_turn["input"])[1])
+        assert image_input["type"] == "localImage"
+        image_path = image_input["path"]
+        assert isinstance(image_path, str)
+        assert Path(image_path).is_absolute()
+        assert Path(image_path).is_file()
         legacy: Final = CodexModel(transport="exec")
         from pycodex.client import ask_many
         assert legacy._client_ask_many is ask_many
         print("ok default SDK: image TaskSpec four-tuple, reasoning attachment, exec opt-in")
 
         for mode in ("startup-hang", "turn-hang", "write-hang"):
-            start_time: Final = time.monotonic()
+            start_time = time.monotonic()
             prompt = "x" * (8 * 1024 * 1024) if mode == "write-hang" else "timeout"
-            result = ask_sdk(prompt, **{**options, "timeout": 0.5,
-                             "extra_env": {**env, "STUB_MODE": mode}})
+            timeout_options: TestOptions = {**options, "timeout": 0.5,
+                                            "extra_env": {**env, "STUB_MODE": mode}}
+            result = ask_sdk(prompt, **timeout_options)
             assert result.timed_out and time.monotonic() - start_time < 6
             assert not running(int(child_file.read_text()))
         print("ok startup, turn and blocked-write deadlines reap MCP/tool descendants")
 
+        close_options: TestOptions = {**options, "timeout": 10,
+                                      "extra_env": {**env, "STUB_MODE": "write-hang"}}
+        closing_session = SDKSession(**close_options)
+        _ = closing_session.thread  # Complete startup; the stub then stops reading stdin.
+        close_errors: list[Exception] = []
+
+        def blocked_ask() -> None:
+            try:
+                closing_session.ask("x" * (8 * 1024 * 1024))
+            except Exception as error:
+                close_errors.append(error)
+
+        writer = threading.Thread(target=blocked_ask)
+        writer.start()
+        wait_until = time.monotonic() + 2
+        while not closing_session._client._client._lock.locked() and time.monotonic() < wait_until:
+            time.sleep(0.01)
+        time.sleep(0.1)
+        closer = threading.Thread(target=closing_session.close)
+        closer.start()
+        closer.join(timeout=2)
+        closed_promptly = not closer.is_alive()
+        if not closed_promptly:
+            # Keep this regression's failure bounded even when close deadlocks.
+            native = closing_session._client._client._proc
+            if native is not None:
+                os.killpg(native.pid, signal.SIGKILL)
+        closer.join(timeout=3)
+        writer.join(timeout=3)
+        assert closed_promptly, "close blocked behind an in-flight SDK stdin write"
+        assert not writer.is_alive() and close_errors
+        assert not running(int(child_file.read_text()))
+        print("ok closing an active blocked-write ask cancels and reaps the session")
+
         for mode in ("rpc-error", "failed-turn", "interrupted", "exit"):
             try:
-                ask_sdk("error", **{**options, "extra_env": {**env, "STUB_MODE": mode}})
+                error_options: TestOptions = {**options, "extra_env": {**env, "STUB_MODE": mode}}
+                ask_sdk("error", **error_options)
             except Exception as exc:
                 if mode == "rpc-error":
                     assert isinstance(exc, InvalidRequestError)

@@ -4,10 +4,15 @@ the import-purity of the embedded-side dispatch module. No kimi bundle, no node,
 
     python3 test_scripts/test_kimi_decode.py
 """
+
+from __future__ import annotations
+
 import json
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
+from typing import cast
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
@@ -16,18 +21,24 @@ sys.path.insert(0, _KIMI)
 sys.path.insert(0, _REPO)
 
 from pykimi.kimi_process.kimi_decode import (  # noqa: E402
-    KimiTurnBuilder, build_turn_from_events, extract_usage, summarize_request)
+    KimiTurnBuilder,
+    build_turn_from_events,
+    extract_usage,
+    summarize_request,
+)
 
-_failures = []
+from wirecap.types import Event, JSONObject
+
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
 
 
-REQ = {
+REQ: JSONObject = {
     "protocol": "anthropic",
     "providerType": "kimi",
     "modelName": "k3",
@@ -45,9 +56,9 @@ REQ = {
     "fields": {},
 }
 
-USAGE = {"inputOther": 100, "output": 40, "inputCacheRead": 900, "inputCacheCreation": 10}
+USAGE: JSONObject = {"inputOther": 100, "output": 40, "inputCacheRead": 900, "inputCacheCreation": 10}
 
-FINISH = {
+FINISH: JSONObject = {
     "type": "finish",
     "message": {
         "role": "assistant",
@@ -61,7 +72,7 @@ FINISH = {
     "rawFinishReason": "end_turn",
 }
 
-EVENTS = [
+EVENTS: list[JSONObject] = [
     {"type": "part", "part": {"type": "think", "think": "let me add"}},
     {"type": "part", "part": {"type": "text", "text": "2+2 = "}},
     {"type": "part", "part": {"type": "text", "text": "4"}},
@@ -71,9 +82,10 @@ EVENTS = [
 ]
 
 
-def test_usage_normalization():
+def test_usage_normalization() -> None:
     print("[offline] extract_usage: kosong TokenUsage -> neutral Usage names")
     u = extract_usage(EVENTS)
+    assert u is not None
     check(u["input_tokens"] == 1010 and u["cached_input_tokens"] == 900
           and u["output_tokens"] == 40 and u["total_tokens"] == 1050,
           "field mapping (input = other+cacheRead+cacheCreation)")
@@ -81,7 +93,7 @@ def test_usage_normalization():
     check(extract_usage([FINISH]) is None, "no usage event -> None")
 
 
-def test_request_summary():
+def test_request_summary() -> None:
     print("[offline] summarize_request: LLMRequestLogInput summary")
     s = summarize_request(REQ)
     check(s["model"] == "k3" and s["provider"] == "kimi" and s["protocol"] == "anthropic",
@@ -90,16 +102,16 @@ def test_request_summary():
     check(s["first_user_text"] == "what is 2+2?", "LAST user message is the prompt")
     # kimi-code 2.4+ appends harness context after the prompt as extra <system-reminder> user
     # messages (captured from a real 2.4.1 request); the prompt must still win.
-    def user(text):
+    def user(text: str) -> JSONObject:
         return {"role": "user", "content": [{"type": "text", "text": text}], "toolCalls": []}
-    req = dict(REQ, messages=[user("what is 2+2?"),
+    req: JSONObject = dict(REQ, messages=[user("what is 2+2?"),
                               user("<system-reminder>\nToday's date is 2026-10-31.\n</system-reminder>"),
                               user("<system-reminder>\nAuto permission mode is active.\n</system-reminder>")])
     check(summarize_request(req)["first_user_text"] == "what is 2+2?",
           "trailing <system-reminder> user messages are skipped")
 
 
-def test_turn_assembly():
+def test_turn_assembly() -> None:
     print("[offline] build_turn_from_events: finish-message authoritative")
     turn = build_turn_from_events(EVENTS, 123.0, None, (122.5, 7, REQ))
     check(turn["kind"] == "kimi_turn" and turn["text"] == "2+2 = 4", "text from finish message")
@@ -108,7 +120,7 @@ def test_turn_assembly():
                                   "arguments": "{\"path\": \"x\"}"}], "tool calls")
     check(turn["model"] == "kimi-k3-instruct", "model from usage event")
     check(turn["finish_reason"] == "stop", "providerFinishReason preferred")
-    check(turn["request"]["model"] == "k3" and turn["request_full"] is REQ, "request paired")
+    check(cast(Mapping[str, object], turn["request"])["model"] == "k3" and turn["request_full"] is REQ, "request paired")
     # a stream that died before finish: the part deltas are the fallback
     partial = [e for e in EVENTS if e["type"] == "part"]
     turn = build_turn_from_events(partial, 123.0, None, None)
@@ -117,7 +129,7 @@ def test_turn_assembly():
     check(turn["model"] is None and "request" not in turn, "unpaired turn stays bare")
 
 
-def test_builder_terminal():
+def test_builder_terminal() -> None:
     print("[offline] KimiTurnBuilder: parse/terminal contract")
     b = KimiTurnBuilder()
     check(b.parse_events(json.dumps(EVENTS[0]).encode()) == [EVENTS[0]], "one fire = one event")
@@ -126,19 +138,19 @@ def test_builder_terminal():
     check(not b.is_terminal(EVENTS[:3]) and b.is_terminal(EVENTS), "finish is the terminal")
 
 
-def test_correlator_end_to_end():
+def test_correlator_end_to_end() -> None:
     print("[offline] dispatch-shape run through BaseCorrelator")
     from wirecap.decode.capture import BaseCorrelator
 
     class _Sink:
-        def __init__(self):
-            self.turns = []
+        def __init__(self) -> None:
+            self.turns: list[Event] = []
 
-        def record(self, *a, **k):
+        def record(self, *a: object, **k: object) -> None:
             pass
 
-        def event(self, obj):
-            self.turns.append(obj)
+        def event(self, obj: Mapping[str, object]) -> None:
+            self.turns.append(dict(obj))
 
     sink = _Sink()
     corr = BaseCorrelator(sink, KimiTurnBuilder())
@@ -147,11 +159,11 @@ def test_correlator_end_to_end():
         corr.feed_chunk(json.dumps(e).encode(), 100.5)
     check(len(sink.turns) == 1, "one kimi_turn emitted at finish")
     t = sink.turns[0]
-    check(t["text"] == "2+2 = 4" and t["request"]["model"] == "k3"
-          and t["usage"]["total_tokens"] == 1050, "assembled + paired")
+    check(t["text"] == "2+2 = 4" and cast(Mapping[str, object], t["request"])["model"] == "k3"
+          and cast(Mapping[str, object], t["usage"])["total_tokens"] == 1050, "assembled + paired")
 
 
-def test_import_purity():
+def test_import_purity() -> None:
     print("[purity] pykimi.kimi_process + wirecap.decode.mp_child import stdlib-only under python3 -S")
     code = ("import sys; sys.path[:0] = [%r, %r]; "
             "import pykimi.kimi_process as kp; import wirecap.decode.mp_child; "
@@ -166,7 +178,7 @@ def test_import_purity():
         print(r.stderr)
 
 
-def main():
+def main() -> None:
     test_usage_normalization()
     test_request_summary()
     test_turn_assembly()

@@ -5,7 +5,9 @@ The agy subclass of :class:`tasksolver.cli_backend.CLIBackendModel`, shared with
 local, logged-in agent CLI we shell out to). Uses `agy --print` under a PTY in a git workspace.
 No API key needed (agy is logged in via ~/.gemini/antigravity-cli/).
 
-    from tasksolver.common import TaskSpec, Question
+    from tasksolver.common import ResponseMetadata, TaskSpec
+from wirecap.runtime.mcp import MCPServers
+from wirecap.types import JSONObject, json_array, json_object, Question
     from pyagy import AgyModel
     model = AgyModel(api_key=None, task=my_task, model="gemini-3-pro")
     parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
@@ -19,12 +21,15 @@ it was not given, raises ``ChatModeViolation``. Needs agy >= 1.2.11 (earlier rel
 workspace agents in ``--print`` runs).
 """
 import os
-from typing import Final
+from collections.abc import Mapping, Sequence
+from typing import Final, Unpack, cast
 
-from tasksolver.cli_backend import CLIBackendModel
-from tasksolver.common import TaskSpec
+from tasksolver.cli_backend import CLIBackendModel, CLIPayload, Message, string_prompt
+from tasksolver.common import ResponseMetadata, TaskSpec
+from wirecap.runtime.mcp import MCPServers
+from wirecap.types import JSONObject, json_array, json_object
 
-from .client import ask_many as _agy_ask_many
+from .client import AgyResponse, AskOptions, Session, SessionOptions, ask_many as _agy_ask_many
 
 #: the workspace agent chat mode runs as (``<workspace>/.agents/agents/<name>/agent.md``)
 CHAT_AGENT: Final = "tasksolver-chat"
@@ -58,7 +63,7 @@ CHAT_TOOLS: Final = ("view_file",)
 CHAT_ENV: Final = {"SSH_CLIENT": None, "SSH_CONNECTION": None, "SSH_TTY": None}
 
 
-class AgyModel(CLIBackendModel):
+class AgyModel(CLIBackendModel[AgyResponse]):
     backend_label = "agy"
     command_label = "agy --print"
     generic_model_aliases = ("agy",)
@@ -72,14 +77,15 @@ class AgyModel(CLIBackendModel):
     # (n_choices == 1 is the plain one-shot).
     _client_ask_many = staticmethod(_agy_ask_many)
 
-    def __init__(self, api_key: str = None, task: TaskSpec = None, model: str = None,
-                 workspace: str = None, skip_permissions: bool = False,
-                 timeout: int = 300, conversation_id: str = None,
-                 continue_latest: bool = False, multi_turn: bool = False,
-                 data_dir: str = None, print_timeout: int = None,
-                 mcp_servers: dict = None, chat: bool = False, effort: str = None,
-                 system_prompt: str = None, extra_flags: list = None,
-                 extra_env: dict = None):
+    def __init__(self, api_key: str | None = None, task: TaskSpec | None = None,
+                 model: str | None = None, workspace: str | None = None,
+                 skip_permissions: bool = False, timeout: float = 300,
+                 conversation_id: str | None = None, continue_latest: bool = False,
+                 multi_turn: bool = False, data_dir: str | None = None,
+                 print_timeout: float | None = None, mcp_servers: MCPServers | None = None,
+                 chat: bool = False, effort: str | None = None, system_prompt: str | None = None,
+                 extra_flags: Sequence[str] | None = None,
+                 extra_env: Mapping[str, str | None] | None = None) -> None:
         # api_key is unused (agy is logged in), kept for contract parity
         super().__init__(api_key=api_key, task=task, model=model)
         if chat:
@@ -95,7 +101,7 @@ class AgyModel(CLIBackendModel):
         self.effort = effort
         self.extra_flags = list(extra_flags or [])
         self.extra_env = dict(extra_env or {})
-        self._chat_paths = set()
+        self._chat_paths: set[str] = set()
         self.workspace = workspace
         self.skip_permissions = skip_permissions
         # Arbitrary {name: {command, args, env}} MCP servers registered for every
@@ -114,26 +120,29 @@ class AgyModel(CLIBackendModel):
         self.multi_turn = bool(multi_turn or conversation_id or continue_latest)
         self.data_dir = data_dir              # scope the conversation store to a project repo
 
-    def _call_kwargs(self, payload: dict) -> dict:
+    def _sample(self, payload: CLIPayload, n_choices: int) -> list[AgyResponse]:
+        return self._client_ask_many(string_prompt(payload), n_choices, **self._call_kwargs(payload))
+
+    def _call_kwargs(self, payload: CLIPayload) -> AskOptions:
         """Shared client.ask_many kwargs assembled from this model's config."""
-        flags: Final = list(self.extra_flags)
-        env: Final = dict(self.extra_env)
+        flags = list(self.extra_flags)
+        env: dict[str, str | None] = dict(self.extra_env)
         effort: Final = self.effort or ("low" if self.chat else None)
         if self.chat:
             flags += ["--agent", CHAT_AGENT]
             env = {**CHAT_ENV, **env}
         if effort:
             flags += ["--effort", effort]
-        kw: Final = dict(
-            workspace=payload.get("workspace") or self.workspace,
-            model=self.model,
-            timeout=self.timeout,
-            skip_permissions=self.skip_permissions,
-            conversation_id=self.conversation_id,
-            continue_latest=(self.continue_latest and self.conversation_id is None),
-            data_dir=self.data_dir,
-            mcp_servers=self.mcp_servers,
-        )
+        kw: AskOptions = {
+            "workspace": payload.get("workspace") or self.workspace,
+            "model": self.model,
+            "timeout": self.timeout,
+            "skip_permissions": self.skip_permissions,
+            "conversation_id": self.conversation_id,
+            "continue_latest": self.continue_latest and self.conversation_id is None,
+            "data_dir": self.data_dir,
+            "mcp_servers": self.mcp_servers,
+        }
         if flags:
             kw["extra_flags"] = flags
         if env:
@@ -145,29 +154,35 @@ class AgyModel(CLIBackendModel):
     def _inline_images(self) -> bool:
         return False                 # agy reads images from files, in chat mode too
 
-    def ask(self, payload: dict, n_choices: int = 1):
+    def ask(self, payload: CLIPayload, n_choices: int = 1) -> tuple[list[Message], list[ResponseMetadata]]:
         self._chat_paths = {os.path.realpath(p) for p in payload.get("image_paths") or []}
         return super().ask(payload, n_choices=n_choices)
 
-    def _chat_violations(self, r) -> list:
+    def _chat_violations(self, r: AgyResponse) -> list[str]:
         """Calls other than view_file, and view_file on a file this call did not hand over."""
-        used = []
+        used: list[str] = []
         for turn in r.turns:
-            for event in turn.get("events") or []:
-                for cand in (event.get("response", event).get("candidates") or []):
-                    for part in (cand.get("content") or {}).get("parts") or []:
-                        call = part.get("functionCall")
+            events = turn.get("events")
+            if not isinstance(events, list):
+                continue
+            for event in cast(list[JSONObject], events):
+                response = json_object(event.get("response", event))
+                for candidate in json_array(response.get("candidates") or []):
+                    content = json_object(json_object(candidate).get("content") or {})
+                    for part in json_array(content.get("parts") or []):
+                        call = json_object(part).get("functionCall")
                         if not call:
                             continue
+                        call = json_object(call)
                         name = call.get("name")
-                        path = (call.get("args") or {}).get("AbsolutePath")
+                        path = json_object(call.get("args") or {}).get("AbsolutePath")
                         if name not in CHAT_TOOLS:
-                            used.append(name)
-                        elif not path or os.path.realpath(path) not in self._chat_paths:
+                            used.append(str(name))
+                        elif not isinstance(path, str) or not path or os.path.realpath(path) not in self._chat_paths:
                             used.append(f"{name}({path})")
         return used
 
-    def _finish(self, r) -> dict:
+    def _finish(self, r: AgyResponse) -> ResponseMetadata:
         """The base result dict (incl. model/usage, which AgyResponse has always exposed) plus
         agy's conversation id, latched from the first turn so later multi_turn calls resume it
         (--conversation=<id>). n_choices>1 is parallel sampling (no single conversation) — the
@@ -176,23 +191,24 @@ class AgyModel(CLIBackendModel):
         res = super()._finish(r)
         # the answering model's reasoning (the session-title call thinks too; leave it out)
         res["explicit_reasoning_output"] = "\n\n".join(
-            t["reasoning"] for t in r.turns if t.get("reasoning") and t.get("model") == r.model)
+            reasoning for t in r.turns if isinstance(reasoning := t.get("reasoning"), str)
+            and reasoning and t.get("model") == r.model)
         if self.multi_turn and self.conversation_id is None:
             self.conversation_id = r.conversation_id
         res["conversation_id"] = self.conversation_id
         res["system_messages"] = r.system_messages
         res["system_message_errors"] = r.system_message_errors
+        res["response_capture_errors"] = r.response_capture_errors
         return res
 
-    def session(self, **kwargs):
+    def session(self, **kwargs: Unpack[SessionOptions]) -> Session:
         """A first-class :class:`pyagy.Session` bound to this model — for rich multi-turn
         use (``.conversation_id``, ``.history()``, decoded ``.turns``). Inherits the model,
         workspace, and skip-permissions, and resumes this model's ``conversation_id`` if it
         has latched one. ``**kwargs`` override the Session defaults."""
-        from .client import Session
-        kw = dict(model=self.model, workspace=self.workspace,
-                  skip_permissions=self.skip_permissions, timeout=self.timeout,
-                  data_dir=self.data_dir, mcp_servers=self.mcp_servers)
+        kw: SessionOptions = {"model": self.model, "workspace": self.workspace,
+                  "skip_permissions": self.skip_permissions, "timeout": self.timeout,
+                  "data_dir": self.data_dir, "mcp_servers": self.mcp_servers}
         if self.conversation_id:
             kw["conversation_id"] = self.conversation_id
         elif self.continue_latest:

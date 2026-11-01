@@ -5,6 +5,7 @@
 #include "gomod.h"
 #include "gocall.h"
 #include "procdef.h"
+#include "symbols_gen.h"
 #include "wirecap.h"
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +14,7 @@
 #include <unistd.h>
 #include <sys/uio.h>
 #include <array>
+#include <atomic>
 #include <memory>
 #include <new>
 #include <string_view>
@@ -22,6 +24,8 @@
 
 /* Null until agy_enable_books, which runs before Go starts. */
 __attribute__((used, externally_visible)) agy_book_fn g_agy_on[BK_COUNT];
+
+static uint64_t g_gh_base;   /* libagy.so load base */
 
 static agy_book_fn agy_handler_for(std::string_view id) {
     if (id == "fh_update")       return &agy_on_fh_update;
@@ -77,10 +81,21 @@ void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base)
 
     uint64_t h = 1469598103934665603ULL ^ (uint64_t)(uintptr_t)src_kind;
     for (int i = 0; i < n; i++) { h ^= frames[i]; h *= 1099511628211ULL; }
-    static std::array<uint64_t, 1024> seen;
-    static int nseen;
-    for (int i = 0; i < nseen; i++) if (seen[i] == h) return;
-    if (nseen < (int)seen.size()) seen[nseen++] = h; else return;
+    // Producers run on multiple Go threads. Slots only transition from empty to a hash.
+    static_assert(std::atomic<uint64_t>::is_always_lock_free);
+    static std::array<std::atomic<uint64_t>, 1024> seen{};
+    if (!h) h = 1;  // Zero is the empty-slot marker.
+    bool inserted = false;
+    for (auto &slot : seen) {
+        uint64_t present = slot.load(std::memory_order_relaxed);
+        if (present == h) return;
+        if (!present && slot.compare_exchange_strong(present, h, std::memory_order_relaxed)) {
+            inserted = true;
+            break;
+        }
+        if (present == h) return;
+    }
+    if (!inserted) return;
 
     unsigned char buf[64 + 48 * 8];
     size_t kl = std::strlen(src_kind);
@@ -193,40 +208,59 @@ static void cgt_diag(agy_block *b)
     wire_emit(&ev);
 }
 
-#define CGT_RESP_CAP 16384
-static void cgt_response_emit(agy_block *b)
+/* App snapshots and SSE JSON lines must remain atomic. Original size lets the Python
+ * decoder reject native truncation and a smaller WIRE_MAXCOPY bridge limit. */
+static void cgt_response_packet(const char *kind, uint64_t id, uint64_t ptr, uint64_t len)
 {
-    uint64_t s = b->regs.rsi;
-    if (s < 0x10000) return;
-    uint64_t hdr[3];                                   /* +0x0, +0x8(ptr), +0x10(len) */
-    if (agy_safe_read(s, hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr)) return;
-    uint64_t ptr = hdr[1], len = hdr[2];
-    if (ptr < 0x10000 || len == 0 || len > (16u << 20)) return;
-    char buf[CGT_RESP_CAP];
-    size_t n = len < CGT_RESP_CAP ? (size_t)len : CGT_RESP_CAP;
-    if (agy_safe_read(ptr, buf, n) != (ssize_t)n) return;
-    if (!mostly_printable((const unsigned char *)buf, n)) return;
-    wire_event_t ev = { .kind = "app_response", .stream_id = b->regs.rax,
-                       .data = (const uint8_t *)buf, .len = n, .mode = WIRE_ASYNC };
+    if (ptr < 0x10000 || len > INT64_MAX) return;
+    struct header { char magic[4]; uint32_t version; uint64_t size; };
+    const header h = {{'A', 'G', 'T', 'X'}, 1, len};
+    static_assert(sizeof(header) == 16);
+    constexpr size_t limit = 1u << 20;
+    const size_t copied = (size_t)std::min<uint64_t>(len, limit - sizeof(h));
+    std::unique_ptr<uint8_t[]> packet(new (std::nothrow) uint8_t[sizeof(h) + copied]);
+    if (!packet) return;
+    std::memcpy(packet.get(), &h, sizeof(h));
+    if (copied && agy_safe_read(ptr, packet.get() + sizeof(h), copied) != (long)copied) return;
+    wire_event_t ev = {.kind = kind, .stream_id = id, .data = packet.get(),
+                       .len = sizeof(h) + copied, .mode = WIRE_ASYNC};
     wire_emit(&ev);
 }
 
-static void cgt_bytes_emit(const char *kind, uint64_t id, uint64_t ptr, uint64_t len,
-                           bool stream)
+static void cgt_response_emit(agy_block *b)
+{
+    /* Pinned Step.GetPlannerResponse and CortexStepPlannerResponse.GetResponse:
+     * RDI is the Step. Type 15 is the planner response; +0x60 holds its oneof wrapper.
+     * Step.Metadata.ToolCall is a different string and must never become the answer. */
+    const uint64_t step = b->regs.rdi;
+    uint32_t type = 0;
+    uint64_t itab = 0, wrapper = 0, response = 0;
+    uint64_t text[2];
+    if (step < 0x10000 || step > UINT64_MAX - 0x68
+            || agy_safe_read(step + 8, &type, sizeof(type)) != (long)sizeof(type) || type != 15
+            || agy_safe_read(step + 0x58, &itab, sizeof(itab)) != (long)sizeof(itab)
+            || itab != g_gh_base + AGY_PLANNER_RESPONSE_ITAB
+            || agy_safe_read(step + 0x60, &wrapper, sizeof(wrapper)) != (long)sizeof(wrapper)
+            || agy_safe_read(wrapper, &response, sizeof(response)) != (long)sizeof(response)
+            || response < 0x10000 || response > UINT64_MAX - 0x18
+            || agy_safe_read(response + 8, text, sizeof(text)) != (long)sizeof(text))
+        return;
+    cgt_response_packet("app_response_packet", b->regs.rax, text[0], text[1]);
+}
+
+static void cgt_bytes_emit(const char *kind, uint64_t id, uint64_t ptr, uint64_t len)
 {
     if (ptr < 0x10000 || len == 0 || len > (16u << 20)) return;
-    char buf[CGT_RESP_CAP];
-    const uint64_t end = stream ? len : (len < CGT_RESP_CAP ? len : CGT_RESP_CAP);
-    for (uint64_t off = 0; off < end; off += CGT_RESP_CAP) {
-        size_t n = end - off < CGT_RESP_CAP ? (size_t)(end - off) : CGT_RESP_CAP;
+    char buf[16384];
+    for (uint64_t off = 0; off < len; off += sizeof(buf)) {
+        size_t n = (size_t)std::min<uint64_t>(len - off, sizeof(buf));
         if (agy_safe_read(ptr + off, buf, n) != (long)n) return;
-        wire_event_t ev = { .kind = kind, .stream_id = id,
-                           .data = (const uint8_t *)buf, .len = n, .mode = WIRE_ASYNC };
+        wire_event_t ev = {.kind = kind, .stream_id = id,
+                          .data = (const uint8_t *)buf, .len = n, .mode = WIRE_ASYNC};
         wire_emit(&ev);
     }
 }
 
-static uint64_t g_gh_base;   /* libagy.so load base */
 static bool g_cgt_args;      /* cached AGY_PROC_CGT_ARGS */
 static bool g_cgt_stack;     /* cached AGY_PROC_STACK */
 
@@ -271,7 +305,7 @@ void agy_on_fh_update(agy_block *b)
 void agy_on_stream(agy_block *b)
 {
     cgt_common(b);
-    cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rbx, b->regs.rcx, true);
+    cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rbx, b->regs.rcx);
 }
 
 void agy_on_file_open(agy_block *b)
@@ -303,7 +337,7 @@ void agy_on_exit(agy_block *b)
 void agy_on_resp_chunk(agy_block *b)
 {
     cgt_common(b);
-    cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rax, b->regs.rbx, false);
+    cgt_response_packet("resp_chunk_packet", b->regs.rax, b->regs.rax, b->regs.rbx);
 }
 
 void agy_on_system_message(agy_block *b)
@@ -367,9 +401,8 @@ void agy_on_readlink_filter(agy_block *b)
         b->regs.rcx = 0;
         b->regs.rdi = 0;
         b->action = 1;
-        static int logged;
-        if (!logged) {
-            logged = 1;
+        static std::atomic_flag logged = ATOMIC_FLAG_INIT;
+        if (!logged.test_and_set(std::memory_order_relaxed)) {
             char kr[512];
             ssize_t n = readlink("/proc/self/exe", kr, sizeof kr - 1);
             kr[n > 0 ? n : 0] = 0;

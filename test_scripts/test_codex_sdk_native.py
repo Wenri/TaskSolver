@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline native SDK/app-server + instrumented capture smoke (requires built Codex).
+"""Offline native SDK/app-server + linked capture smoke (requires built Codex).
 
 Uses only a localhost Responses fixture, an empty temporary CODEX_HOME and
 synthetic replies. No external provider requests or credential reads.
@@ -11,7 +11,8 @@ import json
 from pathlib import Path
 import sys
 import tempfile
-from typing import Final
+from concurrent.futures import ThreadPoolExecutor
+from typing import Final, TypedDict, cast
 from unittest.mock import patch
 
 ROOT: Final = Path(__file__).resolve().parents[1]
@@ -19,12 +20,34 @@ for directory in (ROOT, ROOT / "codex", ROOT / "codex/vendor/sdk/python/src",
                   ROOT / "codex/vendor/sdk/python/tests"):
     sys.path.insert(0, str(directory))
 
-from app_server_harness import AppServerHarness
+from codex.vendor.sdk.python.tests.app_server_harness import AppServerHarness
 from pycodex import SDKSession, ask_sdk
 from pycodex._env import CODEX_BIN
+from pycodex.client import _load_capture
+from wirecap.types import JSONObject, JSONValue, json_object
 
 
-def main():
+class TestOptions(TypedDict):
+    codex_bin: str
+    codex_home: str
+    workspace: str
+    extra_env: dict[str, str]
+    timeout: float
+
+
+def response_stream(response_id: str, text: str) -> str:
+    events: list[JSONObject] = [
+        {"type": "response.created", "response": {"id": response_id}},
+        {"type": "response.output_text.delta", "delta": text},
+        {"type": "response.output_item.done", "item": {"type": "message", "role": "assistant",
+            "id": "message-" + response_id, "content": [{"type": "output_text", "text": text}]}},
+        {"type": "response.completed", "response": {"id": response_id,
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}},
+    ]
+    return "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+
+
+def main() -> None:
     with tempfile.TemporaryDirectory(prefix="tasksolver-sdk-native-") as directory:
         with AppServerHarness(Path(directory)) as harness:
             env: Final = {
@@ -34,9 +57,9 @@ def main():
                 "PYTHONPATH": os.pathsep.join(map(str, (ROOT, ROOT / "codex"))),
                 "RUST_LOG": "warn",
             }
-            kwargs: Final = dict(
-                codex_bin=CODEX_BIN, codex_home=str(harness.codex_home),
-                workspace=str(harness.workspace), extra_env=env, timeout=30)
+            kwargs: Final[TestOptions] = {
+                "codex_bin": CODEX_BIN, "codex_home": str(harness.codex_home),
+                "workspace": str(harness.workspace), "extra_env": env, "timeout": 30}
             harness.responses.enqueue_assistant_message("First SDK answer", response_id="native-1")
             first: Final = ask_sdk("first question", **kwargs)
             assert first.text == "First SDK answer" and not first.timed_out, first
@@ -60,6 +83,36 @@ def main():
                 "first question", "second question", "third question"]
             print("ok native resume + persistent SDK context and per-turn capture")
 
+            harness.responses.enqueue_sse(response_stream("parallel-A", "answer A"),
+                                          delay_between_events_s=0.2)
+            harness.responses.enqueue_sse(response_stream("parallel-B", "answer B"),
+                                          delay_between_events_s=0.2)
+            concurrent = SDKSession(**kwargs)
+            pool = ThreadPoolExecutor(max_workers=2)
+            completed = False
+            try:
+                first_thread = concurrent.client.thread_start(cwd=str(harness.workspace))
+                second_thread = concurrent.client.thread_start(cwd=str(harness.workspace))
+                first_future = pool.submit(first_thread.run, "parallel prompt A")
+                harness.responses.wait_for_requests(4)
+                second_future = pool.submit(second_thread.run, "parallel prompt B")
+                assert first_future.result(timeout=30).final_response == "answer A"
+                assert second_future.result(timeout=30).final_response == "answer B"
+                completed = True
+            finally:
+                concurrent.close(force=not completed)
+                pool.shutdown(wait=True, cancel_futures=True)
+            parallel_turns = _load_capture(concurrent.capture_path)
+            paired: dict[str, object] = {}
+            for turn in parallel_turns:
+                text = turn["text"]
+                assert isinstance(text, str)
+                assert "request" in turn, turn
+                paired[text] = json_object(cast(JSONValue, turn["request"]))["first_user_text"]
+                assert turn["resp_stream"] == turn["req_stream"]
+            assert paired == {"answer A": "parallel prompt A", "answer B": "parallel prompt B"}, paired
+            print("ok overlapping native app-server responses retain their exact requests")
+
     with tempfile.TemporaryDirectory(prefix="tasksolver-sdk-native-auth-") as directory:
         with AppServerHarness(Path(directory), requires_openai_auth=True) as harness:
             auth_env: Final = {
@@ -69,8 +122,9 @@ def main():
                 "PYTHONPATH": os.pathsep.join(map(str, (ROOT, ROOT / "codex"))),
                 "RUST_LOG": "warn",
             }
-            auth_kwargs: Final = dict(codex_home=str(harness.codex_home),
-                                     workspace=str(harness.workspace), extra_env=auth_env, timeout=30)
+            auth_kwargs: Final[TestOptions] = {
+                "codex_bin": CODEX_BIN, "codex_home": str(harness.codex_home),
+                "workspace": str(harness.workspace), "extra_env": auth_env, "timeout": 30}
             auth_file: Final = harness.codex_home / "auth.json"
             harness.responses.enqueue_assistant_message("API key answer", response_id="auth-1")
             authenticated: Final = ask_sdk("use the supplied key", **auth_kwargs)
@@ -85,8 +139,9 @@ def main():
             inherited_env: Final = {key: value for key, value in auth_env.items()
                                     if key != "OPENAI_API_KEY"}
             with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-synthetic-inherited-auth"}):
+                inherited_kwargs: TestOptions = {**auth_kwargs, "extra_env": inherited_env}
                 resumed: Final = ask_sdk("keep stored credentials intact",
-                    **{**auth_kwargs, "extra_env": inherited_env}, session_id=authenticated.session_id,
+                    **inherited_kwargs, session_id=authenticated.session_id,
                     config_overrides=('cli_auth_credentials_store="file"',))
             assert resumed.text == "Preserved login"
             assert auth_file.read_text() == preserved

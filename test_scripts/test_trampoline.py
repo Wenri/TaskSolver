@@ -25,19 +25,24 @@ checks are skipped when agy isn't logged in.
 
     python3 test_scripts/test_trampoline.py            # validates the full union (mixed full-cgo + asmcgo)
 """
+
+from __future__ import annotations
+
 import argparse
 import collections
-import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+from typing import TypedDict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from agy_session import AgySession  # noqa: E402
-from pyagy import trust_workspace   # noqa: E402  (pre-trust the PTY workspace)
+from pyagy import trust_workspace  # noqa: E402  (pre-trust the PTY workspace)
+
+from wirecap.types import json_loads_object
 
 ROOT = os.path.join(os.path.dirname(HERE), "antigravity")
 SHIM = os.path.join(ROOT, "vendor", "libagy.so")
@@ -46,12 +51,22 @@ PROMPT = "Reply with exactly the single word ZORPLE and nothing else."
 CRASH = ["throw", "unexpected return pc", "unknown pc", "fatal error", "panic", "SIGSEGV"]
 
 
-def skip(msg):
+def skip(msg: str) -> None:
     print(f"SKIP: {msg}")
     sys.exit(0)
 
 
-def run(extra, workdir, timeout=200.0):
+class RunResult(TypedDict):
+    kinds: dict[str, int]
+    log: str
+    genai_text: str
+    zorple: bool
+    crashes: int
+    home_bad: int
+    unicode_err: int
+
+
+def run(extra: dict[str, str], workdir: str, timeout: float=200.0) -> RunResult:
     """Run one agy --print turn under the shim to completion; return a dict of signals."""
     label = "-".join(f"{k}={v or 'empty'}" for k, v in sorted(extra.items())) or "union"
     cap = os.path.join(workdir, f"cap_{label}.jsonl")
@@ -67,17 +82,20 @@ def run(extra, workdir, timeout=200.0):
     finally:
         s.close()
     logtxt = open(log, errors="replace").read() if os.path.exists(log) else ""
-    kinds = collections.Counter()
+    kinds: collections.Counter[str] = collections.Counter()
     genai_text = ""
     if os.path.exists(cap):
         for ln in open(cap):
             try:
-                obj = json.loads(ln)
+                obj = json_loads_object(ln)
             except Exception:
                 continue
-            kinds[obj.get("kind")] += 1
-            if obj.get("kind") == "genai_turn" and obj.get("text"):
-                genai_text += obj["text"]
+            kind = obj.get("kind")
+            if isinstance(kind, str):
+                kinds[kind] += 1
+            text = obj.get("text")
+            if kind == "genai_turn" and isinstance(text, str):
+                genai_text += text
     combined = out + "\n" + logtxt
     answer = "\n".join(l for l in out.splitlines()
                        if l.strip() and "antigravity" not in l and "wirecap" not in l
@@ -91,7 +109,7 @@ def run(extra, workdir, timeout=200.0):
     }
 
 
-def main():
+def main() -> None:
     argparse.ArgumentParser(description="Smoke-test the antigravity book union").parse_args()
 
     if not os.path.exists(AGY):
@@ -105,9 +123,9 @@ def main():
                    shell=True, cwd=wd, check=False)  # agy hangs in a non-git dir
     trust_workspace(wd)   # pre-trust so agy under the PTY doesn't block on the folder-trust prompt
 
-    failures = []
+    failures: list[str] = []
 
-    def check(cond, name):
+    def check(cond: object, name: str) -> None:
         print(("  ok   " if cond else "  FAIL ") + name)
         if not cond:
             failures.append(name)

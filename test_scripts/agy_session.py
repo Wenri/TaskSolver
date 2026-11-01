@@ -10,7 +10,7 @@ Two "outputs":
 The PTY transcript (agy's rendered output, ANSI-stripped) is on .transcript/.raw — useful for
 auth/crash checks.
 
-The PTY fork/pump, terminal-query handling, and instrumented env wiring live in `pyagy.AgyProcess`
+The PTY fork/pump, terminal-query handling, and linked env wiring live in `pyagy.AgyProcess`
 over `_pty.PtyPopen`; this is a thin façade that takes the agy argv directly, kept as the CLI used
 in capture experiments.
 
@@ -24,9 +24,13 @@ As a library:
     turns = s.collect(timeout=120)      # decoded answer objects; s.transcript = the raw PTY
     s.close()
 """
+
+from __future__ import annotations
+
 import argparse
 import os
 import sys
+from collections.abc import Mapping, Sequence
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)                       # repo root holds the shared `wirecap` package
@@ -35,29 +39,36 @@ for _p in (_ANTIGRAVITY, _REPO):                     # make `pyagy` + `wirecap` 
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from pyagy.agyprocess import AgyProcess   # noqa: E402
-from pyagy._term import strip_ansi        # noqa: E402  (re-exported for callers)
-from pyagy import client as _client       # noqa: E402  (caller-side queue + drain helpers)
+
+from pyagy import client as _client  # noqa: E402  (caller-side queue + drain helpers)
+from pyagy._term import (
+    strip_ansi as strip_ansi,  # noqa: E402  (re-exported for callers)
+)
+from pyagy.agyprocess import AgyProcess  # noqa: E402
+
+from wirecap.runtime.session import ResultChannel
+from wirecap.types import json_loads_object
 
 
 class AgySession:
-    """Instrumented agy under a PTY for capture experiments — a thin façade over
+    """Linked agy under a PTY for capture experiments — a thin façade over
     :class:`AgyProcess` that takes the agy argv tail directly via ``start(args)``. Drive a one-shot
     ``--print`` turn with ``run()`` or a persistent ``--prompt-interactive`` turn with ``ask()``;
     both return the decoded answer objects the worker streams home. The PTY transcript is on
     ``.transcript`` / ``.raw`` (auth/crash checks); the capture JSONL is written to ``capture``.
     ``.proc`` is the underlying AgyProcess."""
 
-    def __init__(self, agy=None, capture="agy-capture.jsonl",
-                 log=None, workdir=None, extra_env=None, echo=False):
+    def __init__(self, agy: str | None = None, capture: str = "agy-capture.jsonl",
+                 log: str | None = None, workdir: str | None = None,
+                 extra_env: Mapping[str, str | None] | None = None, echo: bool = False) -> None:
         self.agy = agy
         self.capture = os.path.abspath(capture)
         self.log = os.path.abspath(log) if log else None
         self.workdir = workdir or os.getcwd()
         self.extra_env = dict(extra_env or {})
         self.echo = echo
-        self.proc = None                    # the AgyProcess, set on start()
-        self.q = None                       # caller-owned result queue (stock-mp style)
+        self.proc: AgyProcess | None = None                    # the AgyProcess, set on start()
+        self.q: ResultChannel | None = None                       # caller-owned result queue (stock-mp style)
 
     # --- back-compat shims over the underlying PtyPopen ------------------------
     @property
@@ -66,17 +77,17 @@ class AgySession:
 
     @property
     def fd(self):
-        return self.proc._popen.fd if self.proc else None
+        return self.proc._popen.fd if self.proc and self.proc._popen else None
 
     @property
     def raw(self):
-        return self.proc._popen.raw if self.proc else bytearray()
+        return self.proc._popen.raw if self.proc and self.proc._popen else bytearray()
 
     @property
     def transcript(self):
         return self.proc.transcript if self.proc else ""
 
-    def start(self, args):
+    def start(self, args: Sequence[str]):
         """Fork agy under a pty with the given argv tail (e.g. ``["--print", prompt]``)."""
         extra = dict(self.extra_env)
         if self.log:
@@ -88,49 +99,68 @@ class AgySession:
         self.q._writer.close()              # parent reads only; reader EOFs on agy death
         return self
 
-    def collect(self, timeout=200.0):
+    def collect(self, timeout: float=200.0):
         """One-shot: drive agy to completion, draining the PTY; return the decoded answer objects
         (the transcript is on ``.transcript`` / ``.raw``, the capture JSONL on ``capture``)."""
+        assert self.proc is not None and self.q is not None
         return _client._collect(self.proc, self.q, timeout=timeout)
 
-    def ask(self, prompt=None, idle=4.0, timeout=120.0):
+    def ask(self, prompt: str | None=None, idle: float=4.0, timeout: float=120.0):
         """One persistent turn: submit ``prompt`` (or the prefill) and return its decoded objects."""
+        assert self.proc is not None and self.q is not None
         return _client._ask_turn(self.proc, self.q, prompt, idle=idle, timeout=timeout)
 
-    def send(self, data: bytes):
+    def send(self, data: bytes) -> None:
+        assert self.proc is not None
         self.proc.write(data)
 
-    def send_line(self, text: str):
+    def send_line(self, text: str) -> None:
+        assert self.proc is not None
         self.proc.send_line(text)
 
-    def close(self):
+    def close(self) -> None:
         if self.proc is not None:
             self.proc.close(interrupt=True)
         if self.q is not None:
             _client._close_channel(self.q)
 
 
-def _summarize_capture(path):
+def _summarize_capture(path: str):
     import collections
-    import json
     if not os.path.exists(path):
         return "no capture file"
-    c, b = collections.Counter(), collections.Counter()
+    c: collections.Counter[str] = collections.Counter()
+    b: collections.Counter[str] = collections.Counter()
     for line in open(path):
         try:
-            r = json.loads(line)
+            r = json_loads_object(line)
         except Exception:
             continue
-        c[r.get("kind")] += 1
-        b[r.get("kind")] += r.get("len", r.get("body_len", 0))
+        kind = r["kind"]
+        size = r.get("len", r.get("body_len", 0))
+        assert isinstance(kind, str) and isinstance(size, int)
+        c[kind] += 1
+        b[kind] += size
     return "  ".join(f"{k}={c[k]}({b[k]}B)" for k in sorted(c))
 
 
-def _answer(objs):
-    return "\n".join(o.get("text", "") for o in objs if (o.get("text") or "").strip()).strip()
+def _answer(objs: Sequence[Mapping[str, object]]) -> str:
+    return "\n".join(text for obj in objs
+                     if isinstance(text := obj.get("text"), str) and text.strip()).strip()
 
 
-def main():
+
+class Arguments(argparse.Namespace):
+    mode: str
+    prompt: str
+    send: list[str]
+    idle: float
+    timeout: float
+    capture: str
+    workdir: str | None
+    echo: bool
+
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["interactive", "print"], default="print")
     ap.add_argument("--prompt", required=True)
@@ -140,7 +170,7 @@ def main():
     ap.add_argument("--capture", default="agy-capture.jsonl")
     ap.add_argument("--workdir", default=None)
     ap.add_argument("--echo", action="store_true", help="mirror agy output to our stdout live")
-    args = ap.parse_args()
+    args = ap.parse_args(namespace=Arguments())
 
     s = AgySession(capture=args.capture, workdir=args.workdir, echo=args.echo)
     if args.mode == "print":

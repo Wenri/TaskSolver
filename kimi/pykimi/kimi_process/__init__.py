@@ -19,11 +19,14 @@ Stdlib-only (same rule as pyagy.agy_process / pycodex.codex_process): loaded by 
 libpython, which resolves this module from its own env's site-packages (``site`` runs;
 ``PYTHONHOME`` selects the env) — never import ``tasksolver`` or a non-stdlib package here.
 """
-import json
+from __future__ import annotations
+
 import os
-import sys
 import time
 import traceback
+from collections.abc import Callable
+
+from wirecap.types import Event, json_loads_object
 
 from wirecap.decode.record import Recorder
 from wirecap.decode.capture import BaseCorrelator
@@ -36,32 +39,32 @@ _corr = (BaseCorrelator(_rec, KimiTurnBuilder())
          if os.environ.get("WIRE_CORRELATE", "1") != "0" else None)
 
 
-def subscribe(fn):
+def subscribe(fn: Callable[[Event], object]) -> None:
     """Register an in-process consumer fn(obj) for every recorded/decoded event — used by a
     KimiProcess target (mp_child.stream_turns) to stream decoded turns home live."""
     _rec.subscribe(fn)
 
 
-def unsubscribe(fn):
+def unsubscribe(fn: Callable[[Event], object]) -> None:
     """Drop a consumer registered with :func:`subscribe` — a finished mp_child target calls this
     so the recorder stops feeding a queue nobody drains."""
     _rec.unsubscribe(fn)
 
 
-def on_kimi_request(stream_id, data):
+def on_kimi_request(stream_id: int, data: bytes) -> None:
     # The model request (LLMRequestLogInput). Record raw (metadata) + hand the parsed JSON to the
     # correlator so the decoded kimi_turn.request reflects what was sent.
     _rec.record("kimi_request", stream_id, data)
     if _corr:
         try:
-            req = json.loads(data)
-        except ValueError:
+            req = json_loads_object(data)
+        except (ValueError, TypeError):
             req = None
         _corr.feed_request(req, time.time(), stream_id=stream_id)
     return None
 
 
-def on_kimi_event(stream_id, data):
+def on_kimi_event(stream_id: int, data: bytes) -> None:
     # One streamed ModelRequestEvent. Accumulate into the in-flight turn; the correlator emits
     # the kimi_turn at the terminal (finish) event, paired with the pending request.
     if _corr:
@@ -69,21 +72,21 @@ def on_kimi_event(stream_id, data):
     return None
 
 
-def on_kimi_wire(stream_id, data):
+def on_kimi_wire(stream_id: int, data: bytes) -> None:
     # One persisted wire-journal record. Recorded raw only — the turn decode rides the
     # request/event pair; the journal line is capture-side context (usage.record, turn.*, ...).
     _rec.record("kimi_wire", stream_id, data)
     return None
 
 
-_ROUTER = {
+_ROUTER: dict[str, Callable[[int, bytes], bytes | None]] = {
     "kimi_request": on_kimi_request,
     "kimi_event": on_kimi_event,
     "kimi_wire": on_kimi_wire,
 }
 
 
-def dispatch(kind, stream_id, data):
+def dispatch(kind: str, stream_id: int, data: bytes) -> bytes | None:
     try:
         handler = _ROUTER.get(kind)
         if handler is not None:

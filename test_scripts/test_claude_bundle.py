@@ -12,23 +12,49 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
 import runpy
 import subprocess
 import sys
 import tempfile
 import tomllib
-from typing import Final
 import unittest
+from collections.abc import Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, Protocol, TypedDict, cast
 from unittest.mock import patch
+
+if TYPE_CHECKING:
+    from claude.build_cli import CLIPin
+    from setup import BuildPyNative
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 BUILD_SCRIPT: Final = ROOT / "claude/build_cli.py"
 SDK_SOURCE: Final = ROOT / "claude/vendor/sdk/src"
 
 
+from wirecap.types import (
+    JSONValue,
+    json_array,
+    json_loads,
+    json_loads_object,
+    json_object,
+)
+
+
+class BuildFunction(Protocol):
+    __globals__: dict[str, object]
+
+    def __call__(self) -> Path: ...
+
+
+class DownloadModule(TypedDict):
+    build: BuildFunction
+    matches: Callable[[Path, CLIPin], bool]
+    _load_pin: Callable[[Path], CLIPin]
+
+
 class ClaudeDownloadTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="tasksolver-claude-download-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -36,19 +62,21 @@ class ClaudeDownloadTests(unittest.TestCase):
         self.package.mkdir(parents=True)
         (self.package / "_cli_version.py").write_text('__cli_version__ = "test-version"\n')
         self.payload = b"verified executable payload\n"
-        self.pin = {"version": "test-version", "url": "https://example.invalid/claude",
+        self.pin: CLIPin = {"version": "test-version", "url": "https://example.invalid/claude",
                     "size": len(self.payload), "sha256": hashlib.sha256(self.payload).hexdigest()}
         (self.root / "vendor.json").write_text(json.dumps({"cli": self.pin}))
-        self.module = runpy.run_path(str(BUILD_SCRIPT))
+        self.module = cast(DownloadModule, runpy.run_path(str(BUILD_SCRIPT)))
         self.build = self.module["build"]
         self.matches = self.module["matches"]
         self.target = self.package / "_bundled/claude"
         self.addCleanup(patch.stopall)
-        patch.dict(self.build.__globals__, {"__file__": str(self.root / "build_cli.py")}).start()
+        old_file = self.build.__globals__["__file__"]
+        self.addCleanup(self.build.__globals__.__setitem__, "__file__", old_file)
+        self.build.__globals__["__file__"] = str(self.root / "build_cli.py")
         patch("platform.system", return_value="Linux").start()
         patch("platform.machine", return_value="x86_64").start()
 
-    def test_verified_download_is_atomic_executable_and_cached(self):
+    def test_verified_download_is_atomic_executable_and_cached(self) -> None:
         with patch("urllib.request.urlopen", return_value=io.BytesIO(self.payload)) as download:
             self.assertEqual(self.build(), self.target)
         download.assert_called_once_with(self.pin["url"], timeout=60)
@@ -60,7 +88,7 @@ class ClaudeDownloadTests(unittest.TestCase):
             self.assertEqual(self.build(), self.target)
         self.assertEqual(self.target.stat().st_mode & 0o777, 0o755)
 
-    def test_same_length_checksum_mismatch_preserves_previous_target(self):
+    def test_same_length_checksum_mismatch_preserves_previous_target(self) -> None:
         self.target.parent.mkdir()
         self.target.write_bytes(b"previous artifact")
         corrupt: Final = b"x" * len(self.payload)
@@ -70,28 +98,28 @@ class ClaudeDownloadTests(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), b"previous artifact")
         self.assertEqual(list(self.target.parent.glob(".claude-*")), [])
 
-    def test_truncated_download_is_rejected_and_removed(self):
+    def test_truncated_download_is_rejected_and_removed(self) -> None:
         with patch("urllib.request.urlopen", return_value=io.BytesIO(self.payload[:-1])), \
                 self.assertRaisesRegex(RuntimeError, "verification"):
             self.build()
         self.assertFalse(self.target.exists())
         self.assertEqual(list(self.target.parent.glob(".claude-*")), [])
 
-    def test_network_failure_removes_temporary_file(self):
+    def test_network_failure_removes_temporary_file(self) -> None:
         with patch("urllib.request.urlopen", side_effect=OSError("offline")), \
                 self.assertRaisesRegex(OSError, "offline"):
             self.build()
         self.assertFalse(self.target.exists())
         self.assertEqual(list(self.target.parent.glob(".claude-*")), [])
 
-    def test_sdk_cli_version_disagreement_rejected_before_download(self):
+    def test_sdk_cli_version_disagreement_rejected_before_download(self) -> None:
         (self.package / "_cli_version.py").write_text('__cli_version__ = "different"\n')
         with patch("urllib.request.urlopen") as download, \
                 self.assertRaisesRegex(RuntimeError, "pin does not match"):
             self.build()
         download.assert_not_called()
 
-    def test_wrong_platform_rejected_before_download(self):
+    def test_wrong_platform_rejected_before_download(self) -> None:
         with patch("platform.machine", return_value="aarch64"), \
                 patch("urllib.request.urlopen") as download, \
                 self.assertRaisesRegex(RuntimeError, "Linux x86-64"):
@@ -100,41 +128,59 @@ class ClaudeDownloadTests(unittest.TestCase):
 
 
 class ClaudePackageTests(unittest.TestCase):
-    def test_sdk_discovery_license_and_runtime_dependencies(self):
-        config: Final = tomllib.loads((ROOT / "pyproject.toml").read_text())
-        upstream: Final = tomllib.loads((SDK_SOURCE.parent / "pyproject.toml").read_text())
-        pins: Final = json.loads((ROOT / "claude/vendor.json").read_text())
-        self.assertEqual(pins["sdk"]["tag"], "v" + upstream["project"]["version"])
-        self.assertEqual(runpy.run_path(str(SDK_SOURCE / "claude_agent_sdk/_version.py"))[
-            "__version__"], upstream["project"]["version"])
-        setuptools: Final = config["tool"]["setuptools"]
-        self.assertIn("claude/vendor/sdk/src", setuptools["packages"]["find"]["where"])
-        self.assertIn("claude_agent_sdk*", setuptools["packages"]["find"]["include"])
-        self.assertIn("claude/vendor/sdk/LICENSE", setuptools["license-files"])
-        self.assertIn("_bundled/claude", setuptools["package-data"]["claude_agent_sdk"])
+    def test_builder_imports_without_installed_packages(self) -> None:
+        probe = subprocess.run(
+            [sys.executable, "-I", "-S", "-c",
+             "import runpy, sys; runpy.run_path(sys.argv[1]); "
+             "assert 'wirecap' not in sys.modules; print('standalone')",
+             str(BUILD_SCRIPT)],
+            cwd="/tmp", text=True, capture_output=True, timeout=30,
+        )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertEqual(probe.stdout.strip(), "standalone")
+
+    def test_sdk_discovery_license_and_runtime_dependencies(self) -> None:
+        config = json_object(cast(JSONValue, tomllib.loads((ROOT / "pyproject.toml").read_text())))
+        upstream = json_object(cast(JSONValue, tomllib.loads((SDK_SOURCE.parent / "pyproject.toml").read_text())))
+        pins: Final = json_loads_object((ROOT / "claude/vendor.json").read_text())
+        project = json_object(config["project"])
+        upstream_project = json_object(upstream["project"])
+        upstream_version = upstream_project["version"]
+        assert isinstance(upstream_version, str)
+        self.assertEqual(json_object(pins["sdk"])["tag"], "v" + upstream_version)
+        self.assertEqual(cast(dict[str, object], runpy.run_path(str(SDK_SOURCE / "claude_agent_sdk/_version.py")))[
+            "__version__"], upstream_version)
+        setuptools = json_object(json_object(config["tool"])["setuptools"])
+        find = json_object(json_object(setuptools["packages"])["find"])
+        self.assertIn("claude/vendor/sdk/src", json_array(find["where"]))
+        self.assertIn("claude_agent_sdk*", json_array(find["include"]))
+        self.assertIn("claude/vendor/sdk/LICENSE", json_array(setuptools["license-files"]))
+        self.assertIn("_bundled/claude", json_array(json_object(setuptools["package-data"])["claude_agent_sdk"]))
         self.assertTrue((SDK_SOURCE.parent / "LICENSE").is_file())
         from packaging.requirements import Requirement
         from packaging.utils import canonicalize_name
 
-        declared: Final = {
-            canonicalize_name(Requirement(spec).name) for spec in config["project"]["dependencies"]
-        }
-        for dependency in upstream["project"]["dependencies"]:
-            self.assertIn(canonicalize_name(Requirement(dependency).name), declared)
+        def dependency_name(spec: JSONValue) -> str:
+            assert isinstance(spec, str)
+            return canonicalize_name(Requirement(spec).name)
+
+        declared = {dependency_name(spec) for spec in json_array(project["dependencies"])}
+        for dependency in json_array(upstream_project["dependencies"]):
+            self.assertIn(dependency_name(dependency), declared)
         self.assertNotIn("claude-agent-sdk", declared)
 
-    def test_native_package_retains_verified_bundled_cli(self):
-        pin: Final = json.loads((ROOT / "claude/vendor.json").read_text())["cli"]
+    def test_native_package_retains_verified_bundled_cli(self) -> None:
+        helpers = cast(DownloadModule, runpy.run_path(str(BUILD_SCRIPT)))
+        pin = helpers["_load_pin"](ROOT / "claude/vendor.json")
         source: Final = SDK_SOURCE / "claude_agent_sdk/_bundled/claude"
         if not source.exists():
             self.skipTest("Run pixi install to build the pinned Claude runtime first")
-        helpers: Final = runpy.run_path(str(BUILD_SCRIPT))
         self.assertTrue(helpers["matches"](source, pin), "Built CLI must match its pin")
 
         from setuptools import Distribution, find_packages
 
         with patch("setuptools.setup"):
-            setup: Final = runpy.run_path(str(ROOT / "setup.py"))
+            setup = cast(dict[str, object], runpy.run_path(str(ROOT / "setup.py")))
         with tempfile.TemporaryDirectory(prefix="tasksolver-claude-package-") as directory:
             sandbox: Final = Path(directory)
             stage: Final = sandbox / "wheel"
@@ -146,7 +192,8 @@ class ClaudePackageTests(unittest.TestCase):
                                 "claude_agent_sdk": str(SDK_SOURCE / "claude_agent_sdk")},
                 "package_data": {"claude_agent_sdk": ["py.typed", "_bundled/claude"]},
             })
-            builder: Final = setup["BuildPyNative"](distribution)
+            builder_type = cast("type[BuildPyNative]", setup["BuildPyNative"])
+            builder: Final = builder_type(distribution)
             builder.ensure_finalized()
             builder.build_lib = str(stage)
             builder.compile = False
@@ -173,7 +220,7 @@ class ClaudePackageTests(unittest.TestCase):
                  "_cli_version.__cli_version__]))"],
                 cwd=sandbox, env=env, text=True, capture_output=True, check=True, timeout=30,
             )
-            self.assertEqual(json.loads(probe.stdout),
+            self.assertEqual(json_loads(probe.stdout),
                              [str(stage / "claude_agent_sdk"), pin["version"]])
             version: Final = subprocess.run([str(bundled), "--version"], cwd=sandbox,
                                             env=env, text=True, capture_output=True,

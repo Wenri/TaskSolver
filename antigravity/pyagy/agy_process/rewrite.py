@@ -1,29 +1,21 @@
-"""SYNC egress rewrite registry — the only place agy's outbound request is mutated.
+"""Standalone request-byte transformation utility, retained for rule compatibility.
 
-Consumed by ``agy_process.on_tls_write`` when a rewrite source is configured
-(``AGY_PROC_REWRITE_RULES`` = a JSON rules file, or ``AGY_PROC_REWRITE`` =
-``module:func``). Runs *inside* agy's embedded interpreter, so it is stdlib-only, and
-it runs on the goroutine that is blocked in ``crypto/tls.(*Conn).Write`` — keep it
-fast and CPU-bound.
-
-**Length is the hard constraint.** The C shim rewrites the buffer in place and only
-accepts ``out_len <= len`` (antigravity.c). But *shrinking* the body desyncs the
-HTTP ``Content-Length`` / chunk framing, and *growing* is impossible — so the safe,
-enforced default is **equal-length substitution**. A rule set whose net effect
-changes the buffer length is skipped and recorded as ``rewrite_skip`` (opt out of the
-equal-length guard, at your own framing risk, with ``AGY_PROC_REWRITE_ALLOW_SHRINK=1``,
-which permits ``<=``-length results). Additive changes (extra tools/context) must go
-through config-injection, not here.
-
-Rules JSON (a bare list of rules, or ``{"match":..., "allow_shrink":..., "rules":[...]}``):
-    {"find": "sk-secret-000", "replace": "sk-REDACTED-00", "count": 0, "regex": false}
-``find``/``replace`` are UTF-8; ``count`` 0 = all occurrences; ``regex`` uses ``re`` on
-bytes (``\\g<0>`` etc. in ``replace``). Only buffers that sniff as the model request
-are touched (override the sniff with ``match`` / ``AGY_PROC_REWRITE_MATCH``).
+The current native TLS trampoline does not apply replacements. Public agy clients reject
+rewrite requests; the capture decoder never uses this registry to fabricate sent traffic.
+Rules operate on UTF-8 bytes and require equal-length output unless allow_shrink is explicit.
 """
 import importlib
 import os
 import re
+from collections.abc import Mapping, Sequence
+from typing import Protocol, cast
+
+from wirecap.types import JSONObject, JSONValue, json_array, json_load, json_object
+from ..types import RewriteFunction, RewriteSpec
+
+
+class EventRecorder(Protocol):
+    def event(self, obj: Mapping[str, object]) -> None: ...
 
 # The agy model request path is `.../v1internal:streamGenerateContent` (note the
 # capital G — "generateContent" lowercase is NOT a substring). We also accept the
@@ -37,26 +29,28 @@ _SIZE_CAP = 8 << 20        # never attempt a rewrite on an absurdly large buffer
 
 
 class RewriteRegistry:
-    def __init__(self, rules=None, func=None, match=None, allow_shrink=False,
-                 recorder=None, rules_path=None):
-        self.rules = rules or []
+    def __init__(self, rules: Sequence[RewriteSpec] | None = None,
+                 func: RewriteFunction | None = None, match: str | Sequence[str] | None = None,
+                 allow_shrink: bool = False, recorder: EventRecorder | None = None,
+                 rules_path: str | None = None) -> None:
+        self.rules = list(rules or [])
         self.func = func
         self.match = self._markers(match)
         self.allow_shrink = allow_shrink
         self.rec = recorder
         self._path = rules_path
         self._mtime = self._stat(rules_path)
-        self._model_streams = set()
+        self._model_streams: set[int] = set()
 
     @staticmethod
-    def _markers(match):
+    def _markers(match: str | Sequence[str] | None) -> tuple[bytes, ...]:
         m = match or os.environ.get("AGY_PROC_REWRITE_MATCH")
         markers = (m,) if isinstance(m, str) else (tuple(m) if m else _DEFAULT_MATCH)
         return tuple(s.encode() for s in markers)
 
     # --- construction ---------------------------------------------------------
     @classmethod
-    def from_env(cls, recorder=None):
+    def from_env(cls, recorder: EventRecorder | None = None) -> "RewriteRegistry":
         allow_shrink = os.environ.get("AGY_PROC_REWRITE_ALLOW_SHRINK") not in (None, "", "0")
         func_spec = os.environ.get("AGY_PROC_REWRITE")
         if func_spec:
@@ -68,27 +62,27 @@ class RewriteRegistry:
                    recorder=recorder, rules_path=path)
 
     @staticmethod
-    def _stat(path):
+    def _stat(path: str | None) -> float | None:
         try:
             return os.stat(path).st_mtime if path else None
         except OSError:
             return None
 
-    def _maybe_reload(self):
+    def _maybe_reload(self) -> None:
         if not self._path:
             return
         mtime = self._stat(self._path)
         if mtime != self._mtime:
             self._mtime = mtime
             try:
-                self.rules, match, shrink = _load_rules(self._path)
+                self.rules, match, _shrink = _load_rules(self._path)
                 if match:
                     self.match = self._markers(match)
             except Exception as e:      # keep serving the old rules on a bad reload
                 self._event({"kind": "rewrite_error", "phase": "reload", "error": str(e)})
 
     # --- the hot path ---------------------------------------------------------
-    def rewrite(self, stream_id, data):
+    def rewrite(self, stream_id: int, data: bytes) -> bytes | None:
         """Return replacement bytes (equal length by default) for a model-request
         buffer, or None to leave it unchanged."""
         if not data or len(data) > _SIZE_CAP:
@@ -116,7 +110,7 @@ class RewriteRegistry:
                      "orig_len": len(data), "new_len": len(out)})
         return out
 
-    def _apply(self, data):
+    def _apply(self, data: bytes) -> bytes | None:
         if self.func is not None:
             return self.func(data)
         out = data
@@ -133,30 +127,48 @@ class RewriteRegistry:
                     out = out.replace(fb, rb, count if count else -1)
         return out
 
-    def _event(self, obj):
+    def _event(self, obj: JSONObject) -> None:
         if self.rec is not None:
             self.rec.event(obj)
 
 
-def _load_rules(path):
+def _rule(value: JSONValue) -> RewriteSpec:
+    rule = json_object(value)
+    find, replacement, count = rule.get("find", ""), rule.get("replace", ""), rule.get("count", 0)
+    if not isinstance(find, str) or not isinstance(replacement, str):
+        raise TypeError("rewrite find/replace values must be strings")
+    if not isinstance(count, (str, int, float)):
+        raise TypeError("rewrite count must be numeric")
+    return {"find": find, "replace": replacement, "count": int(count),
+            "regex": bool(rule.get("regex", False))}
+
+
+def _load_rules(path: str | None) -> tuple[list[RewriteSpec], str | list[str] | None, bool]:
     """Return (rules_list, match_or_None, allow_shrink_bool) from a rules JSON file."""
-    import json
     if not path:
         return [], None, False
     with open(path) as f:
-        doc = json.load(f)
+        doc = json_load(f)
     if isinstance(doc, list):
-        return doc, None, False
-    return (doc.get("rules", []) or [], doc.get("match"),
-            bool(doc.get("allow_shrink", False)))
+        return [_rule(value) for value in doc], None, False
+    options = json_object(doc)
+    match = options.get("match")
+    if isinstance(match, list):
+        if any(not isinstance(marker, str) for marker in match):
+            raise TypeError("rewrite match markers must be strings")
+        match = [marker for marker in match if isinstance(marker, str)]
+    elif match is not None and not isinstance(match, str):
+        raise TypeError("rewrite match must be a string or list of strings")
+    return ([_rule(value) for value in json_array(options.get("rules") or [])], match,
+            bool(options.get("allow_shrink", False)))
 
 
-def _load_func(spec):
+def _load_func(spec: str) -> RewriteFunction:
     """Resolve a ``module:func`` (or ``module.func``) dotted spec to a callable."""
     mod, _, name = spec.partition(":")
     if not name:
         mod, _, name = spec.rpartition(".")
-    fn = getattr(importlib.import_module(mod), name)
+    fn = cast(object, getattr(importlib.import_module(mod), name))
     if not callable(fn):
         raise TypeError(f"AGY_PROC_REWRITE target {spec!r} is not callable")
-    return fn
+    return cast(RewriteFunction, fn)

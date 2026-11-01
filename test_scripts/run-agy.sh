@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch agy under the antigravity instrumentation.
+# Launch the linked agy host with capture enabled.
 #
 #   test_scripts/run-agy.sh [agy args...]
 #
@@ -11,27 +11,25 @@
 #   AGY_PROC_TLS_WRITE_SYNC set to enable synchronous egress rewrite
 #   AGY_PROC_H2             0 to disable HTTP/2 reassembly
 #
-# The env wiring (AGY_PROC_* + PYTHONPATH + GODEBUG) and the shim injection (agy's PT_INTERP +
-# --preload, so the shim doesn't leak into agy's children via LD_PRELOAD) are delegated to
-# pyagy._env.instrumented_env / preload_argv so this launcher and the Python drivers stay in sync.
+# Launch configuration is shared with the Python drivers in pyagy._env.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANTIGRAVITY="$(cd "$HERE/../antigravity" && pwd)"   # the shim (vendor/) + python subsystem live here
 
-: "${AGY_BIN:=$ANTIGRAVITY/vendor/agy}"   # the pinned, build-id-matched binary (instrumentation needs it)
+: "${AGY_BIN:=$ANTIGRAVITY/vendor/agy}"   # the pinned, build-id-matched binary (matches libagy.so)
 
 exec python3 - "$AGY_BIN" "$@" <<PY
 import os, sys
 sys.path.insert(0, ${ANTIGRAVITY@Q})
-from pyagy._env import instrumented_env, preload_argv
+from pyagy._env import linked_env, linked_argv
 agy, *args = sys.argv[1:]
-env = instrumented_env(
+env = linked_env(
     capture=os.environ.get("WIRE_CAPTURE",
                            os.environ.get("AGY_PROC_CAPTURE",
                                           os.path.join(os.getcwd(), "agy-capture.jsonl"))),
     log=os.environ.get("AGY_PROC_LOG", os.path.join(os.getcwd(), "antigravity.log")),
     module=os.environ.get("WIRE_MODULE", "pyagy.agy_process"),
 )
-argv = preload_argv(agy, args, env=env)   # run agy through its PT_INTERP with --preload (no LD_PRELOAD)
+argv = linked_argv(agy, args, env=env)
 os.execve(argv[0], argv, env)
 PY

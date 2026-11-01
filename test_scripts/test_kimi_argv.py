@@ -4,10 +4,14 @@ home-aware session-store readers. No kimi bundle, no node, no network.
 
     python3 test_scripts/test_kimi_argv.py
 """
+
+from __future__ import annotations
+
 import json
 import os
 import sys
 import tempfile
+from collections.abc import Sequence
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
@@ -19,19 +23,22 @@ sys.path.insert(0, _REPO)
 # `import pygit2` is only *used* at workspace-creation time — which this offline
 # suite never reaches. Stub it when absent so the suite runs without the dep.
 try:
-    import pygit2  # noqa: F401
+    import importlib
+    importlib.import_module("pygit2")
 except ImportError:
     import types
     sys.modules["pygit2"] = types.ModuleType("pygit2")
 
-from pykimi._env import WIRE_NODE_ADDON, kimi_argv, instrumented_env  # noqa: E402
 from pykimi import config as kimi_config  # noqa: E402
 from pykimi import sessions  # noqa: E402
+from pykimi._env import WIRE_NODE_ADDON, kimi_argv, linked_env  # noqa: E402
 
-_failures = []
+from wirecap.types import JSONObject, json_array, json_loads_object, json_object
+
+_failures: list[str] = []
 
 
-def check(cond, name):
+def check(cond: object, name: str) -> None:
     print(("  ok   " if cond else "  FAIL ") + name)
     if not cond:
         _failures.append(name)
@@ -40,7 +47,7 @@ def check(cond, name):
 BIN = "/fake/kimi"
 
 
-def test_argv_fresh():
+def test_argv_fresh() -> None:
     print("[offline] kimi_argv: fresh one-shot print mode")
     argv = kimi_argv("hi", kimi_bin=BIN)
     check(argv == [BIN, "-p", "hi"], "fresh -p argv")
@@ -51,7 +58,7 @@ def test_argv_fresh():
           "default = node + vendored main.mjs")
 
 
-def test_argv_print_mode_rejects():
+def test_argv_print_mode_rejects() -> None:
     """kimi-code refuses --yolo/-y/--auto/--plan alongside -p and exits 1 with an
     EMPTY stdout, which would surface as an unexplained no-output failure. The
     argv builder raises instead, naming the flag."""
@@ -70,7 +77,7 @@ def test_argv_print_mode_rejects():
           "legitimate flags unaffected")
 
 
-def test_argv_resume():
+def test_argv_resume() -> None:
     print("[offline] kimi_argv: resume flags precede -p")
     sid = "session_0123456789abcdef"
     argv = kimi_argv("more", kimi_bin=BIN, session_id=sid)
@@ -81,11 +88,11 @@ def test_argv_resume():
     check("--continue" not in argv, "session_id wins over continue_latest")
 
 
-def test_env_contract():
-    print("[offline] instrumented_env: bridge knobs + KIMI_CODE_HOME/KIMI_MODEL_NAME")
+def test_env_contract() -> None:
+    print("[offline] linked_env: bridge knobs + KIMI_CODE_HOME/KIMI_MODEL_NAME")
     with tempfile.TemporaryDirectory() as td:
         cap = os.path.join(td, "c.jsonl")
-        env = instrumented_env(cap, base={"CONDA_PREFIX": "/conda"})
+        env = linked_env(cap, base={"CONDA_PREFIX": "/conda"})
         check(env.get("WIRE_ENABLE") == "1" and env.get("WIRE_MODULE") == "pykimi.kimi_process",
               "bridge gate + module")
         check(env.get("WIRE_CAPTURE") == os.path.abspath(cap), "capture absolute")
@@ -94,42 +101,42 @@ def test_env_contract():
         check(env.get("WIRE_MAXCOPY") == "8388608", "maxcopy raised for full-history requests")
         check(env.get("PYTHONHOME") == "/conda", "PYTHONHOME from CONDA_PREFIX")
         check(env.get("KIMI_CODE_NO_AUTO_UPDATE") == "1", "auto-update off")
-        env = instrumented_env(cap, base={"PYTHONHOME": "/mine", "CONDA_PREFIX": "/conda"})
+        env = linked_env(cap, base={"PYTHONHOME": "/mine", "CONDA_PREFIX": "/conda"})
         check(env.get("PYTHONHOME") == "/mine", "pre-set PYTHONHOME respected")
 
 
-def test_env_home_model_precedence():
-    print("[offline] instrumented_env: kwargs win over extra_env")
+def test_env_home_model_precedence() -> None:
+    print("[offline] linked_env: kwargs win over extra_env")
     with tempfile.TemporaryDirectory() as td:
         cap = os.path.join(td, "c.jsonl")
         home = os.path.join(td, "home")
-        env = instrumented_env(cap, base={}, kimi_home=home, model="k3",
+        env = linked_env(cap, base={}, kimi_home=home, model="k3",
                                extra_env={"KIMI_CODE_HOME": "/other",
                                           "KIMI_MODEL_NAME": "other"})
         check(env.get("KIMI_CODE_HOME") == home, "kimi_home kwarg wins")
         check(env.get("KIMI_MODEL_NAME") == "k3", "model kwarg wins")
-        env = instrumented_env(cap, base={}, extra_env={"KIMI_CODE_HOME": "/other",
+        env = linked_env(cap, base={}, extra_env={"KIMI_CODE_HOME": "/other",
                                                         "KIMI_MODEL_NAME": "other"})
         check(env.get("KIMI_CODE_HOME") == "/other"
               and env.get("KIMI_MODEL_NAME") == "other", "extra_env alone still works")
 
 
-def test_mcp_json_wrap():
+def test_mcp_json_wrap() -> None:
     print("[offline] pykimi.config.mcp_json: PYTHONHOME unwrap")
     spec = {"command": "uv", "args": ["run", "blender-mcp"],
             "env": {"BLENDER_MCP_PORT": "9"}}
-    doc = json.loads(kimi_config.mcp_json({"blender": spec}))
-    srv = doc["mcpServers"]["blender"]
-    check(srv["command"] == "/usr/bin/env" and srv["args"][:3] == ["-u", "PYTHONHOME", "uv"],
+    doc = json_loads_object(kimi_config.mcp_json({"blender": spec}))
+    srv = json_object(json_object(doc["mcpServers"])["blender"])
+    check(srv["command"] == "/usr/bin/env" and json_array(srv["args"])[:3] == ["-u", "PYTHONHOME", "uv"],
           "wrapped by default")
-    bare = json.loads(kimi_config.mcp_json({"blender": spec}, unset_pythonhome=False))
-    check(bare["mcpServers"]["blender"]["command"] == "uv", "opt-out renders bare")
+    bare = json_loads_object(kimi_config.mcp_json({"blender": spec}, unset_pythonhome=False))
+    check(json_object(json_object(bare["mcpServers"])["blender"])["command"] == "uv", "opt-out renders bare")
     from wirecap.runtime.mcp import env_wrapped
     again = kimi_config.mcp_json({"blender": env_wrapped(spec)})
-    check(json.loads(again) == doc, "idempotent on pre-wrapped specs")
+    check(json_loads_object(again) == doc, "idempotent on pre-wrapped specs")
 
 
-def test_ask_mutual_exclusion():
+def test_ask_mutual_exclusion() -> None:
     print("[offline] ask: session_id + continue_latest rejected")
     from pykimi import client
     try:
@@ -141,7 +148,7 @@ def test_ask_mutual_exclusion():
         check(False, f"ValueError raised (got {type(exc).__name__})")
 
 
-def _seed_session(home, wd_key, sid, workdir, wire_records=(), agent="main"):
+def _seed_session(home: str, wd_key: str, sid: str, workdir: str, wire_records: Sequence[JSONObject]=(), agent: str="main"):
     sdir = os.path.join(home, "sessions", wd_key, sid)
     adir = os.path.join(sdir, "agents", agent)
     os.makedirs(adir, exist_ok=True)
@@ -154,7 +161,7 @@ def _seed_session(home, wd_key, sid, workdir, wire_records=(), agent="main"):
     return sdir
 
 
-def test_sessions_store():
+def test_sessions_store() -> None:
     print("[offline] sessions readers: index fold, tombstones, cwd filter, wire")
     with tempfile.TemporaryDirectory() as td:
         home = os.path.join(td, "home"); os.makedirs(home)
@@ -175,17 +182,19 @@ def test_sessions_store():
         check(sessions.latest_session_id(home=home, cwd=cwd_a) == sid_old, "cwd filter")
         check(sessions.latest_session_id(home=os.path.join(td, "empty")) is None,
               "empty store -> None")
-        check(sessions.find_session_dir(sid_old, home=home).endswith(sid_old),
+        session_dir = sessions.find_session_dir(sid_old, home=home)
+        check(session_dir is not None and session_dir.endswith(sid_old),
               "find_session_dir via index")
         wire = sessions.read_wire(sid_old, home=home)
         check(len(wire) == 2 and wire[1]["type"] == "usage.record", "read_wire")
         # relocated store: recorded sessionDir is stale, the sessions/ scan finds it
         moved = os.path.join(td, "moved"); os.rename(home, moved)
-        check(sessions.find_session_dir(sid_old, home=moved).endswith(sid_old),
+        moved_session = sessions.find_session_dir(sid_old, home=moved)
+        check(moved_session is not None and moved_session.endswith(sid_old),
               "find_session_dir survives a relocated home")
 
 
-def main():
+def main() -> None:
     test_argv_fresh()
     test_argv_print_mode_rejects()
     test_argv_resume()
