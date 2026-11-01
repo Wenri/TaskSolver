@@ -26,6 +26,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <span>
 #include "goframe.h"
 
 /* ---- Go aggregate-type ABI mirrors (amd64) ------------------------------- */

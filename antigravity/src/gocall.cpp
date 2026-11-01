@@ -1,6 +1,4 @@
-/* gocall.cpp — the C side of the trampoline stubs (src/goframe.cpp): the per-row handlers
- * (`agy_on_*`), the per-row gate, and the frame-pointer stack unwinder.
- */
+/* gocall.cpp — the C side of the stubs. See gocall.h. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -20,7 +18,7 @@
 #define GHLOG(...) do { std::fprintf(stderr, "[antigravity/gobook] " __VA_ARGS__); \
                         std::fputc('\n', stderr); std::fflush(stderr); } while (0)
 
-/* The stub asm names this table. It stays null until agy_init enables books, before Go starts. */
+/* Null until agy_enable_books, which runs before Go starts. */
 __attribute__((used, externally_visible)) agy_book_fn g_agy_on[BK_COUNT];
 
 static agy_book_fn agy_handler_for(std::string_view id) {
@@ -34,10 +32,9 @@ static agy_book_fn agy_handler_for(std::string_view id) {
     return &agy_on_generic;
 }
 
-/* The booked row's id, which its events carry as their kind. */
+/* Events carry their row's id as the kind. */
 static const char *book_id(const agy_block *b) { return BOOKS[b->book].id.data(); }
 
-/* The row's bare event: its id as the kind, no payload. */
 static void emit_book(agy_block *b, uint64_t stream_id, wire_mode_t mode = WIRE_ASYNC)
 {
     wire_event_t ev = { .kind = book_id(b), .stream_id = stream_id, .mode = mode };
@@ -225,7 +222,7 @@ static void cgt_bytes_emit(const char *kind, uint64_t id, uint64_t ptr, uint64_t
     }
 }
 
-static uint64_t g_gh_base;   /* libagy.so load base, for reducing PCs to link vaddrs */
+static uint64_t g_gh_base;   /* libagy.so load base */
 static bool g_cgt_args;      /* cached AGY_PROC_CGT_ARGS */
 static bool g_cgt_stack;     /* cached AGY_PROC_STACK */
 

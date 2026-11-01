@@ -84,7 +84,7 @@ int getaddrinfo(const char *node, const char *service,
 static void agy_init(void)
 {
     /* Register the linked stub ranges before Go starts, even when books are disabled. */
-    if (agy_gomod_register(agy_stub_descriptors()) != 0) {
+    if (agy_gomod_register(agy_stubs) != 0) {
         std::fprintf(stderr, "[antigravity] FATAL: invalid trampoline metadata\n");
         std::abort();
     }

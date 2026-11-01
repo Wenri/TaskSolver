@@ -12,7 +12,7 @@
 #ifndef AGY_GOFRAME_H
 #define AGY_GOFRAME_H
 
-#include <span>
+#include "procdef.h"
 
 #define AGY_FRAME        112   /* bytes the stub subtracts from rsp */
 
@@ -41,6 +41,7 @@ struct agy_stub_info {
     const unsigned char *frame_start, *frame_end, *end;
 };
 
-std::span<const agy_stub_info> agy_stub_descriptors() noexcept;
+/* Defined in goframe.cpp, one entry per stub, in BOOKS order. */
+extern const agy_stub_info agy_stubs[BK_STUB_COUNT];
 
 #endif /* AGY_GOFRAME_H */

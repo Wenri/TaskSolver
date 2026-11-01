@@ -22,12 +22,6 @@
 
 static_assert(sizeof(agy_book_fn) == 8, "the stub's table load assumes 8-byte handler pointers");
 
-/* bk() rejects an unknown id, so this only has to catch a row BOOKS has since turned off. */
-#define AGY_STUB_ENABLED(id, go_frame) \
-    static_assert(BOOKS[bk(id)].mech != AGY_OFF, "symbols_gen.h stubs a disabled row: " id);
-AGY_STUBS(AGY_STUB_ENABLED)
-#undef AGY_STUB_ENABLED
-
 /* Saved and restored in this order; RBP must be the frame's last word for Go's unwinder.
  * R12 is Go's scratch register. */
 static constexpr struct {
@@ -123,27 +117,21 @@ struct agy_stub {
     static constexpr agy_stub_info info{&entry, &frame_start, &frame_end, &end};
 };
 
-/* GCC requires literal asm names on declarations, so bind the boundary members before the
- * descriptors below instantiate them. */
-#define AGY_STUB_LABELS(id, go_frame)                                           \
-    template<> const unsigned char agy_stub<bk(id), go_frame>::frame_start      \
-        __asm__("agy_pc__" id "_frame_start");                                  \
-    template<> const unsigned char agy_stub<bk(id), go_frame>::frame_end        \
-        __asm__("agy_pc__" id "_frame_end");                                    \
-    template<> const unsigned char agy_stub<bk(id), go_frame>::end              \
+/* bk() rejects an unknown id; this catches one BOOKS has since turned off. GCC also needs
+ * literal asm names on declarations, so each row binds its own boundary members here. */
+#define AGY_STUB_LABELS(id, go_frame)                                                        \
+    static_assert(BOOKS[bk(id)].mech != AGY_OFF, "symbols_gen.h stubs a disabled row: " id); \
+    template<> const unsigned char agy_stub<bk(id), go_frame>::frame_start                   \
+        __asm__("agy_pc__" id "_frame_start");                                               \
+    template<> const unsigned char agy_stub<bk(id), go_frame>::frame_end                     \
+        __asm__("agy_pc__" id "_frame_end");                                                 \
+    template<> const unsigned char agy_stub<bk(id), go_frame>::end                           \
         __asm__("agy_pc__" id "_end");
 AGY_STUBS(AGY_STUB_LABELS)
-#undef AGY_STUB_LABELS
 
+/* goframe.h sizes this BK_STUB_COUNT, so a list missing a row fails to compile. */
 #define AGY_STUB_INFO(id, go_frame) agy_stub<bk(id), go_frame>::info,
-static constexpr agy_stub_info agy_stubs[] = { AGY_STUBS(AGY_STUB_INFO) };
-#undef AGY_STUB_INFO
+extern constexpr agy_stub_info agy_stubs[] = { AGY_STUBS(AGY_STUB_INFO) };
 
-static_assert(std::ssize(agy_stubs) == BK_STUB_COUNT, "symbols_gen.h skips an enabled BOOKS row");
 static_assert(std::size(agy_stubs) <= AGY_GOMOD_MAX_FUNCS,
               "more books than the static synthetic-moduledata holds — bump AGY_GOMOD_MAX_FUNCS in gomod.h");
-
-std::span<const agy_stub_info> agy_stub_descriptors() noexcept
-{
-    return agy_stubs;
-}

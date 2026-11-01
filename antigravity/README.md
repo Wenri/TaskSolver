@@ -54,9 +54,10 @@ and either returns the handler's verdict or replays the original prologue and re
 
 Each `procdef.h` row reads `{id, mode, retcap, AGY_FULLGO(symbol)}` (or `AGY_ASMGO` / `AGY_OFF`).
 The generated `symbols_gen.h` holds the expected `AGY_BUILD_ID` and `AGY_STUBS`, one
-`X("id", go_frame)` per stubbed row; `goframe.cpp` expands it into the naked stub templates, whose
-asm a `consteval` builder writes at compile time. `gomod.cpp` describes the stubs to Go in a
-synthetic moduledata so the GC can unwind them (see `gomod.h`); the frame layout is in `goframe.h`.
+`X("id", go_frame)` per stubbed row. `goframe.cpp` expands it into the naked stub templates, whose
+asm a `consteval` builder writes at compile time, and into the `agy_stubs` table of entry and frame
+labels. `gomod.cpp` turns that table into the synthetic moduledata Go's GC unwinds the stubs with
+(see `gomod.h`); the frame layout is in `goframe.h`.
 
 ## Diagnostics
 
@@ -78,43 +79,6 @@ agy is an MCP client, so new tools and context come from an MCP server, not from
 `~/.gemini/config/mcp_config.json`, and `validate_server()` runs the handshake first; `config/mcp.json`
 is the manual template.
 
-## Layout
-
-```
-antigravity/
-  CMakeLists.txt            ← generates symbols_gen.h; links vendor/agy against vendor/libagy.so
-  build/                    ← CMake files + the verified raw agy cache, keyed by archive SHA512
-  vendor/                   ← libagy.so (164 MB) + the vendor/agy host
-  symbols/                  ← source build package: `python3 -m symbols.<tool>` from antigravity/
-    agyelf.py               ← procdef.h rows, ELF (lief), Go pclntab/moduledata, prologue parsing
-    build_symbols.py        ← resolver: symbols.json + funcmap; verifies each installed book's prologue
-    make_libagy.py          ← PIE agy → libagy.so: exports, .plt.agy/.got.plt.agy, metadata, then the
-                              E9 jumps; `--update` prints new pins, `--wsl1` applies the tcmalloc fix
-    gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h; `--books` → agy_process/books.py
-    symbols.json            ← generated, gitignored: {build_id, text_base, books, skips, prologues}
-  src/
-    procdef.h               ← BOOKS + consteval bk()
-    symbols_gen.h           ← generated, gitignored: AGY_BUILD_ID + AGY_STUBS
-    goframe.h / goframe.cpp ← stub frame layout; naked stub template + consteval asm (-fno-lto)
-    gocall.h / gocall.cpp   ← handler table, C handlers, frame-pointer unwinder
-    gomod.h / gomod.cpp     ← synthetic Go moduledata
-    antigravity.cpp         ← main() + agy_init() + getaddrinfo interposer
-  pyagy/                    ← the `pyagy` package
-    __init__.py             ← lazy exports (PEP 562)
-    client.py               ← ask() / Session / AgyResponse / ToolSpec / ContextResource / RewriteRule
-    config.py               ← MCP config injection (write_mcp_config / validate_server)
-    model.py                ← AgyModel, the TaskSolver backend over client.ask
-    agyprocess.py           ← AgyProcess, the single agy launcher (a spawn Process)
-    _pty.py                 ← PtyPopen: runs agy under a PTY as the mp child
-    _term.py / _env.py      ← terminal-query responder / instrumented env
-    agy_process/            ← runs inside agy: dispatch(), http1sse.py (model endpoint decoder),
-                              rewrite.py (SYNC egress rules), books.py (BOOKS mirror)
-    agy_mcp_server.py       ← stdio MCP server
-  config/                   ← mcp.json, agents.json: native MCP server / agent (hybrid path)
-```
-
-Shared decoding lives in `../wirecap/decode/`; drivers live in `test_scripts/`.
-
 ## Build & run
 
 `pixi install` builds `vendor/libagy.so` and `vendor/agy` (linux-64 only; a missing toolchain fails
@@ -126,9 +90,8 @@ pixi run shim-agy-update  # print new CMakeLists.txt pins from the latest releas
 pixi run shim-symbols     # ensure library + metadata are current, then recompile
 pixi run shim-books       # after editing src/procdef.h: regenerate pyagy's BOOKS mirror
 pixi run build-shim       # rebuild changed outputs
-pixi run python test_scripts/test_agy_stubs.py   # after stub or toolchain changes; no model calls
-(cd antigravity && pixi run python -m unittest symbols.test_procdef symbols.test_build_symbols \
-                     symbols.test_gen_sources symbols.test_make_libagy)
+pixi run python test_scripts/test_agy_stubs.py    # after stub or toolchain changes; no model calls
+pixi run python test_scripts/test_agy_symbols.py  # parser, resolver, generated sources, conversion
 pixi run test_scripts/run-agy.sh --version       # instrumented startup; writes antigravity.log
 ```
 
@@ -162,8 +125,6 @@ print(r.request["tools"], r.request["first_user_text"])   # the request as SENT
 print(len(r.turns), [t["text"][:20] for t in r.turns])    # every wire model turn decoded
 print(r.app_text)                                # answer decoded at agy's consumer boundary
 print(r.rpc_trace)                               # labeled backend-RPC timeline
-print(ask("…", stack=True).stacks)               # symbolized Go call stacks (overlay)
-print(ask("…", arg_probe=True).cgt_args)         # trampoline arg-graph reports (overlay)
 
 with Session(tools=[ToolSpec("weather", handler="mytools:weather")]) as s:
     print(s.ask("Weather in Paris?").text)       # agy can call the injected tool
@@ -171,9 +132,9 @@ with Session(tools=[ToolSpec("weather", handler="mytools:weather")]) as s:
     print(s.ask("And there?").text)
 ```
 
-**One call, one result object.** Every run installs all books, so one turn fills every capture
-surface; `stack=` and `arg_probe=` add diagnostic overlays. A field is empty or `None` when the run
-captured nothing of that kind.
+Every run installs all books, so one turn fills every surface below; a field is empty or `None`
+when the run captured nothing of that kind. `.text` prefers the app boundary, then the wire, then
+the PTY transcript, and reports which it used in `.source`.
 
 | surface | books | `AgyResponse` field |
 |---|---|---|
@@ -186,9 +147,6 @@ captured nothing of that kind.
 - **Two composable ways to modify:** `rewrite=` (a `RewriteRule` list, a `"module:func"` string or
   a callable) makes `tls_write` a live SYNC egress rewrite, equal-length only (a length-changing
   rule is skipped and recorded as `rewrite_skip`); `tools=` / `context=` add an MCP server.
-- **`AgyResponse`:** `.text` (prefers app, then wire, then transcript), `.source`, `.app_text`,
-  `.turns`, `.request` / `.events` / `.usage` / `.model` for the substantive turn, `.transcript`,
-  `.exit_status`, `.instrumented`, and the lazy diagnostic accessors above.
 - **Introspection:** `from pyagy import BOOKS, by_mech, enabled_books, by_kind, sync_capable,
   DERIVED_KINDS`, the machine-readable mirror of `src/procdef.h`.
 - **Env knobs** (the kwargs set them; diagnostics are in the table above):
@@ -208,53 +166,31 @@ captured nothing of that kind.
   `test_appresponse.py`, `test_rpctrace.py`, `test_symbolize.py`; live (skipping cleanly)
   `test_rewrite.py`, `test_trampoline.py`, `test_agyprocess.py`, `test_agy_session.py`.
 
-## Sessions: resume, list, and scope agy's native conversation store
+## Sessions
 
-agy persists each conversation (`~/.gemini/antigravity-cli/conversations/<uuid>.db`, plus
-`brain/<uuid>/…/transcript.jsonl`) and can resume it on a new launch. **`Session` is the
-first-class object** (its lifecycle lives on `wirecap.runtime.session.WireSession`); `ask()` is
-one-shot sugar, and both carry a resumable `conversation_id`.
+agy persists each conversation under `~/.gemini/antigravity-cli/` and resumes it on a new launch.
+`Session` is the first-class object (on `wirecap.runtime.session.WireSession`); `ask()` is one-shot
+sugar. Both carry a `conversation_id` that `pyagy.resume(cid)`, `pyagy.continue_latest()`,
+`pyagy.list_conversations()` and `pyagy.read_transcript(cid)` work with, as do
+`AgyProcess(conversation_id=)` and `AgyModel(multi_turn=True)`.
 
-```python
-import pyagy
-s = pyagy.Session()                      # live `agy --prompt-interactive`; turns over the PTY
-s.ask("Remember the code word BANANA.")
-cid = s.conversation_id
-s.close()
-
-pyagy.resume(cid).ask("What's the code word?")     # `agy … --conversation=<cid>`  -> BANANA
-pyagy.continue_latest().ask("…")                    # `agy … --continue`
-for c in pyagy.list_conversations(limit=10):        # id, title, step_count, last_modified
-    print(c)
-print(pyagy.read_transcript(cid))                    # stored turns (also s.history())
-```
-
-- **Ids:** the `file_open` book (`os.OpenFile`, with `AGY_PROC_CONV_ID`) reads the uuid from the
-  store path agy opens and emits `conversation_id`; without that event the newest `*.db` wins.
-  `ask(..., conversation_id=… | continue_latest=True)` resumes in `--print` mode.
-  `AgyProcess(conversation_id=…)` and `AgyModel(multi_turn=True | conversation_id=…)` resume too.
-- **Workspace trust (default on):** agy blocks interactive startup on an untrusted workspace and
-  has no flag for it, so each interactive launch adds its workspace to `settings.json →
-  trustedWorkspaces` (`pyagy.trust_workspace`, atomic and idempotent). `trust=False` opts out;
-  `skip_permissions=True` passes `--dangerously-skip-permissions`.
-- **Project-scoped store (`data_dir=`):** agy hardcodes `$HOME/.gemini`, so
-  `Session(workspace=repo, data_dir=repo)` overrides HOME and links the real login token and
-  `config/` into `<repo>/.gemini/antigravity-cli/`; `list_conversations(home=data_dir)` reads it.
-  Ignore the scoped `.gemini/` in git.
+- **Ids** come from the `file_open` book, which reads the uuid out of the store path agy opens;
+  without that event the newest `*.db` by mtime wins.
+- **Workspace trust** is on by default: agy refuses to start interactively in an untrusted
+  workspace and has no flag for it, so each launch adds its workspace to `settings.json →
+  trustedWorkspaces`. `trust=False` opts out, `skip_permissions=True` uses the blunt flag.
+- **`data_dir=`** scopes the store to a project. agy hardcodes `$HOME/.gemini`, so this overrides
+  HOME and links the real login token in, leaving the global store untouched. Git-ignore the
+  scoped `.gemini/`.
 
 ## `AgyProcess`: the single agy launcher
 
-Every agy launch goes through `AgyProcess`, a spawn `Process` on the pinned `vendor/agy`. As with
-`multiprocessing.Process`, the **caller** owns the result `SimpleQueue` and passes it in `args`.
-The default target, `stream_turns`, runs inside agy and streams `genai_turn` and `app_response`
-home; `pyagy/client.py` drains it. A custom `target` runs in agy's embedded interpreter and `.put`s
-native Python objects home.
+Every launch goes through `AgyProcess`, a spawn `Process` on the pinned `vendor/agy`. As with
+`multiprocessing.Process`, the **caller** owns the result `SimpleQueue` and passes it in `args`;
+the target then runs *inside* agy's embedded interpreter and puts native Python objects home. The
+default target, `stream_turns`, streams the decoded answer, which is what `client.py` drains.
 
 ```python
-from multiprocessing import get_context
-from pyagy.agyprocess import AgyProcess
-from wirecap.decode.mp_child import stream_turns
-
 q = get_context("spawn").SimpleQueue()
 p = AgyProcess(target=stream_turns, args=(q,), prompt="What is 2+2?")
 p.start(); q._writer.close()           # the reader EOFs if agy dies

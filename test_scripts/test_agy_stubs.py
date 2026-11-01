@@ -40,7 +40,7 @@ class AgyStubTests(unittest.TestCase):
         cls.obj = lief.parse(str(OBJECT))
         cls.go = lief.parse(str(ANTI / "vendor/libagy.so"))
         cls.symbols = {s.name: s for s in cls.image.symtab_symbols}
-        cls.descriptors = cls.symbols["_ZL9agy_stubs"]  # private constexpr table in goframe.cpp
+        cls.descriptors = cls.symbols["agy_stubs"]  # the constexpr table goframe.cpp defines
         cls.stubs = {name: s for name, s in cls.symbols.items() if name.startswith("agy_stub__")}
         cls.layout = {name: int(value) for name, value in re.findall(
             r"^#define\s+(AGY_\w+)\s+(\d+)\b", (ANTI / "src/goframe.h").read_text(), re.M)}
@@ -62,7 +62,9 @@ class AgyStubTests(unittest.TestCase):
         for binary in (self.obj, self.image):
             self.assertFalse(any("bind_labels" in symbol.name for symbol in binary.symtab_symbols))
         descriptors = self.descriptors
-        self.assertEqual(descriptors.binding, lief.ELF.Symbol.BINDING.LOCAL)
+        self.assertEqual(descriptors.binding, lief.ELF.Symbol.BINDING.GLOBAL)
+        self.assertEqual(descriptors.visibility, lief.ELF.Symbol.VISIBILITY.HIDDEN)
+        self.assertFalse(self.image.has_dynamic_symbol("agy_stubs"))
         self.assertEqual(descriptors.size, len(expected) * 32)
         raw = bytes(self.image.get_content_from_virtual_address(descriptors.value, descriptors.size))
         for row, pointers in zip(enabled_books(), struct.iter_unpack("<4Q", raw), strict=True):

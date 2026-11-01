@@ -1,6 +1,4 @@
-/* gocall.h — the C side of the trampoline stubs (src/goframe.cpp): the per-row handlers
- * (`agy_on_*`), the per-row gate, and the frame-pointer stack unwinder (`gocall.cpp`).
- */
+/* gocall.h — the C side of the stubs: per-row handlers, the handler table, the unwinder. */
 #ifndef AGY_GOCALL_H
 #define AGY_GOCALL_H
 
@@ -9,7 +7,7 @@
 
 using agy_book_fn = void (*)(agy_block *);
 
-/* Named by the stub asm: per BOOKS row, its handler, or nullptr when the row is disabled. */
+/* Named by the stub asm; nullptr disables a row. */
 extern "C" agy_book_fn g_agy_on[];
 
 void agy_on_generic(agy_block *b);
@@ -21,25 +19,19 @@ void agy_on_exit(agy_block *b);
 void agy_on_resp_chunk(agy_block *b);
 void agy_on_readlink_filter(agy_block *b);
 
-/* Fault-safe read of `n` bytes from a possibly-bogus address in our own process
- * (process_vm_readv → EFAULT instead of SIGSEGV). Returns bytes read or -1. */
+/* Returns -1 instead of faulting on a bad address. */
 long agy_safe_read(uint64_t addr, void *dst, unsigned long n);
 
-/* Walk the Go frame-pointer chain from `rbp` (Go keeps rbp: [rbp]=saved caller rbp,
- * [rbp+8]=return address). Stores up to `max` return PCs, each reduced to a link
- * vaddr (pc - base), into `out`. Terminates on rbp==0 / non-monotonic / unreadable.
- * Returns the number of frames captured. */
+/* Return PCs along Go's frame-pointer chain, as link vaddrs (pc - base). */
 int  agy_backtrace(uint64_t rbp, uint64_t base, uint64_t *out, int max);
 
-/* Emit a "callstack" event: src_kind (NUL-terminated) followed by the packed u64
- * frame vaddrs from agy_backtrace(rbp,base). No-op-safe if rbp is bogus. */
+/* A "callstack" event: src_kind, NUL, then the u64 frames. */
 void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base);
 
-/* Set the real agy binary path (from AGY_PROC_REAL_EXE) the readlink_filter book returns for
- * os.readlink("/proc/self/exe"). Called once at agy_init (before Go starts). */
+/* What readlink_filter returns for /proc/self/exe (AGY_PROC_REAL_EXE). */
 void agy_set_real_exe(const char *path);
 
-/* Activate the statically `ld`-bound trampoline stubs once `wire_start()` is ready. */
+/* Fill g_agy_on once wire_start() succeeds, before Go starts. */
 void agy_enable_books(uint64_t base, bool conv_id);
 
 #endif /* AGY_GOCALL_H */
