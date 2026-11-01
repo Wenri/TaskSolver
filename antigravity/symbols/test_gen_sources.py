@@ -89,6 +89,31 @@ class GenSourcesTests(unittest.TestCase):
         for declaration in ("AGY_STUB", "agy_pc__", "struct ", "extern ", "std::array", "goframe.h"):
             self.assertNotIn(declaration, content)
 
+    def test_label_specializations_use_book_ids(self):
+        disabled = {"id": "disabled", "mech": "off"}
+        later = {"id": "later", "mech": "asmcgo"}
+        content = gen_sources.render_labels([disabled, ROW, later])
+        declarations = [line for line in content.splitlines() if line.startswith("template<>")]
+        self.assertEqual(declarations, [
+            'template<> const unsigned char agy_stub<bk("fixture")>::frame_start '
+            '__asm__("agy_pc__fixture_frame_start");',
+            'template<> const unsigned char agy_stub<bk("fixture")>::frame_end '
+            '__asm__("agy_pc__fixture_frame_end");',
+            'template<> const unsigned char agy_stub<bk("fixture")>::end '
+            '__asm__("agy_pc__fixture_end");',
+            'template<> const unsigned char agy_stub<bk("later")>::frame_start '
+            '__asm__("agy_pc__later_frame_start");',
+            'template<> const unsigned char agy_stub<bk("later")>::frame_end '
+            '__asm__("agy_pc__later_frame_end");',
+            'template<> const unsigned char agy_stub<bk("later")>::end '
+            '__asm__("agy_pc__later_end");',
+        ])
+        self.assertIn("#ifndef AGY_STUB_LABELS_GEN_H\n#define AGY_STUB_LABELS_GEN_H", content)
+        self.assertTrue(content.endswith("#endif /* AGY_STUB_LABELS_GEN_H */\n"))
+        self.assertNotIn("disabled", content)
+        for unrelated in ("AGY_BUILD_ID", "AGY_GO_FRAMES", "::entry", "agy_stubs"):
+            self.assertNotIn(unrelated, content)
+
 
 if __name__ == "__main__":
     unittest.main()

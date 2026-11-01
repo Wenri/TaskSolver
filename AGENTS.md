@@ -255,7 +255,7 @@ instrumentation layer; Claude uses its SDK protocol directly:
   `agy_on_stream`, retaining their row-derived event kinds. Each `naked` stub uses basic asm
   to load its entry once into `r12`, skips the hook if null, and otherwise passes that same
   pointer with `&block` through the row's Go gateway (`runtime.cgocall` or `runtime.asmcgocall`).
-  The generated header contains only the expected `AGY_BUILD_ID` and signed `AGY_GO_FRAMES`,
+  Generated `symbols_gen.h` contains only the expected `AGY_BUILD_ID` and signed `AGY_GO_FRAMES`,
   one original Go frame allocation per `BOOKS` row (`-1` for disabled rows). Python validates
   the binary prologues before writing it; the expected BuildID remains an independent startup
   guard. `goframe.cpp` derives active indices (`STUB_BOOKS`) from `BOOKS` and instantiates one
@@ -266,10 +266,13 @@ instrumentation layer; Claude uses its SDK protocol directly:
   basic-asm expression; none of this construction runs at startup. Each exported
   `agy_stub__<id>` label shares its template function's entry, with no wrapper jump.
   `consteval make_stubs` builds a private constexpr `std::array` of typed descriptors.
-  A separate, never-called binding template aliases template boundary members to the asm
-  labels; assembler/linker resolution supplies the addresses without runtime initialization.
-  Linker GC discards the unused binding functions. `agy_stub_descriptors()` exposes a
-  `std::span<const agy_stub_info>` consumed directly by `agy_gomod_register`.
+  A separate `stub_labels_gen.h` is generated from `BOOKS` with
+  `python3 -m symbols.gen_sources --labels`. It supplies three literal GCC asm-name member
+  specializations per active hook, indexed by `bk("id")`.
+  Include it after the stub template and before descriptor instantiation; assembler/linker
+  resolution binds the typed boundary members without runtime initialization.
+  `agy_stub_descriptors()` exposes a `std::span<const agy_stub_info>` consumed directly by
+  `agy_gomod_register`.
   C++ owns the table's storage and layout. Linked function order is unrestricted.
   The asm reconstructs the original Go prologue using `AGY_GO_FRAMES[book]` after releasing
   the trampoline frame. Keep `__builtin_unreachable()` after the asm: its RET/JMP handles

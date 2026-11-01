@@ -126,18 +126,6 @@ static consteval auto asm_text()
     return text;
 }
 
-static consteval std::string boundary_asm(size_t index)
-{
-    std::string code;
-    unsigned operand = 0;
-    for (auto part : {"frame_start", "frame_end", "end"}) {
-        const std::string symbol = "%cc" + decimal(operand++);
-        code += ".globl " + symbol + "\n.hidden " + symbol + "\n.set " + symbol +
-            ", agy_pc__" + std::string(BOOKS[index].id) + "_" + part + "\n";
-    }
-    return code;
-}
-
 template<size_t I>
 struct agy_stub {
     static const unsigned char frame_start, frame_end, end;
@@ -148,21 +136,16 @@ struct agy_stub {
         __builtin_unreachable();
     }
 
-    /* Only emits symbol aliases. Never called; --gc-sections discards the helper
-     * after the assembler binds these template members to the actual code labels. */
-    [[gnu::used, gnu::noinline]] static void bind_labels()
-    {
-        __asm__((asm_text<[] { return boundary_asm(I); }>()) : :
-                ":" (&frame_start), ":" (&frame_end), ":" (&end));
-    }
-
     static constexpr agy_stub_info info{&entry, &frame_start, &frame_end, &end};
 };
+
+/* GCC requires literal asm names on declarations. Specialize the boundary members
+ * before make_stubs instantiates their constexpr descriptors. */
+#include "stub_labels_gen.h"
 
 template<size_t... I>
 static consteval auto make_stubs(std::index_sequence<I...>)
 {
-    [[maybe_unused]] constexpr std::array bindings{&agy_stub<STUB_BOOKS[I]>::bind_labels...};
     return std::array{agy_stub<STUB_BOOKS[I]>::info...};
 }
 

@@ -33,12 +33,15 @@ exports remain for introspection and patching. At startup, `main()` runs
 2. **Static cgocall trampolines (`src/goframe.cpp` + `src/gocall.cpp` + `src/gomod.cpp`)**
    emitted as ordinary `.text` functions by one `naked` template indexed by row.
    `gen_sources.py` emits only the expected `AGY_BUILD_ID` and original Go frame allocations
-   (`AGY_GO_FRAMES`) into `src/symbols_gen.h`. C++ derives active rows from `BOOKS`; a
-   `consteval` builder selects the gateway from `BOOKS[book].mech` and generates the basic asm.
+   (`AGY_GO_FRAMES`) into `src/symbols_gen.h`. Its separate `--labels` mode generates
+   `src/stub_labels_gen.h` from `BOOKS`, binding typed boundary members with literal GCC
+   asm-name declarations. C++ derives active rows from `BOOKS`; a `consteval` builder selects
+   the gateway from `BOOKS[book].mech` and generates the basic asm.
    Exported `agy_stub__<id>` labels share their template functions' entry addresses, with no
    wrapper call or jump. `consteval make_stubs` builds a private constexpr descriptor array,
-   exposed through a read-only span. Linked function order and spacing are unrestricted; descriptors are
-   sorted by address to build one synthetic `moduledata` (`md->bad = 1`), spliced onto `agy_firstmoduledata.next`
+   exposed through a read-only span. Linked function order and spacing are unrestricted;
+   descriptors are sorted by address to build one synthetic `moduledata` (`md->bad = 1`),
+   spliced onto `agy_firstmoduledata.next`
    before `agy_rt0_go()` starts. `agy_enable_hooks` in `gocall.cpp` fills the zero-initialized
    `g_agy_on` handler pointer table for enabled rows; disabled entries remain `nullptr`.
    Each stub loads its entry once, skips the hook if null, and otherwise passes that pointer
@@ -221,7 +224,7 @@ static assembly trampoline stub
 
 The generated `AGY_GO_FRAMES` array holds one signed original Go frame allocation per
 `BOOKS` row, with `-1` for disabled rows; for `smoke`, `AGY_GO_FRAMES[0]` is `0x10`.
-The expected `AGY_BUILD_ID` is the header's only other value. These come from binary metadata;
+The expected `AGY_BUILD_ID` is `symbols_gen.h`'s only other value. These come from binary metadata;
 C++ derives active row indices (`STUB_BOOKS`), ids, and mechanisms directly from `BOOKS`.
 After releasing the fixed 112-byte trampoline frame, the shared basic asm reconstructs
 `pushq %rbp; movq %rsp, %rbp; subq $go_frame, %rsp`, using `AGY_GO_FRAMES[book]`.
@@ -242,12 +245,13 @@ and gateway selection happen entirely at compile time. All instantiations belong
 synthetic moduledata, with each function's pcsp derived from its linked boundaries.
 
 `consteval make_stubs` expands the active indices into a private constexpr `std::array` in
-`goframe.cpp`; C++ owns its storage and layout. A separate ordinary binding template aliases
-typed boundary members to the asm labels. These binding functions are never called and linker
-GC discards their code; the assembler/linker resolves the addresses without a runtime initializer.
+`goframe.cpp`; C++ owns its storage and layout. The separate `stub_labels_gen.h` contains three
+literal GCC asm-name member specializations per active hook, indexed by `bk("id")`. It is
+generated from `BOOKS` alone and included after the stub template, before descriptor
+instantiation. The assembler/linker resolves these boundary references without a runtime initializer.
 `agy_stub_descriptors()` exposes a `std::span<const agy_stub_info>` passed directly to
-`agy_gomod_register`. The naked functions contain basic asm followed by `__builtin_unreachable()`: their
-RET/JMP handles control flow, so C++ never falls through; the stubs can still return to Go.
+`agy_gomod_register`. The naked functions contain basic asm followed by `__builtin_unreachable()`:
+their RET/JMP handles control flow, so C++ never falls through; the stubs can still return to Go.
 
 **Synthetic moduledata (`gomod.cpp`).** `cgocall`'s `entersyscall()` opens a GC-scannable window
 over our trampoline frame; if Go's unwinder can't `findfunc` the trampoline PCs it
@@ -454,7 +458,7 @@ result). See `config/` and `pyagy/config.py`.
 ```
 antigravity/
   README.md                 ← this file (the design)
-  CMakeLists.txt            ← the build: generates symbols_gen.h + links vendor/agy against vendor/libagy.so
+  CMakeLists.txt            ← generates both source headers + links vendor/agy against vendor/libagy.so
   build/                    ← CMake files + immutable raw agy cache, keyed by archive SHA512
   vendor/                   ← libagy.so (164 MB) + built vendor/agy host executable
   symbols/                  ← source build package; run with `python3 -m symbols.<tool>` from antigravity/
@@ -471,10 +475,13 @@ antigravity/
                               `--wsl1` applies the tcmalloc MAP_FIXED_NOREPLACE fix on its own (a
                               conversion applies it automatically when running on WSL1).
     gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (expected AGY_BUILD_ID +
-                              AGY_GO_FRAMES in BOOKS order, -1 for disabled rows); `--hooks` →
+                              AGY_GO_FRAMES in BOOKS order, -1 for disabled rows);
+                              `--labels` → stub_labels_gen.h from BOOKS; `--hooks` →
                               pyagy/agy_process/hooks.py
     symbols.json            ← generated, gitignored: {build_id, text_base, hooks:{name→vaddr}, skips, prologues}
   src/
+    symbols_gen.h           ← generated, gitignored: expected BuildID and binary-derived Go frame sizes
+    stub_labels_gen.h       ← generated, gitignored: literal asm-name declarations for boundary members
     goframe.h               ← the stub frame layout, shared by goframe.cpp and the rest of the
                               C++ (gomod.cpp static_asserts every offset against agy_block)
     goframe.cpp             ← one naked template + consteval asm builder; shared register list,
@@ -563,6 +570,7 @@ For direct use inside an activated Pixi environment:
 cd antigravity
 python3 -m symbols.make_libagy /path/to/raw-agy vendor/libagy.so symbols/symbols.json
 python3 -m symbols.gen_sources --hooks
+python3 -m symbols.gen_sources --labels src/stub_labels_gen.h
 python3 -m symbols.gen_sources symbols/symbols.json src/symbols_gen.h
 ```
 

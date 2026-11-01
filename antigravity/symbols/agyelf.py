@@ -3,7 +3,8 @@
 
 `make_libagy.py` converts raw agy into a shared library, then `build_symbols.py` resolves its
 metadata before any hook is patched. Both use the ELF/pclntab and original-prologue parsing
-here. `gen_sources.py` builds symbols_gen.h and hooks.py from that metadata and procdef.h.
+here. `gen_sources.py` builds symbols_gen.h from that metadata and procdef.h, and builds
+stub_labels_gen.h and hooks.py from procdef.h alone.
 
 Every fact about a hook is read from `src/procdef.h` — its targets and install mechanism — so that
 one C table stays the single source the host, the generated assembly and the Python mirror are all

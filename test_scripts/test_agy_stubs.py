@@ -59,7 +59,8 @@ class AgyStubTests(unittest.TestCase):
         self.assertIsNone(self.image.get_section("agy_trampolines"))
         self.assertFalse(any(name in self.symbols for name in
                              ("__start_agy_trampolines", "__stop_agy_trampolines")))
-        self.assertFalse(any("bind_labels" in name for name in self.symbols))
+        for binary in (self.obj, self.image):
+            self.assertFalse(any("bind_labels" in symbol.name for symbol in binary.symtab_symbols))
         descriptors = self.descriptors
         self.assertEqual(descriptors.binding, lief.ELF.Symbol.BINDING.LOCAL)
         self.assertEqual(descriptors.size, len(expected) * 32)
