@@ -33,7 +33,7 @@ exports remain for introspection and patching. At startup, `main()` runs
    emitted at build time into the `agy_trampolines` section — named without a leading dot so the
    linker defines `__start_`/`__stop_` for it, which is where the region bounds come from — each stub is a `naked`
    function emitted by `AGY_STUB_FULLCGO` or `AGY_STUB_ASMCGO`, sharing save/restore text.
-   `gen_sources.py` emits `AGY_STUBS(FULLCGO, ASMCGO)` and the per-stub literals into
+   `gen_sources.py` emits `AGY_STUBS(FULLCGO, ASMCGO)` with each stub's `id`, `book`, and `go_frame` into
    `src/symbols_gen.h`, preserving active `BOOKS` order — with a
    synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto `agy_firstmoduledata.next`
    before `agy_rt0_go()` starts. `agy_enable_hooks` in `gocall.cpp` fills the zero-initialized
@@ -210,6 +210,12 @@ with `jmp *agy_tramp_slots[slot](%rip)` into a static assembly trampoline stub
 4. zeros X15, restores the registers, and returns if the handler set `block.action`; otherwise it runs the
    displaced original frame-setup prologue and resumes with
    `jmp *agy_resume__<id>@GOTPCREL(%rip)`. The alias already points at `entry + skip + ow`.
+
+Generated entries have the form `FULLCGO(id, book, go_frame)` or `ASMCGO(id, book, go_frame)`,
+for example `ASMCGO(smoke, 0, 0x10)`. `go_frame` is the original Go function's stack allocation.
+After releasing the fixed 112-byte trampoline frame, the shared basic asm reconstructs
+`pushq %rbp; movq %rsp, %rbp; subq $go_frame, %rsp`. The generator accepts only the known
+8/11-byte prologues with canonical nonnegative immediates; native tests check the exact emitted bytes.
 
 Because the trampoline never rewrites *our* return address, parking/rescheduling is
 unaffected — the goroutine may resume on any M. Each `procdef.h` row has the form
@@ -435,7 +441,7 @@ antigravity/
                               `--wsl1` applies the tcmalloc MAP_FIXED_NOREPLACE fix on its own (a
                               conversion applies it automatically when running on WSL1).
     gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (build id + AGY_STUBS(FULLCGO, ASMCGO),
-                              one line of stub literals per installed hook); `--hooks` →
+                              one (id, book, go_frame) entry per installed hook); `--hooks` →
                               pyagy/agy_process/hooks.py
     symbols.json            ← generated, gitignored: {build_id, text_base, hooks:{name→vaddr}, skips, prologues}
   src/
@@ -527,8 +533,12 @@ python3 -m symbols.gen_sources --hooks
 python3 -m symbols.gen_sources symbols/symbols.json src/symbols_gen.h
 ```
 
-To check metadata validation, the table parser, and the checked-in Python mirror, run
-`pixi run python -m unittest symbols.test_procdef symbols.test_build_symbols` from `antigravity/`.
+To check metadata validation, stub generation, the table parser, and the checked-in Python mirror,
+run from `antigravity/`:
+
+```bash
+pixi run python -m unittest symbols.test_procdef symbols.test_build_symbols symbols.test_gen_sources
+```
 
 Bumping agy is `shim-agy-update` (it prints the `AGY_VERSION`/`AGY_URL`/`AGY_SHA512` lines to paste
 into `CMakeLists.txt`) followed by `shim-symbols`. Commit the updated pins; the library and

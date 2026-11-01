@@ -244,7 +244,9 @@ instrumentation layer; Claude uses its SDK protocol directly:
   pointer with `&block` through the row's Go gateway (`runtime.cgocall` or `runtime.asmcgocall`).
   `AGY_STUB_FULLCGO` passes `fn`/`arg` in RAX/RBX; `AGY_STUB_ASMCGO` writes them to the stack.
   The variants share save/restore text and each names its gateway directly. Generated
-  `AGY_STUBS(FULLCGO, ASMCGO)` preserves active `BOOKS` order.
+  `AGY_STUBS(FULLCGO, ASMCGO)` preserves active `BOOKS` order; each entry supplies
+  `(id, book, go_frame)`. Shared basic asm reconstructs the original Go prologue using
+  `go_frame` after releasing the trampoline frame.
   Preserve that Go→C transition. The fixed 112-byte frame reserves 16 bytes for the gateway,
   then packs `uint32_t book` and `action` before the 11 saved registers. A single qword store
   initializes both fields; the pinned ASMCGO gateway's 32-bit result overwrites only `book`
