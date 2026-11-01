@@ -7,7 +7,8 @@ bidirectional static `ld` binding:
   - Imports each active static trampoline stub (`agy_stub__<id>`, defined in `vendor/agy`'s
     `agy_trampolines` section) via eagerly bound `R_X86_64_JUMP_SLOT` relocations in
     `.got.plt.agy`. Each hooked function's `entry + skip` gets a five-byte `jmp rel32`
-    to its `.plt.agy` entry, which jumps through that GOT slot. `ld.so` binds both
+    to its `.plt.agy` entry; INT3 fills the rest of the displaced prologue. The PLT
+    entry jumps through its GOT slot. `ld.so` binds both
     directions at load time with zero runtime code patching or `mprotect`.
 
 Capture symbols.json and funcmap.tsv.gz from the final-layout unpatched ELF before writing
@@ -159,7 +160,7 @@ def patch_wsl1_file(path: str) -> None:
 
 
 def patch_static_hooks(elf_path: str, rows: list[dict], metadata: dict) -> int:
-    """Fill PLT entries and five-byte hooks after validating the final, unpatched ELF."""
+    """Write PLT entries, five-byte hooks and INT3 tails after validating the unpatched ELF."""
     with open(elf_path, "r+b") as f:
         raw = f.read()
         elf = ELF(raw)
@@ -198,7 +199,10 @@ def patch_static_hooks(elf_path: str, rows: list[dict], metadata: dict) -> int:
                 raise SystemExit(f"PLT entry is not unpatched for {row['id']}")
             patches.append((plt_offset, b"\xff\x25" + rel32(got_pc, plt_pc + 6,
                                                           f"PLT {row['id']}") + b"\x66\x90"))
-            patches.append((offset, b"\xe9" + rel32(plt_pc, hook + 5, f"hook {row['id']}")))
+            # The stub replays the full saved prologue and resumes after it; trap on
+            # accidental entry into the unreachable bytes left behind by the jump.
+            jump = b"\xe9" + rel32(plt_pc, hook + 5, f"hook {row['id']}")
+            patches.append((offset, jump + b"\xcc" * (len(prologue) - len(jump))))
         for offset, patch in patches:
             f.seek(offset)
             f.write(patch)

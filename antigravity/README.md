@@ -201,8 +201,8 @@ with a five-byte `E9 rel32` jump to a per-hook `.plt.agy` entry. The converter c
 eight-byte entry (`FF 25 <disp32>` plus `66 90`) and an eight-byte RW `.got.plt.agy` slot.
 `ld.so` fills the slot through `R_X86_64_JUMP_SLOT` in `DT_JMPREL`, with `BIND_NOW`/`NOW`
 requiring resolution before Go starts. Eager binding is required: the lazy resolver would run
-on the Go stack and can clobber live Go argument registers such as R10/R11. The entry patch
-is one byte shorter, with one additional jump in the hook path. The PLT entry reaches a
+on the Go stack and can clobber live Go argument registers such as R10/R11. The entry jump
+uses five bytes, with one additional PLT jump in the hook path. The PLT entry reaches a
 static assembly trampoline stub
 (`agy_stub__<id>` in `agy_trampolines`) that:
 
@@ -510,9 +510,10 @@ are pixi/conda deps — no `pip install` needed.)
 The raw cache is `build/antigravity-<archive-sha512>.raw`; a new pin gets a separate cache entry.
 Every conversion starts from this unchanged input. After LIEF writes the final ELF layout,
 the converter records original prologues and addresses in `symbols.json` and `funcmap.tsv.gz`,
-then writes each five-byte hook jump and publishes the library and metadata together.
-Original prologue bytes from offset 5 onward stay intact; the host replays the complete
-saved 8/11-byte prologue before jumping to its continuation alias.
+then writes each five-byte hook jump and fills the remaining three or six bytes of the
+displaced prologue with `0xCC` (`INT3`) to trap accidental entry into that tail. It publishes
+the library and metadata together. The host replays the complete saved 8/11-byte prologue
+before jumping to the continuation alias after the whole original prologue.
 Both metadata files are generated and gitignored. `-DAGY_BIN=/path/to/raw-agy` selects an
 explicit raw input instead of the download; `vendor/agy` is the compiled host, never an input.
 

@@ -91,13 +91,13 @@ class MakeLibagyTests(unittest.TestCase):
                     self.assertEqual(pc + 5 + struct.unpack_from("<i", patched, offset + 1)[0],
                                      0x2000 + slot * 8)
                     self.assertEqual(patched[offset + 5:offset + len(PROLOGUES[slot])],
-                                     PROLOGUES[slot][5:])
+                                     b"\xcc" * (len(PROLOGUES[slot]) - 5))
                     plt = PLT_OFFSET + slot * 8
                     self.assertEqual(patched[plt:plt + 2], b"\xff\x25")
                     self.assertEqual(0x2000 + slot * 8 + 6 + struct.unpack_from("<i", patched, plt + 2)[0],
                                      0x3000 + slot * 8)
                     self.assertEqual(patched[plt + 6:plt + 8], b"\x66\x90")
-                    changed.update(range(offset, offset + 5))
+                    changed.update(range(offset, offset + len(PROLOGUES[slot])))
                     changed.update(range(plt, plt + 8))
                 self.assertEqual(len(patched), len(image.data))
                 self.assertTrue(all(patched[i] == value for i, value in enumerate(image.data)

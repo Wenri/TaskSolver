@@ -132,7 +132,7 @@ class AgyStubTests(unittest.TestCase):
                 relay, slot = plt.virtual_address + index * 8, got.virtual_address + index * 8
                 self.assertEqual(patched[0], 0xe9)
                 self.assertEqual(hook + 5 + struct.unpack_from("<i", patched, 1)[0], relay)
-                self.assertEqual(patched[5:], prologue[5:])  # original 81/83 and remaining bytes
+                self.assertEqual(patched[5:], b"\xcc" * (len(prologue) - 5))  # unreachable tail
                 code = bytes(self.go.get_content_from_virtual_address(relay, 8))
                 self.assertEqual(code[:2], b"\xff\x25")
                 self.assertEqual(relay + 6 + struct.unpack_from("<i", code, 2)[0], slot)

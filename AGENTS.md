@@ -274,8 +274,9 @@ instrumentation layer; Claude uses its SDK protocol directly:
   build imports separate from the embedded runtime's stdlib-only modules.
   CMake caches the verified raw agy under its archive SHA512 in `build/`. One conversion
   generates `libagy.so`, `symbols.json`, and `funcmap.tsv.gz`: resolve the final ELF layout
-  before writing the five-byte hook jumps. Bytes after the patch stay intact; the host replays
-  the complete original 8/11-byte prologue. Every rebuild starts from raw input; the generated
+  before writing the five-byte hook jumps. Fill the remaining 3/6 bytes of each displaced
+  prologue with `0xCC` (`INT3`) to trap accidental entry. The host replays the complete original
+  8/11-byte prologue and resumes after it. Every rebuild starts from raw input; the generated
   metadata is gitignored. `shim-symbols` ensures these outputs are current. `shim-agy-update`
   only prints new pins from the release manifest; update `CMakeLists.txt`, then rebuild.
   See `antigravity/README.md`.
