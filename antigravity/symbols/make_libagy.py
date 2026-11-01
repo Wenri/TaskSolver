@@ -5,9 +5,9 @@ bidirectional static `ld` binding:
     every Go hook target (`agy_go__*`), and each active hook's continuation
     (`agy_resume__<id>` at entry + skip + displaced prologue length) in `libagy.so`'s `.dynsym`.
   - Imports each active static trampoline stub (`agy_stub__<id>`, defined in `vendor/agy`'s
-    `agy_trampolines` section) via `R_X86_64_GLOB_DAT` relocations in `agy_tramp_slots[]`
-    and statically patches each hooked Go function's `entry + skip` prologue in `libagy.so`
-    with `jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`), so `ld.so` binds both
+    `agy_trampolines` section) via eagerly bound `R_X86_64_JUMP_SLOT` relocations in
+    `.got.plt.agy`. Each hooked function's `entry + skip` gets a five-byte `jmp rel32`
+    to its `.plt.agy` entry, which jumps through that GOT slot. `ld.so` binds both
     directions at load time with zero runtime code patching or `mprotect`.
 
 Capture symbols.json and funcmap.tsv.gz from the final-layout unpatched ELF before writing
@@ -45,6 +45,56 @@ from .build_symbols import resolve_symbols, write_symbols
 MANIFEST_BASE = os.environ.get(
     "AGY_MANIFEST_BASE",
     "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app")
+
+HOOK_PLT = ".plt.agy"
+HOOK_GOT = ".got.plt.agy"
+PLT_ENTRY_SIZE = 8                           # jmp *slot(%rip); two-byte nop
+
+
+def add_hook_plt(bin_: lief.ELF.Binary, rows: list[dict]) -> None:
+    """Reserve PLT code/GOT slots; ld.so resolves the JUMP_SLOT relocations eagerly.
+
+    Add these after the original-address exports so LIEF can adjust every reference if
+    inserting program headers moves the input image. Encode the jumps after its final write.
+    """
+    plt = lief.ELF.Section(HOOK_PLT)
+    plt.flags = lief.ELF.Section.FLAGS.ALLOC | lief.ELF.Section.FLAGS.EXECINSTR
+    plt.alignment = PLT_ENTRY_SIZE
+    plt.entry_size = PLT_ENTRY_SIZE
+    plt.content = [0xcc] * (len(rows) * PLT_ENTRY_SIZE)
+    bin_.add(plt)
+
+    got = lief.ELF.Section(HOOK_GOT)
+    got.flags = lief.ELF.Section.FLAGS.ALLOC | lief.ELF.Section.FLAGS.WRITE
+    got.alignment = 8
+    got.entry_size = 8
+    got.content = [0] * (len(rows) * 8)
+    got = bin_.add(got)
+    if got is None or bin_.get_section(HOOK_PLT) is None:
+        raise SystemExit("could not allocate hook PLT/GOT")
+
+    for slot, row in enumerate(rows):
+        symbol = lief.ELF.Symbol()
+        symbol.name = f"agy_stub__{row['id']}"
+        symbol.type = lief.ELF.Symbol.TYPE.FUNC
+        symbol.binding = lief.ELF.Symbol.BINDING.GLOBAL
+        symbol.shndx = 0
+        symbol = bin_.add_dynamic_symbol(symbol)
+        rel = lief.ELF.Relocation(
+            got.virtual_address + slot * 8,
+            lief.ELF.Relocation.TYPE.X86_64_JUMP_SLOT,
+            lief.ELF.Relocation.ENCODING.RELA,
+        )
+        rel.symbol = symbol
+        bin_.add_pltgot_relocation(rel)
+
+
+def rel32(target: int, next_pc: int, context: str) -> bytes:
+    """Fail conversion instead of publishing an out-of-range hook or PLT jump."""
+    displacement = target - next_pc
+    if not -(1 << 31) <= displacement < (1 << 31):
+        raise SystemExit(f"{context}: displacement {displacement} exceeds signed 32-bit range")
+    return struct.pack("<i", displacement)
 
 
 def is_wsl1():
@@ -109,13 +159,21 @@ def patch_wsl1_file(path: str) -> None:
 
 
 def patch_static_hooks(elf_path: str, rows: list[dict], metadata: dict) -> int:
-    """Write six-byte jumps using metadata captured from this unpatched ELF."""
+    """Fill PLT entries and five-byte hooks after validating the final, unpatched ELF."""
     with open(elf_path, "r+b") as f:
         raw = f.read()
         elf = ELF(raw)
-        slots = elf.bin.get_symbol("agy_tramp_slots")
-        if slots is None or not slots.value:
-            raise SystemExit("agy_tramp_slots symbol missing in written libagy.so")
+        plt, got = (elf.bin.get_section(name) for name in (HOOK_PLT, HOOK_GOT))
+        if (plt is None or got is None or plt.size < len(rows) * PLT_ENTRY_SIZE
+                or got.size < len(rows) * 8):
+            raise SystemExit("hook PLT/GOT missing or too small in written libagy.so")
+        flags = elf.bin.get(lief.ELF.DynamicEntry.TAG.FLAGS)
+        flags1 = elf.bin.get(lief.ELF.DynamicEntry.TAG.FLAGS_1)
+        if not (elf.bin.has(lief.ELF.DynamicEntry.TAG.BIND_NOW)
+                or (flags is not None and flags.value & 8)
+                or (flags1 is not None and flags1.value & 1)):
+            raise SystemExit("hook PLT requires eager binding before Go starts")
+        relocations = {r.address: r for r in elf.bin.pltgot_relocations}
         patches = []
         for slot, row in enumerate(rows):
             name = row["symbol"]
@@ -129,12 +187,22 @@ def patch_static_hooks(elf_path: str, rows: list[dict], metadata: dict) -> int:
             resume = elf.bin.get_symbol(f"agy_resume__{row['id']}")
             if resume is None or resume.value != hook + len(prologue):
                 raise SystemExit(f"continuation export does not match metadata for {row['id']}")
-            disp32 = slots.value + slot * 8 - (hook + 6)
-            patches.append((offset, b"\xff\x25" + struct.pack("<i", disp32)))
+            plt_pc = plt.virtual_address + slot * PLT_ENTRY_SIZE
+            got_pc = got.virtual_address + slot * 8
+            relocation = relocations.get(got_pc)
+            if (relocation is None or relocation.type != lief.ELF.Relocation.TYPE.X86_64_JUMP_SLOT
+                    or not relocation.has_symbol or relocation.symbol.name != f"agy_stub__{row['id']}"):
+                raise SystemExit(f"PLT binding does not match hook {row['id']}")
+            plt_offset = elf.v2o(plt_pc)
+            if raw[plt_offset:plt_offset + PLT_ENTRY_SIZE] != b"\xcc" * PLT_ENTRY_SIZE:
+                raise SystemExit(f"PLT entry is not unpatched for {row['id']}")
+            patches.append((plt_offset, b"\xff\x25" + rel32(got_pc, plt_pc + 6,
+                                                          f"PLT {row['id']}") + b"\x66\x90"))
+            patches.append((offset, b"\xe9" + rel32(plt_pc, hook + 5, f"hook {row['id']}")))
         for offset, patch in patches:
             f.seek(offset)
             f.write(patch)
-    return len(patches)
+    return len(rows)
 
 
 def convert(in_path: str, out_path: str, symbols_path: str) -> None:
@@ -151,7 +219,7 @@ def convert(in_path: str, out_path: str, symbols_path: str) -> None:
     if bin_ is None:
         raise SystemExit(f"lief failed to parse {in_path}")
 
-    if bin_.has_symbol("agy_tramp_slots"):
+    if bin_.has_symbol("agy_rt0_go"):
         raise SystemExit("conversion requires the original upstream agy binary, not a converted library")
 
     # WSL1 cannot run the stock binary at all, so patch before converting: the fix is
@@ -171,52 +239,15 @@ def convert(in_path: str, out_path: str, symbols_path: str) -> None:
         raise SystemExit(f"{ENTRY_TARGET} not found in .gopclntab")
     flags1 = bin_.get(lief.ELF.DynamicEntry.TAG.FLAGS_1)
     if flags1 is not None:
-        flags1.value &= ~int(lief.ELF.DynamicEntryFlags.FLAG.PIE)
+        flags1.remove(lief.ELF.DynamicEntryFlags.FLAG.PIE)
+        flags1.add(lief.ELF.DynamicEntryFlags.FLAG.NOW)
+    else:
+        bin_.add(lief.ELF.DynamicEntry(lief.ELF.DynamicEntry.TAG.BIND_NOW, 0))
 
     bin_.add_exported_function(funcs[ENTRY_TARGET], "agy_rt0_go")
     md_sym = bin_.add_exported_function(img.md_vaddr, "agy_firstmoduledata")
     md_sym.type = lief.ELF.Symbol.TYPE.OBJECT
     md_sym.size = 568
-
-    bss = bin_.get_section(".bss")
-    if bss is None:
-        raise SystemExit("no .bss section in agy binary")
-    slots_vaddr = (bss.virtual_address + bss.size + 63) & ~63
-    slots_size = 512
-    new_bss_end = slots_vaddr + slots_size
-    for seg in bin_.segments:
-        if (
-            seg.type == lief.ELF.Segment.TYPE.LOAD
-            and seg.virtual_address <= bss.virtual_address < seg.virtual_address + seg.virtual_size
-        ):
-            if new_bss_end > seg.virtual_address + seg.virtual_size:
-                seg.virtual_size = new_bss_end - seg.virtual_address
-            break
-    bss.size = new_bss_end - bss.virtual_address
-    slots_sym = bin_.add_exported_function(slots_vaddr, "agy_tramp_slots")
-    slots_sym.type = lief.ELF.Symbol.TYPE.OBJECT
-    slots_sym.size = slots_size
-
-    for slot, r in enumerate(rows_active):
-        stub_sym = lief.ELF.Symbol()
-        stub_sym.name = f"agy_stub__{r['id']}"
-        stub_sym.type = lief.ELF.Symbol.TYPE.FUNC
-        stub_sym.binding = lief.ELF.Symbol.BINDING.GLOBAL
-        stub_sym.visibility = (lief.ELF.Symbol.Symbol.VISIBILITY.DEFAULT
-                               if hasattr(lief.ELF.Symbol, "Symbol")
-                               else lief.ELF.Symbol.VISIBILITY.DEFAULT)
-        stub_sym.shndx = 0
-        stub_sym.value = 0
-        stub_sym.size = 0
-        stub_sym = bin_.add_dynamic_symbol(stub_sym)
-        rel = lief.ELF.Relocation(
-            slots_vaddr + slot * 8,
-            lief.ELF.Relocation.TYPE.X86_64_GLOB_DAT,
-            lief.ELF.Relocation.ENCODING.RELA,
-        )
-        rel.symbol = stub_sym
-        rel.addend = 0
-        bin_.add_dynamic_relocation(rel)
 
     exports = export_map(rows)
     missing = sorted({nm for nm in exports.values() if nm not in funcs})
@@ -232,6 +263,8 @@ def convert(in_path: str, out_path: str, symbols_path: str) -> None:
         if skip <= 0 or len(prologue) not in (16, 22):
             raise SystemExit(f"cannot resolve original prologue for {row['id']} ({row['symbol']})")
         bin_.add_exported_function(entry + skip + len(prologue) // 2, f"agy_resume__{row['id']}")
+
+    add_hook_plt(bin_, rows_active)
 
     if not bin_.has(lief.ELF.DynamicEntry.TAG.SONAME):
         bin_.add(lief.ELF.DynamicSharedObject("libagy.so"))

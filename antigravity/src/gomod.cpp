@@ -5,8 +5,8 @@
  * throw("unknown pc"). See gomod.h.
  *
  * Called once from `agy_init()` before `agy_rt0_go()`: `ld.so` has already
- * processed all `R_X86_64_RELATIVE` and `R_X86_64_GLOB_DAT` relocations in
- * `libagy.so` and `vendor/agy`, so `agy_firstmoduledata` is bound directly via `ld`
+ * processed all `R_X86_64_RELATIVE`, `R_X86_64_GLOB_DAT`, and eager `R_X86_64_JUMP_SLOT`
+ * relocations in `libagy.so` and `vendor/agy`, so `agy_firstmoduledata` is bound directly via `ld`
  * and its `pcHeader` is already relocated. Setting `md->bad = 1` tells Go's startup
  * `runtime.modulesinit()` to skip our synthetic module while `findfunc` still walks
  * `agy_firstmoduledata.next`.

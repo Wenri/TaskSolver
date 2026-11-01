@@ -8,13 +8,13 @@ without a supported plugin API for what we need.
 It does this by converting the upstream PIE `agy` binary into `antigravity/vendor/libagy.so`
 (`make_libagy.py`: clears `DF_1_PIE`, sets `DT_SONAME = "libagy.so"`, exports
 `runtime.rt0_go` as `agy_rt0_go`, `runtime.firstmoduledata` as `agy_firstmoduledata`,
-`agy_tramp_slots` (`512` bytes in `.bss`), and all 41 Go hook target functions as
+and all 41 Go hook target functions as
 `agy_go__<id>` in `.dynsym` — keyed by the hook row's id, so the Go side of a row reads as the
 mirror of its host side `agy_stub__<id>` (a function two rows name is exported under both ids,
 and the two cgocall gateways use the synthetic ids `CGOCALL`/`ASMCGOCALL`) — statically patches
-each hooked Go function's `entry + skip` with
-`jmp *agy_tramp_slots[slot](%rip)` (`FF 25 <disp32>`), and imports all 28 `agy_stub__<id>`
-symbols via `R_X86_64_GLOB_DAT` relocations, while retaining `PT_TLS` inside `libagy.so`) and
+each hooked Go function's `entry + skip` with a five-byte `E9 rel32` jump to its `.plt.agy`
+entry, and imports all 28 `agy_stub__<id>` symbols via eager `R_X86_64_JUMP_SLOT` relocations
+in `DT_JMPREL`, while retaining `PT_TLS` inside `libagy.so`) and
 linking a small C++23 host executable `antigravity/vendor/agy` against `-lagy` as its first
 `DT_NEEDED` dependency (so `ld-linux-x86-64.so.2` assigns `libagy.so` static TLS slot 1 at
 `[%fs:-0x4a0 .. %fs:0)` with no external `agy_tls.S` needed). Each active row also exports
@@ -26,9 +26,10 @@ exports remain for introspection and patching. At startup, `main()` runs
    - `vendor/agy` → `libagy.so`: direct ELF relocation binding (`R_X86_64_64` /
      `R_X86_64_GLOB_DAT`) of `agy_rt0_go`, `agy_firstmoduledata`, the `agy_go__*` gateways,
      and `agy_resume__*` continuation targets (plus libc `getaddrinfo` interposition for cgo DNS).
-   - `libagy.so` → `vendor/agy`: `ld.so` populates `agy_tramp_slots[slot]` in `libagy.so`
-     with the address of each static trampoline stub `agy_stub__<id>` in `vendor/agy` at
-     process load time — zero runtime code patching or `mprotect`.
+   - `libagy.so` → `vendor/agy`: `ld.so` resolves each `R_X86_64_JUMP_SLOT` into
+     `.got.plt.agy` with the address of its static trampoline stub `agy_stub__<id>`.
+     `BIND_NOW`/`NOW` resolve all slots at process load time; `.plt.agy` jumps through them
+     without runtime code patching or `mprotect`.
 2. **Static cgocall trampolines (`src/goframe.cpp` + `src/gocall.cpp` + `src/gomod.cpp`)**
    emitted at build time into the `agy_trampolines` section — named without a leading dot so the
    linker defines `__start_`/`__stop_` for it, which is where the region bounds come from — each stub is a `naked`
@@ -60,7 +61,7 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | `pcHeader.textStart == 0`; real base is a PIE-relocated `moduledata.text` (`0x4eb5080`, `0x80` past the ELF `.text` addr) | Stdlib `debug/gosym` mis-resolves (uses `textStart`, returns morestack trailers) and **GoReSym can't even locate the pclntab**. We resolve directly: find `moduledata` via the reloc whose addend is the pclntab vaddr, read `moduledata.text`, then `addr = text + func.entryoff`. `textsectmap` has one entry (code is one contiguous Go text section), so the mapping is linear — and every hooked address is **prologue-verified**. |
 | Backend is `google.cloud.businessaicode` (Gemini); env overrides exist: **`BAICODE_ENDPOINT_URL`**, `CLOUD_CODE_URL` | Pure *redirection* may need no hook at all — just an env var. |
 | Speaks **MCP as a client** (`mcp.json`/`mcpServers`, `GetPluginMCPSpecs`, `SetMcpManager`) and supports **custom agents** | Custom **tools** and **mcp_context** can largely be delivered *natively* by config (the hybrid path); hooks are reserved for what config can't express. |
-| Runs on **WSL1** (syscall-translation layer, not a real kernel) | `ptrace` injection is unreliable here. We statically patch `libagy.so` on disk and bind our `agy_trampolines` stubs via `ld` / `ld.so` `R_X86_64_GLOB_DAT` relocations — no `ptrace` and no runtime `mprotect`. |
+| Runs on **WSL1** (syscall-translation layer, not a real kernel) | `ptrace` injection is unreliable here. We statically patch `libagy.so` on disk and bind our `agy_trampolines` stubs through eager PLT relocations in `ld.so` — no `ptrace` and no runtime `mprotect`. |
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
 `85d3425a18a809e545747dcb9d87c03c`, agy **1.4.11**). The shim refuses to install hooks if
@@ -196,9 +197,14 @@ model/usage). Reassembling those chunks into `genai_turn` is DONE — `BaseCorre
 
 **Approach A (`src/gocall.cpp` + `src/gomod.cpp`)** avoids gum's return-tracking
 entirely. `make_libagy.py` statically patches the target — **past its stack-check prologue** —
-with `jmp *agy_tramp_slots[slot](%rip)` into a static assembly trampoline stub
-(`agy_stub__<id>` in `agy_trampolines` (section), bound by `ld.so` via
-`R_X86_64_GLOB_DAT`) that:
+with a five-byte `E9 rel32` jump to a per-hook `.plt.agy` entry. The converter creates each
+eight-byte entry (`FF 25 <disp32>` plus `66 90`) and an eight-byte RW `.got.plt.agy` slot.
+`ld.so` fills the slot through `R_X86_64_JUMP_SLOT` in `DT_JMPREL`, with `BIND_NOW`/`NOW`
+requiring resolution before Go starts. Eager binding is required: the lazy resolver would run
+on the Go stack and can clobber live Go argument registers such as R10/R11. The entry patch
+is one byte shorter, with one additional jump in the hook path. The PLT entry reaches a
+static assembly trampoline stub
+(`agy_stub__<id>` in `agy_trampolines`) that:
 
 1. loads `g_agy_on[book]` into `r12`; a null entry skips straight to the displaced prologue,
 2. snapshots the Go-ABI arg registers into a stack **block**,
@@ -435,8 +441,9 @@ antigravity/
                               an offset. All three use lief from the build environment.
     build_symbols.py        ← resolver used before patching: pclntab + moduledata.text →
                               symbols.json + funcmap; verifies every installed hook's prologue
-    make_libagy.py          ← converts PIE agy → libagy.so; exports agy_go__* / agy_resume__* / agy_tramp_slots,
-                              imports agy_stub__* via R_X86_64_GLOB_DAT, captures metadata, then patches entry+skip.
+    make_libagy.py          ← converts PIE agy → libagy.so; exports agy_go__* / agy_resume__*,
+                              creates .plt.agy / .got.plt.agy with eager JUMP_SLOT imports,
+                              captures metadata, then patches entry+skip with E9 rel32.
                               `--update` queries the latest release manifest and prints new pins;
                               `--wsl1` applies the tcmalloc MAP_FIXED_NOREPLACE fix on its own (a
                               conversion applies it automatically when running on WSL1).
@@ -503,7 +510,9 @@ are pixi/conda deps — no `pip install` needed.)
 The raw cache is `build/antigravity-<archive-sha512>.raw`; a new pin gets a separate cache entry.
 Every conversion starts from this unchanged input. After LIEF writes the final ELF layout,
 the converter records original prologues and addresses in `symbols.json` and `funcmap.tsv.gz`,
-then writes each six-byte hook jump and publishes the library and metadata together.
+then writes each five-byte hook jump and publishes the library and metadata together.
+Original prologue bytes from offset 5 onward stay intact; the host replays the complete
+saved 8/11-byte prologue before jumping to its continuation alias.
 Both metadata files are generated and gitignored. `-DAGY_BIN=/path/to/raw-agy` selects an
 explicit raw input instead of the download; `vendor/agy` is the compiled host, never an input.
 
@@ -537,7 +546,7 @@ To check metadata validation, stub generation, the table parser, and the checked
 run from `antigravity/`:
 
 ```bash
-pixi run python -m unittest symbols.test_procdef symbols.test_build_symbols symbols.test_gen_sources
+pixi run python -m unittest symbols.test_procdef symbols.test_build_symbols symbols.test_gen_sources symbols.test_make_libagy
 ```
 
 Bumping agy is `shim-agy-update` (it prints the `AGY_VERSION`/`AGY_URL`/`AGY_SHA512` lines to paste
@@ -558,8 +567,9 @@ including `file_open` when conversation-id capture is off. The stub translation 
 then that same pointer passed through the Go gateway.
 
 After stub or toolchain changes, run `pixi run python test_scripts/test_agy_stubs.py` to check
-frame geometry, the nullable gate, and instrumented startup with disabled hooks and the
-conversation-id toggle. These checks require built native artifacts and make no model calls.
+frame geometry, the nullable gate, the PLT/GOT targets and eager loader binding, and instrumented
+startup with disabled hooks and the conversation-id toggle. These checks require built native
+artifacts and make no model calls.
 
 `pyagy.agy_process` needs `hpack`/`brotli` only for the
 HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.

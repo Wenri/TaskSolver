@@ -8,7 +8,8 @@
  * static TLS slot 1 at [%fs:-0x4a0 .. %fs:0)). Both directions of symbol binding
  * (`libagy.so` -> `agy_stub__*` in `vendor/agy` and `vendor/agy` -> `agy_go__*`, `agy_resume__*`,
  * `agy_firstmoduledata`, `agy_rt0_go` in `libagy.so`) are resolved at load time
- * by `ld-linux-x86-64.so.2` via `R_X86_64_GLOB_DAT` relocations.
+ * by `ld-linux-x86-64.so.2`: eager `R_X86_64_JUMP_SLOT` for the stub imports and
+ * `R_X86_64_GLOB_DAT` for the host's GOT references.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE

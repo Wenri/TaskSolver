@@ -1,7 +1,8 @@
 /* The Go→C trampoline stubs: FULLCGO uses register arguments; ASMCGO uses stack arguments.
  *
- * make_libagy.py patches each hooked function's `entry + skip` with `jmp *agy_tramp_slots[slot]`,
- * and ld.so points the slot at agy_stub__<id>, which runs on the goroutine's stack with the Go
+ * make_libagy.py patches each hooked function's `entry + skip` with E9 rel32 to .plt.agy.
+ * Its PLT entry jumps through a .got.plt.agy slot eagerly resolved by ld.so via JUMP_SLOT
+ * to agy_stub__<id>, which runs on the goroutine's stack with the Go
  * register-ABI arguments live. A stub loads g_agy_on[book] once into the Go scratch register
  * R12; null skips the handler. Otherwise it saves the arguments into the goframe.h frame,
  * calls that handler through runtime.cgocall or runtime.asmcgocall, and restores the registers.

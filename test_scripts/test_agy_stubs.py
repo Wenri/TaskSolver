@@ -74,19 +74,12 @@ class AgyStubTests(unittest.TestCase):
         expected = {"agy_resume__" + row["id"] for row in enabled_hooks()}
         self.assertEqual({name for name in exports if name.startswith("agy_resume__")}, expected)
         bindings = {r.address: r for r in self.image.relocations if r.has_symbol}
-        for slot, row in enumerate(enabled_hooks()):
+        for row in enabled_hooks():
             with self.subTest(hook=row["id"]):
                 name = "agy_resume__" + row["id"]
                 entry = exports["agy_go__" + row["id"]]
                 prologue = bytes.fromhex(metadata["prologues"][row["symbol"]])
                 self.assertEqual(entry.value, metadata["hooks"][row["symbol"]])
-                hook = entry.value + metadata["skips"][row["symbol"]]
-                patched = bytes(self.go.get_content_from_virtual_address(hook, len(prologue)))
-                self.assertEqual(patched[:2], b"\xff\x25")
-                self.assertEqual(patched[6], 0xec)  # SUB opcode survives; no marker byte
-                self.assertEqual(patched[6:], prologue[6:])
-                self.assertEqual(hook + 6 + struct.unpack_from("<i", patched, 2)[0],
-                                 exports["agy_tramp_slots"].value + slot * 8)
                 self.assertEqual(exports[name].value,
                                  entry.value + metadata["skips"][row["symbol"]] + len(prologue))
                 self.assertEqual(exports[name].binding, lief.ELF.Symbol.BINDING.GLOBAL)
@@ -102,6 +95,55 @@ class AgyStubTests(unittest.TestCase):
                 self.assertEqual(code[jump + 6], 0xc3)  # RETURN follows the one-instruction tail
                 hi = self.frame_hi(row)
                 self.assertEqual(hi + 2 + struct.unpack_from("b", code, hi + 1)[0], jump + 6)
+
+    def test_plt_hook_bindings(self):
+        rows = enabled_hooks()
+        metadata = json.loads((ANTI / "symbols/symbols.json").read_text())
+        self.assertFalse(self.go.has_symbol("agy_tramp_slots"))
+        plt, got = (self.go.get_section(name) for name in (".plt.agy", ".got.plt.agy"))
+        for section, permissions in ((plt, 5), (got, 6)):  # ELF PF_R|PF_X / PF_R|PF_W
+            self.assertIsNotNone(section)
+            self.assertGreaterEqual(section.size, len(rows) * 8)  # LIEF may add page padding
+            self.assertEqual(section.virtual_address % 8, 0)
+            segments = [s for s in self.go.segments if s.type == lief.ELF.Segment.TYPE.LOAD
+                        and s.virtual_address <= section.virtual_address
+                        and section.virtual_address + section.size <= s.virtual_address + s.virtual_size]
+            self.assertTrue(segments)
+            for segment in segments:
+                self.assertEqual(int(segment.flags) & 7, permissions)
+        tag = lief.ELF.DynamicEntry.TAG
+        flags, flags1 = self.go.get(tag.FLAGS), self.go.get(tag.FLAGS_1)
+        self.assertTrue(self.go.has(tag.BIND_NOW) or (flags and flags.value & 8)
+                        or (flags1 and flags1.value & 1))
+        self.assertEqual(self.go.get(tag.PLTREL).value, 7)  # DT_RELA
+        reloc_data = bytes(self.go.get_content_from_virtual_address(
+            self.go.get(tag.JMPREL).value, self.go.get(tag.PLTRELSZ).value))
+        records = {address: (info, addend) for address, info, addend in struct.iter_unpack("<QQq", reloc_data)}
+        symbols = list(self.go.dynamic_symbols)
+        relocations = {r.address: r for r in self.go.pltgot_relocations}
+        imports = [r for r in self.go.relocations if r.has_symbol
+                   and r.symbol.name.startswith("agy_stub__")]
+        self.assertEqual(len(imports), len(rows))
+        for index, row in enumerate(rows):
+            with self.subTest(hook=row["id"]):
+                hook = metadata["hooks"][row["symbol"]] + metadata["skips"][row["symbol"]]
+                prologue = bytes.fromhex(metadata["prologues"][row["symbol"]])
+                patched = bytes(self.go.get_content_from_virtual_address(hook, len(prologue)))
+                relay, slot = plt.virtual_address + index * 8, got.virtual_address + index * 8
+                self.assertEqual(patched[0], 0xe9)
+                self.assertEqual(hook + 5 + struct.unpack_from("<i", patched, 1)[0], relay)
+                self.assertEqual(patched[5:], prologue[5:])  # original 81/83 and remaining bytes
+                code = bytes(self.go.get_content_from_virtual_address(relay, 8))
+                self.assertEqual(code[:2], b"\xff\x25")
+                self.assertEqual(relay + 6 + struct.unpack_from("<i", code, 2)[0], slot)
+                self.assertEqual(code[6:], b"\x66\x90")
+                expected = "agy_stub__" + row["id"]
+                self.assertEqual(relocations[slot].symbol.name, expected)
+                self.assertEqual(relocations[slot].type, lief.ELF.Relocation.TYPE.X86_64_JUMP_SLOT)
+                info, addend = records[slot]  # independently read the actual DT_JMPREL table
+                self.assertEqual(info & 0xffffffff, 7)  # R_X86_64_JUMP_SLOT
+                self.assertEqual(symbols[info >> 32].name, expected)
+                self.assertEqual(addend, 0)
 
     def test_nullable_handler_table(self):
         for binary in (self.obj, self.image):
@@ -185,8 +227,8 @@ class AgyStubTests(unittest.TestCase):
             result = subprocess.run(argv, env=env, cwd=directory, capture_output=True,
                                     text=True, timeout=30)
             diagnostics = result.stdout + result.stderr + (log.read_text() if log.exists() else "")
-            self.assertEqual(result.returncode, 0, diagnostics)
-            self.assertRegex(result.stdout, r"\d+\.\d+\.\d+", diagnostics)
+            self.assertEqual(result.returncode, 0, diagnostics[-8000:])
+            self.assertRegex(result.stdout, r"\d+\.\d+\.\d+", diagnostics[-8000:])
             lines = capture.read_text().splitlines() if capture.exists() else []
             return diagnostics, collections.Counter(json.loads(line).get("kind") for line in lines)
 
@@ -209,6 +251,17 @@ class AgyStubTests(unittest.TestCase):
         self.assertNotIn("cgocall-trampoline: installed", diagnostics)
         self.assertNotIn("-> RETURN", diagnostics)
         self.assertFalse(kinds, diagnostics)
+
+    def test_plt_resolved_before_go_start(self):
+        diagnostics, kinds = self.run_version({"AGY_PROC_ENABLE": None, "LD_BIND_NOW": None,
+                                              "LD_DEBUG": "bindings", "LD_DEBUG_OUTPUT": None})
+        marker = "transferring control: " + str(AGY)
+        self.assertTrue(marker in diagnostics, diagnostics[-8000:])
+        before_main = diagnostics[:diagnostics.index(marker)]
+        bound = set(re.findall(r"binding file [^\n]*libagy\.so \[\d+\] to [^\n]*"
+                               r"symbol [`'](agy_stub__\w+)['`]", before_main))
+        self.assertEqual(bound, set(self.stubs))
+        self.assertFalse(kinds)
 
 
 if __name__ == "__main__":

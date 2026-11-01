@@ -225,14 +225,18 @@ instrumentation layer; Claude uses its SDK protocol directly:
     and `externally_visible`: LTO cannot see the table loads in basic asm. Keep `goframe.cpp`
     compiled with `-fno-lto`.
 - **`antigravity/`** → the `pyagy` package: Google's Go `agy` CLI converted into `vendor/libagy.so`
-  (`symbols/make_libagy.py`, exporting `agy_rt0_go`, `agy_firstmoduledata`, `agy_tramp_slots`, and
+  (`symbols/make_libagy.py`, exporting `agy_rt0_go`, `agy_firstmoduledata`, and
   all 41 `agy_go__<id>` hook targets in `.dynsym` (keyed by the procdef.h row id, mirroring
   `agy_stub__<id>`), while statically patching each hooked function's
-  `entry + skip` with `jmp *agy_tramp_slots[slot](%rip)` and importing `agy_stub__<id>` via
-  `R_X86_64_GLOB_DAT`) and linked into a C++23 host executable (`vendor/agy`, built from
+  `entry + skip` with a five-byte `E9 rel32` jump to an eight-byte `.plt.agy` entry.
+  Each entry jumps through an eight-byte RW `.got.plt.agy` slot, bound to `agy_stub__<id>` by
+  `R_X86_64_JUMP_SLOT` in `DT_JMPREL`; `BIND_NOW`/`NOW` resolve these before Go starts) and
+  linked into a C++23 host executable (`vendor/agy`, built from
   `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<id>`) in
   `agy_trampolines`, binds both directions via `ld` / `ld.so`, and splices its synthetic
   `moduledata` (`md->bad = 1`) onto `agy_firstmoduledata.next` before calling `agy_rt0_go`.
+  Keep eager binding: lazy resolution would run on the Go stack and can clobber live
+  R10/R11 arguments.
   Active rows also export `agy_resume__<id>` at `entry + skip + ow`; after the displaced
   prologue, a stub resumes with one GOT-indirect jump. Keep the original `agy_go__<id>`
   entry exports for introspection and patching.
@@ -270,7 +274,8 @@ instrumentation layer; Claude uses its SDK protocol directly:
   build imports separate from the embedded runtime's stdlib-only modules.
   CMake caches the verified raw agy under its archive SHA512 in `build/`. One conversion
   generates `libagy.so`, `symbols.json`, and `funcmap.tsv.gz`: resolve the final ELF layout
-  before writing the six-byte hook jumps. Every rebuild starts from raw input; the generated
+  before writing the five-byte hook jumps. Bytes after the patch stay intact; the host replays
+  the complete original 8/11-byte prologue. Every rebuild starts from raw input; the generated
   metadata is gitignored. `shim-symbols` ensures these outputs are current. `shim-agy-update`
   only prints new pins from the release manifest; update `CMakeLists.txt`, then rebuild.
   See `antigravity/README.md`.
