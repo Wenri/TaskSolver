@@ -17,10 +17,10 @@
 #include <array>
 #include <string_view>
 
-#define GHLOG(...) do { std::fprintf(stderr, "[antigravity/gohook] " __VA_ARGS__); \
+#define GHLOG(...) do { std::fprintf(stderr, "[antigravity/gobook] " __VA_ARGS__); \
                         std::fputc('\n', stderr); std::fflush(stderr); } while (0)
 
-/* The stub asm names this table. It stays null until agy_init enables hooks, before Go starts. */
+/* The stub asm names this table. It stays null until agy_init enables books, before Go starts. */
 __attribute__((used, externally_visible)) agy_book_fn g_agy_on[BK_COUNT];
 
 static agy_book_fn agy_handler_for(std::string_view id) {
@@ -34,8 +34,15 @@ static agy_book_fn agy_handler_for(std::string_view id) {
     return &agy_on_generic;
 }
 
-/* The hooked row's id, which its events carry as their kind. */
+/* The booked row's id, which its events carry as their kind. */
 static const char *book_id(const agy_block *b) { return BOOKS[b->book].id.data(); }
+
+/* The row's bare event: its id as the kind, no payload. */
+static void emit_book(agy_block *b, uint64_t stream_id, wire_mode_t mode = WIRE_ASYNC)
+{
+    wire_event_t ev = { .kind = book_id(b), .stream_id = stream_id, .mode = mode };
+    wire_emit(&ev);
+}
 
 long agy_safe_read(uint64_t addr, void *dst, unsigned long n)
 {
@@ -247,30 +254,26 @@ static inline void cgt_common(agy_block *b)
         agy_emit_stack(book_id(b), b->regs.rbp, g_gh_base);
 }
 
-extern "C" void agy_on_generic(agy_block *b)
+void agy_on_generic(agy_block *b)
 {
     cgt_common(b);
-    wire_event_t ev = { .kind = book_id(b),
-                       .stream_id = b->regs.rax, .mode = WIRE_ASYNC };
-    wire_emit(&ev);
+    emit_book(b, b->regs.rax);
 }
 
-extern "C" void agy_on_fh_update(agy_block *b)
+void agy_on_fh_update(agy_block *b)
 {
     cgt_common(b);
     cgt_response_emit(b);
-    wire_event_t ev = { .kind = book_id(b),
-                       .stream_id = b->regs.rax, .mode = WIRE_ASYNC };
-    wire_emit(&ev);
+    emit_book(b, b->regs.rax);
 }
 
-extern "C" void agy_on_stream(agy_block *b)
+void agy_on_stream(agy_block *b)
 {
     cgt_common(b);
     cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rbx, b->regs.rcx, true);
 }
 
-extern "C" void agy_on_file_open(agy_block *b)
+void agy_on_file_open(agy_block *b)
 {
     cgt_common(b);
     const char *p = (const char *)b->regs.rax;
@@ -283,28 +286,26 @@ extern "C" void agy_on_file_open(agy_block *b)
     }
 }
 
-extern "C" void agy_on_http_rt(agy_block *b)
+void agy_on_http_rt(agy_block *b)
 {
     cgt_common(b);
-    wire_event_t rt = { .kind = book_id(b), .stream_id = b->regs.rbx, .mode = WIRE_ASYNC };
-    wire_emit(&rt);
+    emit_book(b, b->regs.rbx);
 }
 
-extern "C" void agy_on_exit(agy_block *b)
+void agy_on_exit(agy_block *b)
 {
     cgt_common(b);
-    wire_event_t ev = { .kind = book_id(b), .stream_id = b->regs.rax, .mode = WIRE_SYNC };
-    wire_emit(&ev);
+    emit_book(b, b->regs.rax, WIRE_SYNC);
     wire_shutdown();
 }
 
-extern "C" void agy_on_resp_chunk(agy_block *b)
+void agy_on_resp_chunk(agy_block *b)
 {
     cgt_common(b);
     cgt_bytes_emit(book_id(b), b->regs.rax, b->regs.rax, b->regs.rbx, false);
 }
 
-extern "C" void agy_on_readlink_filter(agy_block *b)
+void agy_on_readlink_filter(agy_block *b)
 {
     cgt_common(b);
     uint64_t nptr = b->regs.rax, nlen = b->regs.rbx;
@@ -331,7 +332,7 @@ extern "C" void agy_on_readlink_filter(agy_block *b)
     }
 }
 
-void agy_enable_hooks(uint64_t base, bool conv_id)
+void agy_enable_books(uint64_t base, bool conv_id)
 {
     g_gh_base   = base;
     g_cgt_args  = std::getenv("AGY_PROC_CGT_ARGS") != nullptr;
@@ -346,10 +347,10 @@ void agy_enable_hooks(uint64_t base, bool conv_id)
         }
         g_agy_on[i] = agy_handler_for(h.id);
         n_tramp++;
-        n_asm += (h.mech == AGY_ASMCGO);
+        n_asm += (h.mech == AGY_ASMGO);
         GHLOG("cgo-trampoline %.*s", (int)h.id.size(), h.id.data());
     }
-    std::fprintf(stderr, "[antigravity] cgocall-trampoline: installed %d/%d target(s) (%d asmcgo, %d full-cgo)\n",
-                 n_tramp, n_tramp, n_asm, n_tramp - n_asm);
+    std::fprintf(stderr, "[antigravity] cgocall-trampoline: installed %d/%d row(s) (%d asmcgo, %d full-cgo)\n",
+                 n_tramp, BK_COUNT, n_asm, n_tramp - n_asm);
     std::fflush(stderr);
 }

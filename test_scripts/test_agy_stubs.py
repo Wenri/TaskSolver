@@ -18,7 +18,7 @@ import unittest
 
 import lief
 
-from pyagy import BOOKS, enabled_hooks
+from pyagy import BOOKS, enabled_books
 from pyagy._env import instrumented_env, preload_argv
 
 
@@ -54,7 +54,7 @@ class AgyStubTests(unittest.TestCase):
                 - self.stubs["agy_stub__" + row["id"]].value)
 
     def test_function_and_frame_geometry(self):
-        expected = {"agy_stub__" + row["id"] for row in enabled_hooks()}
+        expected = {"agy_stub__" + row["id"] for row in enabled_books()}
         self.assertEqual(set(self.stubs), expected)
         self.assertIsNone(self.image.get_section("agy_trampolines"))
         self.assertFalse(any(name in self.symbols for name in
@@ -65,7 +65,7 @@ class AgyStubTests(unittest.TestCase):
         self.assertEqual(descriptors.binding, lief.ELF.Symbol.BINDING.LOCAL)
         self.assertEqual(descriptors.size, len(expected) * 32)
         raw = bytes(self.image.get_content_from_virtual_address(descriptors.value, descriptors.size))
-        for row, pointers in zip(enabled_hooks(), struct.iter_unpack("<4Q", raw), strict=True):
+        for row, pointers in zip(enabled_books(), struct.iter_unpack("<4Q", raw), strict=True):
             self.assertEqual(pointers, (self.stubs["agy_stub__" + row["id"]].value,
                 *(self.symbols[f"agy_pc__{row['id']}_{label}"].value
                   for label in ("frame_start", "frame_end", "end"))))
@@ -117,15 +117,15 @@ class AgyStubTests(unittest.TestCase):
     def test_direct_resume_targets(self):
         metadata = json.loads((ANTI / "symbols/symbols.json").read_text())
         exports = {s.name: s for s in self.go.dynamic_symbols}
-        expected = {"agy_resume__" + row["id"] for row in enabled_hooks()}
+        expected = {"agy_resume__" + row["id"] for row in enabled_books()}
         self.assertEqual({name for name in exports if name.startswith("agy_resume__")}, expected)
         bindings = {r.address: r for r in self.image.relocations if r.has_symbol}
-        for row in enabled_hooks():
-            with self.subTest(hook=row["id"]):
+        for row in enabled_books():
+            with self.subTest(book=row["id"]):
                 name = "agy_resume__" + row["id"]
                 entry = exports["agy_go__" + row["id"]]
                 prologue = bytes.fromhex(metadata["prologues"][row["symbol"]])
-                self.assertEqual(entry.value, metadata["hooks"][row["symbol"]])
+                self.assertEqual(entry.value, metadata["books"][row["symbol"]])
                 self.assertEqual(exports[name].value,
                                  entry.value + metadata["skips"][row["symbol"]] + len(prologue))
                 self.assertEqual(exports[name].binding, lief.ELF.Symbol.BINDING.GLOBAL)
@@ -142,8 +142,8 @@ class AgyStubTests(unittest.TestCase):
                 hi = self.frame_hi(row)
                 self.assertEqual(hi + 2 + struct.unpack_from("b", code, hi + 1)[0], jump + 6)
 
-    def test_plt_hook_bindings(self):
-        rows = enabled_hooks()
+    def test_plt_book_bindings(self):
+        rows = enabled_books()
         metadata = json.loads((ANTI / "symbols/symbols.json").read_text())
         self.assertFalse(self.go.has_symbol("agy_tramp_slots"))
         plt, got = (self.go.get_section(name) for name in (".plt.agy", ".got.plt.agy"))
@@ -171,13 +171,13 @@ class AgyStubTests(unittest.TestCase):
                    and r.symbol.name.startswith("agy_stub__")]
         self.assertEqual(len(imports), len(rows))
         for index, row in enumerate(rows):
-            with self.subTest(hook=row["id"]):
-                hook = metadata["hooks"][row["symbol"]] + metadata["skips"][row["symbol"]]
+            with self.subTest(book=row["id"]):
+                book = metadata["books"][row["symbol"]] + metadata["skips"][row["symbol"]]
                 prologue = bytes.fromhex(metadata["prologues"][row["symbol"]])
-                patched = bytes(self.go.get_content_from_virtual_address(hook, len(prologue)))
+                patched = bytes(self.go.get_content_from_virtual_address(book, len(prologue)))
                 relay, slot = plt.virtual_address + index * 8, got.virtual_address + index * 8
                 self.assertEqual(patched[0], 0xe9)
-                self.assertEqual(hook + 5 + struct.unpack_from("<i", patched, 1)[0], relay)
+                self.assertEqual(book + 5 + struct.unpack_from("<i", patched, 1)[0], relay)
                 self.assertEqual(patched[5:], b"\xcc" * (len(prologue) - 5))  # unreachable tail
                 code = bytes(self.go.get_content_from_virtual_address(relay, 8))
                 self.assertEqual(code[:2], b"\xff\x25")
@@ -287,15 +287,15 @@ class AgyStubTests(unittest.TestCase):
                 diagnostics, kinds = self.run_version({"AGY_PROC_CONV_ID": "1" if conv_id else None})
                 self.assertIn("build-id ok", diagnostics)
                 self.assertIn("-> RETURN", diagnostics)
-                installed = set(re.findall(r"^\[antigravity/gohook\] cgo-trampoline (\w+)$",
+                installed = set(re.findall(r"^\[antigravity/gobook\] cgo-trampoline (\w+)$",
                                            diagnostics, re.M))
-                expected = {row["id"] for row in enabled_hooks() if conv_id or row["id"] != "file_open"}
+                expected = {row["id"] for row in enabled_books() if conv_id or row["id"] != "file_open"}
                 self.assertEqual(installed, expected)
                 # Generic ASMCGO and specialized FULLCGO/early-return paths run during startup.
                 self.assertGreater(kinds["smoke"], 0, diagnostics)
                 self.assertGreater(kinds["readlink_filter"], 0, diagnostics)
 
-    def test_hooks_disabled_version(self):
+    def test_books_disabled_version(self):
         diagnostics, kinds = self.run_version({"AGY_PROC_ENABLE": None})
         self.assertNotIn("cgocall-trampoline: installed", diagnostics)
         self.assertNotIn("-> RETURN", diagnostics)

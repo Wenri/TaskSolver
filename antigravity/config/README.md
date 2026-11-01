@@ -2,7 +2,7 @@
 
 agy is an **MCP client** and supports **custom agents**, so custom tools and
 context can be delivered by configuration — no binary patching. This is the
-robust half of the hybrid design (the hooks are the fallback for what config
+robust half of the hybrid design (the books are the fallback for what config
 can't express).
 
 ## Custom tools + context via MCP
@@ -31,11 +31,11 @@ Register it with `mcp.json` (template here). Steps:
      | python3 ../python/agy_mcp_server.py
    ```
 
-## When to use hooks instead
+## When to use books instead
 
-Use the static trampoline hooks (see ../README.md) when config can't do it:
+Use the static trampoline books (see ../README.md) when config can't do it:
 injecting context *invisibly* into prompt assembly, overriding a tool result, or
-observing/rewriting the model traffic. Candidate hook points (MCP manager, tool-spec
+observing/rewriting the model traffic. Candidate book points (MCP manager, tool-spec
 builders, prompt assembly) are in `../symbols/funcmap.tsv.gz`, the full addr→name map
 `pixi run shim-symbols` writes — e.g. `zcat ../symbols/funcmap.tsv.gz | grep GetPluginMCPSpecs`.
 

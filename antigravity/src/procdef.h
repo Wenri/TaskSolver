@@ -2,11 +2,10 @@
  *
  * id      the row's one name: bk() key, agy_stub__/agy_go__ suffix, and its events' kind.
  * MODE    WIRE_ASYNC logs; WIRE_SYNC blocks for a verdict.
- * RETCAP  return capture: 0 none, <0 special, >0 min bytes. Return hooks broke Go's GC unwinder,
- *         so every RETCAP != 0 row uses AGY_OFF; captures read entry args instead.
- * TARGET  AGY_FULLGO(symbol) for functions that may park; AGY_ASMGO(symbol) only for hot
- *         functions that never park; AGY_OFF(symbol) for disabled rows. C++ keeps only the
- *         mechanism; symbols/agyelf.py reads both the mechanism and the Go symbol.
+ * RETCAP  return capture: 0 none, <0 special, >0 min bytes. Return books broke Go's GC unwinder,
+ *         so every RETCAP != 0 row is AGY_OFF; captures read entry args instead.
+ * TARGET  AGY_FULLGO for functions that may park, AGY_ASMGO only for hot ones that never park,
+ *         AGY_OFF to disable. agyelf.py also reads the Go symbol, which C++ drops.
  */
 #ifndef AGY_PROCDEF_H
 #define AGY_PROCDEF_H
@@ -14,9 +13,10 @@
 #include "wirecap.h"
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <string_view>
 
-enum agy_mech_t { AGY_OFF = 0, AGY_FULLCGO, AGY_ASMCGO };
+enum agy_mech_t { AGY_OFF = 0, AGY_FULLGO, AGY_ASMGO };
 
 struct agy_book {
     std::string_view id;      /* views the row's literal, so NUL-terminated */
@@ -25,8 +25,8 @@ struct agy_book {
     agy_mech_t       mech;
 };
 
-#define AGY_FULLGO(sym) AGY_FULLCGO
-#define AGY_ASMGO(sym)  AGY_ASMCGO
+#define AGY_FULLGO(sym) AGY_FULLGO
+#define AGY_ASMGO(sym)  AGY_ASMGO
 #define AGY_OFF(sym)    AGY_OFF
 
 inline constexpr agy_book BOOKS[] = {
@@ -36,7 +36,7 @@ inline constexpr agy_book BOOKS[] = {
 { "exit", WIRE_SYNC, 0, AGY_FULLGO("os.Exit") },
 /* Conversation id from the opened path; only with AGY_PROC_CONV_ID. */
 { "file_open", WIRE_ASYNC, 0, AGY_FULLGO("os.OpenFile") },
-/* Answers /proc/self/exe with the real agy path (os.Readlink is inlined, so hook os.readlink). */
+/* Answers /proc/self/exe with the real agy path (os.Readlink is inlined, so book os.readlink). */
 { "readlink_filter", WIRE_ASYNC, 0, AGY_FULLGO("os.readlink") },
 /* The model request: hot, never parks. */
 { "tls_write", WIRE_ASYNC, 0, AGY_ASMGO("crypto/tls.(*Conn).Write") },
@@ -95,14 +95,14 @@ inline constexpr agy_book BOOKS[] = {
 #undef AGY_ASMGO
 #undef AGY_OFF
 
-inline constexpr int BK_COUNT = (int)(sizeof(BOOKS) / sizeof(BOOKS[0]));
+inline constexpr int BK_COUNT = (int)std::size(BOOKS);
 inline constexpr int BK_STUB_COUNT = (int)std::ranges::count_if(BOOKS, [](auto &b) { return b.mech != AGY_OFF; });
 
 /* Row index by id; an unknown id fails compilation. */
 consteval int bk(std::string_view id) {
     for (int i = 0; i < BK_COUNT; i++)
         if (BOOKS[i].id == id) return i;
-    throw "unknown hook id";
+    throw "unknown book id";
 }
 
 #endif /* AGY_PROCDEF_H */

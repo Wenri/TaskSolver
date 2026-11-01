@@ -9,11 +9,8 @@
 
 using agy_book_fn = void (*)(agy_block *);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-extern agy_book_fn g_agy_on[];         /* per BOOKS row: handler, or nullptr when disabled */
+/* Named by the stub asm: per BOOKS row, its handler, or nullptr when the row is disabled. */
+extern "C" agy_book_fn g_agy_on[];
 
 void agy_on_generic(agy_block *b);
 void agy_on_fh_update(agy_block *b);
@@ -38,15 +35,11 @@ int  agy_backtrace(uint64_t rbp, uint64_t base, uint64_t *out, int max);
  * frame vaddrs from agy_backtrace(rbp,base). No-op-safe if rbp is bogus. */
 void agy_emit_stack(const char *src_kind, uint64_t rbp, uint64_t base);
 
-/* Set the real agy binary path (from AGY_PROC_REAL_EXE) the readlink_filter hook returns for
+/* Set the real agy binary path (from AGY_PROC_REAL_EXE) the readlink_filter book returns for
  * os.readlink("/proc/self/exe"). Called once at agy_init (before Go starts). */
 void agy_set_real_exe(const char *path);
 
-#ifdef __cplusplus
-}
-#endif
-
 /* Activate the statically `ld`-bound trampoline stubs once `wire_start()` is ready. */
-void agy_enable_hooks(uint64_t base, bool conv_id);
+void agy_enable_books(uint64_t base, bool conv_id);
 
 #endif /* AGY_GOCALL_H */

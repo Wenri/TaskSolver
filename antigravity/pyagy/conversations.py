@@ -295,7 +295,7 @@ def snapshot(app_data_dir=None, home=None):
 
 def _id_from_capture(capture_path):
     """First ``{"kind":"conversation_id","id":...}`` event in the capture JSONL, or ``None``.
-    Emitted by the file_open hook (AGY_PROC_CONV_ID) from the conversation-store path — exact
+    Emitted by the file_open book (AGY_PROC_CONV_ID) from the conversation-store path — exact
     and in-process. FIRST = the main/top-level conversation (its store opens before any
     subagent's)."""
     if not capture_path or not os.path.exists(capture_path):
@@ -318,7 +318,7 @@ def _id_from_capture(capture_path):
 
 def capture_conversation_id(snapshot=None, capture_path=None, app_data_dir=None, home=None):
     """Resolve the conversation a just-finished run created or continued, most-reliable first:
-      1. a ``conversation_id`` event from the file_open hook in the capture JSONL (exact,
+      1. a ``conversation_id`` event from the file_open book in the capture JSONL (exact,
          in-process — needs AGY_PROC_CONV_ID + an instrumented run);
       2. vs the pre-run ``snapshot``: the newest conversation that is NEW or whose mtime
          advanced (covers both create and resume);

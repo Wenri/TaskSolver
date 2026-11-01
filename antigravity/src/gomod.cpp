@@ -1,25 +1,15 @@
-/* gomod.cpp — build + register a synthetic go1.27 runtime.moduledata that describes
- * each linked trampoline through its entry, frame and end labels,
- * so the Go GC's stack scanner (findfunc -> findmoduledatap, walking the
- * firstmoduledata linked list) resolves our static trampoline PCs instead of
- * throw("unknown pc"). See gomod.h.
- *
- * Called once from `agy_init()` before `agy_rt0_go()`: `ld.so` has already
- * processed all `R_X86_64_RELATIVE`, `R_X86_64_GLOB_DAT`, and eager `R_X86_64_JUMP_SLOT`
- * relocations in `libagy.so` and `vendor/agy`, so `agy_firstmoduledata` is bound directly via `ld`
- * and its `pcHeader` is already relocated. Setting `md->bad = 1` tells Go's startup
- * `runtime.modulesinit()` to skip our synthetic module while `findfunc` still walks
- * `agy_firstmoduledata.next`.
+/* gomod.cpp — build and register the synthetic moduledata describing the linked stubs
+ * from their entry, frame and end labels. See gomod.h.
  */
-#include <cstddef>
 #include "goframe.h"
 #include "gomod.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <atomic>
 
 #define GLOG(...) do { std::fprintf(stderr, "[antigravity/gomod] " __VA_ARGS__); \
                        std::fputc('\n', stderr); std::fflush(stderr); } while (0)
@@ -27,8 +17,7 @@
 /* go1.27: FuncTabBucketSize = 256*MINFUNC, MINFUNC = 16. */
 #define GO_FUNCTAB_BUCKET 4096
 
-/* src/goframe.cpp writes the registers at these literal offsets; prove they are still where
- * agy_block puts them. Add or reorder a field in agy_go_regs and the build stops here. */
+/* goframe.h's offsets are literals the tests read; each must match agy_block's layout. */
 #define AGY_CHK(f, off) static_assert(AGY_OFF_BLOCK + offsetof(agy_block, f) == (off), \
                                       "trampoline frame offset drifted from agy_block::" #f)
 AGY_CHK(book,     AGY_OFF_BOOK);    AGY_CHK(regs.rax, AGY_OFF_RAX);
@@ -50,24 +39,22 @@ static_assert(sizeof(go_textsect) == 24, "textsect must be 24 bytes");
 static_assert(AGY_GOMOD_MAX_FUNCS <= 256, "findfunc subbucket deltas must fit in a byte");
 static_assert((AGY_FRAME - 8 + 63) / 64 <= AGY_GOMOD_MAX_MAPBYTES,
               "locals bitmap exceeds static capacity");
-/* Pin the go1.27 moduledata layout (agy). If agy's Go changes these, the build
- * fails loudly instead of corrupting memory (as an off-by-N splice would). */
+/* A layout change in agy's Go must fail the build, not corrupt the splice. */
 static_assert(sizeof(go_moduledata) == 568, "moduledata must be 568 bytes (go1.27 amd64)");
 static_assert(offsetof(go_moduledata, text) == 176, "text@176");
 static_assert(offsetof(go_moduledata, gofunc) == 344, "gofunc@344 (go1.27)");
 static_assert(offsetof(go_moduledata, next) == 560, "next@560 (go1.27)");
 
-/* LEB128 varint append (used by the pctab SP-delta encoding). */
+/* LEB128 */
 static size_t put_uvarint(uint8_t *p, uint32_t v)
 {
     size_t n = 0;
     do { uint8_t b = v & 0x7f; v >>= 7; if (v) b |= 0x80; p[n++] = b; } while (v);
     return n;
 }
-/* zigzag encode for the signed value-delta stream. */
 static uint32_t zigzag(int32_t d) { return ((uint32_t)d << 1) ^ (uint32_t)(d >> 31); }
 
-/* Emit one (value-delta, pc-delta) step into the pctab (step() format). */
+/* One pctab step, as runtime.step decodes it. */
 static size_t put_step(uint8_t *p, int32_t dval, uint32_t dpc)
 {
     size_t n = put_uvarint(p, zigzag(dval));
@@ -75,8 +62,7 @@ static size_t put_step(uint8_t *p, int32_t dval, uint32_t dpc)
     return n;
 }
 
-/* One process-lifetime module and its lookup tables. Compact logical text offsets
- * keep the bucket array bounded by code size even when linked addresses are far apart. */
+/* Logical offsets bound the bucket array by code size, however far apart the stubs link. */
 static struct {
     go_moduledata md;
     go_pcHeader ph;
@@ -209,7 +195,7 @@ int agy_gomod_register(std::span<const agy_stub_info> stubs)
     md->minpc = md->text = region_base;
     md->maxpc = md->etext = region_end;
     md->gofunc = (uintptr_t)smap;
-    md->bad = 1;   // modulesinit skips this module; findfunc still follows its metadata.
+    md->bad = 1;   // modulesinit skips it; findfunc still walks it.
     std::atomic_ref<go_moduledata *>(tail->next).store(md, std::memory_order_release);
 
     if (std::getenv("AGY_PROC_ENABLE") && !std::getenv("_AGY_SBOXSERVE")) {

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Smoke test for the full working hook union (gum + cgocall-trampoline).
+"""Smoke test for the full working book union (gum + cgocall-trampoline).
 
-The shim installs every working hook in one pass — no stage selector. This runs a real
+The shim installs every working book in one pass — no stage selector. This runs a real
 `agy --print` turn under it and asserts the union installs, fires, and does not corrupt
 the turn:
 
-  login-independent — the shim installs and a hook fires end-to-end at startup
-      (os.Getenv → the gum "smoke" hook, recorded to the capture). A corrupt register
+  login-independent — the shim installs and a book fires end-to-end at startup
+      (os.Getenv → the gum "smoke" book, recorded to the capture). A corrupt register
       block shows up as `$HOME is not defined`, a wrong `kind` as a worker
       UnicodeDecodeError, a bad GC unwind as throw("unknown pc").
   login-gated — with the WHOLE union active at once (never exercised under the old
@@ -20,7 +20,7 @@ also the primary check that the combined install doesn't destabilize a turn.
 
 It SKIPS (exit 0), rather than fails, when the environment can't run it — no agy
 binary, shim not built, or the running agy's build-id doesn't match symbols.json
-(the shim then refuses to hook; re-run `pixi run shim-symbols`). Model-turn
+(the shim then refuses to book; re-run `pixi run shim-symbols`). Model-turn
 checks are skipped when agy isn't logged in.
 
     python3 test_scripts/test_trampoline.py            # validates the full union (mixed full-cgo + asmcgo)
@@ -81,7 +81,7 @@ def run(extra, workdir, timeout=200.0):
     combined = out + "\n" + logtxt
     answer = "\n".join(l for l in out.splitlines()
                        if l.strip() and "antigravity" not in l and "wirecap" not in l
-                       and "gohook" not in l and "gomod" not in l)
+                       and "gobook" not in l and "gomod" not in l)
     return {
         "kinds": dict(kinds), "log": logtxt, "genai_text": genai_text,
         "zorple": bool(re.search(r"\bZORPLE\b", answer)),
@@ -92,7 +92,7 @@ def run(extra, workdir, timeout=200.0):
 
 
 def main():
-    argparse.ArgumentParser(description="Smoke-test the antigravity hook union").parse_args()
+    argparse.ArgumentParser(description="Smoke-test the antigravity book union").parse_args()
 
     if not os.path.exists(AGY):
         skip(f"agy not found at {AGY} (set AGY_BIN)")
@@ -112,18 +112,18 @@ def main():
         if not cond:
             failures.append(name)
 
-    # One run installs the full working hook union (gum wire hooks + trampoline app/rpc
-    # hooks). Validate the mechanism login-independently first: install + a hook firing
+    # One run installs the full working book union (gum wire books + trampoline app/rpc
+    # books). Validate the mechanism login-independently first: install + a book firing
     # end-to-end + no startup corruption. os.Getenv fires before any auth/network.
-    print("[union] full working hook union under one agy --print turn")
+    print("[union] full working book union under one agy --print turn")
     r = run({}, wd)
     if "build-id ok" not in r["log"]:
         skip("shim build-id does not match the running agy — re-run "
              "`pixi run shim-symbols` && `pixi run build-shim` (agy may have auto-updated)")
     check("cgocall-trampoline: installed" in r["log"], "union: trampoline installed")
-    check(r["kinds"].get("smoke", 0) > 0, "union: gum os.Getenv hook fired end-to-end")
+    check(r["kinds"].get("smoke", 0) > 0, "union: gum os.Getenv book fired end-to-end")
     # readlink_filter fires at os-package init (os.readlink of /proc/self/exe) every turn — a
-    # deterministic, login-independent check of the trampoline FILTER (pass/return) mode: the hook
+    # deterministic, login-independent check of the trampoline FILTER (pass/return) mode: the book
     # RETURNed the real agy path, skipping the body. If this is 0 the filter mode is inert.
     check(r["kinds"].get("readlink_filter", 0) >= 1,
           "union: readlink_filter fired (os.readlink /proc/self/exe → RETURN, filter mode)")
@@ -138,9 +138,9 @@ def main():
               "(run `agy` once to sign in to exercise them)")
     else:
         # THE critical assertion: with the ENTIRE union installed at once (gum tls + all
-        # trampoline app/rpc hooks — never combined under the old per-stage runs), the
+        # trampoline app/rpc books — never combined under the old per-stage runs), the
         # model turn still completes AND every surface decodes from the one capture.
-        check(r["zorple"], "union: turn completes (ZORPLE) with all hooks active")
+        check(r["zorple"], "union: turn completes (ZORPLE) with all books active")
         check(r["kinds"].get("send_user_msg", 0) >= 1, "union: SendUserMessage fired (full-cgo trampoline)")
         check(r["kinds"].get("stream_send", 0) >= 1, "union: callbackStreamer.Send fired (asmcgo trampoline)")
         check(r["kinds"].get("http_rt", 0) >= 1, "union: RoundTrip fired (asmcgo trampoline)")

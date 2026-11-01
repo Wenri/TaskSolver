@@ -6,10 +6,10 @@ keyed by the same link vaddr `= text_base + entryoff`). So symbolizing a frame i
 plain `bisect` — no runtime base needed. Stdlib only (kept out of the embedded
 interpreter's import path; this is a user-side analysis tool).
 
-A `callstack` event is `{"kind":"callstack","src":<hook kind>,"frames":[vaddr,...]}`.
-`frames[0]` is the return address into the hook's caller, `frames[1]` its caller, …
-For **gum** hooks (tls_write/decrypt) the chain is complete from the target upward.
-For **trampoline** hooks the captured rbp is the *caller's* frame, so the immediate
+A `callstack` event is `{"kind":"callstack","src":<book kind>,"frames":[vaddr,...]}`.
+`frames[0]` is the return address into the book's caller, `frames[1]` its caller, …
+For **gum** books (tls_write/decrypt) the chain is complete from the target upward.
+For **trampoline** books the captured rbp is the *caller's* frame, so the immediate
 caller is implicit — the chain starts one frame above `src`.
 
 CLI:

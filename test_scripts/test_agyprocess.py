@@ -82,7 +82,7 @@ def case_exception():
 
 def case_stream():
     # The payoff: stream agy's DECODED model turns home as native objects. Needs a live
-    # model turn (network/auth) + capture hooks (capture=True); agy occasionally exits before
+    # model turn (network/auth) + capture books (capture=True); agy occasionally exits before
     # completing a turn, so retry once. A turn with EMPTY text = a real decode bug (FAIL); no
     # turns after retries = a live-model flake (NOTE, not a failure).
     for _ in range(2):

@@ -131,7 +131,7 @@ message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 
 # NOTE: no python3-config probe here. No shim TU includes a Python header — CPython is embedded by
 # the SHARED bridge (wirecap/native), which does its own probe and carries the embed link flags.
-# ---- generate binary-derived BuildID/frame inputs from symbols.json + src/procdef.h -----------
+# ---- generate the BuildID, Go frames and stub ids from symbols.json + src/procdef.h -----------
 add_custom_command(
   OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
   COMMAND python3 -m symbols.gen_sources
@@ -144,20 +144,7 @@ add_custom_command(
           "${CMAKE_SOURCE_DIR}/src/procdef.h"
   COMMENT "gen src/symbols_gen.h from symbols.json + src/procdef.h"
   VERBATIM)
-# Literal asm names connect template members to their linked instruction boundaries.
-add_custom_command(
-  OUTPUT "${CMAKE_SOURCE_DIR}/src/stub_labels_gen.h"
-  COMMAND python3 -m symbols.gen_sources --labels "${CMAKE_SOURCE_DIR}/src/stub_labels_gen.h"
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-  DEPENDS "${CMAKE_SOURCE_DIR}/symbols/__init__.py"
-          "${CMAKE_SOURCE_DIR}/symbols/gen_sources.py"
-          "${CMAKE_SOURCE_DIR}/symbols/agyelf.py"
-          "${CMAKE_SOURCE_DIR}/src/procdef.h"
-  COMMENT "gen src/stub_labels_gen.h from src/procdef.h"
-  VERBATIM)
-add_custom_target(gen_symbols DEPENDS
-  "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
-  "${CMAKE_SOURCE_DIR}/src/stub_labels_gen.h")
+add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h")
 
 # ---- the shared native bridge (embedded CPython worker) — the wire_* C ABI the shim calls.
 # Extracted to wirecap/native so the codex build links the same bridge; built as a static lib
@@ -167,16 +154,14 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wi
 
 # ---- the instrumented host executable: vendor/agy (links vendor/libagy.so first) --------------
 # src/goframe.cpp derives active rows from BOOKS and instantiates naked templates;
-# symbols_gen.h supplies the expected BuildID and original Go frame sizes;
-# stub_labels_gen.h supplies the literal asm-name declarations for template boundaries.
+# symbols_gen.h supplies the expected BuildID, original Go frame sizes and literal stub ids.
 # GCC 15 constexpr asm emits the stubs; C++ owns the constexpr descriptor table and span API.
 add_executable(agy
   src/antigravity.cpp src/gomod.cpp src/gocall.cpp src/goframe.cpp)
 add_dependencies(agy gen_symbols agy_library)
 set_target_properties(agy PROPERTIES
   OUTPUT_NAME "agy"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor"
-  ENABLE_EXPORTS ON)
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor")
 
 target_compile_features(agy PRIVATE cxx_std_23)
 # All the shim's TUs are C++23. -Wno-deprecated-declarations: one std::auto_ptr warning from

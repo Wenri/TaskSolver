@@ -42,7 +42,7 @@ class PtyPopen(WirePtyPopen):
     `_extra_env`, `_echo`). The PTY mechanics and the generic boot-channel/lifecycle are inherited."""
     method = "agy"
 
-    # --- launch hooks (fill the WirePtyPopen/WirePopen base) -----------------
+    # --- launch books (fill the WirePtyPopen/WirePopen base) -----------------
     def _resolve_launch(self, process_obj):
         """Build agy's instrumented argv + env (the base adds WIRE_MP_BOOT_FD). Records the run's
         resolved workspace/capture/home for AgyProcess's accessors."""
@@ -86,7 +86,7 @@ class PtyPopen(WirePtyPopen):
             self._trust_answered = answer_trust(self.raw, lambda b: os.write(self.fd, b))
 
     def _interrupt(self):
-        """WirePopen.close hook: Ctrl-C twice to break agy out of its TUI before SIGTERM."""
+        """WirePopen.close book: Ctrl-C twice to break agy out of its TUI before SIGTERM."""
         for _ in range(2):
             try:
                 self.write(b"\x03")

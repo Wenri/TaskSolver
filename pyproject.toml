@@ -161,7 +161,7 @@ htop = ">=3.5.1,<4"
 #   pixi run build-shim         # configure (fetch deps) + compile the shim
 #   pixi run shim-symbols       # ensure raw agy conversion + metadata are current, then rebuild
 #   pixi run shim-agy-update    # query the latest release manifest + print new pin values
-#   pixi run shim-hooks         # after editing procdef.h: regen pyagy's BOOKS mirror
+#   pixi run shim-books         # after editing procdef.h: regen pyagy's BOOKS mirror
 [tool.pixi.package]
 name = "tasksolver"
 version = "0.0.1"
@@ -229,7 +229,7 @@ pymport-test = { cmd = "node -e \"const {pymport,proxify}=require('pymport'); co
 build-shim = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build"
 shim-symbols = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target symbols && cmake --build antigravity/build"   # ensure library + metadata are current
 shim-agy-update = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target agy-update"   # query latest manifest + print new pins
-shim-hooks = { cmd = "python3 -m symbols.gen_sources --hooks", cwd = "antigravity" }   # regen pyagy's BOOKS mirror from procdef.h (after editing the C table)
+shim-books = { cmd = "python3 -m symbols.gen_sources --books", cwd = "antigravity" }   # regen pyagy's BOOKS mirror from procdef.h (after editing the C table)
 
 # --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---
 # The `local` and `app` features auto-map to the same-named

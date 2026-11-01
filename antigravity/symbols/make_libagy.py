@@ -2,17 +2,17 @@
 """Convert Google's PIE `agy` (Antigravity) Go executable into `libagy.so` with
 bidirectional static `ld` binding:
   - Exports `agy_rt0_go` (`runtime.rt0_go`), `agy_firstmoduledata` (`runtime.firstmoduledata`),
-    every Go hook target (`agy_go__*`), and each active hook's continuation
+    every Go book target (`agy_go__*`), and each active book's continuation
     (`agy_resume__<id>` at entry + skip + displaced prologue length) in `libagy.so`'s `.dynsym`.
   - Imports each active static trampoline stub (`agy_stub__<id>`, an ordinary `.text`
     function in `vendor/agy`) via eagerly bound `R_X86_64_JUMP_SLOT` relocations in
-    `.got.plt.agy`. Each hooked function's `entry + skip` gets a five-byte `jmp rel32`
+    `.got.plt.agy`. Each booked function's `entry + skip` gets a five-byte `jmp rel32`
     to its `.plt.agy` entry; INT3 fills the rest of the displaced prologue. The PLT
     entry jumps through its GOT slot. `ld.so` binds both
     directions at load time with zero runtime code patching or `mprotect`.
 
 Capture symbols.json and funcmap.tsv.gz from the final-layout unpatched ELF before writing
-any hook jumps. The original prologue bytes in that metadata generate the static stubs.
+any book jumps. The original prologue bytes in that metadata generate the static stubs.
 Every conversion starts from the original upstream binary; converted libraries are outputs.
 
 Usage (from antigravity/):
@@ -37,7 +37,7 @@ from .agyelf import (
     active_rows,
     c_sym_name,
     export_map,
-    hook_targets,
+    book_targets,
     load_procdef,
 )
 
@@ -47,32 +47,32 @@ MANIFEST_BASE = os.environ.get(
     "AGY_MANIFEST_BASE",
     "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app")
 
-HOOK_PLT = ".plt.agy"
-HOOK_GOT = ".got.plt.agy"
+BOOK_PLT = ".plt.agy"
+BOOK_GOT = ".got.plt.agy"
 PLT_ENTRY_SIZE = 8                           # jmp *slot(%rip); two-byte nop
 
 
-def add_hook_plt(bin_: lief.ELF.Binary, rows: list[dict]) -> None:
+def add_book_plt(bin_: lief.ELF.Binary, rows: list[dict]) -> None:
     """Reserve PLT code/GOT slots; ld.so resolves the JUMP_SLOT relocations eagerly.
 
     Add these after the original-address exports so LIEF can adjust every reference if
     inserting program headers moves the input image. Encode the jumps after its final write.
     """
-    plt = lief.ELF.Section(HOOK_PLT)
+    plt = lief.ELF.Section(BOOK_PLT)
     plt.flags = lief.ELF.Section.FLAGS.ALLOC | lief.ELF.Section.FLAGS.EXECINSTR
     plt.alignment = PLT_ENTRY_SIZE
     plt.entry_size = PLT_ENTRY_SIZE
     plt.content = [0xcc] * (len(rows) * PLT_ENTRY_SIZE)
     bin_.add(plt)
 
-    got = lief.ELF.Section(HOOK_GOT)
+    got = lief.ELF.Section(BOOK_GOT)
     got.flags = lief.ELF.Section.FLAGS.ALLOC | lief.ELF.Section.FLAGS.WRITE
     got.alignment = 8
     got.entry_size = 8
     got.content = [0] * (len(rows) * 8)
     got = bin_.add(got)
-    if got is None or bin_.get_section(HOOK_PLT) is None:
-        raise SystemExit("could not allocate hook PLT/GOT")
+    if got is None or bin_.get_section(BOOK_PLT) is None:
+        raise SystemExit("could not allocate book PLT/GOT")
 
     for slot, row in enumerate(rows):
         symbol = lief.ELF.Symbol()
@@ -91,7 +91,7 @@ def add_hook_plt(bin_: lief.ELF.Binary, rows: list[dict]) -> None:
 
 
 def rel32(target: int, next_pc: int, context: str) -> bytes:
-    """Fail conversion instead of publishing an out-of-range hook or PLT jump."""
+    """Fail conversion instead of publishing an out-of-range book or PLT jump."""
     displacement = target - next_pc
     if not -(1 << 31) <= displacement < (1 << 31):
         raise SystemExit(f"{context}: displacement {displacement} exceeds signed 32-bit range")
@@ -159,41 +159,41 @@ def patch_wsl1_file(path: str) -> None:
     print(f"[wsl1] cleared MAP_FIXED_NOREPLACE at {n} site(s) in {path}")
 
 
-def patch_static_hooks(elf_path: str, rows: list[dict], metadata: dict) -> int:
-    """Write PLT entries, five-byte hooks and INT3 tails after validating the unpatched ELF."""
+def patch_static_books(elf_path: str, rows: list[dict], metadata: dict) -> int:
+    """Write PLT entries, five-byte books and INT3 tails after validating the unpatched ELF."""
     with open(elf_path, "r+b") as f:
         raw = f.read()
         elf = ELF(raw)
-        plt, got = (elf.bin.get_section(name) for name in (HOOK_PLT, HOOK_GOT))
+        plt, got = (elf.bin.get_section(name) for name in (BOOK_PLT, BOOK_GOT))
         if (plt is None or got is None or plt.size < len(rows) * PLT_ENTRY_SIZE
                 or got.size < len(rows) * 8):
-            raise SystemExit("hook PLT/GOT missing or too small in written libagy.so")
+            raise SystemExit("book PLT/GOT missing or too small in written libagy.so")
         flags = elf.bin.get(lief.ELF.DynamicEntry.TAG.FLAGS)
         flags1 = elf.bin.get(lief.ELF.DynamicEntry.TAG.FLAGS_1)
         if not (elf.bin.has(lief.ELF.DynamicEntry.TAG.BIND_NOW)
                 or (flags is not None and flags.value & 8)
                 or (flags1 is not None and flags1.value & 1)):
-            raise SystemExit("hook PLT requires eager binding before Go starts")
+            raise SystemExit("book PLT requires eager binding before Go starts")
         relocations = {r.address: r for r in elf.bin.pltgot_relocations}
         patches = []
         for slot, row in enumerate(rows):
             name = row["symbol"]
-            entry = metadata["hooks"][name]
+            entry = metadata["books"][name]
             skip = metadata["skips"][name]
             prologue = bytes.fromhex(metadata["prologues"][name])
-            hook = entry + skip
-            offset = elf.v2o(hook)
+            book = entry + skip
+            offset = elf.v2o(book)
             if skip <= 0 or len(prologue) not in (8, 11) or raw[offset:offset + len(prologue)] != prologue:
                 raise SystemExit(f"original prologue does not match metadata for {row['id']}")
             resume = elf.bin.get_symbol(f"agy_resume__{row['id']}")
-            if resume is None or resume.value != hook + len(prologue):
+            if resume is None or resume.value != book + len(prologue):
                 raise SystemExit(f"continuation export does not match metadata for {row['id']}")
             plt_pc = plt.virtual_address + slot * PLT_ENTRY_SIZE
             got_pc = got.virtual_address + slot * 8
             relocation = relocations.get(got_pc)
             if (relocation is None or relocation.type != lief.ELF.Relocation.TYPE.X86_64_JUMP_SLOT
                     or not relocation.has_symbol or relocation.symbol.name != f"agy_stub__{row['id']}"):
-                raise SystemExit(f"PLT binding does not match hook {row['id']}")
+                raise SystemExit(f"PLT binding does not match book {row['id']}")
             plt_offset = elf.v2o(plt_pc)
             if raw[plt_offset:plt_offset + PLT_ENTRY_SIZE] != b"\xcc" * PLT_ENTRY_SIZE:
                 raise SystemExit(f"PLT entry is not unpatched for {row['id']}")
@@ -201,7 +201,7 @@ def patch_static_hooks(elf_path: str, rows: list[dict], metadata: dict) -> int:
                                                           f"PLT {row['id']}") + b"\x66\x90"))
             # The stub replays the full saved prologue and resumes after it; trap on
             # accidental entry into the unreachable bytes left behind by the jump.
-            jump = b"\xe9" + rel32(plt_pc, hook + 5, f"hook {row['id']}")
+            jump = b"\xe9" + rel32(plt_pc, book + 5, f"book {row['id']}")
             patches.append((offset, jump + b"\xcc" * (len(prologue) - len(jump))))
         for offset, patch in patches:
             f.seek(offset)
@@ -216,7 +216,7 @@ def convert(in_path: str, out_path: str, symbols_path: str) -> None:
         raise SystemExit("raw input, library, symbols JSON and funcmap must be distinct files")
     rows = load_procdef()
     rows_active = active_rows(rows)
-    targets = hook_targets(rows)
+    targets = book_targets(rows)
 
     data = open(in_path, "rb").read()
     bin_ = lief.parse(data)
@@ -256,7 +256,7 @@ def convert(in_path: str, out_path: str, symbols_path: str) -> None:
     exports = export_map(rows)
     missing = sorted({nm for nm in exports.values() if nm not in funcs})
     if missing:
-        raise SystemExit(f"hook targets not found in .gopclntab: {missing}")
+        raise SystemExit(f"book targets not found in .gopclntab: {missing}")
     for hid, nm in exports.items():
         bin_.add_exported_function(funcs[nm], c_sym_name(hid))
     n_exported = len(exports)
@@ -268,13 +268,13 @@ def convert(in_path: str, out_path: str, symbols_path: str) -> None:
             raise SystemExit(f"cannot resolve original prologue for {row['id']} ({row['symbol']})")
         bin_.add_exported_function(entry + skip + len(prologue) // 2, f"agy_resume__{row['id']}")
 
-    add_hook_plt(bin_, rows_active)
+    add_book_plt(bin_, rows_active)
 
     if not bin_.has(lief.ELF.DynamicEntry.TAG.SONAME):
         bin_.add(lief.ELF.DynamicSharedObject("libagy.so"))
 
     # LIEF finalizes the ELF layout once. Resolve all addresses and original bytes from
-    # that unpatched image; no LIEF rewrite or prologue decoding occurs after hook patching.
+    # that unpatched image; no LIEF rewrite or prologue decoding occurs after book patching.
     out_dir = os.path.dirname(os.path.abspath(out_path))
     symbols_dir = os.path.dirname(os.path.abspath(symbols_path))
     os.makedirs(out_dir, exist_ok=True)
@@ -285,7 +285,7 @@ def convert(in_path: str, out_path: str, symbols_path: str) -> None:
         with open(staged_lib, "rb") as f:
             metadata, funcmap = resolve_symbols(f.read(), out_path, rows)
         write_symbols(metadata, funcmap, staged_symbols)
-        n_patched = patch_static_hooks(staged_lib, rows_active, metadata)
+        n_patched = patch_static_books(staged_lib, rows_active, metadata)
         os.chmod(staged_lib, 0o755)
 
         # Validation and staging must finish before replacing any existing build output.
@@ -294,7 +294,7 @@ def convert(in_path: str, out_path: str, symbols_path: str) -> None:
         os.replace(os.path.join(staging, "funcmap.tsv.gz"), funcmap_path)
         os.replace(staged_lib, out_path)
     print(f"wrote {out_path}, {symbols_path} and funcmap.tsv.gz "
-          f"({n_exported} Go entry + {len(rows_active)} continuation exports, {n_patched} hook jumps)")
+          f"({n_exported} Go entry + {len(rows_active)} continuation exports, {n_patched} book jumps)")
 
 
 def update() -> None:

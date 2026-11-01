@@ -1,59 +1,25 @@
 /* gomod.h — go1.27 runtime-metadata mirrors for the cgocall trampolines.
  *
- * WHY THIS EXISTS
- * ---------------
- * The robust way to run a C hook from a hooked Go function is the Quarkslab
- * "rabbit hole" technique: redirect the target (past its stack-check prologue)
- * to a trampoline that marshals the Go-ABI arg registers and CALLs
- * runtime.cgocall(fn=our_C_hook, arg=&block). cgocall switches to the g0/system
- * stack, hands off P, and manages async preemption, so the hook runs in a safe
- * context; on return we restore regs, run the overwritten original instructions,
- * and jmp back into the target body.
+ * cgocall's entersyscall() parks the goroutine in _Gsyscall, where the GC scans its stack
+ * without preempting it, unwinding every frame above gp.syscallsp through the pclntab. That
+ * walk crosses our stub, and a PC findfunc cannot resolve is a fatal throw("unknown pc"), so
+ * each stub needs Go metadata. findmoduledatap walks the firstmoduledata LINKED LIST, so
+ * publishing a module is one pointer write, with no Go allocation and no modulesinit.
  *
- * cgocall calls entersyscall() (cgocall is //go:nosplit, so NO morestack), which
- * puts the goroutine in _Gsyscall. In that state the GC scans the goroutine
- * stack WITHOUT preempting it (mgcmark.go scanstack), unwinding every frame above
- * gp.syscallsp via the pclntab unwinder. That unwind walks cgocall -> OUR
- * trampoline -> the target. If findfunc() can't resolve the trampoline PC it does
- * throw("unknown pc") (traceback.go:201-208) — a fatal crash. The Quarkslab blog
- * dodges this only because its FrameConstructor is compiled Go (real pclntab
- * metadata in a c-shared lib's own runtime); a raw C trampoline has none, so the
- * blog's scheme has the same latent crash and simply never stresses GC.
+ * FRAME GEOMETRY (amd64, framepointer_enabled) — from traceback.go:
+ *   fp   = sp + funcspdelta(pc) + 8     (ret-addr slot at fp-8 == [sp+spdelta])
+ *   locals scanned = [sp, fp - 16)      (the -16 skips the ret-addr and saved-BP slots)
+ * A stub is entered past the target's stack check but before its frame allocation, so the entry
+ * SP is still the target's and [entrySP] holds the target's return address: with spdelta ==
+ * AGY_FRAME at the call, the unwind flows on to the target's caller. The all-ones locals map is
+ * safe because findObject ignores non-pointers, and it keeps the saved argument registers and
+ * the handler's read buffer alive across the cgo window.
  *
- * FIX: register a synthetic runtime.moduledata that describes each trampoline so
- * findfunc resolves our PCs. findfunc -> findmoduledatap (symtab.go:866) walks the
- * `firstmoduledata` LINKED LIST, so registration is a single pointer write
- * (walk to the tail, set tail.next = &our_md) — no runtime.modulesinit, no Go
- * allocation, no modulesSlice (that snapshot is only for global data scanning,
- * which our data-less module doesn't need). The loader binds `agy_firstmoduledata`;
- * we build fresh tables in static storage. A textsectmap maps each linked stub to
- * a compact logical range, excluding gaps and unrelated C functions. The function
- * table uses those logical offsets, and each pcsp uses its own assembly labels.
+ * FuncID must stay 0: the asyncPreempt/debugCallV2 ids make the unwinder read the frame as an
+ * injectedCall. FuncFlagAsm bars async preemption during the register saves and the displaced
+ * prologue; FuncFlagSPWrite would stop the unwind.
  *
- * TRAMPOLINE FRAME GEOMETRY (amd64, framepointer_enabled) — from traceback.go:
- *   fp   = sp + funcspdelta(pc) + 8      (ret-addr slot at fp-8 == [sp+spdelta])
- *   varp = fp - 8 - 8 = sp + spdelta - 8 (the -8..-8 skips ret-addr + saved-BP)
- *   locals scanned = [sp, varp) = [sp, sp+spdelta-8)
- * Entered by JMP at target+skip (post stack-check, PRE frame-alloc), so the
- * trampoline's entry SP == the target's entry SP and [entrySP] still holds the
- * target's own return address. With our frame FRAME bytes and spdelta==FRAME at
- * the `call cgocall` PC:
- *   trampoline.sp = entrySP - FRAME ; ret-addr slot [sp+FRAME] = [entrySP] = the
- *   target's return address -> unwind flows correctly to the target's caller.
- *   locals = [entrySP-FRAME, entrySP-8), nbit = (FRAME-8)/8 words, ALL-ONES map
- *   (conservative: invalid "pointers" are ignored by findObject; keeps the saved
- *   arg-register pointers + the C-hook's read buffer alive across the cgo window).
- *   [entrySP-8, entrySP) is the assumed saved-BP slot (excluded from the map).
- *
- * FuncID must be 0 (normal): NOT FuncID_asyncPreempt/debugCallV2 — the unwinder
- * treats those as injectedCall (traceback.go:485) and misreads our frame. Flag
- * uses FuncFlagAsm to prevent async preemption during the register saves/restores and
- * displaced prologue. NOT FuncFlagSPWrite (would stop the unwind): the fixed call frame
- * is encoded in pcsp so synchronous gateway stack walks can unwind it normally.
- *
- * All facts verified against /usr/lib64/go1.26.4/go/src/runtime/{symtab.go,
- * runtime2.go,traceback.go,mgcmark.go,stkframe.go,asm_amd64.s,cgocall.go} and
- * internal/abi/symtab.go. agy build: go1.26.4.
+ * Verified against release-branch.go1.27 src/runtime and the live agy binary.
  */
 #ifndef AGY_GOMOD_H
 #define AGY_GOMOD_H
@@ -109,15 +75,8 @@ typedef struct {
 /* ---- runtime.stackmap (symtab.go:1324): n bitmaps of nbit bits each ------ */
 typedef struct { int32_t n, nbit; uint8_t bytedata[]; } go_stackmap;
 
-/* ---- runtime.moduledata — layout MUST match agy's Go EXACTLY. agy is built with
- * go1.27 (go1.27-20260615-RC00), whose moduledata is 568 bytes and DIFFERS from
- * go1.26.4: it adds `typedesclen` (after types) and replaces the `typelinks`/
- * `itablinks` slices with `itaboffset`/`itabsize` uintptrs — which shifts `gofunc`
- * to +344 and `next` to +560 (go1.26.4 had 320/584). Verified against
- * release-branch.go1.27 src/runtime/symtab.go AND the live agy binary (hasmain@512,
- * typedesclen@304, itaboffset@320, gofunc@344, next@560 all match). The _Static_
- * asserts in gomod.cpp pin the critical offsets. Leading sys.NotInHeap is zero-size.
- * We build this fresh in static storage and set the fields findfunc/GC-unwind read. */
+/* ---- runtime.moduledata — must match agy's Go exactly; gomod.cpp pins the offsets.
+ * go1.27 adds `typedesclen` and replaces the typelinks/itablinks slices with itaboffset/itabsize. */
 typedef struct go_moduledata {
     go_pcHeader *pcHeader;
     go_slice  funcnametab;   /* []byte   */
@@ -158,48 +117,29 @@ typedef struct go_moduledata {
 /* ---- abi constants (internal/abi/symtab.go, go1.26) ---------------------- */
 #define GO_FUNCDATA_ArgsPointerMaps    0
 #define GO_FUNCDATA_LocalsPointerMaps  1
-#define GO_PCDATA_UnsafePoint          0
-#define GO_PCDATA_StackMapIndex        1
 #define GO_FUNCFLAG_ASM               4
-#define GO_PCLNTAB_MAGIC_GO120         0xFFFFFFF1u   /* == CurrentPCLnTabMagic; copied from the live pcHeader, not hardcoded */
+#define GO_PCLNTAB_MAGIC_GO120         0xFFFFFFF1u   /* CurrentPCLnTabMagic since go1.20 */
 
-/* Registers we snapshot into the trampoline frame (= the block the C hook reads).
- * Order is the Go internal register ABI arg order so the hook can name fields.
- * `rbp` is the 11th slot (AGY_OFF_RBP = 104), at the frame's saved-BP position;
- * naming it lets the stack unwinder read the caller frame pointer. */
+/* Go's register-ABI argument order; `rbp` lands on the frame's saved-BP slot. */
 typedef struct {
     uint64_t rax, rbx, rcx, rdi, rsi, r8, r9, r10, r11, rdx, rbp;
-} agy_go_regs;   /* 88 bytes; argument slots are scanned, final rbp slot is excluded */
+} agy_go_regs;
 
-/* The block a stub builds and hands its handler. `book` is the row's BOOKS index. `action` is
- * the handler's verdict: 0 runs the body; nonzero returns the Go-ABI values it wrote into `regs`. */
+/* `action` is the handler's verdict: 0 runs the body; nonzero returns what it wrote into `regs`. */
 typedef struct { uint32_t book, action; agy_go_regs regs; } agy_block;
 
 /* _func total stride in pclntable: 44-byte header + funcdata[2] (no pcdata). */
 #define AGY_FUNC_STRIDE 52
 
-/* Static metadata capacities, independent of function placement and individual sizes.
- * MAX_TEXT_SIZE bounds the sum of function sizes, excluding address gaps.
- * MAX_MAPBYTES bounds the locals bitmap (2 bytes for AGY_FRAME = 112). */
+/* Static capacities: TEXT_SIZE bounds the summed stub sizes, not their spacing. */
 #define AGY_GOMOD_MAX_FUNCS    64
 #define AGY_GOMOD_MAX_TEXT_SIZE (AGY_GOMOD_MAX_FUNCS * 4096u)
 #define AGY_GOMOD_MAX_MAPBYTES 8
 
-/* Single-phase registration (called from main() -> agy_init() before agy_rt0_go,
- * after ld.so has already relocated libagy.so and bound `agy_firstmoduledata`):
- *
- * agy_gomod_register() — sort the actual stub ranges, map them to compact logical
- * text offsets, and compute each function's pcsp from its linked frame labels.
- * No section, adjacency, source order, fixed stride or hardcoded PCs are required.
- * Reject invalid/overlapping ranges and metadata-capacity overflow before publishing.
- * Mark `md->bad = 1`
- * (so `runtime.modulesinit` skips it while `moduledataverify1` and `findfunc`
- * walk it), and splice it onto `agy_firstmoduledata.next`. */
 extern "C" go_moduledata agy_firstmoduledata;
 
+/* Publish the stubs as one module on agy_firstmoduledata.next, before Go starts. md->bad = 1
+ * makes modulesinit skip it while findfunc still walks it; invalid input publishes nothing. */
 int agy_gomod_register(std::span<const agy_stub_info> stubs);
-
-/* The frame-pointer unwinder (agy_safe_read/agy_backtrace/agy_emit_stack) and the
- * per-hook C handlers (`agy_on_*`) are gocall.cpp's API — see gocall.h. */
 
 #endif /* AGY_GOMOD_H */

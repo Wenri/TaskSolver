@@ -33,9 +33,9 @@ class GenSourcesTests(unittest.TestCase):
             ("send_user_msg", "example.(*Backend).SendUserMessage", "fullcgo",
              "554889e54881ec18010000", 0x118),
         )
-        for hook, symbol, mech, prologue, frame in cases:
-            with self.subTest(hook=hook):
-                row = {"id": hook, "symbol": symbol, "mech": mech}
+        for book, symbol, mech, prologue, frame in cases:
+            with self.subTest(book=book):
+                row = {"id": book, "symbol": symbol, "mech": mech}
                 self.assertEqual(gen_sources.frame_size(row, prologue), frame)
 
     def test_reject_invalid_or_noncanonical_prologues(self):
@@ -54,7 +54,7 @@ class GenSourcesTests(unittest.TestCase):
             with self.subTest(prologue=prologue):
                 with self.assertRaises(SystemExit) as failure:
                     gen_sources.frame_size(ROW, prologue)
-                self.assertIn(f"hook {ROW['id']} ({ROW['symbol']}):", str(failure.exception))
+                self.assertIn(f"book {ROW['id']} ({ROW['symbol']}):", str(failure.exception))
 
     def test_invalid_later_row_preserves_header(self):
         later = {"id": "later", "symbol": "example.Later", "mech": "asmcgo"}
@@ -66,11 +66,11 @@ class GenSourcesTests(unittest.TestCase):
             symbols.write_text(json.dumps(metadata))
             header.write_text("existing valid header\n")
             with mock.patch.object(gen_sources, "load_procdef", return_value=[ROW, later]):
-                with self.assertRaisesRegex(SystemExit, "hook later"):
+                with self.assertRaisesRegex(SystemExit, "book later"):
                     gen_sources.gen_header(symbols, header)
             self.assertEqual(header.read_text(), "existing valid header\n")
 
-    def test_header_frames_preserve_disabled_book_rows(self):
+    def test_header_lists_only_stubbed_rows(self):
         disabled = {"id": "disabled", "symbol": "example.Disabled", "mech": "off"}
         later = {"id": "later", "symbol": "example.Later", "mech": "asmcgo"}
         metadata = {"build_id": "fixture-build", "prologues": {
@@ -83,36 +83,10 @@ class GenSourcesTests(unittest.TestCase):
                 gen_sources.gen_header(symbols, header)
             content = header.read_text()
         self.assertIn('inline constexpr char AGY_BUILD_ID[] = "fixture-build";', content)
-        self.assertIn("#include <cstdint>", content)
-        self.assertIn("inline constexpr std::int32_t AGY_GO_FRAMES[] = {\n"
-                      "    0x10,\n    -1,\n    0xc0,\n};", content)
-        for declaration in ("AGY_STUB", "agy_pc__", "struct ", "extern ", "std::array", "goframe.h"):
-            self.assertNotIn(declaration, content)
-
-    def test_label_specializations_use_book_ids(self):
-        disabled = {"id": "disabled", "mech": "off"}
-        later = {"id": "later", "mech": "asmcgo"}
-        content = gen_sources.render_labels([disabled, ROW, later])
-        declarations = [line for line in content.splitlines() if line.startswith("template<>")]
-        self.assertEqual(declarations, [
-            'template<> const unsigned char agy_stub<bk("fixture")>::frame_start '
-            '__asm__("agy_pc__fixture_frame_start");',
-            'template<> const unsigned char agy_stub<bk("fixture")>::frame_end '
-            '__asm__("agy_pc__fixture_frame_end");',
-            'template<> const unsigned char agy_stub<bk("fixture")>::end '
-            '__asm__("agy_pc__fixture_end");',
-            'template<> const unsigned char agy_stub<bk("later")>::frame_start '
-            '__asm__("agy_pc__later_frame_start");',
-            'template<> const unsigned char agy_stub<bk("later")>::frame_end '
-            '__asm__("agy_pc__later_frame_end");',
-            'template<> const unsigned char agy_stub<bk("later")>::end '
-            '__asm__("agy_pc__later_end");',
-        ])
-        self.assertIn("#ifndef AGY_STUB_LABELS_GEN_H\n#define AGY_STUB_LABELS_GEN_H", content)
-        self.assertTrue(content.endswith("#endif /* AGY_STUB_LABELS_GEN_H */\n"))
-        self.assertNotIn("disabled", content)
-        for unrelated in ("AGY_BUILD_ID", "AGY_GO_FRAMES", "::entry", "agy_stubs"):
-            self.assertNotIn(unrelated, content)
+        self.assertIn('#define AGY_STUBS(X) \\\n    X("fixture", 0x10) \\\n    X("later", 0xc0)\n\n#endif',
+                      content)
+        for absent in ("disabled", "-1", "AGY_GO_FRAMES", "agy_pc__", "struct ", "std::array"):
+            self.assertNotIn(absent, content)
 
 
 if __name__ == "__main__":

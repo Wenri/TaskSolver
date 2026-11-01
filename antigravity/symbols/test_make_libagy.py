@@ -1,4 +1,4 @@
-"""Offline hook patching checks; run from antigravity/ with
+"""Offline book patching checks; run from antigravity/ with
 ``pixi run python -m unittest symbols.test_make_libagy``.
 """
 from pathlib import Path
@@ -17,19 +17,19 @@ ROWS = [{"id": "small", "symbol": "example.small"},
         {"id": "large", "symbol": "example.large"}]
 PROLOGUES = (bytes.fromhex("554889e54883ec28"),
              bytes.fromhex("554889e54881ec00020000"))
-HOOK_OFFSETS = (32, 64)
+BOOK_OFFSETS = (32, 64)
 PLT_OFFSET = 128
 GOT_OFFSET = 160
 
 
-def fixture(plt_pc=0x2000, got_pc=0x3000, hook_pcs=(0x1000, 0x1100)):
+def fixture(plt_pc=0x2000, got_pc=0x3000, book_pcs=(0x1000, 0x1100)):
     """Separate virtual addresses from file offsets so overflow cases stay tiny."""
     data = bytearray(b"\xa5" * 256)
-    metadata = {"hooks": {}, "skips": {}, "prologues": {}}
+    metadata = {"books": {}, "skips": {}, "prologues": {}}
     symbols, mappings = {}, []
-    for row, pc, offset, prologue in zip(ROWS, hook_pcs, HOOK_OFFSETS, PROLOGUES):
+    for row, pc, offset, prologue in zip(ROWS, book_pcs, BOOK_OFFSETS, PROLOGUES):
         data[offset:offset + len(prologue)] = prologue
-        metadata["hooks"][row["symbol"]] = pc - 6
+        metadata["books"][row["symbol"]] = pc - 6
         metadata["skips"][row["symbol"]] = 6
         metadata["prologues"][row["symbol"]] = prologue.hex()
         symbols["agy_resume__" + row["id"]] = SimpleNamespace(value=pc + len(prologue))
@@ -68,7 +68,7 @@ class MakeLibagyTests(unittest.TestCase):
             path.write_bytes(original)
             with mock.patch.object(make_libagy, "ELF", return_value=image.elf):
                 with self.assertRaisesRegex(SystemExit, message):
-                    make_libagy.patch_static_hooks(path, ROWS, image.metadata)
+                    make_libagy.patch_static_books(path, ROWS, image.metadata)
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(list(Path(directory).iterdir()), [path])
 
@@ -82,10 +82,10 @@ class MakeLibagyTests(unittest.TestCase):
                 path = Path(directory) / "libagy.so"
                 path.write_bytes(image.data)
                 with mock.patch.object(make_libagy, "ELF", return_value=image.elf):
-                    self.assertEqual(make_libagy.patch_static_hooks(path, ROWS, image.metadata), 2)
+                    self.assertEqual(make_libagy.patch_static_books(path, ROWS, image.metadata), 2)
                 patched = path.read_bytes()
                 changed = set()
-                for slot, offset in enumerate(HOOK_OFFSETS):
+                for slot, offset in enumerate(BOOK_OFFSETS):
                     self.assertEqual(patched[offset], 0xe9)
                     pc = (0x1000, 0x1100)[slot]
                     self.assertEqual(pc + 5 + struct.unpack_from("<i", patched, offset + 1)[0],
@@ -108,7 +108,7 @@ class MakeLibagyTests(unittest.TestCase):
             with self.subTest(failure=failure):
                 image = fixture()
                 if failure == "prologue":
-                    image.data[HOOK_OFFSETS[1]] = 0x90
+                    image.data[BOOK_OFFSETS[1]] = 0x90
                     message = "original prologue.*large"
                 elif failure == "resume":
                     image.symbols["agy_resume__large"].value += 1
@@ -130,9 +130,9 @@ class MakeLibagyTests(unittest.TestCase):
         self.assert_rejected_without_writes(image, "requires eager binding")
 
     def test_out_of_range_jumps_preserve_entire_image(self):
-        # The first hook validates, then the second hook's backward jump exceeds rel32.
-        image = fixture(hook_pcs=(0x1000, 0x2008 + (1 << 31)))
-        self.assert_rejected_without_writes(image, "hook large:.*signed 32-bit")
+        # The first book validates, then the second book's backward jump exceeds rel32.
+        image = fixture(book_pcs=(0x1000, 0x2008 + (1 << 31)))
+        self.assert_rejected_without_writes(image, "book large:.*signed 32-bit")
         # Both GOT slots exist, but the PLT cannot address them with RIP-relative disp32.
         image = fixture(got_pc=0x2006 + (1 << 31))
         self.assert_rejected_without_writes(image, "PLT small:.*signed 32-bit")

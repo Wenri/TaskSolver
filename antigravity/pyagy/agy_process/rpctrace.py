@@ -1,6 +1,6 @@
 """Render a time-ordered RPC trace from a capture.
 
-The shim trampolines agy's `(*CodeAssistClient).*` methods — one hook per backend
+The shim trampolines agy's `(*CodeAssistClient).*` methods — one book per backend
 RPC — emitting an `rpc_<name>` event when each fires. This tool prints them as a
 labeled, time-ordered timeline of a turn (the app-level view that sits alongside the
 wire `genai_turn` decode), optionally enriched with:
@@ -15,7 +15,7 @@ Stdlib only. CLI:
 import json
 import sys
 
-# rpc_<kind> -> readable RPC name (mirrors the CodeAssistClient hooks in procdef.h).
+# rpc_<kind> -> readable RPC name (mirrors the CodeAssistClient books in procdef.h).
 RPC_KINDS = {
     "rpc_stream_generate": "StreamGenerateContent  (the model turn)",
     "rpc_generate": "GenerateContent",

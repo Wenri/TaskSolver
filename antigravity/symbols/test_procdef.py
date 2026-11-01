@@ -5,7 +5,7 @@ from pathlib import Path
 import unittest
 
 from .agyelf import active_rows, load_procdef, parse_procdef
-from .gen_sources import BOOKS_OUT, render_hooks
+from .gen_sources import BOOKS_OUT, render_books
 
 
 class ProcdefTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class ProcdefTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in active_rows(rows)], ["resp", "smoke"])
 
     def test_checked_in_python_mirror(self):
-        self.assertEqual(render_hooks(load_procdef()), Path(BOOKS_OUT).read_text())
+        self.assertEqual(render_books(load_procdef()), Path(BOOKS_OUT).read_text())
 
 
 if __name__ == "__main__":

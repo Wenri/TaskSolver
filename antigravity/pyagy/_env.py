@@ -27,7 +27,7 @@ SHIM = LIBAGY
 
 def preload_argv(agy_bin, agy_args, shim=None, env=None):
     """Build the argv that runs ``agy_bin`` (linked directly against ``libagy.so``) and record
-    ``AGY_PROC_REAL_EXE`` in ``env`` for the ``readlink_filter`` hook."""
+    ``AGY_PROC_REAL_EXE`` in ``env`` for the ``readlink_filter`` book."""
     del shim
     env = os.environ if env is None else env
     env["AGY_PROC_REAL_EXE"] = os.path.abspath(agy_bin)
@@ -38,8 +38,8 @@ def instrumented_env(capture="agy-capture.jsonl", log=None,
                      module="pyagy.agy_process",
                      base=None, extra_env=None):
     """Environment for an instrumented agy run: points the shim's embedded interpreter at
-    ``module`` (default ``pyagy.agy_process``) and writes hook events to the ``capture`` JSONL.
-    The shim installs the full working hook union (wire + app + rpc) on every run — the only gate
+    ``module`` (default ``pyagy.agy_process``) and writes book events to the ``capture`` JSONL.
+    The shim installs the full working book union (wire + app + rpc) on every run — the only gate
     is ``AGY_PROC_ENABLE`` (set here). This sets NO ``LD_PRELOAD``/``LD_LIBRARY_PATH``/``PYTHONPATH``:
     the shim is injected via :func:`preload_argv` (the loader's ``--preload``/``--library-path``) and
     the embedded interpreter finds pyagy/wirecap via ``site`` (see ``PYTHONHOME`` below), so nothing

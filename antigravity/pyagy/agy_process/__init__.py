@@ -1,12 +1,12 @@
 """agy_process — in-process Python side of the antigravity instrumentation.
 
-The native shim's worker thread calls `dispatch(kind, stream_id, data)` for every
-hook event (see src/pybridge.c). This is where your custom logic lives.
+The worker thread (wirecap/native) calls `dispatch(kind, stream_id, data)` for every book
+event. This is where your custom logic lives.
 
 Contract:
   dispatch(kind: str, stream_id: int, data: bytes) -> bytes | None
-    * ASYNC hooks (logging): return value is ignored — do fire-and-forget work.
-    * SYNC hooks (modify, e.g. tls_write when AGY_PROC_TLS_WRITE_SYNC=1): return
+    * ASYNC books (logging): return value is ignored — do fire-and-forget work.
+    * SYNC books (modify, e.g. tls_write when AGY_PROC_TLS_WRITE_SYNC=1): return
       replacement bytes (must be <= original length for in-place rewrite) or None
       to leave unchanged. Keep SYNC handlers fast/CPU-bound (they block a Go
       goroutine — see README's GC-stall note).
@@ -119,14 +119,14 @@ def on_dns(stream_id, data):
 
 
 def on_smoke(stream_id, data):
-    print("[agy_process] smoke hook fired — end-to-end pipeline OK", file=sys.stderr, flush=True)
+    print("[agy_process] smoke book fired — end-to-end pipeline OK", file=sys.stderr, flush=True)
     _rec.record("smoke", stream_id, data)
     return None
 
 
 def on_exit(stream_id, data):
     # os.Exit(code) fired — the clean end-of-capture marker. The exit code rode stream_id from the
-    # C hook, which SYNC-emits so this record is written (line-buffered → flushed) BEFORE agy's
+    # C book, which SYNC-emits so this record is written (line-buffered → flushed) BEFORE agy's
     # exit_group syscall. A capture that ends without this marker was truncated (crash/kill).
     # Responses still streaming (e.g. a session-title call agy never waited for) are emitted
     # first: they accumulate per responseId now, so no later request flushes them.
@@ -136,7 +136,7 @@ def on_exit(stream_id, data):
     return None
 
 
-# conversation-id capture (AGY_PROC_CONV_ID): the file_open hook (os.OpenFile) is C-filtered to
+# conversation-id capture (AGY_PROC_CONV_ID): the file_open book (os.OpenFile) is C-filtered to
 # conversation-store paths, so `data` is a path like `.../conversations/<uuid>.db` or
 # `.../brain/<uuid>/.../transcript.jsonl`. Extract the uuid and emit a `conversation_id` event
 # (deduped per process; the FIRST distinct id is the main/top-level conversation — subagents open
@@ -157,7 +157,7 @@ def on_file_open(stream_id, data):
 
 
 def on_readlink_filter(stream_id, data):
-    # The readlink_filter hook (os.readlink) RETURN-substituted "/proc/self/exe" — which resolves to
+    # The readlink_filter book (os.readlink) RETURN-substituted "/proc/self/exe" — which resolves to
     # the loader under `ld.so --preload` — with the real agy path (`data`, from AGY_PROC_REAL_EXE), so
     # os.Executable()/self-re-exec see agy, not ld.so. `data` is the substitute path we handed back.
     _rec.event({"kind": "readlink_filter", "requested": "/proc/self/exe",
@@ -166,7 +166,7 @@ def on_readlink_filter(stream_id, data):
 
 
 def on_cgt_args(stream_id, data):
-    # Diagnostic (AGY_PROC_CGT_ARGS): the C hook already rendered a readable arg
+    # Diagnostic (AGY_PROC_CGT_ARGS): the C book already rendered a readable arg
     # report; print it in full (the raw recorder would truncate to the preview len)
     # and store the whole text so it survives in the capture JSONL.
     report = data.decode("utf-8", "replace")
@@ -176,7 +176,7 @@ def on_cgt_args(stream_id, data):
 
 
 def on_callstack(stream_id, data):
-    # AGY_PROC_STACK: `data` = source-hook kind (NUL-terminated) + packed u64 frame
+    # AGY_PROC_STACK: `data` = source-book kind (NUL-terminated) + packed u64 frame
     # link-vaddrs (pc - module_base). Record raw; symbolize offline via symbolize.py
     # (the funcmap is too big to load inside agy).
     import struct
@@ -229,7 +229,7 @@ def dispatch(kind, stream_id, data):
         if handler is not None:
             return handler(stream_id, data)
         # Unrouted kind (resp/serialize/marshal/proto_marshal/send_user_msg/…):
-        # record it rather than drop it, so a hook is never silently ineffective.
+        # record it rather than drop it, so a book is never silently ineffective.
         _rec.record(kind, stream_id, data)
         return None
     except Exception:
@@ -238,7 +238,7 @@ def dispatch(kind, stream_id, data):
 
 
 # AgyProcess embedded-worker channel: run the pickled target on a daemon thread — separate from this
-# dispatch worker so a blocking recv() there can't starve hook dispatch. The capture pipeline above
+# dispatch worker so a blocking recv() there can't starve book dispatch. The capture pipeline above
 # stays live, so the target can consume decoded events in-process AND stream results over the
 # Connection. start() self-gates on the boot fd + sys._wire_shim and never raises.
 from wirecap.decode import mp_child

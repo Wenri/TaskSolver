@@ -2,11 +2,11 @@
 """Shared parsing for the agy toolchain: the C book table, ELF, and Go's pclntab.
 
 `make_libagy.py` converts raw agy into a shared library, then `build_symbols.py` resolves its
-metadata before any hook is patched. Both use the ELF/pclntab and original-prologue parsing
-here. `gen_sources.py` builds symbols_gen.h from that metadata and procdef.h, and builds
-stub_labels_gen.h and hooks.py from procdef.h alone.
+metadata before any book is patched. Both use the ELF/pclntab and original-prologue parsing
+here. `gen_sources.py` builds symbols_gen.h from that metadata and procdef.h, and books.py from
+procdef.h alone.
 
-Every fact about a hook is read from `src/procdef.h` — its targets and install mechanism — so that
+Every fact about a book is read from `src/procdef.h` — its targets and install mechanism — so that
 one C table stays the single source the host, the generated assembly and the Python mirror are all
 built from. Nothing here is specific to one agy release.
 """
@@ -23,9 +23,9 @@ lief.logging.disable()   # agy's layout makes lief chatty; the parse itself is f
 PROCDEF_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "procdef.h"))
 
-#: Go runtime entry points the static trampolines *call* (never hook): each stub hands its frame
+#: Go runtime entry points the static trampolines *call* (never book): each stub hands its frame
 #: to the cgocall gateway. They carry synthetic ids so they are exported and referenced exactly
-#: like hook rows; the generated stub assembly calls `agy_go__CGOCALL` / `agy_go__ASMCGOCALL`.
+#: like book rows; the generated stub assembly calls `agy_go__CGOCALL` / `agy_go__ASMCGOCALL`.
 GATEWAYS = {"CGOCALL": "runtime.cgocall", "ASMCGOCALL": "runtime.asmcgocall"}
 GATEWAY_TARGETS = tuple(GATEWAYS.values())
 
@@ -33,63 +33,50 @@ GATEWAY_TARGETS = tuple(GATEWAYS.values())
 ENTRY_TARGET = "runtime.rt0_go"
 
 
-def c_sym_name(hook_id: str) -> str:
-    """The C/ELF identifier libagy.so exports a hook's Go function under.
-
-    Keyed by the row's short id, not by the Go symbol: ids are already valid C identifiers, and
-    it makes every synthetic name in the pair of binaries read the same way — `agy_go__<id>` is
-    the Go side of exactly the row whose host side is `agy_stub__<id>`. The Go symbol a row
-    points at lives in procdef.h and symbols.json, which is where it is resolved.
-
-    One Go function reached by two rows is exported once per id, as aliases on one address.
-    """
-    return "agy_go__" + hook_id
+def c_sym_name(book_id: str) -> str:
+    """The export name of a row's Go function: `agy_go__<id>`, mirroring `agy_stub__<id>`."""
+    return "agy_go__" + book_id
 
 
 def export_map(rows):
-    """`{id: Go symbol}` for every name libagy.so must export as `agy_go__<id>`.
-
-    One entry per procdef row (so a disabled row keeps its export, and a function named by two
-    rows is aliased under both ids), plus the cgocall gateways under their synthetic ids.
-    """
+    """`{id: Go symbol}` for every row, disabled ones included, plus the cgocall gateways."""
     out = {r["id"]: r["symbol"] for r in rows}
     clash = set(out) & set(GATEWAYS)
     if clash:
-        raise SystemExit(f"procdef hook id(s) collide with the gateway ids: {sorted(clash)}")
+        raise SystemExit(f"procdef book id(s) collide with the gateway ids: {sorted(clash)}")
     out.update(GATEWAYS)
     return out
 
 
 # --- src/procdef.h ------------------------------------------------------------------------------
-# A row: { "id", WIRE_x, retcap, AGY_FULLGO/AGY_ASMGO/AGY_OFF(<symbol>) }; the symbol is a literal or
-# MACRO "suffix" concatenation (e.g. CAC "StreamGenerateContent").
+# A row: { "id", WIRE_x, retcap, AGY_FULLGO/AGY_ASMGO/AGY_OFF(<symbol>) }. The symbol is an optional
+# MACRO followed by adjacent string literals, which C concatenates (e.g. CAC "StreamGenerateContent").
+_LIT = r'"(?:[^"\\]|\\.)*"'
 _ROW = re.compile(
     r'\{\s*"(?P<id>[a-z0-9_]+)"\s*,\s*'
     r'(?P<mode>WIRE_\w+)\s*,\s*'
     r'(?P<retcap>-?\d+)\s*,\s*'
-    r'(?P<mech>AGY_\w+)\(\s*(?P<sym>(?:[A-Z_][A-Z0-9_]*\s*)?"(?:[^"\\]|\\.)*")\s*\)\s*\}'
+    rf'(?P<mech>AGY_\w+)\(\s*(?P<sym>(?:[A-Z_][A-Z0-9_]*\s*)?(?:{_LIT}\s*)+)\)\s*\}}'
 )
-_MACRO_DEF = re.compile(r'^\s*#define\s+([A-Z_][A-Z0-9_]*)\s+("(?:[^"\\]|\\.)*")\s*$', re.M)
+_MACRO_DEF = re.compile(rf'^\s*#define\s+([A-Z_][A-Z0-9_]*)\s+((?:{_LIT}\s*)+)$', re.M)
 
 
-def _unquote(lit):
-    return re.sub(r'\\(.)', r'\1', lit[1:-1])
+def _unquote(literals):
+    """The value of adjacent C string literals."""
+    return "".join(re.sub(r'\\(.)', r'\1', lit[1:-1]) for lit in re.findall(_LIT, literals))
 
 
 def parse_procdef(src_text):
-    """Every hook row from procdef.h, in table order."""
+    """Every row of BOOKS in procdef.h, in table order."""
+    src_text = src_text.replace("\\\n", "")   # splice continued lines, as the preprocessor does
     macros = {name: _unquote(val) for name, val in _MACRO_DEF.findall(src_text)}
     rows = []
     for m in _ROW.finditer(src_text):
-        sym = m.group("sym").strip()
-        prefix = ""
-        mac = re.match(r'^([A-Z_][A-Z0-9_]*)\s*(".*")$', sym, re.S)
-        if mac:
-            prefix = macros.get(mac.group(1), "")
-            sym = mac.group(2)
+        sym = m.group("sym")
+        mac = re.match(r'\s*([A-Z_][A-Z0-9_]*)', sym)
         rows.append({
             "id": m.group("id"),
-            "symbol": prefix + _unquote(sym),
+            "symbol": (macros.get(mac.group(1), "") if mac else "") + _unquote(sym),
             "mode": "sync" if m.group("mode") == "WIRE_SYNC" else "async",
             "mech": {"AGY_OFF": "off", "AGY_FULLGO": "fullcgo",
                      "AGY_ASMGO": "asmcgo"}[m.group("mech")],
@@ -99,13 +86,13 @@ def parse_procdef(src_text):
 
 
 def load_procdef(path=None):
-    """The hook rows from procdef.h. Empty means the table or this parser broke — never a
-    silently hook-free build, so it raises."""
+    """The book rows from procdef.h. Empty means the table or this parser broke — never a
+    silently book-free build, so it raises."""
     path = path or PROCDEF_PATH
     with open(path) as f:
         rows = parse_procdef(f.read())
     if not rows:
-        raise SystemExit(f"no hook rows parsed from {path}")
+        raise SystemExit(f"no book rows parsed from {path}")
     return rows
 
 
@@ -114,7 +101,7 @@ def active_rows(rows):
     return [r for r in rows if r["mech"] in ("fullcgo", "asmcgo")]
 
 
-def hook_targets(rows):
+def book_targets(rows):
     """Go symbols to resolve and export, in procdef order with the gateways last.
 
     Inactive (`AGY_OFF`) rows are kept, so a conversion fails if agy drops one, and re-enabling one
@@ -202,7 +189,7 @@ def _stack_check_at(b, k):
 
 
 def is_prologue(elf: ELF, d: bytes, addr: int) -> bool:
-    """Whether `addr` looks like a Go function entry — the layout guard for a resolved hook."""
+    """Whether `addr` looks like a Go function entry — the layout guard for a resolved book."""
     try:
         b = d[elf.v2o(addr):elf.v2o(addr) + 24]
     except ValueError:
@@ -215,7 +202,7 @@ def is_prologue(elf: ELF, d: bytes, addr: int) -> bool:
 
 
 def prologue_skip(elf: ELF, d: bytes, addr: int) -> int:
-    """Bytes to skip so the hook lands PAST the stack-check prologue — else Go's morestack re-runs
+    """Bytes to skip so the book lands PAST the stack-check prologue — else Go's morestack re-runs
     the entry and re-enters our trampoline, stalling agy. Finds `cmp 0x10(%r14),reg` then the
     following Jcc (to the morestack stub); the real body begins right after. 0 for nosplit funcs."""
     try:

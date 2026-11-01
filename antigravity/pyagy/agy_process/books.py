@@ -2,14 +2,14 @@
 
 GENERATED — do not edit by hand. Regenerate with::
 
-    pixi run shim-hooks
+    pixi run shim-books
 
 `pyagy.BOOKS` is a public introspection surface, so this file is checked in and ships in the
 wheel. Stdlib-pure: agy_process imports it inside the instrumented CLI's embedded interpreter.
 
 Each row mirrors one C row:
   id      the row's name, the `bk("id")` key at the C call sites
-  symbol  the Go symbol the hook patches
+  symbol  the Go symbol the book patches
   mode    "async" (log) | "sync" (block for a modify verdict)
   kind    the same name, as the tag passed to dispatch(kind, stream_id, data)
   mech    "off" (not installed) | "fullcgo" | "asmcgo" — the cgocall trampoline flavour
@@ -97,7 +97,7 @@ BOOKS = [
      "mode": 'async', "kind": 'usage_delta', "mech": 'fullcgo', "retcap": 0},
 ]
 
-#: kinds the Python layer DERIVES rather than receiving straight from a hook.
+#: kinds the Python layer DERIVES rather than receiving straight from a book.
 DERIVED_KINDS = ("genai_turn", "h2msg", "conversation_id", "callstack", "app_response")
 
 
@@ -111,7 +111,7 @@ def by_kind(kind):
     return [h for h in BOOKS if h["kind"] == kind]
 
 
-def enabled_hooks():
+def enabled_books():
     """Rows actually installed at runtime (everything not mech="off")."""
     return [h for h in BOOKS if h["mech"] != "off"]
 

@@ -6,7 +6,7 @@
                 is its resumable id, `s.history()` its stored transcript, and
                 `list_conversations()` enumerates past ones.
 - `ask` : one-shot sugar over a transient Session — run a turn and get a decoded
-                `AgyResponse`. One run installs the full hook union, so it captures the
+                `AgyResponse`. One run installs the full book union, so it captures the
                 wire turn (`.turns`), app answer (`.app_text`), and RPC timeline
                 (`.rpc_trace`) together; the `stack=`/`arg_probe=` overlays add symbolized
                 stacks (`.stacks`/`.call_graph`) and the arg-graph diagnostic
@@ -14,15 +14,15 @@
 - `AgyModel`  : TaskSolver adapter (prepare_payload/ask/rough_guess/run_once/…),
                 mirroring tasksolver.claude_code.ClaudeCodeModel.
 - `agy_process` : in-process recorder imported by the preloaded shim.
-- `BOOKS`/`by_mech`/`by_kind`/`enabled_hooks`/`sync_capable`/`DERIVED_KINDS` : the
+- `BOOKS`/`by_mech`/`by_kind`/`enabled_books`/`sync_capable`/`DERIVED_KINDS` : the
                 machine-readable mirror of BOOKS, the book table in src/procdef.h, for
-                introspecting which hooks are installed (by mechanism) and which kinds
+                introspecting which books are installed (by mechanism) and which kinds
                 can rewrite egress.
 
 Top-level names are loaded lazily (PEP 562): `import pyagy.agy_process` — done by the
 shim under a minimal *system* libpython — runs this __init__, so it must NOT eagerly
 import model (it pulls tasksolver, which that embedded interpreter can't load).
-The catalog names below live in `agy_process.hooks` (stdlib-pure), also lazily.
+The catalog names below live in `agy_process.books` (stdlib-pure), also lazily.
 """
 _LAZY = {
     # high-level client (the end-user API); Session is the first-class object
@@ -55,12 +55,12 @@ _LAZY = {
     "remove_mcp_servers": ".config",
     "detect_config_path": ".config",
     # the BOOKS mirror (stdlib-pure; safe under the embedded interpreter)
-    "BOOKS": ".agy_process.hooks",
-    "DERIVED_KINDS": ".agy_process.hooks",
-    "by_mech": ".agy_process.hooks",
-    "enabled_hooks": ".agy_process.hooks",
-    "by_kind": ".agy_process.hooks",
-    "sync_capable": ".agy_process.hooks",
+    "BOOKS": ".agy_process.books",
+    "DERIVED_KINDS": ".agy_process.books",
+    "by_mech": ".agy_process.books",
+    "enabled_books": ".agy_process.books",
+    "by_kind": ".agy_process.books",
+    "sync_capable": ".agy_process.books",
 }
 __all__ = list(_LAZY)
 

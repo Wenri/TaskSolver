@@ -2,14 +2,8 @@
 """Resolve the Go functions listed in `src/procdef.h` inside the stripped, Propeller/BOLT-reordered
 unpatched agy image and write symbols.json for the native host.
 
-The hook list is NOT repeated here: the targets, the ELF/pclntab parsing and the prologue
-arithmetic all come from `agyelf.py`, so this tool and `make_libagy.py` cannot disagree about where
-a hook lands. Conversion resolves this metadata after the ELF layout is final, before patching.
-
-Verification: every *installed* row (`AGY_FULLGO(symbol)`/`AGY_ASMGO(symbol)`) must resolve to a
-Go function entry with an intact frame prologue, or this exits non-zero —
-that is the tripwire for an agy layout change. Retired (`AGY_OFF(symbol)`) rows are resolved too (so
-re-enabling one is a procdef edit); several are frameless leaf getters with no prologue.
+Targets and parsing come from `agyelf.py`, shared with `make_libagy.py`. An installed row that does
+not resolve to an intact prologue fails the build: the tripwire for an agy layout change.
 
 Usage (from antigravity/):  python3 -m symbols.build_symbols <agy-binary> <out.json>
 """
@@ -18,13 +12,13 @@ import json
 import os
 import sys
 
-from .agyelf import GoImage, active_rows, hook_targets, load_procdef
+from .agyelf import GoImage, active_rows, book_targets, load_procdef
 
 
 def resolve_symbols(data: bytes, image_path: str, rows=None) -> tuple[dict, list[tuple[int, str]]]:
     """Resolve and validate an unpatched image without writing any output files."""
     rows = load_procdef() if rows is None else rows
-    targets = hook_targets(rows)
+    targets = book_targets(rows)
     installed = {r["symbol"] for r in active_rows(rows)}
 
     img = GoImage(data)
@@ -35,13 +29,13 @@ def resolve_symbols(data: bytes, image_path: str, rows=None) -> tuple[dict, list
             name2addr[nm] = addr
         funcmap.append((addr, nm))
 
-    hooks, skips, prologues, missing, unverified = {}, {}, {}, [], []
+    books, skips, prologues, missing, unverified = {}, {}, {}, [], []
     for nm in targets:
         if nm not in name2addr:
             missing.append(nm)
             continue
         a = name2addr[nm]
-        hooks[nm] = a
+        books[nm] = a
         skips[nm] = img.prologue_skip(a)
         prologues[nm] = img.frame_prologue_hex(a, skips[nm])
         if nm in installed and (not img.is_prologue(a) or skips[nm] <= 0
@@ -59,7 +53,7 @@ def resolve_symbols(data: bytes, image_path: str, rows=None) -> tuple[dict, list
         "text_base": img.text_base,
         "minpc": img.minpc,
         "total_funcs": img.nfunc,
-        "hooks": hooks,
+        "books": books,
         "skips": skips,
         "prologues": prologues,
         "missing": missing,
@@ -92,7 +86,7 @@ def main():
     write_symbols(metadata, funcmap, outpath)
 
     installed = {r["symbol"] for r in active_rows(rows)}
-    hooks, skips = metadata["hooks"], metadata["skips"]
+    books, skips = metadata["books"], metadata["skips"]
     fmpath = os.path.join(os.path.dirname(os.path.abspath(outpath)), "funcmap.tsv.gz")
     print(f"wrote {outpath}")
     print(f"  funcmap:    {fmpath} ({len(funcmap)} funcs)")
@@ -100,11 +94,11 @@ def main():
     print(f"  moduledata: {metadata['moduledata_vaddr']:#x}   text_base: {metadata['text_base']:#x}"
           + (f"   minpc: {metadata['minpc']:#x}" if metadata['minpc'] else ""))
     print(f"  funcs:      {metadata['total_funcs']}")
-    print(f"  hooks:      {len(hooks)}/{len(hook_targets(rows))}")
-    for nm in hook_targets(rows):
+    print(f"  books:      {len(books)}/{len(book_targets(rows))}")
+    for nm in book_targets(rows):
         flag = "" if nm in installed else "  (retired)"
-        print(f"    {hooks[nm]:#012x} (+{skips[nm]:2d})  {nm}{flag}")
-    print(f"  all {len(installed)} installed hook addresses verified as Go prologues ✓")
+        print(f"    {books[nm]:#012x} (+{skips[nm]:2d})  {nm}{flag}")
+    print(f"  all {len(installed)} installed book addresses verified as Go prologues ✓")
 
 
 if __name__ == "__main__":

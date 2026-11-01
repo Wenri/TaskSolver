@@ -1,15 +1,8 @@
-/* antigravity.cpp — host executable for `libagy.so`: splice the synthetic Go
- * `moduledata` describing each stub onto `agy_firstmoduledata.next`,
- * start the embedded CPython worker (when `AGY_PROC_ENABLE=1`), enable the
- * `ld`-bound static trampoline stubs, and transfer control to `agy_rt0_go(argc, argv)`.
+/* antigravity.cpp — the host for libagy.so: register the stubs' moduledata, start the embedded
+ * CPython worker when AGY_PROC_ENABLE is set, enable the books, then run agy_rt0_go.
  *
- * Linked directly against `libagy.so` as its first DT_NEEDED dependency (with
- * no PT_TLS segment of its own, so `ld-linux-x86-64.so.2` assigns `libagy.so`
- * static TLS slot 1 at [%fs:-0x4a0 .. %fs:0)). Both directions of symbol binding
- * (`libagy.so` -> `agy_stub__*` in `vendor/agy` and `vendor/agy` -> `agy_go__*`, `agy_resume__*`,
- * `agy_firstmoduledata`, `agy_rt0_go` in `libagy.so`) are resolved at load time
- * by `ld-linux-x86-64.so.2`: eager `R_X86_64_JUMP_SLOT` for the stub imports and
- * `R_X86_64_GLOB_DAT` for the host's GOT references.
+ * libagy.so is the first DT_NEEDED and this executable has no PT_TLS of its own, so ld.so gives
+ * libagy.so static TLS slot 1 and binds both directions eagerly, before Go starts.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -21,19 +14,17 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "wirecap.h"
-#include "symbols_gen.h"
 #include "gocall.h"
-#include <cstddef>
 #include "goframe.h"
 #include "gomod.h"
+#include "symbols_gen.h"
+#include "wirecap.h"
+#include <cstddef>
 
 /* ---- logging -------------------------------------------------------------- */
 static FILE *g_logf;
 #define LOG(...) do { FILE *f = g_logf ? g_logf : stderr; \
     std::fprintf(f, "[antigravity] " __VA_ARGS__); std::fputc('\n', f); std::fflush(f); } while (0)
-
-static bool g_conv_id;   /* AGY_PROC_CONV_ID=1 → enable the os.OpenFile conversation-id probe */
 
 extern "C" void agy_rt0_go(int argc, char **argv);
 
@@ -92,7 +83,7 @@ int getaddrinfo(const char *node, const char *service,
 /* ---- initialization + entrypoint ------------------------------------------ */
 static void agy_init(void)
 {
-    /* Register the linked stub ranges before Go starts, even when hooks are disabled. */
+    /* Register the linked stub ranges before Go starts, even when books are disabled. */
     if (agy_gomod_register(agy_stub_descriptors()) != 0) {
         std::fprintf(stderr, "[antigravity] FATAL: invalid trampoline metadata\n");
         std::abort();
@@ -103,23 +94,22 @@ static void agy_init(void)
 
     const char *logpath = std::getenv("AGY_PROC_LOG");
     if (logpath && *logpath) g_logf = std::fopen(logpath, "ae");
-    g_conv_id = std::getenv("AGY_PROC_CONV_ID") != nullptr;
     agy_set_real_exe(std::getenv("AGY_PROC_REAL_EXE"));
 
-    /* build-id guard: refuse to enable hooks on a different libagy.so build */
+    /* build-id guard: refuse to enable books on a different libagy.so build */
     struct bid b = { .hex = "", .base = 0, .done = 0 };
     dl_iterate_phdr(bid_cb, &b);
     if (!b.base || std::strcmp(b.hex, AGY_BUILD_ID) != 0) {
-        LOG("build-id not agy (running=%s symbols=%s); not hooking this process",
+        LOG("build-id not agy (running=%s symbols=%s); not booking this process",
             b.hex[0] ? b.hex : "<none>", AGY_BUILD_ID);
         if (!b.base || !std::getenv("AGY_PROC_FORCE")) return;
     } else {
         LOG("build-id ok (%s)", b.hex);
     }
 
-    if (wire_start() != 0) { LOG("python bridge failed to start; not enabling hooks"); return; }
+    if (wire_start() != 0) { LOG("python bridge failed to start; not enabling books"); return; }
     LOG("main module base = 0x%llx", (unsigned long long)b.base);
-    agy_enable_hooks(b.base, g_conv_id);
+    agy_enable_books(b.base, std::getenv("AGY_PROC_CONV_ID") != nullptr);
     LOG("initialized");
 }
 

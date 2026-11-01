@@ -15,7 +15,7 @@ Two modify mechanisms compose here (the package accepts *both*, per the design):
     (framing-safe; additive changes are impossible — use tools/context for those).
   * ``tools=`` / ``context=`` — additive, via an injected MCP server (config.py).
 
-Every call installs the full working hook union, so one run captures all surfaces at once:
+Every call installs the full working book union, so one run captures all surfaces at once:
   * ``.turns``/``.request``/``.usage``/``.model`` — the decoded wire model turn (and the
     ``rewrite=`` SYNC-substitution surface);
   * ``.app_text``/``.source`` — the answer decoded at agy's own consumer boundary;
@@ -194,7 +194,7 @@ class AgyResponse:
 
     @cached_property
     def rpc_trace(self):
-        """A time-ordered, labeled RPC timeline from the ``CodeAssistClient`` hooks —
+        """A time-ordered, labeled RPC timeline from the ``CodeAssistClient`` books —
         ``StreamGenerateContent`` is the model turn. ``""`` when the capture holds no
         ``rpc_*`` events."""
         if not self._has_capture():
@@ -205,7 +205,7 @@ class AgyResponse:
     @cached_property
     def cgt_args(self):
         """The trampoline arg-graph reports captured with ``arg_probe=True``
-        (``AGY_PROC_CGT_ARGS``) — one rendered string per hook fire. ``[]`` otherwise."""
+        (``AGY_PROC_CGT_ARGS``) — one rendered string per book fire. ``[]`` otherwise."""
         if not self._has_capture():
             return []
         reports = []
@@ -468,7 +468,7 @@ def ask(prompt, *, model=None, workspace=None, tools=None, context=None, mcp_ser
         continue_latest=False, data_dir=None, trust=True, extra_flags=None):
     """Run one ``agy --print`` turn and return a decoded :class:`AgyResponse`.
 
-    The shim installs the full working hook union, so one turn populates the wire
+    The shim installs the full working book union, so one turn populates the wire
     (``.turns``/``.request``/``.usage``/``.model``), app-boundary (``.app_text``), and
     RPC-trace (``.rpc_trace``) surfaces together. The overlays ``stack=True`` /
     ``arg_probe=True`` add the diagnostic call-stack / trampoline arg-graph, surfaced on
