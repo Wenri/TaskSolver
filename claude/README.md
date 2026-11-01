@@ -6,6 +6,12 @@ Code executable. It does not need native instrumentation or a separate global CL
 The `claude-code` and `claude-agent` model aliases select this backend; the direct
 Anthropic Messages adapter remains separate.
 
+For the ordinary Claude UI, run `pixi run python -m tasksolver.terminal claude`.
+It uses the bundled executable in a managed screen, alongside other backends if desired,
+with optional browser viewing. This UI uses Claude's own session store; SDK result
+metadata is available through the SDK calls below. See
+[managed terminal screens](../README.md#managed-terminal-screens).
+
 The official Python SDK source is checked into `claude/vendor/sdk` at tag
 `v0.2.176` (commit `2146f9d8985513053e904b13200c8f744b36785a`), and packaged
 as part of TaskSolver. There is no separate `claude-agent-sdk` package dependency.

@@ -6,6 +6,12 @@ snapshot. The CLI retains source patches at its HTTP boundary for native request
 response and usage capture through `wirecap` and its embedded CPython bridge.
 Low-level `pycodex.ask` and `pycodex.Session` keep the exec/PTY interfaces.
 
+For the native UI, run `pixi run python -m tasksolver.terminal codex`; it also works
+alongside agy, Claude and Kimi screens, with simultaneous local and browser views.
+Interactive launches, including `pycodex.Session`, use `--no-daemon`: the bundled
+binary lacks the upstream daemon package layout, so its app-server and capture stay
+owned by the screen or session. See [managed terminal screens](../README.md#managed-terminal-screens).
+
 ## Layout
 
 - `vendor/` — the Codex repo at **0.166.0** (`rust-v0.166.0`, upstream commit
@@ -53,6 +59,12 @@ artifacts with `pixi reinstall --locked tasksolver` in the consuming workspace.
 Omit `--locked` when dependency changes require an updated lockfile. Do not
 install a separate `openai-codex` or `openai-codex-cli-bin` distribution into
 the same environment; TaskSolver supplies both SDK source and runtime.
+
+Cargo's source cache defaults to `$HOME/.cargo` when `CARGO_HOME` is unset. Fresh Pixi
+build directories have a new `HOME`, so crates, including V8, may download again
+while compiled artifacts in `vendor/codex-rs/target` are reused. The project does not
+set `CARGO_HOME`; a persistent value in the build environment could retain that
+source cache. Build time depends on which downloads and compilation steps are needed.
 
 ## Official Python SDK
 

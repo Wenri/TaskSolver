@@ -87,7 +87,9 @@ def codex_argv(prompt: str | None, workspace: str, model: str | None = None,
             argv = [bin_, "resume", "--last"]
         else:
             argv = [bin_, *([prompt] if prompt else [])]
-        argv += ["-C", workspace]
+        # The bundled binary has no upstream daemon package layout. Keep its
+        # app-server and capture worker owned by this interactive process.
+        argv += ["-C", workspace, "--no-daemon"]
     else:
         # One-shot, the direct counterpart of `agy --print`. `codex exec resume` is the
         # non-interactive resume (exec/src/cli.rs Command::Resume); with --last the

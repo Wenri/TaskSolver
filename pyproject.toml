@@ -175,6 +175,9 @@ libclang = ">=23.1.4,<24"
 libcap = ">=2.78,<3"
 pygit2 = ">=1.19.3,<2"
 htop = ">=3.5.1,<4"
+# Managed interactive screens and the optional browser view.
+tmux = ">=3.8_,<4"
+ttyd = ">=1.7.4"
 
 # setup.py's build_py step compiles the bundled native runtimes during package installation.
 [tool.pixi.package]

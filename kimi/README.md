@@ -5,6 +5,10 @@ capture patch. The CLI loads an N-API addon that embeds CPython and runs the sha
 `wirecap` decoder. `pykimi` exposes one-shot calls, persistent sessions and the
 TaskSolver `KimiCodeModel` adapter.
 
+For the native UI, run `pixi run python -m tasksolver.terminal kimi`. It shares the
+named-screen manager and optional browser view with agy, Codex and Claude, retaining
+Kimi's linked capture. See [managed terminal screens](../README.md#managed-terminal-screens).
+
 ## Layout
 
 - `vendor/kimi-code/` — the Kimi Code monorepo, vendored at tag

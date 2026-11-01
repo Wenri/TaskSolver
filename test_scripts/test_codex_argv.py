@@ -61,7 +61,19 @@ def test_argv_stdin() -> None:
     check(argv == [BIN, "exec", "-", "--skip-git-repo-check", "-C", WS],
           "positional becomes -")
     argv = codex_argv("p", WS, codex_bin=BIN, persistent=True, prompt_via_stdin=True)
-    check(argv == [BIN, "p", "-C", WS], "TUI ignores prompt_via_stdin")
+    check(argv == [BIN, "p", "-C", WS, "--no-daemon"], "TUI ignores prompt_via_stdin")
+
+
+def test_argv_interactive_owned_process() -> None:
+    print("[offline] codex_argv: interactive sessions own their app-server")
+    argv = codex_argv(None, WS, codex_bin=BIN, persistent=True)
+    check(argv == [BIN, "-C", WS, "--no-daemon"], "TUI avoids packaged daemon discovery")
+    argv = codex_argv(None, WS, codex_bin=BIN, persistent=True, session_id="saved-thread")
+    check(argv == [BIN, "resume", "saved-thread", "-C", WS, "--no-daemon"],
+          "interactive resume keeps the app-server in this process")
+    argv = codex_argv(None, WS, codex_bin=BIN, persistent=True, continue_latest=True)
+    check(argv == [BIN, "resume", "--last", "-C", WS, "--no-daemon"],
+          "interactive latest resume keeps the app-server in this process")
 
 
 def test_argv_resume_drops_C() -> None:
@@ -215,6 +227,7 @@ def test_sessions_reverted_rollout() -> None:
 def main() -> None:
     test_argv_fresh()
     test_argv_stdin()
+    test_argv_interactive_owned_process()
     test_argv_resume_drops_C()
     test_env_codex_home()
     test_mcp_flags_wrap()

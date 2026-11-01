@@ -9,6 +9,10 @@ booked Go function with a jump to a host stub; a small C++23 host, `vendor/agy`,
 first `DT_NEEDED`, registers the stubs with Go's runtime and calls `agy_rt0_go`. Book events reach
 an embedded CPython interpreter on a worker thread, where your logic lives (`pyagy/agy_process/`).
 
+To use the native interactive UI, run `pixi run python -m tasksolver.terminal agy`.
+Python manages named screens through the shared wirecap terminal manager, with optional
+browser viewing and the same linked capture. See [managed terminal screens](../README.md#managed-terminal-screens).
+
 ## Binary constraints
 
 | Fact | Consequence |

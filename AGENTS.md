@@ -50,8 +50,10 @@ isolation, so `[build-system].requires` and the native tools must also be in
 `[tool.pixi.package.host-dependencies]`. Under rattler-build `CONDA_PREFIX` is the empty build env:
 `setup.py` (`native_build_env`) points native builds at `$PREFIX` and passes `PY3CONFIG`.
 `BuildPyNative` re-raises native failures as `SystemExit`, since the editable install would
-otherwise only warn. A fresh build work dir has its own `HOME`, so codex's crates re-download and
-rebuild (~25 min).
+otherwise only warn. A fresh build work dir has its own `HOME`. With `CARGO_HOME` unset,
+Cargo uses `$HOME/.cargo`, so dependency sources (including the V8 crate) may download again
+even when compiled artifacts in `codex/vendor/codex-rs/target` are reused. A persistent
+`CARGO_HOME` could retain this source cache; the project does not configure one.
 
 **Toolchain.** Conda GCC `>=15,<16` (C++23; GCC 15's constexpr asm strings build agy's stubs).
 After a compiler-major upgrade or removal of a cached build environment, reconfigure the
@@ -209,6 +211,25 @@ the returned id is read from the store, so a silent fork shows), `prompt_via_std
 own MCP and tool children. Tests: `test_codex_argv.py`, `test_codex_process.py`.
 
 ## Agent runtime subsystems
+
+**Interactive screens.** `tasksolver.terminal.open_terminal` launches the ordinary
+agy/Codex/Claude/Kimi UI in `wirecap.runtime.terminal.TerminalManager`, using a private
+tmux server. Pixi supplies tmux and ttyd >=1.7.4; non-Pixi environments must provide
+these executables on `PATH` (ttyd is only needed for browser viewing).
+Python attaches its existing TTY; never open a desktop terminal. Screens
+keep running across detach until the manager closes. Each screen carries an inherited
+`TASKSOLVER_TERMINAL_SCREEN` ownership marker for descendant cleanup; preserve it in
+child environments. Provider configuration belongs in TaskSolver, generic screen
+lifecycle in wirecap's parent-side runtime. Native capture applies to agy/Codex/Kimi;
+the ordinary Claude UI has no wirecap capture. Default captures are temporary; explicit
+paths persist. `wirecap.runtime.webterm.WebTerminal` uses ttyd for optional browser
+viewing on loopback, with read-only input by default and a grouped tmux session for independent
+local/web screen selection. Use SSH forwarding for remote viewing. Closing the final
+screen closes its viewers; the manager remains reusable. The CLI's `--web-port` also
+attaches the local TTY when available, then keeps serving after local detach until
+Ctrl-C. `--no-attach` with `--web-port` forces web-only operation. Offline checks:
+`test_terminal.py`, `test_tasksolver_terminal.py`, `test_webterm.py` and
+`test_webterm_views.py`. Run them through Pixi; they send input only to local stubs.
 
 Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protocol directly.
 

@@ -89,6 +89,12 @@ pixi run python test_scripts/test_wire_process.py
 pixi run python test_scripts/test_wire_bridge.py
 pixi run python test_scripts/test_wirecap_framing.py
 
+# Managed interactive screens (Pixi supplies tmux and ttyd)
+pixi run python test_scripts/test_terminal.py
+pixi run python test_scripts/test_tasksolver_terminal.py
+pixi run python test_scripts/test_webterm.py
+pixi run python test_scripts/test_webterm_views.py
+
 # Agy build metadata, native readers and configuration
 pixi run python test_scripts/test_agy_symbols.py
 pixi run python test_scripts/test_agy_stubs.py
@@ -149,6 +155,97 @@ print(parsed)
 `rough_guess` retries parsing up to `max_tries` (default 1); if the reply still won't parse it raises `GPTMaxTriesExceededException`, which exposes the last attempt's `.raw_response`, `.response_metadata`, and `.request_payload` so you can inspect what the model actually returned.
 
 To dispatch by model-id instead of importing an adapter directly, use `tasksolver.agent.Agent(api_key, task, vision_model="claude-code-sonnet-4-6")` and call `agent.visual_interface.run_once(question)`. Runnable text-only and vision examples live in [`test_scripts/`](test_scripts/).
+
+### Managed terminal screens
+
+Run the native agy, Codex, Claude and Kimi interfaces in named screens inside the
+terminal that is already running Python:
+
+```bash
+pixi run python -m tasksolver.terminal agy codex claude kimi
+```
+
+Pixi supplies [tmux](https://github.com/tmux/tmux/wiki/Getting-Started) and
+[ttyd](https://github.com/tsl0922/ttyd) **1.7.4 or newer**.
+TaskSolver owns a private tmux server; your existing tmux sessions are unaffected.
+Press **Ctrl-b w** to choose a screen, **Ctrl-b n/p** for next/previous, and
+**Ctrl-b d** to detach. The command above then exits and closes its screens.
+Each backend keeps its normal login, workspace trust and tool approval UI. No prompt
+is submitted during launch. `--workspace PATH`, `--model NAME` and `--no-capture`
+configure the launch; a model name must be understood by every selected backend.
+Terminal backends are exactly `agy`, `codex`, `claude` and `kimi`; model names are
+forwarded unchanged, without `Agent`'s model-id alias expansion.
+
+For application-controlled lifetimes, use the shared manager directly:
+
+```python
+from tasksolver.terminal import TerminalManager, open_terminal
+
+with TerminalManager(workspace=".") as terminals:
+    agy = open_terminal("agy", manager=terminals)
+    codex = open_terminal("codex", manager=terminals)
+    claude = open_terminal("claude", manager=terminals)
+    kimi = open_terminal("kimi", manager=terminals)
+    terminals.attach("agy")  # Uses this terminal; returns when you detach.
+    print(agy.snapshot(history=100))
+    # Screens still run here, until explicitly closed or the context exits.
+```
+
+`terminals.screens` exposes the named screens. Each screen has `send(text)`,
+`submit(text)` (paste then Enter), `send_keys("C-c")`, `snapshot()`, `alive`,
+`exit_status` and `close()`. Multiple screens may use the same backend; names default
+to `agy`, `agy-2`, etc. `TerminalManager.open(name, argv)` also runs arbitrary
+commands. The generic manager lives in `wirecap.runtime.terminal`; provider launch
+configuration stays in `tasksolver.terminal`. It creates no desktop windows.
+
+Agy, Codex and Kimi keep their linked JSONL capture, exposed as `screen.capture_path`.
+Default capture files are temporary and removed when the manager closes. Pass
+`capture="/absolute/path/run.jsonl"` to retain one, or `capture=False` to disable it.
+The ordinary Claude UI uses Claude's own session store and has `capture_path=None`;
+SDK calls remain available separately through `pyclaude`.
+CLIs may contact their services during startup, so captures can include account and
+configuration metadata before any prompt is sent.
+
+For browser viewing, run:
+
+```bash
+pixi run python -m tasksolver.terminal agy codex claude kimi --web-port 7681
+```
+
+Open the printed loopback URL. When stdin and stdout are terminals, the launcher also
+attaches the local terminal, so local and browser views run together. **Ctrl-b d**
+detaches locally while keeping the screens and web view running; **Ctrl-C** at the
+launcher then closes them. Add `--no-attach` to `--web-port` for web-only operation.
+Without a local TTY, web-only operation is automatic. The browser is read-only by default;
+`--writable` enables typing and tmux screen selection. No browser is opened
+automatically. To view it from another host, forward the port and open
+`http://127.0.0.1:7681` on your computer:
+
+```bash
+ssh -N -L 7681:127.0.0.1:7681 user@host
+```
+
+The server binds only to `127.0.0.1` and checks WebSocket origins. Python can keep a
+local and browser view open together, or serve a particular screen read-only:
+
+```python
+from tasksolver.terminal import TerminalManager, open_terminal
+from wirecap.runtime.webterm import WebTerminal
+
+with TerminalManager() as terminals:
+    open_terminal("agy", manager=terminals)
+    open_terminal("codex", manager=terminals)
+    with WebTerminal(terminals, screen="codex", port=7681) as web:
+        print(web.url, flush=True)
+        terminals.attach("agy")
+```
+
+The web view shares the existing processes and keeps its screen selection independent
+of the local view. Closing a view leaves the screens running; closing the last screen
+closes its viewers. The manager can then open new screens and viewers. Closing the
+manager closes everything it owns. `port=0` selects an available port. Outside Pixi,
+install tmux and, for browser viewing, ttyd >=1.7.4 on `PATH`. Executables can be
+selected with `tmux_bin=` / `ttyd_bin=` or the CLI's `--tmux-bin` / `--ttyd-bin`.
 
 ### Chat mode
 
