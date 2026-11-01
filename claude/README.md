@@ -8,8 +8,8 @@ Anthropic Messages adapter remains separate.
 
 For the ordinary Claude UI, run `pixi run python -m tasksolver.terminal claude`.
 It uses the bundled executable in a managed screen, alongside other backends if desired,
-with optional browser viewing. This UI uses Claude's own session store; SDK result
-metadata is available through the SDK calls below. See
+with optional browser viewing. This UI uses Claude's own session store and runs
+separately from SDK calls. See
 [managed terminal screens](../README.md#managed-terminal-screens).
 
 The official Python SDK source is checked into `claude/vendor/sdk` at tag
@@ -27,6 +27,23 @@ Override the executable path with
 After changing the wrapper or vendored SDK, run `pixi reinstall --locked tasksolver`
 in the consuming workspace to refresh its installed copy. Omit `--locked` if
 dependencies changed; see the [installation notes](../README.md#install).
+
+## Native UI and SDK transport
+
+In the pinned version, the Agent SDK launches Claude with `stream-json` input and
+output over subprocess pipes. It does not attach to an existing native terminal
+UI. Resuming a session ID starts another process using the saved conversation;
+it does not control the process in a managed screen. Running the parent Python
+under a terminal does not change this protocol.
+
+The SDK accepts a custom transport, but that transport still needs a CLI endpoint
+that handles SDK initialization, control requests and result events. The native
+UI's [inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket)
+accepts peer messages, without providing that SDK protocol.
+[Hooks](https://code.claude.com/docs/en/hooks) can expose native session events,
+but they are not SDK results: a `Stop` hook can be followed by continued work.
+TaskSolver currently exposes screen input through `TerminalScreen`; it does not
+provide a Python SDK attachment to Claude's native UI.
 
 ## Authentication
 

@@ -231,6 +231,11 @@ Ctrl-C. `--no-attach` with `--web-port` forces web-only operation. Offline check
 `test_terminal.py`, `test_tasksolver_terminal.py`, `test_webterm.py` and
 `test_webterm_views.py`. Run them through Pixi; they send input only to local stubs.
 
+The pinned Claude SDK uses subprocess `stream-json` pipes and cannot attach to a
+running native UI. A resumed session ID starts a separate process. The native
+inbox socket and lifecycle hooks are distinct from the SDK control/result
+protocol; do not represent peer messages or `Stop` hooks as SDK result events.
+
 Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protocol directly.
 
 - **`wirecap/`**, the shared capture layer:

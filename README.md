@@ -202,7 +202,9 @@ Agy, Codex and Kimi keep their linked JSONL capture, exposed as `screen.capture_
 Default capture files are temporary and removed when the manager closes. Pass
 `capture="/absolute/path/run.jsonl"` to retain one, or `capture=False` to disable it.
 The ordinary Claude UI uses Claude's own session store and has `capture_path=None`;
-SDK calls remain available separately through `pyclaude`.
+SDK calls through `pyclaude` start separate processes. They cannot attach to the
+running UI, even when resuming its session ID. See
+[Claude's UI and SDK transports](claude/README.md#native-ui-and-sdk-transport).
 CLIs may contact their services during startup, so captures can include account and
 configuration metadata before any prompt is sent.
 
