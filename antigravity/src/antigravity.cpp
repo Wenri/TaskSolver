@@ -1,5 +1,5 @@
 /* antigravity.cpp — host executable for `libagy.so`: splice the synthetic Go
- * `moduledata` covering `agy_trampolines` onto `agy_firstmoduledata.next`,
+ * `moduledata` describing each stub onto `agy_firstmoduledata.next`,
  * start the embedded CPython worker (when `AGY_PROC_ENABLE=1`), enable the
  * `ld`-bound static trampoline stubs, and transfer control to `agy_rt0_go(argc, argv)`.
  *
@@ -29,8 +29,8 @@
 #include "goframe.h"
 #include "gomod.h"
 
-static_assert(BK_SLOTS <= AGY_GOMOD_MAX_SLOTS,
-              "more hooks than the static synthetic-moduledata holds — bump AGY_GOMOD_MAX_SLOTS in gomod.h");
+static_assert(BK_STUB_COUNT <= AGY_GOMOD_MAX_FUNCS,
+              "more hooks than the static synthetic-moduledata holds — bump AGY_GOMOD_MAX_FUNCS in gomod.h");
 
 /* ---- logging -------------------------------------------------------------- */
 static FILE *g_logf;
@@ -96,20 +96,11 @@ int getaddrinfo(const char *node, const char *service,
 /* ---- initialization + entrypoint ------------------------------------------ */
 static void agy_init(void)
 {
-    /* Register the synthetic Go moduledata covering `agy_trampolines` unconditionally
-     * before Go starts, since `libagy.so` statically jumps through `agy_stub__*`. */
-    /* The stubs tile the section by alignment, so a stub that outgrew its slot shows up here as
-     * a section wider than nslots * stride. Nothing earlier can catch it (see goframe.cpp). */
-    const size_t tramp_bytes = (size_t)(agy_tramp_region_end - agy_tramp_region_start);
-    if (tramp_bytes != (size_t)BK_SLOTS * AGY_SLOT_SIZE) {
-        std::fprintf(stderr, "[antigravity] FATAL: trampoline region is %zu bytes, expected %d*%d;"
-                             " a stub body outgrew its slot\n",
-                     tramp_bytes, BK_SLOTS, AGY_SLOT_SIZE);
+    /* Register the linked stub ranges before Go starts, even when hooks are disabled. */
+    if (agy_gomod_register(agy_stubs, BK_STUB_COUNT) != 0) {
+        std::fprintf(stderr, "[antigravity] FATAL: invalid trampoline metadata\n");
         std::abort();
     }
-    agy_gomod_register((uintptr_t)agy_tramp_region_start,
-                       (uintptr_t)agy_tramp_region_end,
-                       AGY_SLOT_SIZE, BK_SLOTS, AGY_FRAME, AGY_FRAME_LO);
 
     if (!std::getenv("AGY_PROC_ENABLE")) return;          /* opt-in */
     if (std::getenv("_AGY_SBOXSERVE")) return;            /* skip sandbox-server children */

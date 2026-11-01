@@ -178,8 +178,8 @@ endif()
 if(TASKSOLVER_LTO)
   target_compile_options(agy PRIVATE -flto=auto)
   target_link_options(agy PRIVATE -flto=auto)
-  # ...except goframe.cpp. Its naked asm stubs must retain their slot order and padding;
-  # keep LTO from merging or moving them. See test_agy_stubs.py for compiler checks.
+  # ...except goframe.cpp: keep asm-defined boundary labels and their external references
+  # reliable. Metadata uses linked addresses, not function order. See test_agy_stubs.py.
   set_source_files_properties(src/goframe.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 endif()
 target_include_directories(agy PRIVATE "${CONDA_PREFIX}/include")

@@ -4,8 +4,8 @@ bidirectional static `ld` binding:
   - Exports `agy_rt0_go` (`runtime.rt0_go`), `agy_firstmoduledata` (`runtime.firstmoduledata`),
     every Go hook target (`agy_go__*`), and each active hook's continuation
     (`agy_resume__<id>` at entry + skip + displaced prologue length) in `libagy.so`'s `.dynsym`.
-  - Imports each active static trampoline stub (`agy_stub__<id>`, defined in `vendor/agy`'s
-    `agy_trampolines` section) via eagerly bound `R_X86_64_JUMP_SLOT` relocations in
+  - Imports each active static trampoline stub (`agy_stub__<id>`, an ordinary `.text`
+    function in `vendor/agy`) via eagerly bound `R_X86_64_JUMP_SLOT` relocations in
     `.got.plt.agy`. Each hooked function's `entry + skip` gets a five-byte `jmp rel32`
     to its `.plt.agy` entry; INT3 fills the rest of the displaced prologue. The PLT
     entry jumps through its GOT slot. `ld.so` binds both

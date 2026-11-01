@@ -13,13 +13,6 @@
 #define AGY_GOFRAME_H
 
 #define AGY_FRAME        112   /* bytes the stub subtracts from rsp */
-#define AGY_SLOT_SIZE    256   /* stride between stubs */
-#define AGY_TRAMP_SECTION "agy_trampolines"   /* a C identifier, so ld defines __start_/__stop_ */
-
-/* The frame is live from the end of subq through the end of leaq, for the synthetic pcsp. */
-#define AGY_FRAME_LO      20
-#define AGY_FRAME_HI_FULLCGO 167
-#define AGY_FRAME_HI_ASMCGO  173
 
 #define AGY_OFF_FN         0   /* cgocall arg 0: the C handler */
 #define AGY_OFF_ARG        8   /* cgocall arg 1: &block */
@@ -39,17 +32,19 @@
 #define AGY_OFF_RDX       96
 #define AGY_OFF_RBP      104
 
-/* The trampoline region, bounded by the linker. */
+/* Linked function boundaries, independent of section placement or function order.
+ * The frame is live after SUB through the end of LEA; the end label follows RET. */
+typedef struct agy_stub_info {
+    void (*entry)(void);
+    const unsigned char *frame_start, *frame_end, *end;
+} agy_stub_info;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-extern const unsigned char __start_agy_trampolines[];
-extern const unsigned char __stop_agy_trampolines[];
+extern const agy_stub_info agy_stubs[];
 #ifdef __cplusplus
 }
 #endif
-
-#define agy_tramp_region_start __start_agy_trampolines
-#define agy_tramp_region_end   __stop_agy_trampolines
 
 #endif /* AGY_GOFRAME_H */

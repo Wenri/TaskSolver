@@ -1,4 +1,4 @@
-/* gomod.h — go1.26 runtime-metadata mirrors for the cgocall trampoline.
+/* gomod.h — go1.27 runtime-metadata mirrors for the cgocall trampolines.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -20,15 +20,15 @@
  * metadata in a c-shared lib's own runtime); a raw C trampoline has none, so the
  * blog's scheme has the same latent crash and simply never stresses GC.
  *
- * FIX: register a synthetic runtime.moduledata that covers the trampoline page so
+ * FIX: register a synthetic runtime.moduledata that describes each trampoline so
  * findfunc resolves our PCs. findfunc -> findmoduledatap (symtab.go:866) walks the
  * `firstmoduledata` LINKED LIST, so registration is a single pointer write
  * (walk to the tail, set tail.next = &our_md) — no runtime.modulesinit, no Go
  * allocation, no modulesSlice (that snapshot is only for global data scanning,
- * which our data-less module doesn't need), and moduledataverify1 is startup-only
- * so it never runs on us. build_symbols.py already resolves `moduledata_vaddr`
- * (== &runtime.firstmoduledata); we clone that live struct to inherit the exact
- * go1.26 layout + all gc/type/pcHeader pointers, then patch only the fields below.
+ * which our data-less module doesn't need). The loader binds `agy_firstmoduledata`;
+ * we build fresh tables in static storage. A textsectmap maps each linked stub to
+ * a compact logical range, excluding gaps and unrelated C functions. The function
+ * table uses those logical offsets, and each pcsp uses its own assembly labels.
  *
  * TRAMPOLINE FRAME GEOMETRY (amd64, framepointer_enabled) — from traceback.go:
  *   fp   = sp + funcspdelta(pc) + 8      (ret-addr slot at fp-8 == [sp+spdelta])
@@ -60,6 +60,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "goframe.h"
 
 /* ---- Go aggregate-type ABI mirrors (amd64) ------------------------------- */
 typedef struct { void *ptr; intptr_t len; intptr_t cap; } go_slice;   /* []T   */
@@ -76,8 +77,11 @@ typedef struct {
     uintptr_t funcnameOffset, cuOffset, filetabOffset, pctabOffset, pclnOffset;
 } go_pcHeader;
 
-/* ---- runtime.functab (symtab.go:580): entryoff relative to moduledata.text */
+/* ---- runtime.functab: logical text entryoff and pclntable funcoff. */
 typedef struct { uint32_t entryoff, funcoff; } go_functab;
+
+/* Logical text offsets mapped onto independent linked function ranges. */
+typedef struct { uintptr_t vaddr, end, baseaddr; } go_textsect;
 
 /* ---- runtime.findfuncbucket (symtab.go:601) ------------------------------ */
 typedef struct { uint32_t idx; uint8_t subbuckets[16]; } go_findfuncbucket;
@@ -113,7 +117,7 @@ typedef struct { int32_t n, nbit; uint8_t bytedata[]; } go_stackmap;
  * release-branch.go1.27 src/runtime/symtab.go AND the live agy binary (hasmain@512,
  * typedesclen@304, itaboffset@320, gofunc@344, next@560 all match). The _Static_
  * asserts in gomod.cpp pin the critical offsets. Leading sys.NotInHeap is zero-size.
- * We build this fresh (calloc) and set only the fields findfunc/GC-unwind read. */
+ * We build this fresh in static storage and set the fields findfunc/GC-unwind read. */
 typedef struct go_moduledata {
     go_pcHeader *pcHeader;
     go_slice  funcnametab;   /* []byte   */
@@ -174,21 +178,21 @@ typedef struct { uint32_t book, action; agy_go_regs regs; } agy_block;
 /* _func total stride in pclntable: 44-byte header + funcdata[2] (no pcdata). */
 #define AGY_FUNC_STRIDE 52
 
-/* The synthetic moduledata is a process singleton kept in STATIC (BSS) storage — no heap, nothing
- * to leak, no OOM path. These bound its fixed-size tables; agy_gomod_prepare rejects (rc<0) anything
- * larger, and antigravity.cpp static_asserts BK_SLOTS <= AGY_GOMOD_MAX_SLOTS so BOOKS can
- * never outgrow it (bump the cap if you add that many hooks). MAX_MAPBYTES bounds the locals bitmap:
- * mapbytes = ((frame-8)/8 + 7)/8, which is 2 for the real frame (AGY_FRAME = 112). */
-#define AGY_GOMOD_MAX_SLOTS    64
+/* Static metadata capacities, independent of function placement and individual sizes.
+ * MAX_TEXT_SIZE bounds the sum of function sizes, excluding address gaps.
+ * MAX_MAPBYTES bounds the locals bitmap (2 bytes for AGY_FRAME = 112). */
+#define AGY_GOMOD_MAX_FUNCS    64
+#define AGY_GOMOD_MAX_TEXT_SIZE (AGY_GOMOD_MAX_FUNCS * 4096u)
 #define AGY_GOMOD_MAX_MAPBYTES 8
 
 /* Single-phase registration (called from main() -> agy_init() before agy_rt0_go,
  * after ld.so has already relocated libagy.so and bound `agy_firstmoduledata`):
  *
- * agy_gomod_register() — build a synthetic moduledata covering
- * [region_base, region_end) as `nslots` trampoline funcs in active BOOKS order (each
- * `slot_size` bytes, entry i at region_base + i*slot_size), select the FULLCGO/ASMCGO
- * pcsp window from each row's mechanism, mark `md->bad = 1`
+ * agy_gomod_register() — sort the actual stub ranges, map them to compact logical
+ * text offsets, and compute each function's pcsp from its linked frame labels.
+ * No section, adjacency, source order, fixed stride or hardcoded PCs are required.
+ * Reject invalid/overlapping ranges and metadata-capacity overflow before publishing.
+ * Mark `md->bad = 1`
  * (so `runtime.modulesinit` skips it while `moduledataverify1` and `findfunc`
  * walk it), and splice it onto `agy_firstmoduledata.next`. */
 #ifdef __cplusplus
@@ -196,9 +200,7 @@ extern "C" {
 #endif
 extern go_moduledata agy_firstmoduledata;
 
-int agy_gomod_register(uintptr_t region_base, uintptr_t region_end,
-                       uint32_t slot_size, int nslots,
-                       uint32_t frame, uint32_t frame_lo);
+int agy_gomod_register(const agy_stub_info *stubs, size_t nstubs);
 #ifdef __cplusplus
 }
 #endif

@@ -96,7 +96,7 @@ inline constexpr agy_book BOOKS[] = {
 #undef AGY_OFF
 
 inline constexpr int BK_COUNT = (int)(sizeof(BOOKS) / sizeof(BOOKS[0]));
-inline constexpr int BK_SLOTS = (int)std::ranges::count_if(BOOKS, [](auto &b) { return b.mech != AGY_OFF; });
+inline constexpr int BK_STUB_COUNT = (int)std::ranges::count_if(BOOKS, [](auto &b) { return b.mech != AGY_OFF; });
 
 /* Row index by id; an unknown id fails compilation. */
 consteval int bk(std::string_view id) {

@@ -232,8 +232,8 @@ instrumentation layer; Claude uses its SDK protocol directly:
   Each entry jumps through an eight-byte RW `.got.plt.agy` slot, bound to `agy_stub__<id>` by
   `R_X86_64_JUMP_SLOT` in `DT_JMPREL`; `BIND_NOW`/`NOW` resolve these before Go starts) and
   linked into a C++23 host executable (`vendor/agy`, built from
-  `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<id>`) in
-  `agy_trampolines`, binds both directions via `ld` / `ld.so`, and splices its synthetic
+  `antigravity/src/`) that emits the 28 static assembly trampoline stubs (`agy_stub__<id>`) as
+  ordinary `.text` functions, binds both directions via `ld` / `ld.so`, and splices its synthetic
   `moduledata` (`md->bad = 1`) onto `agy_firstmoduledata.next` before calling `agy_rt0_go`.
   Keep eager binding: lazy resolution would run on the Go stack and can clobber live
   R10/R11 arguments.
@@ -248,8 +248,8 @@ instrumentation layer; Claude uses its SDK protocol directly:
   pointer with `&block` through the row's Go gateway (`runtime.cgocall` or `runtime.asmcgocall`).
   `AGY_STUB_FULLCGO` passes `fn`/`arg` in RAX/RBX; `AGY_STUB_ASMCGO` writes them to the stack.
   The variants share save/restore text and each names its gateway directly. Generated
-  `AGY_STUBS(FULLCGO, ASMCGO)` preserves active `BOOKS` order; each entry supplies
-  `(id, book, go_frame)`. Shared basic asm reconstructs the original Go prologue using
+  `AGY_STUBS(FULLCGO, ASMCGO)` supplies `(id, book, go_frame)` for each active row;
+  linked function order is unrestricted. Shared basic asm reconstructs the original Go prologue using
   `go_frame` after releasing the trampoline frame.
   Preserve that Go→C transition. The fixed 112-byte frame reserves 16 bytes for the gateway,
   then packs `uint32_t book` and `action` before the 11 saved registers. A single qword store
@@ -257,15 +257,22 @@ instrumentation layer; Claude uses its SDK protocol directly:
   after the handler returns. The epilogue compares `action` and restores `rsp` with `lea`
   to preserve the branch flags; pcsp changes after each stack adjustment ends. Mark synthetic
   functions `FuncFlagAsm` to prevent async preemption of partial frames and displaced prologues.
-  `gomod.cpp` emits two pcsp sequences using the variant-specific frame ends in `goframe.h`
-  and selects one per active `BOOKS` row; frame size and 256-byte slot size remain shared.
+  Each stub descriptor records its entry and hidden asm labels for the frame start, frame
+  end, and function end. `gomod.cpp` sorts these by actual address, builds each function's
+  pcsp from those boundaries, and maps them into one synthetic module with a `textsectmap`
+  entry per function. Compact logical offsets exclude address gaps and index the populated
+  lookup buckets; neither fixed code slots nor a custom section are required. The shared
+  frame remains 112 bytes. Static metadata capacity limits aggregate code size, not function spacing.
   Zero X15 immediately after the gateway for both return paths.
   `procdef.h` rows use `{id, mode, retcap, AGY_FULLGO(symbol)}` (or `AGY_ASMGO` / `AGY_OFF`).
   The wrapper selects the mechanism; C++ discards its symbol argument, while the Python
   parser reads both. `BOOKS` stores only `id`, `mode`, `retcap`, and `mech`.
-  Keep `-fno-lto` and run
-  `test_scripts/test_agy_stubs.py` after stub or toolchain changes: it checks frame geometry,
-  the nullable gate, and native startup with disabled hooks and the conversation-id toggle.
+  Keep `-fno-lto` so asm-defined boundary labels and their external references remain reliable, and run
+  `test_scripts/test_agy_stubs.py` after stub or toolchain changes: it checks linked boundary
+  descriptors, frame geometry, the nullable gate, PLT binding, and native startup with disabled
+  hooks and the conversation-id toggle. Its C++ fixture compiles `gomod.cpp` and checks lookup
+  and pcsp against Go 1.27's rules for linked and irregular layouts, gap rejection, and invalid
+  metadata rejection before publication.
   `symbols/` is a source build package: its tools use relative `.agyelf` imports and run as
   `python3 -m symbols.<tool>` (`make_libagy`, `build_symbols`, `gen_sources`) from
   `antigravity/`. CMake and the `shim-hooks` Pixi task set that cwd explicitly, so the tools

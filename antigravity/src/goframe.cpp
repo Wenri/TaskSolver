@@ -10,7 +10,8 @@
  * Go supplies zero in X15 at entry; re-zero it after C code on both PASS and RETURN paths.
  *
  * Naked functions use basic asm. The table it names carries used and externally_visible;
- * __builtin_unreachable() stops GCC appending a ud2 past the slot, and -fno-lto keeps stubs ordered.
+ * __builtin_unreachable() stops GCC appending a ud2 past the end label; -fno-lto preserves
+ * the asm-defined labels referenced by the metadata descriptors.
  * test_agy_stubs.py checks the generated instructions, frame PCs and native startup.
  */
 #include "goframe.h"
@@ -24,13 +25,19 @@ static_assert(std::size(BOOKS) <= INT32_MAX, "movq's signed immediate must zero 
 #define TO_STRING_IMPL(x) #x
 #define TO_STRING(x) TO_STRING_IMPL(x)
 
+#define AGY_PC(id, part) \
+    ".globl agy_pc__" #id "_" #part "\n" \
+    ".hidden agy_pc__" #id "_" #part "\n" \
+    "agy_pc__" #id "_" #part ":\n\t"
+
 /* Shared register snapshot and continuation. One qword initializes book and action=0.
  * CMP reads action while the frame is live; LEA releases the frame without changing flags. */
-#define AGY_STUB_ENTER(book) \
+#define AGY_STUB_ENTER(id, book) \
     "movq   g_agy_on+8*" #book "(%rip), %r12\n\t" \
     "testq  %r12, %r12\n\t" \
     "je     1f\n\t" \
     "subq   $" TO_STRING(AGY_FRAME) ", %rsp\n\t" \
+    AGY_PC(id, frame_start) \
     "movq   %rax, " TO_STRING(AGY_OFF_RAX) "(%rsp)\n\t" \
     "movq   %rbx, " TO_STRING(AGY_OFF_RBX) "(%rsp)\n\t" \
     "movq   %rcx, " TO_STRING(AGY_OFF_RCX) "(%rsp)\n\t" \
@@ -59,6 +66,7 @@ static_assert(std::size(BOOKS) <= INT32_MAX, "movq's signed immediate must zero 
     "movq   " TO_STRING(AGY_OFF_RBP) "(%rsp), %rbp\n\t" \
     "cmpl   $0, " TO_STRING(AGY_OFF_ACTION) "(%rsp)\n\t" \
     "leaq   " TO_STRING(AGY_FRAME) "(%rsp), %rsp\n\t" \
+    AGY_PC(id, frame_end) \
     "jne    2f\n" \
     "1:\n\t" \
     "pushq  %rbp\n\t" \
@@ -67,18 +75,22 @@ static_assert(std::size(BOOKS) <= INT32_MAX, "movq's signed immediate must zero 
     "jmp    *agy_resume__" #id "@GOTPCREL(%rip)\n" \
     "2:\n\t" \
     "ret\n\t" \
-    ".balign " TO_STRING(AGY_SLOT_SIZE) ", 0x90"
+    AGY_PC(id, end)
 
 #define AGY_STUB_DECLARE(id, book) \
     static_assert(bk(#id) == (book), "symbols_gen.h is out of step with BOOKS"); \
-    extern "C" __attribute__((naked, used, visibility("default"), \
-                              aligned(AGY_SLOT_SIZE), section(AGY_TRAMP_SECTION))) \
+    extern "C" { \
+        extern const unsigned char agy_pc__##id##_frame_start[]; \
+        extern const unsigned char agy_pc__##id##_frame_end[]; \
+        extern const unsigned char agy_pc__##id##_end[]; \
+    } \
+    extern "C" __attribute__((naked, used, visibility("default"))) \
     void agy_stub__##id()
 
 /* ABIInternal: cgocall spills its own RAX/RBX arguments into our reserved two words. */
 #define AGY_STUB_FULLCGO(id, book, go_frame) \
     AGY_STUB_DECLARE(id, book) { \
-        __asm__(AGY_STUB_ENTER(book) \
+        __asm__(AGY_STUB_ENTER(id, book) \
             "leaq   " TO_STRING(AGY_OFF_BLOCK) "(%rsp), %rbx\n\t" \
             "movq   %r12, %rax\n\t" \
             "call   *agy_go__CGOCALL@GOTPCREL(%rip)\n\t" \
@@ -89,7 +101,7 @@ static_assert(std::size(BOOKS) <= INT32_MAX, "movq's signed immediate must zero 
 /* ABI0: asmcgocall reads fn/arg from the stack; it does not need register copies. */
 #define AGY_STUB_ASMCGO(id, book, go_frame) \
     AGY_STUB_DECLARE(id, book) { \
-        __asm__(AGY_STUB_ENTER(book) \
+        __asm__(AGY_STUB_ENTER(id, book) \
             "movq   %r12, " TO_STRING(AGY_OFF_FN) "(%rsp)\n\t" \
             "leaq   " TO_STRING(AGY_OFF_BLOCK) "(%rsp), %rax\n\t" \
             "movq   %rax, " TO_STRING(AGY_OFF_ARG) "(%rsp)\n\t" \
@@ -98,6 +110,10 @@ static_assert(std::size(BOOKS) <= INT32_MAX, "movq's signed immediate must zero 
         __builtin_unreachable(); \
     }
 
-/* One stub per installed row, in BOOKS order. Slot alignment makes them tile the section;
- * agy_init catches any stub that outgrows its slot. */
+/* The linker may place these functions in any order, with gaps between them. */
 AGY_STUBS(AGY_STUB_FULLCGO, AGY_STUB_ASMCGO)
+
+#define AGY_STUB_INFO(id, book, go_frame) \
+    {agy_stub__##id, agy_pc__##id##_frame_start, agy_pc__##id##_frame_end, agy_pc__##id##_end},
+const agy_stub_info agy_stubs[] = { AGY_STUBS(AGY_STUB_INFO, AGY_STUB_INFO) };
+static_assert(std::size(agy_stubs) == BK_STUB_COUNT, "one descriptor per installed hook");

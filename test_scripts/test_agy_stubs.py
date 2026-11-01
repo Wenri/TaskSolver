@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -45,28 +46,69 @@ class AgyStubTests(unittest.TestCase):
         cls.rows = {"agy_stub__" + row["id"]: (index, row) for index, row in enumerate(BOOKS)}
 
     def frame_hi(self, row):
-        return self.layout["AGY_FRAME_HI_" + row["mech"].upper()]
+        return self.pc_offset(row, "frame_end")
 
-    def test_slot_and_frame_geometry(self):
+    def pc_offset(self, row, label):
+        return (self.symbols[f"agy_pc__{row['id']}_{label}"].value
+                - self.stubs["agy_stub__" + row["id"]].value)
+
+    def test_function_and_frame_geometry(self):
         expected = {"agy_stub__" + row["id"] for row in enabled_hooks()}
         self.assertEqual(set(self.stubs), expected)
-        section = self.image.get_section("agy_trampolines")
-        stride = self.layout["AGY_SLOT_SIZE"]
-        self.assertEqual(section.size, len(expected) * stride)
+        self.assertIsNone(self.image.get_section("agy_trampolines"))
+        self.assertFalse(any(name in self.symbols for name in
+                             ("__start_agy_trampolines", "__stop_agy_trampolines")))
+        descriptors = self.symbols["agy_stubs"]
+        self.assertEqual(descriptors.size, len(expected) * 32)
+        raw = bytes(self.image.get_content_from_virtual_address(descriptors.value, descriptors.size))
+        for row, pointers in zip(enabled_hooks(), struct.iter_unpack("<4Q", raw), strict=True):
+            self.assertEqual(pointers, (self.stubs["agy_stub__" + row["id"]].value,
+                *(self.symbols[f"agy_pc__{row['id']}_{label}"].value
+                  for label in ("frame_start", "frame_end", "end"))))
         frame = struct.pack("b", self.layout["AGY_FRAME"])
-        for index, stub in enumerate(sorted(self.stubs.values(), key=lambda s: s.value)):
+        previous_end = 0
+        for stub in sorted(self.stubs.values(), key=lambda s: s.value):
             with self.subTest(stub=stub.name):
-                self.assertEqual(stub.value, section.virtual_address + index * stride)
-                self.assertEqual(stub.value % stride, 0)
-                self.assertEqual(stub.size, stride)
+                row = self.rows[stub.name][1]
+                lo, hi, end = (self.pc_offset(row, label)
+                               for label in ("frame_start", "frame_end", "end"))
+                self.assertGreaterEqual(stub.value, previous_end)
+                previous_end = stub.value + end
+                self.assertTrue(0 < lo < hi < end)
+                self.assertEqual(stub.size, end)
                 code = bytes(self.image.get_content_from_virtual_address(stub.value, stub.size))
-                lo, hi = self.layout["AGY_FRAME_LO"], self.frame_hi(self.rows[stub.name][1])
+                self.assertEqual(code[-1], 0xc3)  # no fixed-slot padding after RETURN
                 self.assertEqual(code[lo - 4:lo], b"\x48\x83\xec" + frame)
                 self.assertEqual(code[hi - 5:hi], b"\x48\x8d\x64\x24" + frame)
                 # CMP survives the flag-preserving stack restore for either verdict.
                 action = self.layout["AGY_OFF_ACTION"]
                 self.assertEqual(code[hi - 10:hi - 5], b"\x83\x7c\x24" + bytes([action, 0]))
                 self.assertEqual(code[hi], 0x75)  # JNE RETURN; pcsp changes after LEA
+
+    def test_metadata_lookup_and_validation(self):
+        compiler = shutil.which("x86_64-conda-linux-gnu-c++")
+        if compiler is None:
+            self.skipTest("run this native fixture through pixi; the pinned C++ compiler is missing")
+        with tempfile.TemporaryDirectory(prefix="agy-gomod-test-") as directory:
+            executable = Path(directory) / "gomod-test"
+            command = [compiler, "-std=c++23", "-O2", "-Wall", "-Wextra",
+                       "-I" + str(ANTI / "src"), "-I" + str(ROOT / "wirecap/native"),
+                       str(ANTI / "src/gomod.cpp"),
+                       str(ROOT / "test_scripts/fixtures/agy_gomod.cpp"), "-o", str(executable)]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            linked = Path(directory) / "linked-stubs.txt"
+            descriptor = self.symbols["agy_stubs"]
+            raw = bytes(self.image.get_content_from_virtual_address(descriptor.value, descriptor.size))
+            linked.write_text("".join(" ".join(f"{p:x}" for p in pointers) + "\n"
+                                      for pointers in struct.iter_unpack("<4Q", raw)))
+            for case in ("linked", "sparse", "single", "frame_start", "frame_end", "end",
+                         "overlap", "module_overlap", "count", "size"):
+                with self.subTest(case=case):
+                    args = [str(executable), case] + ([str(linked)] if case == "linked" else [])
+                    result = subprocess.run(args, capture_output=True,
+                                            text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_direct_resume_targets(self):
         metadata = json.loads((ANTI / "symbols/symbols.json").read_text())
@@ -157,14 +199,17 @@ class AgyStubTests(unittest.TestCase):
                              for r in self.image.relocations))
         prologues = json.loads((ANTI / "symbols/symbols.json").read_text())["prologues"]
         obj_stubs = {s.name: s for s in self.obj.symtab_symbols if s.name.startswith("agy_stub__")}
+        stub_sections = {s.section.name for s in obj_stubs.values()}
         relocations = [r for r in self.obj.relocations if r.has_section and r.has_symbol
-                       and r.section.name == "agy_trampolines"]
+                       and r.section.name in stub_sections]
         self.assertFalse(any(r.symbol.name.startswith("agy_on_") for r in relocations))
         loads = [r for r in relocations if r.symbol.name == "g_agy_on"]
         self.assertEqual(len(loads), len(self.stubs))
         for name, stub in obj_stubs.items():
             with self.subTest(stub=name):
-                matches = [r for r in loads if stub.value <= r.address < stub.value + stub.size]
+                in_stub = lambda r: (r.section.name == stub.section.name
+                                     and stub.value <= r.address < stub.value + stub.size)
+                matches = [r for r in loads if in_stub(r)]
                 self.assertEqual(len(matches), 1)
                 rel = matches[0]
                 index, row = self.rows[name]
@@ -181,12 +226,12 @@ class AgyStubTests(unittest.TestCase):
                 self.assertGreater(original, self.frame_hi(row))
                 prologue = bytes.fromhex(prologues[row["symbol"]])
                 self.assertEqual(code[original:original + len(prologue)], prologue)
-                body = code[self.layout["AGY_FRAME_LO"]:self.frame_hi(row)]
+                body = code[self.pc_offset(row, "frame_start"):self.frame_hi(row)]
                 # One qword initializes the adjacent uint32 book and action fields.
                 self.assertEqual(self.layout["AGY_OFF_ACTION"], self.layout["AGY_OFF_BOOK"] + 4)
                 init = b"\x48\xc7\x44\x24" + bytes([self.layout["AGY_OFF_BOOK"]])
                 self.assertEqual(body.count(init + struct.pack("<I", index)), 1)
-                gateway = [r for r in relocations if stub.value <= r.address < stub.value + stub.size
+                gateway = [r for r in relocations if in_stub(r)
                            and r.symbol.name in {"agy_go__CGOCALL", "agy_go__ASMCGOCALL"}]
                 self.assertEqual(len(gateway), 1)
                 call = gateway[0].address - stub.value - 2

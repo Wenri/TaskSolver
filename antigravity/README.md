@@ -31,12 +31,12 @@ exports remain for introspection and patching. At startup, `main()` runs
      `BIND_NOW`/`NOW` resolve all slots at process load time; `.plt.agy` jumps through them
      without runtime code patching or `mprotect`.
 2. **Static cgocall trampolines (`src/goframe.cpp` + `src/gocall.cpp` + `src/gomod.cpp`)**
-   emitted at build time into the `agy_trampolines` section — named without a leading dot so the
-   linker defines `__start_`/`__stop_` for it, which is where the region bounds come from — each stub is a `naked`
-   function emitted by `AGY_STUB_FULLCGO` or `AGY_STUB_ASMCGO`, sharing save/restore text.
+   emitted as ordinary `.text` functions: each stub is a `naked` function emitted by
+   `AGY_STUB_FULLCGO` or `AGY_STUB_ASMCGO`, sharing save/restore text. Descriptors record each
+   entry and hidden asm labels for its frame and function boundaries.
    `gen_sources.py` emits `AGY_STUBS(FULLCGO, ASMCGO)` with each stub's `id`, `book`, and `go_frame` into
-   `src/symbols_gen.h`, preserving active `BOOKS` order — with a
-   synthetic `moduledata` (`md->bad = 1`) spliced synchronously onto `agy_firstmoduledata.next`
+   `src/symbols_gen.h`. Linked function order and spacing are unrestricted; descriptors are
+   sorted by address to build one synthetic `moduledata` (`md->bad = 1`), spliced onto `agy_firstmoduledata.next`
    before `agy_rt0_go()` starts. `agy_enable_hooks` in `gocall.cpp` fills the zero-initialized
    `g_agy_on` handler pointer table for enabled rows; disabled entries remain `nullptr`.
    Each stub loads its entry once, skips the hook if null, and otherwise passes that pointer
@@ -58,10 +58,10 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 | **Go binary**, cgo-enabled, statically linked except libc/libpthread/**libresolv** | Go makes syscalls *directly*, not through libc → classic `LD_PRELOAD` of `connect`/`send`/`SSL_*` **cannot** see its network traffic. We must hook Go functions in-memory. libresolv ⇒ the **cgo DNS resolver** is compiled in, so `getaddrinfo` interposition *can* redirect where it connects. |
 | TLS is **BoringCrypto**, statically linked (no `libssl.so`) | No dynamic `SSL_read`/`SSL_write` to preload. We hook Go's `crypto/tls.(*Conn).Read/Write` instead, which see **plaintext**. |
 | **Stripped** (no ELF symtab) but **pclntab intact** (magic `0xf1ffffff`) | Function *names* survive. ~131 844 functions are recoverable. |
-| `pcHeader.textStart == 0`; real base is a PIE-relocated `moduledata.text` (`0x4eb5080`, `0x80` past the ELF `.text` addr) | Stdlib `debug/gosym` mis-resolves (uses `textStart`, returns morestack trailers) and **GoReSym can't even locate the pclntab**. We resolve directly: find `moduledata` via the reloc whose addend is the pclntab vaddr, read `moduledata.text`, then `addr = text + func.entryoff`. `textsectmap` has one entry (code is one contiguous Go text section), so the mapping is linear — and every hooked address is **prologue-verified**. |
+| `pcHeader.textStart == 0`; real base is a PIE-relocated `moduledata.text` (`0x4eb5080`, `0x80` past the ELF `.text` addr) | Stdlib `debug/gosym` mis-resolves (uses `textStart`, returns morestack trailers) and **GoReSym can't even locate the pclntab**. We resolve directly: find `moduledata` via the reloc whose addend is the pclntab vaddr, read `moduledata.text`, then `addr = text + func.entryoff`. The upstream binary's `textsectmap` has one entry (one contiguous Go text section), so its mapping is linear — and every hooked address is **prologue-verified**. |
 | Backend is `google.cloud.businessaicode` (Gemini); env overrides exist: **`BAICODE_ENDPOINT_URL`**, `CLOUD_CODE_URL` | Pure *redirection* may need no hook at all — just an env var. |
 | Speaks **MCP as a client** (`mcp.json`/`mcpServers`, `GetPluginMCPSpecs`, `SetMcpManager`) and supports **custom agents** | Custom **tools** and **mcp_context** can largely be delivered *natively* by config (the hybrid path); hooks are reserved for what config can't express. |
-| Runs on **WSL1** (syscall-translation layer, not a real kernel) | `ptrace` injection is unreliable here. We statically patch `libagy.so` on disk and bind our `agy_trampolines` stubs through eager PLT relocations in `ld.so` — no `ptrace` and no runtime `mprotect`. |
+| Runs on **WSL1** (syscall-translation layer, not a real kernel) | `ptrace` injection is unreliable here. We statically patch `libagy.so` on disk and bind our `agy_stub__*` functions through eager PLT relocations in `ld.so` — no `ptrace` and no runtime `mprotect`. |
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
 `85d3425a18a809e545747dcb9d87c03c`, agy **1.4.11**). The shim refuses to install hooks if
@@ -204,7 +204,7 @@ requiring resolution before Go starts. Eager binding is required: the lazy resol
 on the Go stack and can clobber live Go argument registers such as R10/R11. The entry jump
 uses five bytes, with one additional PLT jump in the hook path. The PLT entry reaches a
 static assembly trampoline stub
-(`agy_stub__<id>` in `agy_trampolines`) that:
+(`agy_stub__<id>` in the host's `.text`) that:
 
 1. loads `g_agy_on[book]` into `r12`; a null entry skips straight to the displaced prologue,
 2. snapshots the Go-ABI arg registers into a stack **block**,
@@ -230,8 +230,8 @@ unaffected — the goroutine may resume on any M. Each `procdef.h` row has the f
 `runtime.asmcgocall`, a lighter variant (just the g0 stack switch, no `entersyscall`/`_Gsyscall`)
 for hot or syscall-at-entry-sensitive funcs; `AGY_OFF(symbol)` disables the hook. C++ keeps
 the wrapper's mechanism enum in `BOOKS` and discards the symbol; the Python parser reads both.
-Each stub variant names its gateway directly. Both share one region and synthetic moduledata,
-with a separate pcsp sequence for each variant.
+Each stub variant names its gateway directly. Both belong to one synthetic moduledata,
+with each function's pcsp derived from its linked boundaries.
 
 **Synthetic moduledata (`gomod.cpp`).** `cgocall`'s `entersyscall()` opens a GC-scannable window
 over our trampoline frame; if Go's unwinder can't `findfunc` the trampoline PCs it
@@ -240,10 +240,17 @@ over our trampoline frame; if Go's unwinder can't `findfunc` the trampoline PCs 
 `runtime.findfunc` validate and walk it) spliced synchronously onto the `ld`-bound
 `agy_firstmoduledata.next` before `agy_rt0_go()` starts. Its pclntab/pcsp cover the trampoline,
 so GC unwinds it cleanly — and the pcsp must report **one constant spdelta** across the whole
-trampoline-frame window. `gomod.cpp` emits the two sequences once, then selects each `_func`'s
-pcsp offset while walking active `BOOKS` rows in stub order. Both use a 112-byte frame and
-256-byte slots; the live frame windows are `[20,167)` for FULLCGO and `[20,173)` for ASMCGO,
-ending after their respective stack-restore instructions (`goframe.h`).
+trampoline-frame window. Each descriptor supplies the function entry plus hidden asm labels
+for frame start, frame end, and function end. `gomod.cpp` sorts descriptors by actual address
+and emits each function's pcsp from these boundaries, with a 112-byte delta while its frame
+is live. No fixed code slots, padding to a slot boundary, or hardcoded frame-PC offsets are
+needed; ordinary compiler alignment may still leave gaps between functions.
+
+A `textsectmap` entry maps each function into compact logical offsets used by the function
+table and populated lookup buckets. Go's lookup rejects gaps between actual functions, so
+linker reordering and unrelated code between stubs do not become synthetic Go functions.
+The final table sentinel maps to the last function's actual end. Static metadata capacity
+limits aggregate code size to `64 * 4096` bytes, independently of address gaps.
 
 **Fixed frame layout.** `runtime.cgocall` spills its two register args (`fn`, `arg`)
 into caller-provided slots at `[S]` and `[S+8]` (`S` = rsp at the call). The block starts at
@@ -267,7 +274,7 @@ afterward, covering both the normal continuation and early return.
 The `AGY_FULLGO`/`AGY_ASMGO` rows in `procdef.h` generate the static stubs, and
 `agy_enable_hooks` selects their handlers before Go starts. `os.Getenv` remains enabled
 as the `smoke` ASMCGO hook used by the native startup checks. The synthetic moduledata
-covers the whole trampoline region.
+covers the linked stub functions and excludes intervening address gaps.
 
 ### App-boundary text probe — why the wire (`http1sse`) wins for the response
 
@@ -564,19 +571,24 @@ build with GCC LTO (`-DTASKSOLVER_LTO=OFF` disables it). The `g_agy_on` handler 
 explicit `used` and `externally_visible` attributes because LTO cannot see its asm references.
 `agy_enable_hooks` selects handlers once before Go starts; `nullptr` disables a row,
 including `file_open` when conversation-id capture is off. The stub translation unit stays
-`-fno-lto` and uses basic asm: a single load from `g_agy_on+8*book` into `r12`, a null check,
+`-fno-lto` to preserve asm-defined boundary labels and their external references. Its basic asm
+uses a single load from `g_agy_on+8*book` into `r12`, a null check,
 then that same pointer passed through the Go gateway.
 
 After stub or toolchain changes, run `pixi run python test_scripts/test_agy_stubs.py` to check
-frame geometry, the nullable gate, the PLT/GOT targets and eager loader binding, and instrumented
-startup with disabled hooks and the conversation-id toggle. These checks require built native
-artifacts and make no model calls.
+linked boundary descriptors, frame geometry, the nullable gate, the PLT/GOT targets and eager
+loader binding, and instrumented startup with disabled hooks and the conversation-id toggle.
+The C++ validation fixture (`test_scripts/fixtures/agy_gomod.cpp`) compiles with `gomod.cpp`
+and models Go 1.27's lookup rules: it checks linked descriptors, reversed input with irregular
+function sizes and large address gaps, pcsp boundaries, and rejection of invalid metadata
+before publication. These checks require built native artifacts and the pinned C++ compiler;
+they make no model calls.
 
 `pyagy.agy_process` needs `hpack`/`brotli` only for the
 HTTP/2 body decode (both are guarded/lazy), so it imports fine without them.
 
 Run agy under the hook via the launcher in `test_scripts/` — it enables the full working
-hook union (all 28 static `agy_trampolines` stubs bound via `ld` / `ld.so`, each hook's cgo
+hook union (all 28 static `agy_stub__*` functions bound via `ld` / `ld.so`, each hook's cgo
 gateway chosen by the `procdef.h` target wrapper); the GC-safe synthetic moduledata is
 always on:
 
