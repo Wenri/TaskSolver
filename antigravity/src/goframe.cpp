@@ -1,119 +1,176 @@
-/* The Go→C trampoline stubs: FULLCGO uses register arguments; ASMCGO uses stack arguments.
+/* Go→C trampolines instantiated directly from BOOKS.
  *
- * make_libagy.py patches each hooked function's `entry + skip` with E9 rel32 to .plt.agy.
- * Its PLT entry jumps through a .got.plt.agy slot eagerly resolved by ld.so via JUMP_SLOT
- * to agy_stub__<id>, which runs on the goroutine's stack with the Go
- * register-ABI arguments live. A stub loads g_agy_on[book] once into the Go scratch register
- * R12; null skips the handler. Otherwise it saves the arguments into the goframe.h frame,
- * calls that handler through runtime.cgocall or runtime.asmcgocall, and restores the registers.
- * It runs the displaced prologue and resumes the function, or returns if the handler set block.action.
- * Go supplies zero in X15 at entry; re-zero it after C code on both PASS and RETURN paths.
+ * Each naked template emits basic asm built at compile time. The exported
+ * agy_stub__<id> label shares its entry address; ld.so binds libagy.so's eager
+ * PLT slots to these labels without a wrapper call or jump. Hidden frame/end
+ * labels provide each function's Go unwind metadata.
  *
- * Naked functions use basic asm. The table it names carries used and externally_visible;
- * __builtin_unreachable() stops GCC appending a ud2 past the end label; -fno-lto preserves
- * the asm-defined labels referenced by the metadata descriptors.
- * test_agy_stubs.py checks the generated instructions, frame PCs and native startup.
+ * Keep this translation unit out of LTO: the compiler cannot see the symbols
+ * defined inside basic asm. __builtin_unreachable() suppresses a trailing UD2.
  */
 #include "goframe.h"
 #include "gocall.h"
 #include "procdef.h"
 #include "symbols_gen.h"
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <string>
+#include <utility>
+
+#ifndef __GXX_CONSTEXPR_ASM__
+#error "agy stubs require GCC 15 or newer with constexpr asm strings"
+#endif
 
 static_assert(sizeof(agy_book_fn) == 8, "stub table indexing requires 8-byte handler pointers");
 static_assert(std::size(BOOKS) <= INT32_MAX, "movq's signed immediate must zero the adjacent action");
+static_assert(std::size(AGY_GO_FRAMES) == std::size(BOOKS), "one frame size per BOOKS row");
+static_assert([] {
+    for (size_t i = 0; i < std::size(BOOKS); ++i)
+        if ((BOOKS[i].mech == AGY_OFF) != (AGY_GO_FRAMES[i] < 0)) return false;
+    return true;
+}(), "symbols_gen.h is out of step with BOOKS");
 
-#define TO_STRING_IMPL(x) #x
-#define TO_STRING(x) TO_STRING_IMPL(x)
+static constexpr auto STUB_BOOKS = [] {
+    std::array<size_t, BK_STUB_COUNT> indices{};
+    size_t count = 0;
+    for (size_t i = 0; i < std::size(BOOKS); ++i)
+        if (BOOKS[i].mech != AGY_OFF) indices[count++] = i;
+    return indices;
+}();
 
-#define AGY_PC(id, part) \
-    ".globl agy_pc__" #id "_" #part "\n" \
-    ".hidden agy_pc__" #id "_" #part "\n" \
-    "agy_pc__" #id "_" #part ":\n\t"
+/* One register list supplies both halves of the snapshot. RBP is the last word
+ * in the frame, as required by Go's unwinder. R12 is Go's scratch register. */
+static constexpr struct {
+    std::string_view name;
+    unsigned offset;
+} saved_regs[] = {
+    {"rax", AGY_OFF_RAX}, {"rbx", AGY_OFF_RBX}, {"rcx", AGY_OFF_RCX},
+    {"rdi", AGY_OFF_RDI}, {"rsi", AGY_OFF_RSI}, {"r8", AGY_OFF_R8},
+    {"r9", AGY_OFF_R9}, {"r10", AGY_OFF_R10}, {"r11", AGY_OFF_R11},
+    {"rdx", AGY_OFF_RDX}, {"rbp", AGY_OFF_RBP},
+};
 
-/* Shared register snapshot and continuation. One qword initializes book and action=0.
- * CMP reads action while the frame is live; LEA releases the frame without changing flags. */
-#define AGY_STUB_ENTER(id, book) \
-    "movq   g_agy_on+8*" #book "(%rip), %r12\n\t" \
-    "testq  %r12, %r12\n\t" \
-    "je     1f\n\t" \
-    "subq   $" TO_STRING(AGY_FRAME) ", %rsp\n\t" \
-    AGY_PC(id, frame_start) \
-    "movq   %rax, " TO_STRING(AGY_OFF_RAX) "(%rsp)\n\t" \
-    "movq   %rbx, " TO_STRING(AGY_OFF_RBX) "(%rsp)\n\t" \
-    "movq   %rcx, " TO_STRING(AGY_OFF_RCX) "(%rsp)\n\t" \
-    "movq   %rdi, " TO_STRING(AGY_OFF_RDI) "(%rsp)\n\t" \
-    "movq   %rsi, " TO_STRING(AGY_OFF_RSI) "(%rsp)\n\t" \
-    "movq   %r8,  " TO_STRING(AGY_OFF_R8)  "(%rsp)\n\t" \
-    "movq   %r9,  " TO_STRING(AGY_OFF_R9)  "(%rsp)\n\t" \
-    "movq   %r10, " TO_STRING(AGY_OFF_R10) "(%rsp)\n\t" \
-    "movq   %r11, " TO_STRING(AGY_OFF_R11) "(%rsp)\n\t" \
-    "movq   %rdx, " TO_STRING(AGY_OFF_RDX) "(%rsp)\n\t" \
-    "movq   %rbp, " TO_STRING(AGY_OFF_RBP) "(%rsp)\n\t" \
-    "movq   $" #book ", " TO_STRING(AGY_OFF_BOOK) "(%rsp)\n\t"
+static constexpr std::string decimal(unsigned value)
+{
+    char buffer[10];
+    auto [end, error] = std::to_chars(std::begin(buffer), std::end(buffer), value);
+    if (error != std::errc{}) throw "assembly immediate exceeds decimal buffer";
+    return {buffer, end};
+}
 
-#define AGY_STUB_LEAVE(id, go_frame) \
-    "xorps  %xmm15, %xmm15\n\t" \
-    "movq   " TO_STRING(AGY_OFF_RAX) "(%rsp), %rax\n\t" \
-    "movq   " TO_STRING(AGY_OFF_RBX) "(%rsp), %rbx\n\t" \
-    "movq   " TO_STRING(AGY_OFF_RCX) "(%rsp), %rcx\n\t" \
-    "movq   " TO_STRING(AGY_OFF_RDI) "(%rsp), %rdi\n\t" \
-    "movq   " TO_STRING(AGY_OFF_RSI) "(%rsp), %rsi\n\t" \
-    "movq   " TO_STRING(AGY_OFF_R8)  "(%rsp), %r8\n\t" \
-    "movq   " TO_STRING(AGY_OFF_R9)  "(%rsp), %r9\n\t" \
-    "movq   " TO_STRING(AGY_OFF_R10) "(%rsp), %r10\n\t" \
-    "movq   " TO_STRING(AGY_OFF_R11) "(%rsp), %r11\n\t" \
-    "movq   " TO_STRING(AGY_OFF_RDX) "(%rsp), %rdx\n\t" \
-    "movq   " TO_STRING(AGY_OFF_RBP) "(%rsp), %rbp\n\t" \
-    "cmpl   $0, " TO_STRING(AGY_OFF_ACTION) "(%rsp)\n\t" \
-    "leaq   " TO_STRING(AGY_FRAME) "(%rsp), %rsp\n\t" \
-    AGY_PC(id, frame_end) \
-    "jne    2f\n" \
-    "1:\n\t" \
-    "pushq  %rbp\n\t" \
-    "movq   %rsp, %rbp\n\t" \
-    "subq   $" #go_frame ", %rsp\n\t" \
-    "jmp    *agy_resume__" #id "@GOTPCREL(%rip)\n" \
-    "2:\n\t" \
-    "ret\n\t" \
-    AGY_PC(id, end)
+static consteval std::string stub_asm(size_t index)
+{
+    const auto &book = BOOKS[index];
+    if (book.mech == AGY_OFF) throw "disabled hook has no stub";
 
-#define AGY_STUB_DECLARE(id, book) \
-    static_assert(bk(#id) == (book), "symbols_gen.h is out of step with BOOKS"); \
-    extern "C" { \
-        extern const unsigned char agy_pc__##id##_frame_start[]; \
-        extern const unsigned char agy_pc__##id##_frame_end[]; \
-        extern const unsigned char agy_pc__##id##_end[]; \
-    } \
-    extern "C" __attribute__((naked, used, visibility("default"))) \
-    void agy_stub__##id()
+    const std::string id(book.id), entry = "agy_stub__" + id;
+    std::string code = ".globl " + entry + "\n.type " + entry + ", @function\n" + entry + ":\n";
+    auto pc = [&](std::string_view part) {
+        const std::string label = "agy_pc__" + id + "_" + std::string(part);
+        code += ".globl " + label + "\n.hidden " + label + "\n" + label + ":\n";
+    };
+    auto stack = [](unsigned offset) { return decimal(offset) + "(%rsp)"; };
 
-/* ABIInternal: cgocall spills its own RAX/RBX arguments into our reserved two words. */
-#define AGY_STUB_FULLCGO(id, book, go_frame) \
-    AGY_STUB_DECLARE(id, book) { \
-        __asm__(AGY_STUB_ENTER(id, book) \
-            "leaq   " TO_STRING(AGY_OFF_BLOCK) "(%rsp), %rbx\n\t" \
-            "movq   %r12, %rax\n\t" \
-            "call   *agy_go__CGOCALL@GOTPCREL(%rip)\n\t" \
-            AGY_STUB_LEAVE(id, go_frame)); \
-        __builtin_unreachable(); \
+    code += "movq g_agy_on+" + decimal(8 * index) + "(%rip), %r12\n"
+            "testq %r12, %r12\n"
+            "je 1f\n"
+            "subq $" + decimal(AGY_FRAME) + ", %rsp\n";
+    pc("frame_start");
+    for (const auto &r : saved_regs)
+        code += "movq %" + std::string(r.name) + ", " + stack(r.offset) + "\n";
+    // One qword store initializes book and the adjacent action=0.
+    code += "movq $" + decimal(index) + ", " + stack(AGY_OFF_BOOK) + "\n";
+
+    if (book.mech == AGY_FULLCGO) {
+        // ABIInternal: cgocall spills its own fn/arg into our reserved two words.
+        code += "leaq " + stack(AGY_OFF_BLOCK) + ", %rbx\n"
+                "movq %r12, %rax\n"
+                "call *agy_go__CGOCALL@GOTPCREL(%rip)\n";
+    } else {
+        // ABI0: asmcgocall reads fn/arg from the stack.
+        code += "movq %r12, " + stack(AGY_OFF_FN) + "\n"
+                "leaq " + stack(AGY_OFF_BLOCK) + ", %rax\n"
+                "movq %rax, " + stack(AGY_OFF_ARG) + "\n"
+                "call *agy_go__ASMCGOCALL@GOTPCREL(%rip)\n";
     }
 
-/* ABI0: asmcgocall reads fn/arg from the stack; it does not need register copies. */
-#define AGY_STUB_ASMCGO(id, book, go_frame) \
-    AGY_STUB_DECLARE(id, book) { \
-        __asm__(AGY_STUB_ENTER(id, book) \
-            "movq   %r12, " TO_STRING(AGY_OFF_FN) "(%rsp)\n\t" \
-            "leaq   " TO_STRING(AGY_OFF_BLOCK) "(%rsp), %rax\n\t" \
-            "movq   %rax, " TO_STRING(AGY_OFF_ARG) "(%rsp)\n\t" \
-            "call   *agy_go__ASMCGOCALL@GOTPCREL(%rip)\n\t" \
-            AGY_STUB_LEAVE(id, go_frame)); \
-        __builtin_unreachable(); \
+    // Go expects X15 to contain zero on both PASS and RETURN paths.
+    code += "xorps %xmm15, %xmm15\n";
+    for (const auto &r : saved_regs)
+        code += "movq " + stack(r.offset) + ", %" + std::string(r.name) + "\n";
+    // LEA releases the frame without changing CMP's verdict flags.
+    code += "cmpl $0, " + stack(AGY_OFF_ACTION) + "\n"
+            "leaq " + stack(AGY_FRAME) + ", %rsp\n";
+    pc("frame_end");
+    code += "jne 2f\n"
+            "1:\n"
+            "pushq %rbp\n"
+            "movq %rsp, %rbp\n"
+            "subq $" + decimal(AGY_GO_FRAMES[index]) + ", %rsp\n"
+            "jmp *agy_resume__" + id + "@GOTPCREL(%rip)\n"
+            "2:\n"
+            "ret\n";
+    pc("end");
+    code += ".size " + entry + ", .-" + entry + "\n";
+    return code;
+}
+
+/* The temporary string may allocate during constant evaluation; asm receives
+ * a fixed array whose size is derived from the complete generated text. */
+template<auto MakeText>
+static consteval auto asm_text()
+{
+    std::array<char, MakeText().size()> text{};
+    std::ranges::copy(MakeText(), text.begin());
+    return text;
+}
+
+static consteval std::string boundary_asm(size_t index)
+{
+    std::string code;
+    unsigned operand = 0;
+    for (auto part : {"frame_start", "frame_end", "end"}) {
+        const std::string symbol = "%cc" + decimal(operand++);
+        code += ".globl " + symbol + "\n.hidden " + symbol + "\n.set " + symbol +
+            ", agy_pc__" + std::string(BOOKS[index].id) + "_" + part + "\n";
+    }
+    return code;
+}
+
+template<size_t I>
+struct agy_stub {
+    static const unsigned char frame_start, frame_end, end;
+
+    [[gnu::naked, gnu::used]] static void entry()
+    {
+        __asm__((asm_text<[] { return stub_asm(I); }>()));
+        __builtin_unreachable();
     }
 
-/* The linker may place these functions in any order, with gaps between them. */
-AGY_STUBS(AGY_STUB_FULLCGO, AGY_STUB_ASMCGO)
+    /* Only emits symbol aliases. Never called; --gc-sections discards the helper
+     * after the assembler binds these template members to the actual code labels. */
+    [[gnu::used, gnu::noinline]] static void bind_labels()
+    {
+        __asm__((asm_text<[] { return boundary_asm(I); }>()) : :
+                ":" (&frame_start), ":" (&frame_end), ":" (&end));
+    }
 
-#define AGY_STUB_INFO(id, book, go_frame) \
-    {agy_stub__##id, agy_pc__##id##_frame_start, agy_pc__##id##_frame_end, agy_pc__##id##_end},
-const agy_stub_info agy_stubs[] = { AGY_STUBS(AGY_STUB_INFO, AGY_STUB_INFO) };
-static_assert(std::size(agy_stubs) == BK_STUB_COUNT, "one descriptor per installed hook");
+    static constexpr agy_stub_info info{&entry, &frame_start, &frame_end, &end};
+};
+
+template<size_t... I>
+static consteval auto make_stubs(std::index_sequence<I...>)
+{
+    [[maybe_unused]] constexpr std::array bindings{&agy_stub<STUB_BOOKS[I]>::bind_labels...};
+    return std::array{agy_stub<STUB_BOOKS[I]>::info...};
+}
+
+static constexpr auto agy_stubs = make_stubs(std::make_index_sequence<BK_STUB_COUNT>{});
+static_assert(agy_stubs.size() <= AGY_GOMOD_MAX_FUNCS,
+              "more hooks than the static synthetic-moduledata holds — bump AGY_GOMOD_MAX_FUNCS in gomod.h");
+
+std::span<const agy_stub_info> agy_stub_descriptors() noexcept
+{
+    return agy_stubs;
+}

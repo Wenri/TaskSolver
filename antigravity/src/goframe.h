@@ -1,6 +1,6 @@
-/* The stub frame layout, shared by goframe.cpp's asm and the C++ that reads it as agy_block
- * (src/gomod.h). Basic asm can't use offsetof, so the offsets are literals, and gomod.cpp
- * static_asserts each one against agy_block.
+/* The stub frame layout, shared by goframe.cpp's constexpr asm builder and the C++
+ * that reads it as agy_block (src/gomod.h). gomod.cpp checks these offsets against
+ * agy_block with static_assert.
  *
  *   rsp+0    handler fn      \ runtime.cgocall spill space / runtime.asmcgocall arguments
  *   rsp+8    &block          /
@@ -11,6 +11,8 @@
  */
 #ifndef AGY_GOFRAME_H
 #define AGY_GOFRAME_H
+
+#include <span>
 
 #define AGY_FRAME        112   /* bytes the stub subtracts from rsp */
 
@@ -34,17 +36,11 @@
 
 /* Linked function boundaries, independent of section placement or function order.
  * The frame is live after SUB through the end of LEA; the end label follows RET. */
-typedef struct agy_stub_info {
+struct agy_stub_info {
     void (*entry)(void);
     const unsigned char *frame_start, *frame_end, *end;
-} agy_stub_info;
+};
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-extern const agy_stub_info agy_stubs[];
-#ifdef __cplusplus
-}
-#endif
+std::span<const agy_stub_info> agy_stub_descriptors() noexcept;
 
 #endif /* AGY_GOFRAME_H */

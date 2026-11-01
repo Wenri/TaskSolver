@@ -195,15 +195,9 @@ typedef struct { uint32_t book, action; agy_go_regs regs; } agy_block;
  * Mark `md->bad = 1`
  * (so `runtime.modulesinit` skips it while `moduledataverify1` and `findfunc`
  * walk it), and splice it onto `agy_firstmoduledata.next`. */
-#ifdef __cplusplus
-extern "C" {
-#endif
-extern go_moduledata agy_firstmoduledata;
+extern "C" go_moduledata agy_firstmoduledata;
 
-int agy_gomod_register(const agy_stub_info *stubs, size_t nstubs);
-#ifdef __cplusplus
-}
-#endif
+int agy_gomod_register(std::span<const agy_stub_info> stubs);
 
 /* The frame-pointer unwinder (agy_safe_read/agy_backtrace/agy_emit_stack) and the
  * per-hook C handlers (`agy_on_*`) are gocall.cpp's API — see gocall.h. */

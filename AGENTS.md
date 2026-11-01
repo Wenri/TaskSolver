@@ -50,6 +50,15 @@ pixi run -e cuda python test_scripts/vision_language.py # vision; uses QwenModel
 
 **pixi-build env (`[tool.pixi.*]` in `pyproject.toml`):** the workspace uses the `pixi-build` preview feature. `tasksolver` is a Linux x86-64 conda package (`noarch = false`) built by `pixi-build-python` and depended on by path. The build compiles agy/Codex/Kimi capture integrations, packages the checked-in Claude and Codex SDKs, and fetches Claude's pinned size/SHA256-verified executable. The backend builds *without isolation*, so `[build-system].requires` (setuptools/pip) and native build tools must also appear under `[tool.pixi.package.host-dependencies]`. rattler-build activates the host env and then the (empty) build env, so `CONDA_PREFIX` names the build env there; `setup.py` (`native_build_env`) points the native builds' `CONDA_PREFIX` at the host env (`$PREFIX`) whenever `CONDA_BUILD=1`, and passes `PY3CONFIG` explicitly because the CMake build dirs are shared with `pixi run build-shim`. The backend installs the package *editable*, and setuptools' `editable_wheel` downgrades a failing `build_py` to a warning; `BuildPyNative` therefore re-raises native-build failures as `SystemExit`, so a broken native build fails `pixi install` instead of installing a package without its natives. rattler-build also points `HOME` at each build's own work dir. The kimi step therefore keeps pnpm's store in `.pixi/pnpm-store` and lets pnpm relink `node_modules` without a TTY prompt. cargo's registry still lives under that per-build `HOME`, so a package build that starts in a fresh work dir re-downloads the crates and recompiles all of codex (about 25 min); one that reuses the work dir finishes in seconds. The backend resolves from pixi's default channel and is not pinned in `pixi.lock`.
 
+The `default` and `cuda` environments and package host dependencies require the conda GCC 15
+toolchain (`gcc_linux-64` / `gxx_linux-64`: `>=15,<16`). The workspace lock currently resolves
+GCC 15.3 and compatible binutils 2.46.1; binutils has no independent pin. Native C++ stays
+C++23. GCC 15 supplies the constexpr-generated basic-asm strings used by agy's trampoline
+template. After a compiler-major upgrade, freshly configure and rebuild
+the native CMake trees: cached compiler identity and old GCC LTO objects must be cleared.
+Preserve `antigravity/build/antigravity-*.raw` when cleaning generated build files; do not
+delete the whole `antigravity/build` directory and its verified raw-binary cache.
+
 After source changes, use `pixi reinstall --locked tasksolver` in the consuming workspace to rebuild and refresh the installed package; omit `--locked` when dependencies changed. In particular, a parent's noneditable PyPI path dependency remains an installed snapshot until refreshed. An editable Python source path also does not rebuild native artifacts by itself. Do not install duplicate `claude-agent-sdk`, `openai-codex`, or `openai-codex-cli-bin` distributions: TaskSolver owns their SDK namespaces and bundled runtimes. Keep `claude/build_cli.py` and `claude/vendor.json` in `MANIFEST.in` so source distributions can execute the build hook.
 
 **Optional extras, the merged env, and building flash-attn.** `[project.optional-dependencies]` keeps two *portable* extras — `local` (torch/HF stack **incl. flash-attn**, since the intern/phi/minicpm/llama adapters hardcode `flash_attention_2`) and `app` (streamlit/flask/matplotlib). TaskSolver's workspace maps them to **two** pixi environments (`[tool.pixi.environments]`): `default` = `app` only (GPU-free — what plain `pixi install` resolves; verified to install without a GPU), and `cuda` = `local` + `app`. The cu134 torch index, `no-build-isolation`, the CUDA 13.4 toolkit (conda-forge `cuda-nvcc` + `cuda-cudart-dev`, so the host needs only the NVIDIA driver) and the flash-attn build toolchain live in `[tool.pixi.feature.local.*]`; the CUDA 13.4 driver requirement is a virtual package on the workspace `platforms` but **only binds the `cuda` env**. PyPI's newest flash-attn (2.8.3.post2) compiles with `-std=c++17`, which torch >= 2.13's C++20 headers reject, so the feature builds it as C++20: `CXX` is `tools/cxx20-g++` (the conda g++ with `-std=c++17` rewritten to `-std=c++20`; torch compiles `.cpp` files with `$CXX`) and `NVCC_APPEND_FLAGS=-std=c++20` (nvcc keeps the last `-std`). Upstream `main` fixed `setup.py` alone, but flash-attn from git cannot be locked: its `setup.py` imports torch at metadata time, and PyPI torch is not installed during resolution. Remove both overrides once a release after 2.8.3.post2 is on PyPI. So `pixi install -e cuda` requires a CUDA 13.4 driver and compiles flash-attn (`pip install tasksolver[local]` additionally needs a host CUDA toolkit); plain `pixi install` does not. conda-forge's nvcc activation sets no `CUDA_HOME` and keeps the headers only under `targets/x86_64-linux/include`, so the feature's `activation.env` sets `CUDA_HOME=$CONDA_PREFIX` and `CUDA_INC_PATH` (overriding any host toolkit) and blanks `NVCC_PREPEND_FLAGS` (torch passes `-ccbin $CC` itself). On NixOS it also prepends `/run/opengl-driver/lib` to `NIX_LD_LIBRARY_PATH`; without it torch cannot find `libcuda.so.1` and reports no GPU. That build has two non-obvious knobs, set in `[tool.pixi.feature.local.activation.env]` (pixi *does* apply a feature's `activation.env` during the build): use **`FLASH_ATTN_CUDA_ARCHS`** (e.g. `"80"` = Ampere) — flash-attn silently ignores `TORCH_CUDA_ARCH_LIST` and otherwise builds a 4-arch fat binary (~4× the work); and set **`MAX_JOBS`** explicitly, else flash-attn's `psutil`-based auto-calc under-parallelizes because this host's ZFS ARC cache deflates "available" memory.
@@ -246,11 +255,25 @@ instrumentation layer; Claude uses its SDK protocol directly:
   `agy_on_stream`, retaining their row-derived event kinds. Each `naked` stub uses basic asm
   to load its entry once into `r12`, skips the hook if null, and otherwise passes that same
   pointer with `&block` through the row's Go gateway (`runtime.cgocall` or `runtime.asmcgocall`).
-  `AGY_STUB_FULLCGO` passes `fn`/`arg` in RAX/RBX; `AGY_STUB_ASMCGO` writes them to the stack.
-  The variants share save/restore text and each names its gateway directly. Generated
-  `AGY_STUBS(FULLCGO, ASMCGO)` supplies `(id, book, go_frame)` for each active row;
-  linked function order is unrestricted. Shared basic asm reconstructs the original Go prologue using
-  `go_frame` after releasing the trampoline frame.
+  The generated header contains only the expected `AGY_BUILD_ID` and signed `AGY_GO_FRAMES`,
+  one original Go frame allocation per `BOOKS` row (`-1` for disabled rows). Python validates
+  the binary prologues before writing it; the expected BuildID remains an independent startup
+  guard. `goframe.cpp` derives active indices (`STUB_BOOKS`) from `BOOKS` and instantiates one
+  naked template per active row; its `consteval` asm builder selects the gateway from
+  `BOOKS[book].mech`. FULLCGO passes `fn`/`arg` in RAX/RBX; ASMCGO
+  writes them to the stack. One register list supplies both save and restore instructions.
+  The temporary assembly string is copied into an exactly sized `std::array` for GCC's
+  basic-asm expression; none of this construction runs at startup. Each exported
+  `agy_stub__<id>` label shares its template function's entry, with no wrapper jump.
+  `consteval make_stubs` builds a private constexpr `std::array` of typed descriptors.
+  A separate, never-called binding template aliases template boundary members to the asm
+  labels; assembler/linker resolution supplies the addresses without runtime initialization.
+  Linker GC discards the unused binding functions. `agy_stub_descriptors()` exposes a
+  `std::span<const agy_stub_info>` consumed directly by `agy_gomod_register`.
+  C++ owns the table's storage and layout. Linked function order is unrestricted.
+  The asm reconstructs the original Go prologue using `AGY_GO_FRAMES[book]` after releasing
+  the trampoline frame. Keep `__builtin_unreachable()` after the asm: its RET/JMP handles
+  control flow, so C++ execution never falls through, even when the stub returns to Go.
   Preserve that Go→C transition. The fixed 112-byte frame reserves 16 bytes for the gateway,
   then packs `uint32_t book` and `action` before the 11 saved registers. A single qword store
   initializes both fields; the pinned ASMCGO gateway's 32-bit result overwrites only `book`

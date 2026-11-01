@@ -119,12 +119,11 @@ kernel-headers_linux-64 = ">=6"   # -> sysroot 2.39 (matches 3D-CoT; relaxing bi
 # Conda C/C++ compilers for the antigravity shim — the automatic build_py build AND manual
 # `pixi run build-shim`. Use them instead of a bare PATH `gcc`/`g++`: on a Nix host those are
 # Nix's, which bake /nix/store glibc rpaths into the shim and break its LD_PRELOAD. cmake picks
-# them up via $CXX/$CC exported by the env. gxx pulls gcc; pinned >=13,<13.3 (gcc 13.2) — the
-# newest gcc conda-forge ships a 13.x compiler wrapper for, and what the 3D-CoT consumer builds
-# with, so both build the natives on the same toolchain (gcc 13.2 + binutils 2.40). Shared solve
-# group with the local feature. All shim TUs are C++23 (Boost.Thread/Boost.Python).
-gcc_linux-64 = ">=13,<13.3"
-gxx_linux-64 = ">=13,<13.3"
+# them up via $CXX/$CC exported by the env. GCC 15 supports constexpr-generated asm strings
+# in C++23. Keep the workspace and package build on the same compiler major; the CUDA
+# toolchain's gcc_impl constraint also permits GCC 15. All shim TUs remain C++23.
+gcc_linux-64 = ">=15,<16"
+gxx_linux-64 = ">=15,<16"
 # Boost.Thread for the pybridge worker (its thread::attributes sets the libpython worker's
 # 16 MB stack — no std API can). libboost-devel = headers + link libs; it pulls libboost (the
 # runtime libboost_thread.so, found at runtime via the shim's -rpath $CONDA_PREFIX/lib).
@@ -140,9 +139,7 @@ libpython = "*"
 hpack = ">=4"
 brotli-python = ">=1.1"
 gdb = ">=18.1,<19"
-# binutils is NOT pinned: it comes from the gcc/gxx wrapper, which exact-pins the
-# binutils_linux-64 build it was made against (gcc-13.2's wrapper -> binutils 2.40).
-# Forcing binutils >=2.45 here would exclude gcc 13.2 and drop the toolchain to gcc 12.4.
+# Let the compiler packages resolve compatible binutils; no independent binutils pin.
 gh = ">=2.96.0,<3"
 glab = ">=1.106.0,<2"
 paramiko = ">=5.0.0,<6"
@@ -191,8 +188,8 @@ cmake = ">=4.3.4,<5"          # drives the shim build (antigravity/CMakeLists.tx
 ninja = ">=1.11"             # cmake generator for the shim build
 py-lief = ">=1.0.0,<2"   # make_libagy.py converts the upstream agy binary into libagy.so
 kernel-headers_linux-64 = ">=6"   # -> sysroot 2.39 (matches 3D-CoT; relaxing binutils would otherwise drop it to 2.28/kh-4.18)
-gcc_linux-64 = ">=13,<13.3"   # pulled by gxx; conda toolchain, not the Nix gcc on PATH
-gxx_linux-64 = ">=13,<13.3"   # all shim TUs are C++23 (Boost.Thread/Boost.Python) → conda g++
+gcc_linux-64 = ">=15,<16"   # same conda toolchain as the workspace, not the Nix gcc on PATH
+gxx_linux-64 = ">=15,<16"   # C++23 plus GCC's constexpr-generated asm strings
 libboost-devel = ">=1.88"     # Boost.Thread (headers + libboost_thread) for the pybridge worker
 libboost-python-devel = ">=1.88"   # Boost.Python (embedding) — py315 build matches libpython3.15
 libpython = "*"               # libpython3.15.so to link the embedded interpreter (split out of `python` in 3.15)
@@ -245,7 +242,7 @@ shim-hooks = { cmd = "python3 -m symbols.gen_sources --hooks", cwd = "antigravit
 # flash-attn builds from source: no-build-isolation so it can import torch at build
 # time. nvcc and the CUDA headers come from conda-forge (below), so the host needs
 # only the NVIDIA driver, no CUDA toolkit; nvcc compiles host code with the conda
-# gcc 13.2 (torch's cpp_extension passes `-ccbin $CC`).
+# GCC 15 (torch's cpp_extension passes `-ccbin $CC`).
 [tool.pixi.feature.local.pypi-options]
 extra-index-urls = ["https://download.pytorch.org/whl/cu134"]
 index-strategy = "unsafe-best-match"
@@ -263,7 +260,7 @@ torchaudio = { version = "*", index = "https://download.pytorch.org/whl/cu134" }
 [tool.pixi.feature.local.dependencies]
 cmake = ">=4"
 ninja = "*"
-gxx_linux-64 = ">=13,<13.3"
+gxx_linux-64 = ">=15,<16"
 # CUDA toolkit for the flash-attn build, at the CUDA minor version of the torch wheels
 # (cu134). nvcc plus the cudart/driver headers are all flash-attn's sources include:
 # torch's CUDAContextLight.h would also need the cuBLAS/cuSPARSE/cuSOLVER headers, but

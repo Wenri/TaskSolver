@@ -89,9 +89,10 @@ static struct {
     alignas(uint32_t) uint8_t smap[sizeof(go_stackmap) + AGY_GOMOD_MAX_MAPBYTES];
 } g_mod;
 
-int agy_gomod_register(const agy_stub_info *stubs, size_t nstubs)
+int agy_gomod_register(std::span<const agy_stub_info> stubs)
 {
-    if (!stubs || nstubs == 0 || nstubs > AGY_GOMOD_MAX_FUNCS || g_mod.md.pcHeader) {
+    const size_t nstubs = stubs.size();
+    if (stubs.empty() || nstubs > AGY_GOMOD_MAX_FUNCS || g_mod.md.pcHeader) {
         GLOG("invalid stub count or repeated module registration (nfunc=%zu)", nstubs);
         return -1;
     }

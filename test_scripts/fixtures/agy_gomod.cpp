@@ -112,7 +112,7 @@ static int32_t spdelta(const go_moduledata *md, const go_func *fn, uint32_t pc)
 
 static void check_registered(std::vector<agy_stub_info> stubs)
 {
-    CHECK(agy_gomod_register(stubs.data(), stubs.size()) == 0);
+    CHECK(agy_gomod_register(stubs) == 0);
     std::sort(stubs.begin(), stubs.end(), [](auto &a, auto &b) { return entry(a) < entry(b); });
     auto md = agy_firstmoduledata.next;
     CHECK(md && !md->next && md->bad);
@@ -203,7 +203,7 @@ int main(int argc, char **argv)
     else if (!std::strcmp(argv[1], "count")) stubs.resize(AGY_GOMOD_MAX_FUNCS + 1, stubs[0]);
     else if (!std::strcmp(argv[1], "size")) stubs[0] = stub(0x100000, AGY_GOMOD_MAX_TEXT_SIZE + 1, 20, 173);
     else CHECK(false);
-    CHECK(agy_gomod_register(stubs.data(), stubs.size()) < 0);
+    CHECK(agy_gomod_register(stubs) < 0);
     CHECK(!agy_firstmoduledata.next);  // invalid metadata must never reach the runtime
     return 0;
 }

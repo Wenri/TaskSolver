@@ -40,6 +40,7 @@ class AgyStubTests(unittest.TestCase):
         cls.obj = lief.parse(str(OBJECT))
         cls.go = lief.parse(str(ANTI / "vendor/libagy.so"))
         cls.symbols = {s.name: s for s in cls.image.symtab_symbols}
+        cls.descriptors = cls.symbols["_ZL9agy_stubs"]  # private constexpr table in goframe.cpp
         cls.stubs = {name: s for name, s in cls.symbols.items() if name.startswith("agy_stub__")}
         cls.layout = {name: int(value) for name, value in re.findall(
             r"^#define\s+(AGY_\w+)\s+(\d+)\b", (ANTI / "src/goframe.h").read_text(), re.M)}
@@ -58,7 +59,9 @@ class AgyStubTests(unittest.TestCase):
         self.assertIsNone(self.image.get_section("agy_trampolines"))
         self.assertFalse(any(name in self.symbols for name in
                              ("__start_agy_trampolines", "__stop_agy_trampolines")))
-        descriptors = self.symbols["agy_stubs"]
+        self.assertFalse(any("bind_labels" in name for name in self.symbols))
+        descriptors = self.descriptors
+        self.assertEqual(descriptors.binding, lief.ELF.Symbol.BINDING.LOCAL)
         self.assertEqual(descriptors.size, len(expected) * 32)
         raw = bytes(self.image.get_content_from_virtual_address(descriptors.value, descriptors.size))
         for row, pointers in zip(enabled_hooks(), struct.iter_unpack("<4Q", raw), strict=True):
@@ -98,7 +101,7 @@ class AgyStubTests(unittest.TestCase):
             result = subprocess.run(command, capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             linked = Path(directory) / "linked-stubs.txt"
-            descriptor = self.symbols["agy_stubs"]
+            descriptor = self.descriptors
             raw = bytes(self.image.get_content_from_virtual_address(descriptor.value, descriptor.size))
             linked.write_text("".join(" ".join(f"{p:x}" for p in pointers) + "\n"
                                       for pointers in struct.iter_unpack("<4Q", raw)))

@@ -24,13 +24,9 @@
 #include "wirecap.h"
 #include "symbols_gen.h"
 #include "gocall.h"
-#include "procdef.h"
 #include <cstddef>
 #include "goframe.h"
 #include "gomod.h"
-
-static_assert(BK_STUB_COUNT <= AGY_GOMOD_MAX_FUNCS,
-              "more hooks than the static synthetic-moduledata holds — bump AGY_GOMOD_MAX_FUNCS in gomod.h");
 
 /* ---- logging -------------------------------------------------------------- */
 static FILE *g_logf;
@@ -97,7 +93,7 @@ int getaddrinfo(const char *node, const char *service,
 static void agy_init(void)
 {
     /* Register the linked stub ranges before Go starts, even when hooks are disabled. */
-    if (agy_gomod_register(agy_stubs, BK_STUB_COUNT) != 0) {
+    if (agy_gomod_register(agy_stub_descriptors()) != 0) {
         std::fprintf(stderr, "[antigravity] FATAL: invalid trampoline metadata\n");
         std::abort();
     }

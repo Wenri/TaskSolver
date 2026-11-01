@@ -31,11 +31,13 @@ exports remain for introspection and patching. At startup, `main()` runs
      `BIND_NOW`/`NOW` resolve all slots at process load time; `.plt.agy` jumps through them
      without runtime code patching or `mprotect`.
 2. **Static cgocall trampolines (`src/goframe.cpp` + `src/gocall.cpp` + `src/gomod.cpp`)**
-   emitted as ordinary `.text` functions: each stub is a `naked` function emitted by
-   `AGY_STUB_FULLCGO` or `AGY_STUB_ASMCGO`, sharing save/restore text. Descriptors record each
-   entry and hidden asm labels for its frame and function boundaries.
-   `gen_sources.py` emits `AGY_STUBS(FULLCGO, ASMCGO)` with each stub's `id`, `book`, and `go_frame` into
-   `src/symbols_gen.h`. Linked function order and spacing are unrestricted; descriptors are
+   emitted as ordinary `.text` functions by one `naked` template indexed by row.
+   `gen_sources.py` emits only the expected `AGY_BUILD_ID` and original Go frame allocations
+   (`AGY_GO_FRAMES`) into `src/symbols_gen.h`. C++ derives active rows from `BOOKS`; a
+   `consteval` builder selects the gateway from `BOOKS[book].mech` and generates the basic asm.
+   Exported `agy_stub__<id>` labels share their template functions' entry addresses, with no
+   wrapper call or jump. `consteval make_stubs` builds a private constexpr descriptor array,
+   exposed through a read-only span. Linked function order and spacing are unrestricted; descriptors are
    sorted by address to build one synthetic `moduledata` (`md->bad = 1`), spliced onto `agy_firstmoduledata.next`
    before `agy_rt0_go()` starts. `agy_enable_hooks` in `gocall.cpp` fills the zero-initialized
    `g_agy_on` handler pointer table for enabled rows; disabled entries remain `nullptr`.
@@ -65,8 +67,8 @@ dedicated worker thread, where your logic lives (`antigravity/pyagy/agy_process/
 
 **Build pinning.** Everything is pinned to the agy ELF BuildID (currently
 `85d3425a18a809e545747dcb9d87c03c`, agy **1.4.11**). The shim refuses to install hooks if
-the running binary's BuildID doesn't match `symbols.json`, so offsets can never be
-silently applied to a different build. After updating the release pins, rebuild the library
+the running binary's BuildID doesn't match the compiled `AGY_BUILD_ID` captured from
+`symbols.json`, so offsets can never be silently applied to a different build. After updating the release pins, rebuild the library
 and metadata with `pixi run shim-symbols`.
 
 The 1.4.11 upgrade follows the package move of `createPlannerResponseStep` and
@@ -217,11 +219,14 @@ static assembly trampoline stub
    displaced original frame-setup prologue and resumes with
    `jmp *agy_resume__<id>@GOTPCREL(%rip)`. The alias already points at `entry + skip + ow`.
 
-Generated entries have the form `FULLCGO(id, book, go_frame)` or `ASMCGO(id, book, go_frame)`,
-for example `ASMCGO(smoke, 0, 0x10)`. `go_frame` is the original Go function's stack allocation.
+The generated `AGY_GO_FRAMES` array holds one signed original Go frame allocation per
+`BOOKS` row, with `-1` for disabled rows; for `smoke`, `AGY_GO_FRAMES[0]` is `0x10`.
+The expected `AGY_BUILD_ID` is the header's only other value. These come from binary metadata;
+C++ derives active row indices (`STUB_BOOKS`), ids, and mechanisms directly from `BOOKS`.
 After releasing the fixed 112-byte trampoline frame, the shared basic asm reconstructs
-`pushq %rbp; movq %rsp, %rbp; subq $go_frame, %rsp`. The generator accepts only the known
-8/11-byte prologues with canonical nonnegative immediates; native tests check the exact emitted bytes.
+`pushq %rbp; movq %rsp, %rbp; subq $go_frame, %rsp`, using `AGY_GO_FRAMES[book]`.
+Before writing the header, the Python generator validates the known 8/11-byte prologues
+and their canonical nonnegative immediates; native tests check the exact emitted bytes.
 
 Because the trampoline never rewrites *our* return address, parking/rescheduling is
 unaffected — the goroutine may resume on any M. Each `procdef.h` row has the form
@@ -230,8 +235,19 @@ unaffected — the goroutine may resume on any M. Each `procdef.h` row has the f
 `runtime.asmcgocall`, a lighter variant (just the g0 stack switch, no `entersyscall`/`_Gsyscall`)
 for hot or syscall-at-entry-sensitive funcs; `AGY_OFF(symbol)` disables the hook. C++ keeps
 the wrapper's mechanism enum in `BOOKS` and discards the symbol; the Python parser reads both.
-Each stub variant names its gateway directly. Both belong to one synthetic moduledata,
-with each function's pcsp derived from its linked boundaries.
+The `consteval` builder emits the selected gateway directly and uses one register list for
+both save and restore instructions. It builds a temporary `std::string`, then copies it into
+an exactly sized `std::array` for GCC 15's `__asm__((expression))` extension. String construction
+and gateway selection happen entirely at compile time. All instantiations belong to one
+synthetic moduledata, with each function's pcsp derived from its linked boundaries.
+
+`consteval make_stubs` expands the active indices into a private constexpr `std::array` in
+`goframe.cpp`; C++ owns its storage and layout. A separate ordinary binding template aliases
+typed boundary members to the asm labels. These binding functions are never called and linker
+GC discards their code; the assembler/linker resolves the addresses without a runtime initializer.
+`agy_stub_descriptors()` exposes a `std::span<const agy_stub_info>` passed directly to
+`agy_gomod_register`. The naked functions contain basic asm followed by `__builtin_unreachable()`: their
+RET/JMP handles control flow, so C++ never falls through; the stubs can still return to Go.
 
 **Synthetic moduledata (`gomod.cpp`).** `cgocall`'s `entersyscall()` opens a GC-scannable window
 over our trampoline frame; if Go's unwinder can't `findfunc` the trampoline PCs it
@@ -454,15 +470,15 @@ antigravity/
                               `--update` queries the latest release manifest and prints new pins;
                               `--wsl1` applies the tcmalloc MAP_FIXED_NOREPLACE fix on its own (a
                               conversion applies it automatically when running on WSL1).
-    gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (build id + AGY_STUBS(FULLCGO, ASMCGO),
-                              one (id, book, go_frame) entry per installed hook); `--hooks` →
+    gen_sources.py          ← symbols.json + procdef.h → symbols_gen.h (expected AGY_BUILD_ID +
+                              AGY_GO_FRAMES in BOOKS order, -1 for disabled rows); `--hooks` →
                               pyagy/agy_process/hooks.py
     symbols.json            ← generated, gitignored: {build_id, text_base, hooks:{name→vaddr}, skips, prologues}
   src/
     goframe.h               ← the stub frame layout, shared by goframe.cpp and the rest of the
                               C++ (gomod.cpp static_asserts every offset against agy_block)
-    goframe.cpp             ← AGY_STUB_FULLCGO / AGY_STUB_ASMCGO emit each `naked` trampoline
-                              with shared basic-asm save/restore text; compiled -fno-lto
+    goframe.cpp             ← one naked template + consteval asm builder; shared register list,
+                              private constexpr descriptor array with a span API; compiled -fno-lto
     antigravity.cpp         ← main() entrypoint + agy_init() + getaddrinfo interposer
     gomod.cpp / gocall.cpp  ← synthetic Go moduledata + handler-table setup, C handlers & stack unwinder
     pybridge.cpp/.h         ← embed libpython (C++23); pyworker boost::thread, Boost.Python
@@ -560,6 +576,15 @@ pixi run python -m unittest symbols.test_procdef symbols.test_build_symbols symb
 Bumping agy is `shim-agy-update` (it prints the `AGY_VERSION`/`AGY_URL`/`AGY_SHA512` lines to paste
 into `CMakeLists.txt`) followed by `shim-symbols`. Commit the updated pins; the library and
 metadata are regenerated from the verified raw release.
+
+**Compiler toolchain.** Both Pixi environments (`default` and `cuda`) and the package host
+dependencies require conda GCC `>=15,<16`; the workspace lock currently resolves GCC 15.3
+and binutils 2.46.1. The native code stays C++23. GCC 15 provides the constexpr-generated
+basic-asm strings used by the trampoline template in that language mode.
+After changing compiler major versions, clear the native CMake caches and compiled objects,
+then configure and rebuild the native trees: CMake caches the compiler identity, and old
+GCC LTO objects cannot be reused across major versions. Preserve the verified
+`antigravity/build/antigravity-*.raw` cache when cleaning; do not delete the whole build directory.
 
 **libpython / Python version.** The shim embeds the **pixi env's libpython 3.15**
 (`$(CONDA_PREFIX)/bin/python3-config`), unified with the pixi-3.15 driver so the

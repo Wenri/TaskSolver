@@ -131,7 +131,7 @@ message(STATUS "[build] UAPI headers: ${UAPI_INC} (empty = /usr/include)")
 
 # NOTE: no python3-config probe here. No shim TU includes a Python header — CPython is embedded by
 # the SHARED bridge (wirecap/native), which does its own probe and carries the embed link flags.
-# ---- generate symbols_gen.h from generated symbols.json + src/procdef.h ----------------------
+# ---- generate binary-derived BuildID/frame inputs from symbols.json + src/procdef.h -----------
 add_custom_command(
   OUTPUT "${CMAKE_SOURCE_DIR}/src/symbols_gen.h"
   COMMAND python3 -m symbols.gen_sources
@@ -153,8 +153,9 @@ add_custom_target(gen_symbols DEPENDS "${CMAKE_SOURCE_DIR}/src/symbols_gen.h")
 add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wirecap_bridge")
 
 # ---- the instrumented host executable: vendor/agy (links vendor/libagy.so first) --------------
-# src/goframe.cpp emits FULLCGO/ASMCGO naked stubs with their own argument setup;
-# the generated src/symbols_gen.h selects the variant and supplies its literals (AGY_STUBS).
+# src/goframe.cpp derives active rows from BOOKS and instantiates naked templates;
+# the generated header supplies only the expected BuildID and original Go frame sizes.
+# GCC 15 constexpr asm emits the stubs; C++ owns the constexpr descriptor table and span API.
 add_executable(agy
   src/antigravity.cpp src/gomod.cpp src/gocall.cpp src/goframe.cpp)
 add_dependencies(agy gen_symbols agy_library)
@@ -178,8 +179,8 @@ endif()
 if(TASKSOLVER_LTO)
   target_compile_options(agy PRIVATE -flto=auto)
   target_link_options(agy PRIVATE -flto=auto)
-  # ...except goframe.cpp: keep asm-defined boundary labels and their external references
-  # reliable. Metadata uses linked addresses, not function order. See test_agy_stubs.py.
+  # ...except goframe.cpp: preserve the templates' asm-defined export/boundary labels and
+  # their external references. Metadata uses linked addresses. See test_agy_stubs.py.
   set_source_files_properties(src/goframe.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
 endif()
 target_include_directories(agy PRIVATE "${CONDA_PREFIX}/include")

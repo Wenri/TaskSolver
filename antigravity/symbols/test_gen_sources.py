@@ -14,34 +14,29 @@ ROW = {"id": "fixture", "symbol": "example.(*Fixture).Run", "mech": "fullcgo"}
 
 
 class GenSourcesTests(unittest.TestCase):
-    def test_frame_boundaries_for_both_gateways(self):
+    def test_frame_boundaries(self):
         cases = (
             ("554889e54883ec00", 0),
             ("554889e54883ec7f", 127),
             ("554889e54881ec80000000", 128),
             ("554889e54881ecffffff7f", 0x7fffffff),
         )
-        for mech in ("fullcgo", "asmcgo"):
-            for prologue, frame in cases:
-                with self.subTest(mech=mech, frame=frame):
-                    row = {**ROW, "mech": mech}
-                    self.assertEqual(gen_sources.stub_entry(row, 7, prologue),
-                                     f"{mech.upper()}(fixture, 7, {frame:#x})")
+        for prologue, frame in cases:
+            with self.subTest(frame=frame):
+                self.assertEqual(gen_sources.frame_size(ROW, prologue), frame)
 
     def test_representative_go_prologues(self):
         cases = (
-            ("smoke", "os.Getenv", "asmcgo", 0, "554889e54883ec10", "ASMCGO(smoke, 0, 0x10)"),
-            ("readlink_filter", "os.readlink", "fullcgo", 3, "554889e54883ec78",
-             "FULLCGO(readlink_filter, 3, 0x78)"),
-            ("tls_write", "crypto/tls.(*Conn).Write", "asmcgo", 4, "554889e54881ecc0000000",
-             "ASMCGO(tls_write, 4, 0xc0)"),
-            ("send_user_msg", "example.(*Backend).SendUserMessage", "fullcgo", 12,
-             "554889e54881ec18010000", "FULLCGO(send_user_msg, 12, 0x118)"),
+            ("smoke", "os.Getenv", "asmcgo", "554889e54883ec10", 0x10),
+            ("readlink_filter", "os.readlink", "fullcgo", "554889e54883ec78", 0x78),
+            ("tls_write", "crypto/tls.(*Conn).Write", "asmcgo", "554889e54881ecc0000000", 0xc0),
+            ("send_user_msg", "example.(*Backend).SendUserMessage", "fullcgo",
+             "554889e54881ec18010000", 0x118),
         )
-        for hook, symbol, mech, book, prologue, expected in cases:
+        for hook, symbol, mech, prologue, frame in cases:
             with self.subTest(hook=hook):
                 row = {"id": hook, "symbol": symbol, "mech": mech}
-                self.assertEqual(gen_sources.stub_entry(row, book, prologue), expected)
+                self.assertEqual(gen_sources.frame_size(row, prologue), frame)
 
     def test_reject_invalid_or_noncanonical_prologues(self):
         cases = (
@@ -58,7 +53,7 @@ class GenSourcesTests(unittest.TestCase):
         for prologue in cases:
             with self.subTest(prologue=prologue):
                 with self.assertRaises(SystemExit) as failure:
-                    gen_sources.stub_entry(ROW, 7, prologue)
+                    gen_sources.frame_size(ROW, prologue)
                 self.assertIn(f"hook {ROW['id']} ({ROW['symbol']}):", str(failure.exception))
 
     def test_invalid_later_row_preserves_header(self):
@@ -74,6 +69,25 @@ class GenSourcesTests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "hook later"):
                     gen_sources.gen_header(symbols, header)
             self.assertEqual(header.read_text(), "existing valid header\n")
+
+    def test_header_frames_preserve_disabled_book_rows(self):
+        disabled = {"id": "disabled", "symbol": "example.Disabled", "mech": "off"}
+        later = {"id": "later", "symbol": "example.Later", "mech": "asmcgo"}
+        metadata = {"build_id": "fixture-build", "prologues": {
+            ROW["symbol"]: "554889e54883ec10", later["symbol"]: "554889e54881ecc0000000",
+        }}
+        with tempfile.TemporaryDirectory() as directory:
+            symbols, header = (Path(directory) / name for name in ("symbols.json", "symbols_gen.h"))
+            symbols.write_text(json.dumps(metadata))
+            with mock.patch.object(gen_sources, "load_procdef", return_value=[ROW, disabled, later]):
+                gen_sources.gen_header(symbols, header)
+            content = header.read_text()
+        self.assertIn('inline constexpr char AGY_BUILD_ID[] = "fixture-build";', content)
+        self.assertIn("#include <cstdint>", content)
+        self.assertIn("inline constexpr std::int32_t AGY_GO_FRAMES[] = {\n"
+                      "    0x10,\n    -1,\n    0xc0,\n};", content)
+        for declaration in ("AGY_STUB", "agy_pc__", "struct ", "extern ", "std::array", "goframe.h"):
+            self.assertNotIn(declaration, content)
 
 
 if __name__ == "__main__":
