@@ -16,7 +16,9 @@
 # An adoption that needs hand work (patch conflicts, a failed agy conversion, a Claude Code release
 # the native bridge does not support yet, a failing test) is pushed to `runtime-updates/run-<id>`
 # and reported in an issue; scheduled and push runs skip that target while the issue stays open.
-# The commits and tags this workflow pushes with GITHUB_TOKEN start no new runs.
+# The commits and tags this workflow pushes with GITHUB_TOKEN start no new runs. It keeps
+# nix/hashes.json current but does not build the Nix package: the downstream Nix configuration
+# that pins TaskSolver builds and tests it.
 #
 # Repository variables: RUNTIME_RUNNER (JSON runs-on value, default "ubuntu-24.04"; a self-hosted
 # runner keeps the build caches) and PREFIX_CHANNEL (prefix.dev channel for full releases, using
@@ -48,10 +50,6 @@ on:
         default: ""
       release:
         description: Publish a full release (after adopting any outdated runtimes)
-        type: boolean
-        default: false
-      nix_build:
-        description: Also build the Nix package (a second Codex build on a cold runner)
         type: boolean
         default: false
 
@@ -229,10 +227,6 @@ jobs:
           pixi publish --target-dir dist 2>&1 | tee "$RUNNER_TEMP/publish.log"
           pixi run python tools/check_bundle.py dist/tasksolver-"$VERSION"-*.conda 2>&1 |
             tee -a "$RUNNER_TEMP/publish.log"
-
-      - name: Build the Nix package
-        if: inputs.nix_build && hashFiles('flake.nix') != ''
-        run: nix build .#default --print-build-logs 2>&1 | tee "$RUNNER_TEMP/nix.log"
 
       - name: Commit, tag and push
         id: publish

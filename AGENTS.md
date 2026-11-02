@@ -94,7 +94,8 @@ input of `nix/hashes.json` changed since the commit that last wrote it, the offl
 with `notes`. An adoption publishes a pre-release of the latest code; a push with nothing to adopt
 only builds and tests; a full release is a manual dispatch with `release`. A failed adoption goes
 to branch `runtime-updates/run-<id>` plus an issue. The Claude native bridge is gated to one Claude
-Code release (`claude/unbundle.py`), so a Claude bump always needs it revisited.
+Code release (`claude/unbundle.py`), so a Claude bump always needs it revisited. The workflow does
+not build the Nix package; the downstream Nix configuration that pins TaskSolver does.
 
 **Toolchain.** Conda GCC `>=15,<16` (C++23; GCC 15's constexpr asm strings build agy's stubs).
 After a compiler-major upgrade or removal of a cached build environment, reconfigure the
