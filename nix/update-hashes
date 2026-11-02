@@ -9,7 +9,16 @@
 # The last two are fixed-output derivations: each is built with its hash
 # emptied, and Nix's "got:" line is the new value (downloads, no compile).
 #
-# Usage: nix/update-hashes [FLAKE]   (FLAKE defaults to the repository, `.`)
+# Each entry records what its hash was computed from, and only an entry whose
+# record no longer matches the tree is recomputed: rustyV8 its `version`,
+# claudeAgentSdk its `tag`, and the two fixed-output derivations their `drv`,
+# the derivation's store path as of the computation. That path moves with
+# every input of the output (the lockfile and manifests in the derivation's
+# source, the fetcher, nixpkgs) and with the hash itself, so a hand-edited
+# hash is recomputed too. --force recomputes every entry.
+#
+# Usage: nix/update-hashes [--force] [FLAKE]   (FLAKE defaults to the
+# repository, `.`)
 # A git flake sees tracked files only, nix/hashes.json included: `git add`
 # new files first. On any failure nix/hashes.json is restored and the exit
 # status is non-zero. Needs bash and Nix with flakes; jq comes from nixpkgs.
@@ -17,24 +26,43 @@ set -euo pipefail
 
 command -v jq >/dev/null || exec nix shell nixpkgs#jq --command bash "$0" "$@"
 
+force=false
+if [[ ${1:-} == --force ]]; then
+  force=true
+  shift
+fi
 cd "$(dirname "$0")/.."
 flake=${1:-.}
 file=nix/hashes.json
 backup=$(mktemp)
 cp "$file" "$backup"
-restore() {
-  cp "$backup" "$file"
+ok=false
+finish() {
+  if ! $ok; then
+    cp "$backup" "$file"
+    echo "update-hashes: failed; $file restored" >&2
+  fi
   rm -f "$backup"
-  echo "update-hashes: failed; $file restored" >&2
 }
-trap restore ERR
+trap finish EXIT
 
 # set PATH-IN-JSON VALUE: rewrite one string field in place.
 set_field() {
   jq --indent 2 --arg value "$2" "$1 = \$value" "$file" >"$file.new"
   mv "$file.new" "$file"
 }
+# current ENTRY FILTER VALUE: whether FILTER, given VALUE as $v, holds for
+# the recorded ENTRY (never under --force); says so when it does.
+current() {
+  if ! $force && jq -e --arg v "$3" ".$1 | $2" "$file" >/dev/null; then
+    echo "update-hashes: $1 is current"
+  else
+    return 1
+  fi
+}
 prefetch() { nix store prefetch-file --json "$@" | jq -r .hash; }
+# drv ATTR: the store path of ATTR's derivation, as the file now stands.
+drv() { nix eval --raw "$flake#default.$1.drvPath"; }
 # fod ATTR: the hash Nix reports for ATTR built with its hash emptied.
 fod() {
   local log
@@ -46,26 +74,38 @@ fod() {
 v8=$(nix eval --raw --impure --expr '
   let lock = builtins.fromTOML (builtins.readFile ./codex/vendor/codex-rs/Cargo.lock);
   in (builtins.head (builtins.filter (p: p.name == "v8") lock.package)).version')
-assets=https://github.com/denoland/rusty_v8/releases/download/v$v8
-set_field .rustyV8.version "$v8"
-set_field .rustyV8.archive "$(prefetch "$assets/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz")"
-set_field .rustyV8.binding "$(prefetch "$assets/src_binding_release_x86_64-unknown-linux-gnu.rs")"
+# Each value is assigned before it is written: a failed command substitution
+# fails an assignment (and so the script), never a command's argument.
+if ! current rustyV8 ".version == \$v and (.archive | length) > 0 and (.binding | length) > 0" "$v8"; then
+  assets=https://github.com/denoland/rusty_v8/releases/download/v$v8
+  archive=$(prefetch "$assets/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz")
+  binding=$(prefetch "$assets/src_binding_release_x86_64-unknown-linux-gnu.rs")
+  set_field .rustyV8.version "$v8"
+  set_field .rustyV8.archive "$archive"
+  set_field .rustyV8.binding "$binding"
+fi
 
 tag=$(jq -r .sdk.tag claude/vendor.json)
-set_field .claudeAgentSdk.tag "$tag"
-set_field .claudeAgentSdk.hash \
-  "$(prefetch --unpack "https://github.com/anthropics/claude-agent-sdk-python/archive/refs/tags/$tag.tar.gz")"
+if ! current claudeAgentSdk ".tag == \$v and (.hash | length) > 0" "$tag"; then
+  hash=$(prefetch --unpack "https://github.com/anthropics/claude-agent-sdk-python/archive/refs/tags/$tag.tar.gz")
+  set_field .claudeAgentSdk.tag "$tag"
+  set_field .claudeAgentSdk.hash "$hash"
+fi
 
 for pair in codexCargo:codex.cargoDeps kimiPnpm:pnpmDeps; do
   key=${pair%%:*} attr=${pair#*:}
-  set_field ".$key" ""
-  set_field ".$key" "$(fod "$attr")"
+  drvpath=$(drv "$attr")
+  current "$key" ".drv == \$v and (.hash | length) > 0" "$drvpath" && continue
+  set_field ".$key.hash" ""
+  hash=$(fod "$attr")
+  set_field ".$key.hash" "$hash"
+  drvpath=$(drv "$attr")
+  set_field ".$key.drv" "$drvpath"
 done
 
-trap - ERR
 if cmp -s "$backup" "$file"; then
   echo "update-hashes: $file unchanged"
 else
   diff -u "$backup" "$file" || true
 fi
-rm -f "$backup"
+ok=true

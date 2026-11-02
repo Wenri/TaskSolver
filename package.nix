@@ -150,7 +150,7 @@ let
     src = codexRs;
     cargoDeps = rustPlatform.fetchCargoVendor {
       src = codexRs;
-      hash = hashes.codexCargo;
+      hash = hashes.codexCargo.hash;
     };
     cargoBuildFlags = [
       "--bin"
@@ -295,7 +295,7 @@ python.pkgs.buildPythonPackage {
     inherit ((lib.importJSON "${subtree kimiRoot}/apps/kimi-code/package.json")) version;
     src = subtree kimiRoot;
     fetcherVersion = 3;
-    hash = hashes.kimiPnpm;
+    hash = hashes.kimiPnpm.hash;
   };
 
   env = {

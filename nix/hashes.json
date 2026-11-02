@@ -1,6 +1,12 @@
 {
-  "codexCargo": "sha256-v1j4o/89AkCTNMH/WiS2RwQS6yybD28rGRp88sA/Rtg=",
-  "kimiPnpm": "sha256-LxNyd7iy8vo7SpLM4fWGwzIxbwChrkGmLFdJI67McJ0=",
+  "codexCargo": {
+    "drv": "/nix/store/y68s9p8vhy4ab4x9vbk16pnqfa94gcbj-cargo-deps-vendor.drv",
+    "hash": "sha256-v1j4o/89AkCTNMH/WiS2RwQS6yybD28rGRp88sA/Rtg="
+  },
+  "kimiPnpm": {
+    "drv": "/nix/store/r2kaagf9l72slipr9zkk9kywz06skygp-tasksolver-kimi-code-pnpm-deps.drv",
+    "hash": "sha256-LxNyd7iy8vo7SpLM4fWGwzIxbwChrkGmLFdJI67McJ0="
+  },
   "rustyV8": {
     "version": "152.2.0",
     "archive": "sha256-tmg+mvy3f72MssOs9F001SApqyFrMyUiyVF5wS8P7Tw=",
