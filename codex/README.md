@@ -14,9 +14,9 @@ owned by the screen or session. See [managed terminal screens](../README.md#mana
 
 ## Layout
 
-- `vendor/` — the Codex repo at **0.166.0** (`rust-v0.166.0`, upstream commit
-  `6ff1e1c`; Apache-2.0; `LICENSE` preserved), imported with git subtree. Kept pristine except
-  our patch (below); `codex-rs/target/` is gitignored.
+- `vendor/` — the Codex repo at the release pinned in [`vendor.json`](vendor.json) (upstream tag and
+  commit; Apache-2.0; `LICENSE` preserved). Kept pristine except our patch (below);
+  `codex-rs/target/` is gitignored.
 - `pycodex/` — the Python wrapper: `ask()`/`CodexResponse`/`CodexModel` + the in-process decode
   side `codex_process` (the `WIRE_MODULE` the embedded interpreter loads) + the OpenAI-Responses
   turn decoder `responses_decode`. `sdk.py` integrates the official Python SDK with the same
@@ -27,21 +27,23 @@ owned by the screen or session. See [managed terminal screens](../README.md#mana
   separate `openai-codex-cli-bin` runtime.
 
 ## The patch
-The `vendor/codex-rs/wirecap/` crate wraps `libwirecap_bridge.a`; its fat GCC LTO objects provide
-regular machine code for the Rust linker. `cli/src/main.rs` starts and stops the bridge.
+The `vendor/codex-rs/wirecap/` crate wraps `libwirecap_bridge.a` from the standalone
+`wirecap/native/build` that setup.py builds before cargo (`WIRECAP_BRIDGE_DIR` overrides it), so
+codex does not depend on the agy build; its fat GCC LTO objects provide regular machine code for the
+Rust linker. `cli/src/main.rs` starts and stops the bridge.
 Each SSE or WebSocket transport owns a capture guard: it records the outgoing JSON before
 compression, tags response events with the same request ID, and emits `codex_end` on completion,
 error or cancellation. The Python decoder accumulates each ID separately, so concurrent
 requests cannot merge their text or exchange request metadata. Both transports use the same
 Responses event decoder.
 
-Keep these transport-boundary patches when updating the vendored snapshot:
-
-    git subtree pull --prefix codex/vendor https://github.com/openai/codex.git <newtag> --squash
-
-then re-apply the emit edits if they drifted, update SDK dependency bounds if
-required, and reinstall TaskSolver in the consuming workspace. The SDK and CLI
-must remain on the same upstream snapshot.
+Keep these transport-boundary patches when updating the vendored snapshot.
+`python3 tools/runtimes.py adopt codex [--version X.Y.Z]` replays them onto a new release with a
+three-way merge against the pinned tag (`Cargo.lock` takes upstream's copy, which the unlocked
+build completes), updates `vendor.json`, the README's pin table and pycodex's SDK
+`client_version`, and names any conflicted file to fix by hand. Then update SDK dependency bounds
+if required and reinstall TaskSolver in the consuming workspace. The SDK and CLI must remain on
+the same upstream snapshot.
 
 ## Build + run
 Built from source as a **gnu-dynamic** ELF (NOT the static-musl release artifact — it must embed

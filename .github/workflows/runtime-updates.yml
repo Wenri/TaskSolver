@@ -1,0 +1,248 @@
+# Adopt new upstream releases of the four agent runtimes, build, test and release.
+#
+# Daily, `tools/runtimes.py check` compares the pins (antigravity/vendor.json, codex/vendor.json,
+# claude/vendor.json, kimi/vendor.json) with the latest releases of agy, Codex, the Claude Agent
+# SDK (and the Claude Code release it pins) and Kimi Code. For each outdated runtime the release
+# job runs `tools/runtimes.py adopt`, which replays TaskSolver's patches onto the new release, then
+# builds the workspace, runs the offline tests, builds the redistributable conda bundle (without
+# agy and Claude Code), raises the patch version, tags, pushes and publishes a GitHub release.
+#
+# An adoption that needs hand work (patch conflicts, a failed agy conversion, a Claude Code release
+# the native bridge does not support yet, a failing test) is pushed to `runtime-updates/run-<id>`
+# and reported in an issue; scheduled runs skip those targets while the issue stays open.
+#
+# Repository variables: RUNTIME_RUNNER (JSON runs-on value, default "ubuntu-24.04"; a self-hosted
+# runner keeps the build caches) and PREFIX_CHANNEL (prefix.dev channel for the conda package,
+# using trusted publishing; unset skips the upload).
+name: Runtime updates
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      runtimes:
+        description: Runtimes to check and adopt, space-separated (empty means all four)
+        type: string
+        default: ""
+      release:
+        description: Build and release even when no runtime is outdated
+        type: boolean
+        default: false
+      nix_build:
+        description: Also build the Nix package (a second full Codex build)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-updates
+  cancel-in-progress: false
+
+env:
+  PIXI_VERSION: v0.83.0
+  # Everything an adoption or a release may change; anything else staged stops the release.
+  RELEASE_PATHS: >-
+    pyproject.toml README.md antigravity/vendor.json codex/vendor.json claude/vendor.json
+    kimi/vendor.json codex/vendor claude/vendor/sdk kimi/vendor/kimi-code codex/pycodex/sdk.py
+    nix/hashes.json
+  # github:Wenri/patchnar 0.22.0, which provides bun_graph for unbundling Claude Code.
+  PATCHNAR_REF: 6ce459b619135f5dde6d83c130dd9db92897ba67
+
+jobs:
+  check:
+    name: Check upstream releases
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      runtimes: ${{ steps.check.outputs.runtimes }}
+      targets: ${{ steps.check.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.runtimes }}
+        run: |
+          # shellcheck disable=SC2086  # REQUESTED is a space-separated list
+          python3 tools/runtimes.py check $REQUESTED --github-output "$RUNNER_TEMP/check.out"
+          runtimes=$(sed -n 's/^runtimes=//p' "$RUNNER_TEMP/check.out")
+          targets=$(sed -n 's/^targets=//p' "$RUNNER_TEMP/check.out")
+          title="Runtime update needs hand work: $targets"
+          if [ -n "$runtimes" ] && [ "$GITHUB_EVENT_NAME" = schedule ] &&
+             gh issue list --state open --search "\"$title\" in:title" --json title --jq '.[].title' |
+             grep -qxF "$title"; then
+            echo "::notice::Skipping $targets: an open issue tracks its hand work"
+            runtimes="" targets=""
+          fi
+          { echo "runtimes=$runtimes"; echo "targets=$targets"; } >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Adopt, build and release
+    needs: check
+    if: needs.check.outputs.runtimes != '' || inputs.release
+    runs-on: ${{ fromJSON(vars.RUNTIME_RUNNER || '"ubuntu-24.04"') }}
+    timeout-minutes: 360
+    permissions:
+      contents: write
+      issues: write
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUNTIMES: ${{ needs.check.outputs.runtimes }}
+      TARGETS: ${{ needs.check.outputs.targets }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Make room on the hosted runner
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift
+          sudo docker system prune --all --force > /dev/null || true
+          sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
+          { echo "PIXI_CACHE_DIR=/mnt/work/pixi-cache"; echo "RATTLER_CACHE_DIR=/mnt/work/rattler-cache"; } >> "$GITHUB_ENV"
+          df -h / /mnt
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Put the large build trees on the scratch disk
+        if: runner.environment == 'github-hosted'
+        run: |
+          mkdir -p /mnt/work/pixi /mnt/work/codex-target
+          ln -s /mnt/work/pixi .pixi
+          ln -s /mnt/work/codex-target codex/vendor/codex-rs/target
+          # .gitignore's `.pixi/` and `/target/` match directories only, not these symlinks.
+          printf '/.pixi\n/codex/vendor/codex-rs/target\n' >> .git/info/exclude
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - uses: cachix/install-nix-action@v31.11.3
+
+      - name: Build bun_graph (unbundles Claude Code)
+        run: |
+          nix build "github:Wenri/patchnar/$PATCHNAR_REF" --out-link "$RUNNER_TEMP/patchnar"
+          echo "$RUNNER_TEMP/patchnar/bin" >> "$GITHUB_PATH"
+
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          pixi-version: ${{ env.PIXI_VERSION }}
+          run-install: false
+
+      - name: Adopt upstream releases
+        id: adopt
+        run: |
+          for runtime in $RUNTIMES; do
+            python3 tools/runtimes.py adopt "$runtime" 2>&1 | tee -a "$RUNNER_TEMP/adopt.log"
+          done
+          if [ -x nix/update-hashes ]; then
+            nix/update-hashes 2>&1 | tee -a "$RUNNER_TEMP/adopt.log"
+          fi
+          git status --short | tee -a "$RUNNER_TEMP/adopt.log"
+
+      - name: Build the workspace (agy, Codex, Claude Code and Kimi Code)
+        run: pixi install --locked 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Offline tests
+        run: |
+          pixi run typecheck 2>&1 | tee "$RUNNER_TEMP/tests.log"
+          for test in \
+              test_runtimes test_reconstruct test_claude_sdk test_claude_bundle test_claude_unbundle \
+              test_claude_transport test_codex_sdk test_codex_sdk_native test_chat_mode test_codex_argv \
+              test_codex_process test_responses_decode test_kimi_argv test_kimi_decode test_kimi_process \
+              test_kimi_session test_kimi_bundle test_wire_session test_wire_process test_wire_bridge \
+              test_wirecap_framing test_mcp_serializers test_terminal test_tasksolver_terminal test_webterm \
+              test_webterm_views test_agy_symbols test_agy_stubs test_appresponse test_config \
+              test_system_messages test_agy_system_message_queue test_agy_system_message_api; do
+            echo "::group::$test"
+            pixi run python "test_scripts/$test.py" 2>&1 | tee -a "$RUNNER_TEMP/tests.log"
+            echo "::endgroup::"
+          done
+
+      - name: Build the redistributable bundle
+        run: |
+          pixi publish --target-dir dist 2>&1 | tee "$RUNNER_TEMP/publish.log"
+          pixi run python tools/check_bundle.py dist/*.conda 2>&1 | tee -a "$RUNNER_TEMP/publish.log"
+
+      - name: Build the Nix package
+        if: inputs.nix_build && hashFiles('flake.nix') != ''
+        run: nix build .#default --print-build-logs 2>&1 | tee "$RUNNER_TEMP/nix.log"
+
+      - name: Commit, tag and push
+        id: publish
+        run: |
+          version=$(python3 tools/runtimes.py bump)
+          # shellcheck disable=SC2086  # RUNTIMES is a space-separated list
+          python3 tools/runtimes.py notes $RUNTIMES > "$RUNNER_TEMP/notes.md"
+          git add -A
+          unexpected=$(git diff --cached --name-only | while read -r path; do
+            for allowed in $RELEASE_PATHS; do
+              if [ "$path" = "$allowed" ] || [ "${path#"$allowed"/}" != "$path" ]; then continue 2; fi
+            done
+            echo "$path"
+          done)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Files outside RELEASE_PATHS are staged; ignore them or extend RELEASE_PATHS:"
+            echo "$unexpected"
+            exit 1
+          fi
+          git commit -m "Release $version${TARGETS:+: adopt $TARGETS}"
+          git tag -a "v$version" -m "TaskSolver $version"
+          git push origin HEAD:main "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub release
+        env:
+          VERSION: ${{ steps.publish.outputs.version }}
+        run: |
+          gh release create "v$VERSION" dist/*.conda --verify-tag --title "TaskSolver $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+
+      - name: Upload to prefix.dev
+        if: vars.PREFIX_CHANNEL != ''
+        env:
+          CHANNEL: ${{ vars.PREFIX_CHANNEL }}
+        run: pixi upload prefix --channel "$CHANNEL" --generate-attestation dist/*.conda
+
+      - name: Hand a failed adoption over
+        if: failure() && env.RUNTIMES != '' && steps.adopt.conclusion != 'skipped' && steps.publish.conclusion != 'success'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          branch="runtime-updates/run-$GITHUB_RUN_ID"
+          git reset -q
+          for path in $RELEASE_PATHS; do
+            if [ -e "$path" ] || git ls-files --error-unmatch "$path" > /dev/null 2>&1; then
+              git add -A -- "$path"
+            fi
+          done
+          git commit -qm "Adopt $TARGETS (needs hand work, run $GITHUB_RUN_ID)" || true
+          git push --force origin "HEAD:refs/heads/$branch"
+          log=$(find "$RUNNER_TEMP" -maxdepth 1 -name '*.log' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
+          {
+            echo "Adopting **$TARGETS** failed in [run $GITHUB_RUN_ID]($RUN_URL)."
+            echo "The attempt is on branch \`$branch\`; finish it there and merge, or close this issue to retry."
+            echo
+            echo "Last lines of \`$(basename "${log:-none}")\`:"
+            echo '```'
+            if [ -n "$log" ]; then tail -n 80 "$log"; fi
+            echo '```'
+          } > "$RUNNER_TEMP/issue.md"
+          title="Runtime update needs hand work: $TARGETS"
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "map(select(.title == \"$title\"))[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+          fi

@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 [tool.basedpyright]
 include = ["."]
 exclude = ["**/vendor/**", "**/build/**", "**/node_modules/**", ".pixi", ".git", "**/__pycache__"]
-extraPaths = [".", "antigravity", "claude", "codex", "kimi", "claude/vendor/sdk/src", "codex/vendor/sdk/python/src"]
+extraPaths = [".", "antigravity", "claude", "codex", "kimi", "tools", "claude/vendor/sdk/src", "codex/vendor/sdk/python/src"]
 venvPath = ".pixi/envs"
 venv = "default"
 pythonVersion = "3.15"
@@ -27,7 +27,7 @@ reportPrivateUsage = "none"
 
 [project]
 name = "tasksolver"
-version = "0.0.1"
+version = "0.1.0"
 description = "Provider-agnostic VLM query flow with API, Claude Agent SDK, Codex SDK, linked CLI, and local HuggingFace backends."
 readme = "README.md"
 requires-python = ">=3.15"
@@ -100,7 +100,8 @@ where = [".", "antigravity", "codex", "kimi", "claude", "codex/vendor/sdk/python
 include = ["tasksolver*", "wirecap*", "pyagy*", "pycodex*", "pykimi*", "pyclaude*", "openai_codex*", "claude_agent_sdk*"]
 
 [tool.setuptools]
-license-files = ["LICENSE", "codex/vendor/LICENSE", "codex/vendor/NOTICE", "claude/vendor/sdk/LICENSE"]
+license-files = ["LICENSE", "codex/vendor/LICENSE", "codex/vendor/NOTICE", "claude/vendor/sdk/LICENSE",
+                 "kimi/vendor/kimi-code/LICENSE"]
 
 [tool.setuptools.package-data]
 "*" = ["py.typed"]
@@ -180,7 +181,7 @@ ttyd = ">=1.7.4"
 # setup.py's build_py step compiles the bundled native runtimes during package installation.
 [tool.pixi.package]
 name = "tasksolver"
-version = "0.0.1"
+version = "0.1.0"
 
 [tool.pixi.package.build.backend]
 name = "pixi-build-python"
@@ -242,6 +243,9 @@ build-shim = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --buil
 shim-symbols = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target symbols && cmake --build antigravity/build"   # ensure library + metadata are current
 shim-agy-update = "cmake -S antigravity -B antigravity/build -G Ninja && cmake --build antigravity/build --target agy-update"   # query latest manifest + print new pins
 shim-books = { cmd = "python3 -m symbols.gen_sources --books", cwd = "antigravity" }   # regen pyagy's BOOKS mirror from procdef.h (after editing the C table)
+# Rebuild agy and Claude Code from the pinned official executables on this machine and install them
+# into an environment whose redistributable tasksolver bundle left them out (--target ENV).
+reconstruct = "python -m tasksolver.reconstruct"
 
 # --- torch dev env (TaskSolver-local; consumers do NOT inherit any of this) ---
 # The `local` and `app` features auto-map to the same-named

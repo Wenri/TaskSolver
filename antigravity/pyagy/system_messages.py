@@ -158,7 +158,7 @@ def _message(text: object, conversation_id: object) -> tuple[str, str | None]:
 
 
 def _step_json(text: str) -> str:
-    # agy 1.4.11's ScrubInternalFields panics on the otherwise valid metadata
+    # agy 1.4.11's ScrubInternalFields panicked on the otherwise valid metadata
     # map[string]string. Keep IDs local; agy attributes the step to our hook.
     return json.dumps({"systemMessage": {"systemMessage": text}}, ensure_ascii=False)
 

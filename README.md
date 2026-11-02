@@ -55,6 +55,31 @@ pixi reinstall --locked tasksolver
 
 This rebuilds and recopies the bundled artifacts as needed. Omit `--locked` when dependency changes require a new lockfile. A consuming workspace's noneditable path dependency is an installed snapshot; source edits alone do not refresh its wheel.
 
+### Redistributable bundles
+
+The agy and Claude Code runtimes are built from proprietary upstream executables, so they never ship in a redistributable bundle. A non-editable conda build (`pixi publish`, or a conda source dependency) neither fetches nor packages `pyagy/vendor/{agy,libagy.so}` or `claude_agent_sdk/_bundled/`; Codex (Apache-2.0) and Kimi Code (MIT) ship as usual with their licenses. The editable workspace and wheels built by uv or pip for a path dependency still build and keep everything.
+
+To put the two runtimes back into an environment that installed such a bundle, run the helper from a TaskSolver checkout at the same version:
+
+```bash
+pixi run reconstruct --target /path/to/env               # both, auto-detected
+pixi run reconstruct --agy ~/Downloads/antigravity --claude=/path/to/claude --target /path/to/env
+```
+
+`--agy`/`--claude` take a path or, without one, auto-detect; with neither flag it restores both. `--target` accepts an environment prefix, a Python executable or a `site-packages` directory (default: the current environment). Inputs must be the exact pinned official builds (`antigravity/vendor.json`, `claude/vendor.json`). Auto-detection checks the checkout's build caches, `PATH`, `~/.local/bin` (including agy's `agy.*.old` updater backups), `~/.local/share/claude/versions`, `~/.claude/local`, Nix profiles (following their wrappers) and editor extensions' bundled `claude`. It reports every rejected candidate, for example a newer agy or a Nix-patched Claude Code. The helper then rebuilds with the checkout's normal build steps and verifies the copy it installs.
+
+### Releases and runtime updates
+
+`.github/workflows/runtime-updates.yml` checks daily for new releases of agy, Codex, the Claude Agent SDK (with the Claude Code release it pins) and Kimi Code. It adopts each one with `tools/runtimes.py`, which replays TaskSolver's patches onto the new release with a three-way merge, then builds the workspace, runs the offline tests, builds the redistributable bundle, raises the patch version and publishes a GitHub release with the `.conda` attached. An adoption that needs hand work (a patch conflict, an agy release whose hooked functions changed, a Claude Code release the native bridge does not support yet, a failing test) goes to a `runtime-updates/run-<id>` branch and an issue instead. The same steps run locally:
+
+```bash
+python3 tools/runtimes.py check                 # pinned vs latest
+python3 tools/runtimes.py adopt agy              # or codex, claude, kimi; --version X.Y.Z
+pixi install --locked && pixi run python test_scripts/test_runtimes.py
+```
+
+Repository variables tune the workflow: `RUNTIME_RUNNER` (a JSON `runs-on` value, e.g. a self-hosted runner that keeps build caches between runs) and `PREFIX_CHANNEL` (also upload the package to that prefix.dev channel through trusted publishing).
+
 For à-la-carte use, the same groups are portable `[project.optional-dependencies]` extras — `tasksolver[local]` (torch + HuggingFace adapters, **including flash-attn**) and `tasksolver[app]` (UI/plotting) — so the package stays installable as a dependency by uv and pixi (a consumer points at its own torch index). Core dependency versions are resolved by the consuming workspace, with compatibility bounds for the agent SDKs and native capture dependencies; `flash-attn` has no prebuilt wheels for new Pythons and builds from source, so `tasksolver[local]` needs CUDA. Its newest PyPI release (2.8.3.post2) also compiles with C++17 and fails against torch >= 2.13, whose headers need C++20; TaskSolver's `cuda` env therefore forces C++20 for that build (`tools/cxx20-g++` plus `NVCC_APPEND_FLAGS`), as upstream's unreleased `main` does.
 
 Credentials are supplied via a `KeyChain` (loading files like `system/credentials/openai_api.txt`) or environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `VLLM_API_KEY`, `MOONSHOT_API_KEY`).
@@ -72,6 +97,8 @@ pixi run python test_scripts/test_claude_bundle.py
 pixi run python test_scripts/test_codex_sdk.py
 pixi run python test_scripts/test_codex_sdk_native.py
 pixi run python test_scripts/test_chat_mode.py
+pixi run python test_scripts/test_reconstruct.py   # redistributable bundles and the reconstruct helper
+pixi run python test_scripts/test_runtimes.py      # the runtime updater, against local git fixtures
 
 # Exec/PTY clients and packaged Kimi runtime
 pixi run python test_scripts/test_codex_argv.py

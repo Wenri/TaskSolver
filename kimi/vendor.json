@@ -1,0 +1,7 @@
+{
+  "upstream": {
+    "repository": "https://github.com/MoonshotAI/kimi-code.git",
+    "tag": "@moonshot-ai/kimi-code@2.4.1",
+    "commit": "1fc1d165c83b175873a46897e1e9db73dc70c984"
+  }
+}

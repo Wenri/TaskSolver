@@ -334,11 +334,12 @@ def update() -> None:
     print(f"[agy-update] querying {url}")
     with cast(HTTPResponse, urllib.request.urlopen(url, timeout=60)) as r:          # noqa: S310 (fixed https host)
         man = cast(ReleaseManifest, json.load(r))
-    print(f"[agy-update] latest = {man['version']}. Update the pins in CMakeLists.txt:")
-    print(f'    set(AGY_VERSION "{man["version"]}")')
-    print(f'    set(AGY_URL     "{man["url"]}")')
-    print(f'    set(AGY_SHA512  "{man["sha512"]}")')
-    print("[agy-update] then: pixi run build-shim   (fetch, verify, convert and regenerate metadata)")
+    print(f"[agy-update] latest = {man['version']}. Update the archive pin in vendor.json:")
+    print(f'    "version": "{man["version"]}",')
+    print(f'    "url": "{man["url"]}",')
+    print(f'    "archive_sha512": "{man["sha512"]}",')
+    print("[agy-update] then: pixi run build-shim   (fetch and verify; configure reports the extracted\n"
+          "             binary's sha512 and size to record beside them, then converts and regenerates)")
 
 
 def main() -> None:

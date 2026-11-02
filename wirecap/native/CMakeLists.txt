@@ -1,7 +1,8 @@
 # wirecap_bridge — the shared native bridge (embedded CPython worker) as a static library,
 # linked into the agy host executable and the kimi N-API addon (antigravity/CMakeLists.txt and
 # kimi/native/CMakeLists.txt add_subdirectory this) and into the patched codex binary (its build.rs
-# links libwirecap_bridge.a from antigravity/build). PUBLIC usage requirements (the wirecap.h
+# links libwirecap_bridge.a from this project's standalone build, `cmake -S wirecap/native -B
+# wirecap/native/build`, which setup.py runs before cargo). PUBLIC usage requirements (the wirecap.h
 # include dir + the libpython embed + boost link + the conda rpath) propagate to whatever links it,
 # so a consumer just does target_link_libraries(... wirecap_bridge).
 #

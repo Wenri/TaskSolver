@@ -1,11 +1,16 @@
 """Build and bundle the native runtimes described in pyproject.toml.
 
-CMake produces the agy host, libagy.so and wirecap bridge; Cargo links that bridge
-into Codex. Kimi builds its Node bundle and native addon. Claude ships a clean private
-Bun with bridged source, matching caches and a native launcher. Native failures fail the build.
+CMake produces the wirecap bridge, the agy host and libagy.so; Cargo links the bridge into
+Codex. Kimi builds its Node bundle and native addon. Claude ships a clean private Bun with
+bridged source, matching caches and a native launcher. Native failures fail the build.
 
-Artifacts are copied into each provider's vendor directory in the wheel. The wheel
-uses a platform and Python ABI tag because its runtimes embed CPython.
+Artifacts are copied into each provider's vendor directory in the wheel. The wheel uses a
+platform and Python ABI tag because its runtimes embed CPython.
+
+agy and Claude Code are built from proprietary upstream executables. A conda package build
+(`pixi publish`, a conda source dependency) is a redistributable bundle: it neither fetches nor
+ships them (tasksolver.reconstruct.LOCAL_ONLY), and `python -m tasksolver.reconstruct` rebuilds
+them on the user's machine. Editable installs and local wheels build and keep everything.
 """
 import json
 import os
@@ -17,6 +22,10 @@ from typing import NotRequired, TypedDict, cast
 
 from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py
+
+# The agy and Claude build steps are shared with the reconstruct helper in the package source.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tasksolver.reconstruct import LOCAL_ONLY, build_agy, build_claude, cmake_python_args
 
 
 class PackageManifest(TypedDict):
@@ -47,12 +56,11 @@ def native_build_env() -> dict[str, str]:
     return env
 
 
-def cmake_python_args(env: Mapping[str, str]) -> list[str]:
-    """Name the embedded interpreter on every configure. The CMake build dirs are shared with
-    `pixi run build-shim`, and a PY3CONFIG cached from another env would embed that env's
-    libpython (a different minor version after a Python bump)."""
-    cfg = os.path.join(env.get("CONDA_PREFIX", ""), "bin", "python3-config")
-    return [f"-DPY3CONFIG={cfg}"] if os.path.isfile(cfg) else []
+def redistributable_bundle(editable: bool, env: Mapping[str, str]) -> bool:
+    """A non-editable conda package build is a redistributable bundle: `pixi publish` and conda
+    source dependencies build that way. The editable pixi workspace and the wheel uv or pip build
+    for a local path dependency keep the agy and Claude runtimes."""
+    return not editable and env.get("CONDA_BUILD") == "1"
 
 
 class BuildPyNative(build_py):
@@ -61,33 +69,46 @@ class BuildPyNative(build_py):
     def run(self) -> None:
         root = os.path.dirname(os.path.abspath(__file__))
         env = native_build_env()
+        local = not redistributable_bundle(self.editable_mode, env)
         try:
-            # Stage Claude's launcher, clean private Bun, source, caches and assets together.
-            subprocess.run([sys.executable, "-m", "claude.build_cli"],
-                           cwd=root, env=env, check=True)
+            if local:
+                self._build_claude(root, env)      # before package data copies its runtime
             super().run()
-            self._build_antigravity_shim(root, env)   # builds wirecap_bridge + vendor/agy + vendor/libagy.so
-            self._build_codex(root, env)              # links the bridge from the shim step → must follow it
-            self._build_kimi(root, env)               # independent: kimi/native builds its own bridge copy
-            self._bundle_artifacts(root)              # copy (+strip codex) into the wheel under py* pkgs
+            self._build_bridge(root, env)          # the wirecap bridge codex links
+            if local:
+                self._build_antigravity_shim(root, env)   # vendor/agy + vendor/libagy.so
+            self._build_codex(root, env)
+            self._build_kimi(root, env)            # independent: kimi/native builds its own bridge copy
+            self._bundle_artifacts(root, local)    # copy (+strip codex) into the wheel under py* pkgs
         except Exception as exc:
             # An editable install (what pixi-build's python backend runs) calls build_py inside
             # `except Exception` and only warns, which would install the package without its
             # natives. SystemExit is not an Exception, so the build fails loudly as documented.
             raise SystemExit(f"[setup] native build failed: {exc}") from exc
 
+    def _build_claude(self, root: str, env: Mapping[str, str]) -> None:
+        # Stage Claude's launcher, clean private Bun, source, caches and assets together.
+        build_claude(root, env)
+
+    def _build_bridge(self, root: str, env: Mapping[str, str]) -> None:
+        # The standalone static bridge (wirecap/native/build/libwirecap_bridge.a) that codex's
+        # build.rs links. The agy host and the kimi addon compile the same sources in their own
+        # trees, so codex does not depend on agy and redistributable builds never fetch agy.
+        build = os.path.join("wirecap", "native", "build")
+        subprocess.run(["cmake", "-S", os.path.join("wirecap", "native"), "-B", build, "-G", "Ninja",
+                        *cmake_python_args(env)], cwd=root, env=env, check=True)
+        subprocess.run(["cmake", "--build", build], cwd=root, env=env, check=True)
+        sys.stderr.write("[setup] wirecap_bridge built\n")
+
     def _build_antigravity_shim(self, root: str, env: Mapping[str, str]) -> None:
         if not os.path.isdir(os.path.join(root, "antigravity")):
             return  # antigravity/ absent (degenerate checkout with the source tree missing)
         # CMake + Ninja (both pixi host-dependencies) run the whole chain: configure caches the
         # pinned raw agy (sha512-verified); the build converts it into vendor/libagy.so, captures
-        # metadata before patching, generates symbols_gen.h, and links wirecap_bridge + vendor/agy.
+        # metadata before patching, generates symbols_gen.h, and links the host vendor/agy.
         # All idempotent; picks up conda's g++/python3-config from the env ($CXX / $CONDA_PREFIX).
-        build = os.path.join("antigravity", "build")
-        subprocess.run(["cmake", "-S", "antigravity", "-B", build, "-G", "Ninja", *cmake_python_args(env)],
-                       cwd=root, env=env, check=True)
-        subprocess.run(["cmake", "--build", build], cwd=root, env=env, check=True)
-        sys.stderr.write("[setup] vendor/agy + vendor/libagy.so + wirecap_bridge built\n")
+        build_agy(root, env)
+        sys.stderr.write("[setup] vendor/agy + vendor/libagy.so built\n")
 
     def _build_codex(self, root: str, env: Mapping[str, str]) -> None:
         codex_rs = os.path.join(root, "codex", "vendor", "codex-rs")
@@ -95,7 +116,7 @@ class BuildPyNative(build_py):
             return  # codex-rs absent (degenerate checkout with the source tree missing)
         # cargo build the codex CLI in the DEFAULT host target (x86_64-unknown-linux-gnu, dynamic
         # glibc — NOT the static-musl release target, which can't embed the pixi libpython). Its
-        # build.rs links the wirecap_bridge produced above + libpython. LIBCLANG_PATH lets
+        # build.rs links the standalone wirecap_bridge built above + libpython. LIBCLANG_PATH lets
         # aws-lc-rs/rustls' bindgen find libclang. Idempotent: cargo no-ops when nothing changed.
         env = dict(env)
         if env.get("CONDA_BUILD") == "1":
@@ -149,13 +170,9 @@ class BuildPyNative(build_py):
         subprocess.run(["cmake", "--build", build], cwd=root, env=env, check=True)
         sys.stderr.write("[setup] kimi-code bundle + wirecap_node.node built\n")
 
-    def _bundle_artifacts(self, root: str) -> None:
-        # Make the wheel self-contained: copy the native artifacts from their sibling vendor/
-        # build dirs into the package tree under build_lib, so bdist_wheel zips them in and the
-        # runtime resolver (_vendored) finds them at pyagy/vendor/… and pycodex/vendor/…. The
-        # existence check is defensive — after the required builds above the artifacts are present;
-        # it only no-ops on a degenerate sourceless checkout that skipped the builds entirely.
-        jobs = [
+    def _bundle_jobs(self, root: str) -> list[tuple[str, str, str, bool]]:
+        """(built artifact, package, name under <package>/vendor, strip debug info)."""
+        return [
             (os.path.join(root, "antigravity", "vendor", "libagy.so"),      "pyagy", "libagy.so",      False),  # build-id coupled to symbols.json — never strip
             (os.path.join(root, "antigravity", "vendor", "agy"),            "pyagy", "agy",            False),
             (os.path.join(root, "codex", "vendor", "codex-rs", "target", "release", "codex"), "pycodex", "codex", True),  # ~72% debuginfo — strip for the wheel
@@ -163,7 +180,18 @@ class BuildPyNative(build_py):
             (os.path.join(root, "kimi", "vendor", "kimi-code", "apps", "kimi-code", "dist", "search-worker.mjs"), "pykimi", "search-worker.mjs", False),
             (os.path.join(root, "kimi", "native", "build", "wirecap_node.node"), "pykimi", "wirecap_node.node", False),
         ]
-        for src, pkg, name, do_strip in jobs:
+
+    def _bundle_artifacts(self, root: str, local: bool) -> None:
+        # Make the wheel self-contained: copy the native artifacts from their sibling vendor/
+        # build dirs into the package tree under build_lib, so bdist_wheel zips them in and the
+        # runtime resolver (_vendored) finds them at pyagy/vendor/… and pycodex/vendor/…. The
+        # existence check is defensive — after the required builds above the artifacts are present;
+        # it only no-ops on a degenerate sourceless checkout that skipped the builds entirely.
+        for src, pkg, name, do_strip in self._bundle_jobs(root):
+            packaged = f"{pkg}/vendor/{name}"
+            if not local and packaged in LOCAL_ONLY:
+                sys.stderr.write(f"[setup] bundle: {packaged} left out of this redistributable build\n")
+                continue
             if not os.path.isfile(src):
                 sys.stderr.write(f"[setup] bundle: {src} absent — not bundling (pure-Python wheel)\n")
                 continue
@@ -178,6 +206,12 @@ class BuildPyNative(build_py):
                 except (OSError, subprocess.CalledProcessError) as exc:
                     sys.stderr.write(f"[setup] bundle: strip of {dest} failed ({exc}); shipping unstripped\n")
             sys.stderr.write(f"[setup] bundled {pkg}/vendor/{name}\n")
+        if not local:
+            # Package data copies a Claude runtime that an earlier local build left in the tree.
+            shutil.rmtree(os.path.join(self.build_lib, "claude_agent_sdk", "_bundled"), ignore_errors=True)
+            leaked = [path for path in LOCAL_ONLY if os.path.lexists(os.path.join(self.build_lib, path))]
+            if leaked:
+                raise RuntimeError("the redistributable build still contains " + ", ".join(leaked))
 
 
 setup(distclass=BinaryDistribution, cmdclass={"build_py": BuildPyNative})

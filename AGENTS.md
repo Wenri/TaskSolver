@@ -23,9 +23,18 @@ pixi run typecheck      # strict checks for all project Python; no Any, vendors 
 pixi run npm-install
 pixi run pymport-test
 
+# Restore agy and Claude Code into an env whose redistributable bundle omits them
+pixi run reconstruct [--agy [PATH]] [--claude [PATH]] [--target ENV]
+
+# Upstream runtimes: pinned vs latest, then adopt one (agy | codex | claude | kimi)
+python3 tools/runtimes.py check
+python3 tools/runtimes.py adopt agy [--version X.Y.Z]
+
 # Offline SDK/packaging tests: no credentials or model calls
 pixi run python test_scripts/test_claude_sdk.py
 pixi run python test_scripts/test_claude_bundle.py
+pixi run python test_scripts/test_reconstruct.py     # bundle modes and the reconstruct helper
+pixi run python test_scripts/test_runtimes.py        # the runtime updater (local git fixtures)
 pixi run python test_scripts/test_codex_sdk.py
 pixi run python test_scripts/test_codex_sdk_native.py
 pixi run python test_scripts/test_chat_mode.py        # chat mode, image files, vendored paths
@@ -54,6 +63,32 @@ otherwise only warn. A fresh build work dir has its own `HOME`. During conda bui
 `_build_codex` defaults `CARGO_HOME` to the checkout's `.pixi/cargo-home`, preserving
 dependency sources (including the V8 crate) alongside the compiled artifacts in
 `codex/vendor/codex-rs/target`. An explicit `CARGO_HOME` takes precedence.
+
+**Redistributable bundles.** agy and Claude Code are built from proprietary upstream executables.
+A non-editable conda build (`pixi publish`, a conda source dependency; `redistributable_bundle`
+in `setup.py`) neither fetches nor ships them: `tasksolver.reconstruct.LOCAL_ONLY`
+(`pyagy/vendor/{agy,libagy.so}`, `claude_agent_sdk/_bundled`) stays out, and a staged copy fails
+the build. The editable workspace and uv/pip path wheels build and keep everything. Codex links
+the standalone `wirecap/native/build` bridge, so it never needs agy. `pixi run reconstruct`
+restores both runtimes: it verifies the pinned official executables (an explicit `--agy`/`--claude`
+path, else the checkout caches, `PATH`, `~/.local/bin` with agy's `*.old` backups, Claude's
+version store, Nix wrappers' targets, editor extensions), seeds the build caches, runs the same
+`build_agy`/`build_claude` steps and installs into `--target` after checking it matches the
+checkout (agy's BOOKS mirror, the SDK's CLI version, the Python minor). Codex (Apache-2.0 with
+`NOTICE`) and kimi-code (MIT) ship in bundles; keep their files in `license-files`.
+
+**Runtime updates.** Each runtime has one pin file: `antigravity/vendor.json`, `claude/vendor.json`,
+`codex/vendor.json`, `kimi/vendor.json`. `tools/runtimes.py` (stdlib only) compares them with
+upstream (`check`) and adopts a release (`adopt`). agy re-pins its archive and extracted binary.
+The vendored trees replay TaskSolver's patch onto the new tag by a three-way merge of trees (base:
+the pinned tag, ours: `HEAD`'s committed tree, theirs: the new tag), so commit vendored edits
+first. Conflicted files keep their markers and are named; codex's `Cargo.lock` takes upstream's
+copy, which the unlocked build completes. `docs` keeps the README pin table and pycodex's
+`client_version` in step with the pins. `.github/workflows/runtime-updates.yml` runs this daily:
+adopt, `nix/update-hashes` when present, `pixi install --locked`, the offline tests, `pixi publish`
+checked by `tools/check_bundle.py`, then `bump`, tag, push and a GitHub release with `notes`. A
+failure goes to branch `runtime-updates/run-<id>` plus an issue. The Claude native bridge is gated
+to one Claude Code release (`claude/unbundle.py`), so a Claude bump always needs it revisited.
 
 **Toolchain.** Conda GCC `>=15,<16` (C++23; GCC 15's constexpr asm strings build agy's stubs).
 After a compiler-major upgrade or removal of a cached build environment, reconfigure the
@@ -291,7 +326,8 @@ Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protoc
     flags before releasing the launch lock. Keep descriptor ownership and child reaping one-shot,
     including failed startup. PTY result/death readiness must drain buffered output before closing.
   - `wirecap/native/` is the C ABI bridge (`libwirecap_bridge.a`) that embeds CPython on a 16 MB-stack
-    worker thread, linked into the agy host, the codex binary and the kimi addon. They build with
+    worker thread, linked into the agy host, the codex binary (from the standalone
+    `wirecap/native/build`; `WIRECAP_BRIDGE_DIR` overrides) and the kimi addon. They build with
     GCC LTO (`TASKSOLVER_LTO`, default on); the archive holds fat LTO objects because codex's Rust
     link cannot read GCC bytecode. Repeated starts share one worker; shutdown drains accepted
     events, joins once and prevents restart. Event-kind strings must live for the process lifetime.
@@ -318,8 +354,10 @@ Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protoc
     the conda toolchain. Keep these build-only
     requirements in `[build-system].requires`, pixi host dependencies and workspace dependencies.
     Source tools stay out of the wheel and embedded runtime's stdlib-only modules. Conversions
-    always start from cached raw agy (`build/antigravity-*.raw`, keyed by SHA512); `shim-symbols`
-    refreshes the outputs, and `shim-agy-update` prints new pins for `CMakeLists.txt`.
+    always start from cached raw agy (`build/antigravity-*.raw`, keyed by the archive SHA512).
+    `antigravity/vendor.json` pins the archive and the extracted binary (configure verifies both
+    and reports a new binary's sha512/size); `shim-symbols` refreshes the outputs, and
+    `shim-agy-update` prints the latest archive pin.
   - Run `test_scripts/test_agy_symbols.py` and `test_scripts/test_agy_stubs.py` after build-tool,
     stub or toolchain changes. `test_appresponse.py` checks native planner-response reads,
     Unicode, payload truncation and concurrent stack diagnostics. App/SSE capture errors are
@@ -332,8 +370,8 @@ Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protoc
   See `codex/README.md`.
 - **`kimi/`** → the `pykimi` package: Moonshot's Node kimi-code built from a vendored tree, with a
   three-line patch loading the bridge as an N-API addon (`kimi/native/`). See `kimi/README.md`.
-- **`claude/`** → `pyclaude` and the pristine `claude/vendor/sdk`. `claude/vendor.json` pins SDK
-  v0.2.176 and Claude Code 2.1.316; `claude/build_cli.py` installs the bridged runtime and
+- **`claude/`** → `pyclaude` and the pristine `claude/vendor/sdk`. `claude/vendor.json` pins the SDK
+  tag and the Claude Code release it expects; `claude/build_cli.py` installs the bridged runtime and
   its external source, caches, assets and addons under the SDK's `_bundled/` before packaging. See `claude/README.md`.
 
 The PTY paths are symmetric (`agy --print` ≡ `codex exec` ≡ `kimi -p`), so a change to one usually

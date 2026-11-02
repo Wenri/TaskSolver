@@ -62,6 +62,10 @@ class PtyPopen(WirePtyPopen[BaseProcess]):
         # (tests inject one), else the packaged agy (_VENDOR_AGY — bundled or sibling, never external).
         process = cast(_AgyLaunch, process_obj)
         agy = process._agy_bin or _VENDOR_AGY
+        if not os.path.isfile(agy):
+            # Redistributable bundles leave the host out (it links the proprietary agy).
+            raise FileNotFoundError(f"the agy host is not built: {agy}; rebuild it with `python -m "
+                                    "tasksolver.reconstruct --agy` (`pixi reinstall tasksolver` in a checkout)")
         workdir = ensure_git_workspace(process._workdir)
         self._workspace = workdir                            # resolved workspace (AgyProcess.workspace)
         capture = process._capture or os.path.join(workdir, "agy-capture.jsonl")

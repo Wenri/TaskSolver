@@ -216,7 +216,8 @@ class ClaudePackageTests(unittest.TestCase):
             builder.build_lib = str(stage)
             builder.compile = False
             builder.force = True
-            with patch.object(builder, "_build_antigravity_shim"), \
+            with patch.object(builder, "_build_bridge"), \
+                    patch.object(builder, "_build_antigravity_shim"), \
                     patch.object(builder, "_build_codex"), \
                     patch.object(builder, "_build_kimi"), \
                     patch.object(builder, "_bundle_artifacts"), \

@@ -13,9 +13,8 @@ optional [browser viewing](../README.md#managed-terminal-screens).
 `ask` and `Session` start headless SDK processes instead. Resuming a saved session
 ID starts another process; attaching to a screen controls the running one.
 
-The pristine official Python SDK is checked into `claude/vendor/sdk` at tag
-`v0.2.176` (commit `2146f9d8985513053e904b13200c8f744b36785a`) and packaged
-as part of TaskSolver. Do not install a separate `claude-agent-sdk` distribution.
+The pristine official Python SDK is checked into `claude/vendor/sdk` at the tag
+pinned in [`vendor.json`](vendor.json) and packaged as part of TaskSolver. Do not install a separate `claude-agent-sdk` distribution.
 The SDK itself uses its existing subprocess `stream-json` protocol for headless
 calls. Native UI attachment uses the SDK's custom transport interface and a
 private Unix socket. Both paths execute the same bridged runtime.
@@ -27,7 +26,7 @@ a missing bundle is an error rather than a fallback to a global CLI.
 `pixi install` builds the runtime automatically, using
 [`bun_graph`](https://github.com/Wenri/patchnar/blob/main/src/bun_graph.cc) from
 `PATH`. Provide that executable in the build environment. [`vendor.json`](vendor.json)
-pins Claude Code 2.1.316; [`build_cli.py`](build_cli.py) verifies the download's size
+pins the Claude Code release that SDK expects; [`build_cli.py`](build_cli.py) verifies the download's size
 and SHA256, checks the SDK's CLI version, then stages the complete runtime under
 `claude_agent_sdk/_bundled/`:
 
@@ -98,6 +97,11 @@ Headless SDK calls keep their stdio channel and create no UI socket.
 After source changes, run `pixi reinstall --locked tasksolver` in the consuming
 workspace to refresh installed artifacts. Omit `--locked` if dependencies changed;
 see the [installation notes](../README.md#install).
+
+Redistributable (conda) bundles leave `_bundled/` out because it is derived from the
+proprietary executable. `pixi run reconstruct --claude [PATH]` rebuilds it from the
+pinned official executable found on the machine (see the
+[installation notes](../README.md#redistributable-bundles)).
 
 ### SDK control of the native UI
 

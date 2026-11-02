@@ -73,7 +73,7 @@ def main() -> None:
         distribution_type = cast("type[BinaryDistribution]", setup["BinaryDistribution"])
         builder: Final = builder_type(distribution_type())
         builder.build_lib = str(stage)
-        builder._bundle_artifacts(str(fake_root))
+        builder._bundle_artifacts(str(fake_root), local=False)   # kimi ships in redistributable bundles
         bundle_dir: Final = stage / "pykimi/vendor"
         for name, src in ARTIFACTS.items():
             bundled = bundle_dir / name

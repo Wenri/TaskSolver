@@ -27,13 +27,19 @@ if(NOT CONDA_PREFIX)
   message(FATAL_ERROR "CONDA_PREFIX is not set — configure inside the pixi env (pixi run build-shim).")
 endif()
 
-# ---- pinned agy release (keep these three in sync; then `pixi run shim-symbols`) ---------------
-# Cache the SHA512-verified upstream release; only agy-update consults the manifest.
-# AGY_BIN can select another raw binary. Never convert vendor/agy: it is the linked host.
-# If agy's self-updater replaces that host, remove vendor/agy and rebuild it.
-set(AGY_VERSION "1.4.11")
-set(AGY_URL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.11-5180209989812224/linux-x64/cli_linux_x64.tar.gz")
-set(AGY_SHA512 "2935601efa745ed6e314d32b415c71f44d9d455f0e6a2583372584be5a9074c28154cf81d5eec65b4416579453a3b3b05d3abe4d4f176754d5ef93a84af6cf28")
+# ---- pinned agy release: vendor.json (then `pixi run shim-symbols`) ----------------------------
+# archive_sha512 verifies the download; sha512 and size verify the extracted binary, which is also
+# what `python -m tasksolver.reconstruct --agy` checks a locally installed agy against. Only
+# agy-update consults the release manifest. AGY_BIN can select another raw binary. Never convert
+# vendor/agy: it is the linked host. If agy's self-updater replaces that host, remove vendor/agy
+# and rebuild it.
+file(READ "${CMAKE_SOURCE_DIR}/vendor.json" _agy_pin)
+string(JSON AGY_VERSION GET "${_agy_pin}" cli version)
+string(JSON AGY_URL GET "${_agy_pin}" cli url)
+string(JSON AGY_SHA512 GET "${_agy_pin}" cli archive_sha512)
+string(JSON AGY_RAW_SHA512 GET "${_agy_pin}" cli sha512)
+string(JSON AGY_RAW_SIZE GET "${_agy_pin}" cli size)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/vendor.json")
 set(AGY_BIN "" CACHE STRING "optional: local raw agy input (relative to the source directory)")
 # WSL1's 4.4 kernel rejects tcmalloc's MAP_FIXED_NOREPLACE mmap flag, so a freshly-fetched agy must
 # be byte-patched to run there (length-preserving, so addresses and the build-id survive).
@@ -69,6 +75,13 @@ if(NOT EXISTS "${AGY_RAW}")
   if(NOT _agy_tar EQUAL 0)
     file(REMOVE "${CMAKE_BINARY_DIR}/antigravity")
     message(FATAL_ERROR "agy extract failed")
+  endif()
+  file(SIZE "${CMAKE_BINARY_DIR}/antigravity" _agy_raw_size)
+  file(SHA512 "${CMAKE_BINARY_DIR}/antigravity" _agy_raw_sha512)
+  if(NOT _agy_raw_size EQUAL AGY_RAW_SIZE OR NOT _agy_raw_sha512 STREQUAL AGY_RAW_SHA512)
+    file(REMOVE "${CMAKE_BINARY_DIR}/antigravity")
+    message(FATAL_ERROR "the extracted agy does not match vendor.json (size ${_agy_raw_size}, "
+                        "sha512 ${_agy_raw_sha512}); record both with a new archive pin")
   endif()
   file(RENAME "${CMAKE_BINARY_DIR}/antigravity" "${AGY_RAW}")
 endif()

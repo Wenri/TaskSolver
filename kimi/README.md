@@ -11,8 +11,8 @@ Kimi's linked capture. See [managed terminal screens](../README.md#managed-termi
 
 ## Layout
 
-- `vendor/kimi-code/` — the Kimi Code monorepo, vendored at tag
-  **`@moonshot-ai/kimi-code@2.4.1`** (`2c73f3f5`; MIT; `LICENSE` preserved). Kept pristine except
+- `vendor/kimi-code/` — the Kimi Code monorepo, vendored at the release tag pinned in
+  [`vendor.json`](vendor.json) (MIT; `LICENSE` preserved). Kept pristine except
   our wiretap patch (below); `node_modules/`, `dist/`, and the build-time `vis-web-asset.ts` stub
   are gitignored. The engine is `packages/agent-core-v2`.
 - `native/` — `wirecap_node.cc` + `CMakeLists.txt`: the N-API addon that links
@@ -43,18 +43,12 @@ runs without the source tree's `node_modules` or `package.json`. After an update
 `apps/kimi-code/package.json` dependency to `alwaysBundle`; `test_kimi_bundle.py` catches a miss.
 
 The wiretap helper is separate from upstream code. Preserve the three emit sites and the
-ESM packaging config when updating the source. The tree is no longer a usable git subtree (its
-only squash commit records 0.34.0, so `git subtree pull` merges against the wrong base); replace
-the tracked files instead, keeping the gitignored build output:
-
-    git clone --depth 1 --branch '@moonshot-ai/kimi-code@<X.Y.Z>' https://github.com/MoonshotAI/kimi-code /tmp/kimi-code
-    rsync -a --delete --exclude=.git --exclude=node_modules --exclude=/apps/kimi-code/dist/ \
-          --exclude=/apps/kimi-code/src/generated/vis-web-asset.ts /tmp/kimi-code/ kimi/vendor/kimi-code/
-    git checkout HEAD -- kimi/vendor/kimi-code/packages/agent-core-v2/src/wiretap
-
-then re-apply the three emit edits and the `tsdown.config.ts` packaging edits (the previous
-commit's diff against the old upstream tag shows them), and run
-`pixi reinstall --locked tasksolver`, which rebuilds the bundle and addon.
+ESM packaging config when updating the source: `python3 tools/runtimes.py adopt kimi
+[--version X.Y.Z]` replays the wiretap module, the emit sites and the `tsdown.config.ts` edits onto
+a new release with a three-way merge against the pinned tag, keeps the gitignored build output,
+and names any conflicted file to fix by hand. `pnpm-lock.yaml` comes from upstream (the build
+installs with `--frozen-lockfile`). Then run `pixi reinstall --locked tasksolver`, which rebuilds
+the bundle and addon.
 
 ## Build + run
 Built by **`pixi install`** (setup.py's `_build_kimi`, after the shim so the bridge exists):

@@ -21,9 +21,9 @@ browser viewing and the same linked capture. See [managed terminal screens](../R
 | TLS is BoringCrypto, statically linked | Nothing to preload; the `crypto/tls.(*Conn).Write` book sees plaintext. |
 | Stripped, but the pclntab is intact and `pcHeader.textStart == 0` | Names are recoverable, but `debug/gosym` mis-resolves; we locate `moduledata` through the relocation addressing the pclntab and prologue-verify every booked address. |
 
-Everything is pinned to the agy BuildID (currently `85d3425a18a809e545747dcb9d87c03c`, agy
-**1.4.11**); the shim installs no books on any other build. After updating the release pins, run
-`pixi run shim-symbols`.
+Everything is pinned to the BuildID of the agy release in [`vendor.json`](vendor.json)
+(`symbols/symbols.json` records it at build time); the shim installs no books on any other build.
+`python3 tools/runtimes.py adopt agy` pins the latest release; then run `pixi run shim-symbols`.
 
 ## Architecture
 
@@ -122,8 +122,11 @@ not an agy CLI configuration-path override.
 ## Build & run
 
 `pixi install` builds `vendor/libagy.so` and `vendor/agy` (linux-64 only; a missing toolchain fails
-the install). CMake caches the pinned raw agy by its SHA512 in `build/`, and every conversion starts
-from it; `-DAGY_BIN=/path/to/raw-agy` selects a local copy.
+the install). [`vendor.json`](vendor.json) pins the release archive and the extracted binary; CMake
+verifies both and caches the raw agy in `build/`, and every conversion starts from it;
+`-DAGY_BIN=/path/to/raw-agy` selects a local copy. Redistributable (conda) bundles omit both
+outputs; `pixi run reconstruct --agy [PATH]` rebuilds them from the pinned agy on the machine (see
+the [installation notes](../README.md#redistributable-bundles)).
 
 Run the source tools as `python3 -m symbols.<tool>` from `antigravity/`. LIEF writes the ELF
 layout; pyelftools reads and validates its metadata; Capstone validates Go stack checks, frame
@@ -133,7 +136,7 @@ libraries are declared in `[build-system].requires` and pixi's host/workspace de
 the wheel; embedded capture modules remain stdlib-only.
 
 ```bash
-pixi run shim-agy-update  # print new CMakeLists.txt pins from the latest release manifest
+pixi run shim-agy-update  # print the latest release's archive pin for vendor.json
 pixi run shim-symbols     # ensure library + metadata are current, then recompile
 pixi run shim-books       # after editing src/procdef.h: regenerate pyagy's BOOKS mirror
 pixi run build-shim       # rebuild changed outputs
@@ -297,7 +300,7 @@ Queue status `emitted` means the command hook returned the step to agy; it is no
 from the model. Inspect `.system_messages` to verify native serialization. The native step
 attributes its content to the harness, but the inspected serializers carry it in a user/context
 envelope with a `SYSTEM_MESSAGE` marker. This does not change the provider's system prompt.
-The pinned agy 1.4.11 crashes while scrubbing hook metadata maps, so notifications carry text
+agy 1.4.11 crashed while scrubbing hook metadata maps, so notifications carry text
 only; queue ids stay in the parent-side status records.
 
 Messages are limited to 256 KiB of UTF-8 text and must fit within the 1 MiB hook-output limit

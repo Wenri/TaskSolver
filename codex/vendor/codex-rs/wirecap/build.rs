@@ -1,6 +1,7 @@
-//! Link the codex binary against the shared native bridge (`libwirecap_bridge.a`, built by the
-//! antigravity CMake as a byproduct of `pixi run build-shim`) and its runtime deps (the conda
-//! libpython + Boost.Python/Thread + libstdc++, versions derived from $CONDA_PREFIX's python3).
+//! Link the codex binary against the shared native bridge (`libwirecap_bridge.a`, the standalone
+//! `wirecap/native` CMake build that setup.py runs before cargo, independent of agy) and its runtime
+//! deps (the conda libpython + Boost.Python/Thread + libstdc++, versions derived from
+//! $CONDA_PREFIX's python3).
 //! These directives propagate from this crate to the final `codex` binary. RPATH
 //! `$CONDA_PREFIX/lib` resolves the .so's at run time — the same mechanism the antigravity
 //! shim uses.
@@ -16,7 +17,7 @@ fn main() {
     let repo = manifest.join("../../../..").canonicalize().unwrap();
     let bridge_dir = std::env::var("WIRECAP_BRIDGE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| repo.join("antigravity/build/wirecap_bridge"));
+        .unwrap_or_else(|_| repo.join("wirecap/native/build"));
     let conda = PathBuf::from(
         std::env::var("CONDA_PREFIX").expect("CONDA_PREFIX not set — build inside the pixi env"),
     );
