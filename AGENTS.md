@@ -86,7 +86,7 @@ first. Conflicted files keep their markers and are named; codex's `Cargo.lock` t
 copy, which the unlocked build completes. `docs` keeps the README pin table and pycodex's
 `client_version` in step with the pins. `.github/workflows/runtime-updates.yml` runs twice a day,
 on code pushes to `main` and on demand: adopt, `pixi install --locked`, `nix/update-hashes` when an
-input of `nix/hashes.json` changed since the last tag, the offline tests, `pixi publish` checked by
+input of `nix/hashes.json` changed since the commit that last wrote it, the offline tests, `pixi publish` checked by
 `tools/check_bundle.py`, then `bump`, an atomic push of the commit and tag, and a GitHub release
 with `notes`. An adoption publishes a pre-release of the latest code; a push with nothing to adopt
 only builds and tests; a full release is a manual dispatch with `release`. A failed adoption goes

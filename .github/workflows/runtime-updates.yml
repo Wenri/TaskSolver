@@ -135,6 +135,12 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/share/swift
           sudo docker system prune --all --force > /dev/null || true
           sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
+          # rustc reaches 8 GB on codex's largest crates; swap keeps 16 GB runners from OOM-killing it.
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 16G /mnt/swapfile && sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile > /dev/null && sudo swapon /mnt/swapfile
+          free -g
           { echo "PIXI_CACHE_DIR=/mnt/work/pixi-cache"; echo "RATTLER_CACHE_DIR=/mnt/work/rattler-cache"; } >> "$GITHUB_ENV"
           df -h / /mnt
 
@@ -183,9 +189,9 @@ jobs:
         if: env.MODE != 'validate' && hashFiles('nix/update-hashes') != ''
         run: |
           # After the build, which completes codex's Cargo.lock. Refresh only when an input of
-          # nix/hashes.json changed since the last tag (always before the first one).
-          last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
-          if [ -z "$last" ] || ! git diff --quiet "$last" -- codex/vendor/codex-rs/Cargo.lock \
+          # nix/hashes.json changed since the commit that last wrote it.
+          base=$(git log -1 --format=%H -- nix/hashes.json)
+          if [ -z "$base" ] || ! git diff --quiet "$base" -- codex/vendor/codex-rs/Cargo.lock \
                kimi/vendor/kimi-code/pnpm-lock.yaml ':(glob)kimi/vendor/kimi-code/**/package.json' \
                claude/vendor.json nix; then
             nix/update-hashes 2>&1 | tee "$RUNNER_TEMP/nix-hashes.log"
@@ -242,7 +248,25 @@ jobs:
             git commit -m "Release $version${TARGETS:+: adopt $TARGETS}"
           fi
           git tag -a "v$version" -m "TaskSolver $version"
-          git push --atomic origin HEAD:main "v$version"
+          if ! git push --atomic origin HEAD:main "v$version"; then
+            # main moved during the build. Docs, Nix and CI commits don't change what was tested,
+            # so rebase onto those and retry; anything else fails the release.
+            git fetch origin main
+            moved=$(git diff --name-only HEAD~1 origin/main | while read -r path; do
+              case "$path" in
+                *.md|LICENSE|.gitignore|.gitattributes|.github/*|.agents/*|.claude/*|.vscode/*|*.nix|flake.lock|nix/*) ;;
+                *) echo "$path" ;;
+              esac
+            done)
+            if [ -n "$moved" ]; then
+              echo "::error::main gained code changes during the build; not releasing untested code:"
+              echo "$moved"
+              exit 1
+            fi
+            git rebase origin/main
+            git tag -f -a "v$version" -m "TaskSolver $version"
+            git push --atomic origin HEAD:main "v$version"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Create the GitHub release
