@@ -84,6 +84,17 @@ For à-la-carte use, the same groups are portable `[project.optional-dependencie
 
 Credentials are supplied via a `KeyChain` (loading files like `system/credentials/openai_api.txt`) or environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `VLLM_API_KEY`, `MOONSHOT_API_KEY`).
 
+### Nix
+
+The flake builds TaskSolver for x86_64-linux on nixpkgs 26.05, with Python 3.15 and all four runtimes:
+
+```bash
+nix build github:Wenri/TaskSolver      # or .#default in a checkout
+nix/update-hashes                      # after a runtime bump: refresh nix/hashes.json
+```
+
+The build fetches the agy and Claude Code releases pinned in `antigravity/vendor.json` and `claude/vendor.json` and derives `libagy.so` and Claude's runtime from them on the building machine, as the editable workspace does; Codex and Kimi Code build from the vendored sources. Since agy and Claude Code are proprietary, the package is marked unfree: the flake's own `packages` allow it, and a consuming configuration sets `nixpkgs.config.allowUnfree`. In another flake, apply `overlays.deps` first. It adds what TaskSolver needs above nixpkgs: LIEF 1.x, the pinned Claude Agent SDK, and fixes for the Python 3.15 package set, which nixpkgs 26.05 does not build yet. Then apply `overlays.default`, which adds `pkgs.tasksolver`. `package.nix` also takes a consumer's own builds of the pinned runtimes (`agyArchive`, `claudeExecutable`, `codexBase`). The first build takes hours, since no binary cache holds the Python 3.15 set and Codex compiles from source. `nix/hashes.json` holds the hashes the pins cannot carry (the Codex crates, the Kimi Code pnpm store, the rusty_v8 assets and the SDK source), and `nix/update-hashes` recomputes them.
+
 ## Verify the CLI integrations
 
 From the TaskSolver checkout, these checks run without provider credentials or model calls:

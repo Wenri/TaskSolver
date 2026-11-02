@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Recompute nix/hashes.json from the current tree: the hashes package.nix and
+# flake.nix need that the pins in vendor.json and the lockfiles cannot carry.
+#   rustyV8         denoland/rusty_v8's release assets for the `v8` crate
+#                   codex/vendor/codex-rs/Cargo.lock names
+#   claudeAgentSdk  the SDK's tag tarball, at claude/vendor.json's sdk.tag
+#   codexCargo      rustPlatform.fetchCargoVendor of codex-rs/Cargo.lock
+#   kimiPnpm        fetchPnpmDeps of kimi/vendor/kimi-code
+# The last two are fixed-output derivations: each is built with its hash
+# emptied, and Nix's "got:" line is the new value (downloads, no compile).
+#
+# Usage: nix/update-hashes [FLAKE]   (FLAKE defaults to the repository, `.`)
+# A git flake sees tracked files only, nix/hashes.json included: `git add`
+# new files first. On any failure nix/hashes.json is restored and the exit
+# status is non-zero. Needs bash and Nix with flakes; jq comes from nixpkgs.
+set -euo pipefail
+
+command -v jq >/dev/null || exec nix shell nixpkgs#jq --command bash "$0" "$@"
+
+cd "$(dirname "$0")/.."
+flake=${1:-.}
+file=nix/hashes.json
+backup=$(mktemp)
+cp "$file" "$backup"
+restore() {
+  cp "$backup" "$file"
+  rm -f "$backup"
+  echo "update-hashes: failed; $file restored" >&2
+}
+trap restore ERR
+
+# set PATH-IN-JSON VALUE: rewrite one string field in place.
+set_field() {
+  jq --indent 2 --arg value "$2" "$1 = \$value" "$file" >"$file.new"
+  mv "$file.new" "$file"
+}
+prefetch() { nix store prefetch-file --json "$@" | jq -r .hash; }
+# fod ATTR: the hash Nix reports for ATTR built with its hash emptied.
+fod() {
+  local log
+  log=$(nix build --no-link "$flake#default.$1" 2>&1 || true)
+  sed -n 's/^ *got: *\(sha256-[A-Za-z0-9+/=]*\)$/\1/p' <<<"$log" | tail -1 | grep . ||
+    { echo "$log" >&2; echo "update-hashes: no hash for $1" >&2; return 1; }
+}
+
+v8=$(nix eval --raw --impure --expr '
+  let lock = builtins.fromTOML (builtins.readFile ./codex/vendor/codex-rs/Cargo.lock);
+  in (builtins.head (builtins.filter (p: p.name == "v8") lock.package)).version')
+assets=https://github.com/denoland/rusty_v8/releases/download/v$v8
+set_field .rustyV8.version "$v8"
+set_field .rustyV8.archive "$(prefetch "$assets/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz")"
+set_field .rustyV8.binding "$(prefetch "$assets/src_binding_release_x86_64-unknown-linux-gnu.rs")"
+
+tag=$(jq -r .sdk.tag claude/vendor.json)
+set_field .claudeAgentSdk.tag "$tag"
+set_field .claudeAgentSdk.hash \
+  "$(prefetch --unpack "https://github.com/anthropics/claude-agent-sdk-python/archive/refs/tags/$tag.tar.gz")"
+
+for pair in codexCargo:codex.cargoDeps kimiPnpm:pnpmDeps; do
+  key=${pair%%:*} attr=${pair#*:}
+  set_field ".$key" ""
+  set_field ".$key" "$(fod "$attr")"
+done
+
+trap - ERR
+if cmp -s "$backup" "$file"; then
+  echo "update-hashes: $file unchanged"
+else
+  diff -u "$backup" "$file" || true
+fi
+rm -f "$backup"

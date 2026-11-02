@@ -1,0 +1,13 @@
+{
+  "codexCargo": "sha256-v1j4o/89AkCTNMH/WiS2RwQS6yybD28rGRp88sA/Rtg=",
+  "kimiPnpm": "sha256-LxNyd7iy8vo7SpLM4fWGwzIxbwChrkGmLFdJI67McJ0=",
+  "rustyV8": {
+    "version": "152.2.0",
+    "archive": "sha256-tmg+mvy3f72MssOs9F001SApqyFrMyUiyVF5wS8P7Tw=",
+    "binding": "sha256-Pk1f7Nvg+YpgF+adfKglGad/sDLF615M2+zdPi7FGdU="
+  },
+  "claudeAgentSdk": {
+    "tag": "v0.2.176",
+    "hash": "sha256-rOaat2IX4C041kOIBEnb+5CA6kjYgIuMCVYZU6MiI1U="
+  }
+}
