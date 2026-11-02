@@ -190,6 +190,11 @@ let
                               os.environ["TASKSOLVER_BUN_INTERPRETER"], str(bun)], check=True)'
     '';
     env = {
+      # node_api.h for the libwire.node addon the staging compiles.
+      CONDA_PREFIX = prefix;
+      # The runtime has no lib/: stdenv's -rpath $out/lib would only name
+      # this path in libwire.node, keeping it beside claudeSdk's copy.
+      NIX_NO_SELF_RPATH = "1";
       PATCHELF = "${patchnar}/bin/patchelf";
       TASKSOLVER_BUN_INTERPRETER = stdenv.cc.bintools.dynamicLinker;
     };
@@ -216,7 +221,9 @@ let
         echo "tasksolver: claude/vendor.json pins claude-agent-sdk ${sdkVersion}, python315 has ${old.version}" >&2
         exit 1
       fi
-      cp -r ${claudeRuntime} $out/${python.sitePackages}/claude_agent_sdk/_bundled
+      # Into the directory itself: the SDK ships a .gitignore there, so
+      # copying the runtime as a whole would nest it one level down.
+      cp -r ${claudeRuntime}/. $out/${python.sitePackages}/claude_agent_sdk/_bundled/
     '';
   });
 
@@ -320,6 +327,11 @@ python.pkgs.buildPythonPackage {
   dontPatchELF = true;
 
   pythonImportsCheck = [ "tasksolver" ];
+  # pyclaude requires the bundled runtime where the SDK keeps it.
+  postInstallCheck = ''
+    PYTHONPATH=$out/${python.sitePackages}:$PYTHONPATH ${python.interpreter} -c \
+      'from pyclaude._env import bundled_cli; print(bundled_cli())'
+  '';
 
   passthru = {
     inherit

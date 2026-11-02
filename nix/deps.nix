@@ -58,6 +58,13 @@ in
           pyprev.sniffio
           pyprev.jsonschema
         ];
+        # These suites spawn a stand-in CLI through /usr/bin/env, which the
+        # build sandbox lacks, and read the child's state with ps.
+        postPatch = (old.postPatch or "") + ''
+          substituteInPlace tests/test_close_cancellation.py tests/test_run_end_subprocess.py \
+            --replace-fail '#!/usr/bin/env python3' '#!${pyprev.python.interpreter}'
+        '';
+        nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ final.procps ];
       });
     })
 
@@ -66,6 +73,18 @@ in
     (
       _: pyprev:
       lib.optionalAttrs (pyprev.pythonAtLeast "3.15") {
+        # TaskSolver's bound (pyproject's build-system, >=0.33,<0.34): the
+        # Claude runtime's ELF edit passes Container.update() keywords that
+        # 0.32 rejects. 3.15 is TaskSolver's interpreter, so the bump stays here.
+        pyelftools = pyprev.pyelftools.overridePythonAttrs (old: rec {
+          version = "0.33";
+          src = final.fetchFromGitHub {
+            owner = "eliben";
+            repo = "pyelftools";
+            tag = "v${version}";
+            hash = "sha256-NqF5A6PRl4uncwNS9j44fIV7ovlljiucvV2Msv0LK/w=";
+          };
+        });
         jiter = pyo3Forward pyprev.jiter;
         rpds-py = pyo3Forward pyprev.rpds-py;
         # 2.41's core uses CPython API outside the stable ABI, so it needs
@@ -105,6 +124,21 @@ in
           ];
           # The monorepo's core suite as well as its benchmarks.
           disabledTestPaths = (old.disabledTestPaths or [ ]) ++ [ "tests/pydantic_core" ];
+          # base64's url-safe decoding changed its leniency in 3.15.
+          disabledTests = (old.disabledTests or [ ]) ++ [ "test_base64url" ];
+        });
+        # pydantic 2.13 made PydanticUserError a RuntimeError (a TypeError
+        # before), so a tool whose return type has no JSON schema failed its
+        # registration instead of getting no output schema: upstream's fix,
+        # in 1.27.1.
+        mcp = pyprev.mcp.overridePythonAttrs (old: {
+          patches = (old.patches or [ ]) ++ [
+            (final.fetchpatch {
+              name = "pydantic-2.13-compat.patch";
+              url = "https://github.com/modelcontextprotocol/python-sdk/commit/8d4c2f5834f9925b969809d4db415bba130ee4e8.patch";
+              hash = "sha256-MMRbeALhQSeiK6HYdpxvtciNKuHS4GVDxh3XFDnBPEE=";
+            })
+          ];
         });
 
         # Test suites with cases 3.15 changed under them.
@@ -130,8 +164,13 @@ in
         jedi = skipTestPaths [ "test/test_api/test_environment.py" ] (
           skipTests [ "test_venv_and_pths" ] pyprev.jedi
         );
-        # Every import-hook case: importlib's cache_from_source changed.
-        typeguard = skipTests [ "importhook" ] pyprev.typeguard;
+        # Every import-hook case (importlib's cache_from_source changed), and
+        # the suites whose fixture imports typing.no_type_check_decorator,
+        # removed in 3.15 (only tests/dummymodule.py uses it).
+        typeguard = skipTestPaths [
+          "tests/test_instrumentation.py"
+          "tests/test_pytest_plugin.py"
+        ] (skipTests [ "importhook" ] pyprev.typeguard);
         astroid = skipTests [
           "test_typing_object_notsubscriptable_3"
           "test_kw_only_sentinel"
@@ -139,10 +178,45 @@ in
         ] pyprev.astroid;
         botocore = skipTestPaths [ "tests/unit/test_compress.py" ] pyprev.botocore;
         rich = skipTestPaths [ "tests/test_inspect.py" ] (skipTests [ "test_attrs_broken" ] pyprev.rich);
-        scipy = skipTests [ "test_funcs and cdf and Normal" ] pyprev.scipy;
         uvloop = skipTests [ "test_socket_sync_remove" ] pyprev.uvloop;
+        distutils = skipTests [ "test_get_host_platform" ] pyprev.distutils;
+        scikit-build-core = skipTests [ "test_abi3_wheel" ] pyprev.scikit-build-core;
+        yarl = skipTests [ "test_pickle" ] pyprev.yarl;
+        # Its bytecode-to-AST verifier fails across the sample suite: 3.15
+        # changed the bytecode it maps.
+        executing = pyprev.executing.overridePythonAttrs { doCheck = false; };
+        # Its suite crashes pytest-xdist in the gc tests on 3.15.
+        scipy = pyprev.scipy.overridePythonAttrs { doCheck = false; };
+        # Its suite needs fastapi, whose test closure does not build for
+        # 3.15 (watchfiles' and pendulum's Rust extensions).
+        # It also gets starlette, a runtime dependency, only through them.
+        sse-starlette = pyprev.sse-starlette.overridePythonAttrs (old: {
+          doCheck = false;
+          dependencies = old.dependencies ++ [ pyprev.starlette ];
+        });
+        # Teleportation reads code.co_lnotab, removed in 3.15; pwntools uses
+        # rpyc only for its gdb API.
+        rpyc = skipTests [ "test_compat" ] pyprev.rpyc;
+        # Its suite fails on 3.15's Unicode tables and times out in the
+        # debugger tests.
+        ipython = pyprev.ipython.overridePythonAttrs { doCheck = false; };
+        # Every test module fails at import (importlib's cache_from_source).
+        stack-data = pyprev.stack-data.overridePythonAttrs { doCheck = false; };
         # Every case of its one test file errors (its builtins patching).
         blockbuster = pyprev.blockbuster.overridePythonAttrs { doCheck = false; };
+        # Its suite runs under blockbuster, whose patching fails the same way:
+        # 4,331 errors, 67 passes.
+        aiohttp = pyprev.aiohttp.overridePythonAttrs { doCheck = false; };
+        # Django is here only for pytest-randomly's test inputs (factory-boy,
+        # model-bakery, pytest-django). Seven of its 18,166 cases fail on
+        # 3.15: argparse's new "maybe you meant", strip_tags' table of
+        # versions, and five template tags with an annotation naming an
+        # undefined type (a NameError at registration).
+        django = pyprev.django.overridePythonAttrs { doCheck = false; };
+        # django-configurations' importer has only load_module(), and 3.15
+        # removed importlib's fallback to it, so its settings do not import;
+        # nothing here uses it beyond this suite.
+        pytest-django = skipTestPaths [ "tests/test_django_configurations.py" ] pyprev.pytest-django;
         # Their suites need pendulum, whose Rust extension uses CPython API
         # outside the stable ABI and so does not compile for 3.15; nothing
         # needs pendulum at run time.
