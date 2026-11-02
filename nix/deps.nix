@@ -68,7 +68,6 @@ in
       lib.optionalAttrs (pyprev.pythonAtLeast "3.15") {
         jiter = pyo3Forward pyprev.jiter;
         rpds-py = pyo3Forward pyprev.rpds-py;
-        pendulum = pyo3Forward pyprev.pendulum;
         # 2.41's core uses CPython API outside the stable ABI, so it needs
         # the release that knows 3.15, now in pydantic's own repository, and
         # pydantic pins its core: both at nixpkgs-unstable's versions.
@@ -104,7 +103,8 @@ in
               hash = "sha256-azclSDYY/H8RcerNvI07njwLzr8fyIZ17nM18y/edVo=";
             })
           ];
-          disabledTestPaths = (old.disabledTestPaths or [ ]) ++ [ "tests/pydantic_core/benchmarks" ];
+          # The monorepo's core suite as well as its benchmarks.
+          disabledTestPaths = (old.disabledTestPaths or [ ]) ++ [ "tests/pydantic_core" ];
         });
 
         # Test suites with cases 3.15 changed under them.
@@ -127,9 +127,27 @@ in
         setproctitle = skipTests [ "test_clear_segfault" ] pyprev.setproctitle;
         sqlalchemy = skipTests [ "test_date_no_string" ] pyprev.sqlalchemy;
         time-machine = skipTests [ "test_date_today" ] pyprev.time-machine;
-        blockbuster = skipTests [ "test_os_makedirs" ] pyprev.blockbuster;
-        jedi = skipTests [ "test_find_system_environments" ] pyprev.jedi;
-        typeguard = skipTests [ "test_attribute_assign_unpacking" ] pyprev.typeguard;
+        jedi = skipTestPaths [ "test/test_api/test_environment.py" ] (
+          skipTests [ "test_venv_and_pths" ] pyprev.jedi
+        );
+        # Every import-hook case: importlib's cache_from_source changed.
+        typeguard = skipTests [ "importhook" ] pyprev.typeguard;
+        astroid = skipTests [
+          "test_typing_object_notsubscriptable_3"
+          "test_kw_only_sentinel"
+          "test_regression_parse_deeply_nested_parentheses"
+        ] pyprev.astroid;
+        botocore = skipTestPaths [ "tests/unit/test_compress.py" ] pyprev.botocore;
+        rich = skipTestPaths [ "tests/test_inspect.py" ] (skipTests [ "test_attrs_broken" ] pyprev.rich);
+        scipy = skipTests [ "test_funcs and cdf and Normal" ] pyprev.scipy;
+        uvloop = skipTests [ "test_socket_sync_remove" ] pyprev.uvloop;
+        # Every case of its one test file errors (its builtins patching).
+        blockbuster = pyprev.blockbuster.overridePythonAttrs { doCheck = false; };
+        # Their suites need pendulum, whose Rust extension uses CPython API
+        # outside the stable ABI and so does not compile for 3.15; nothing
+        # needs pendulum at run time.
+        pydantic-extra-types = pyprev.pydantic-extra-types.overridePythonAttrs { doCheck = false; };
+        sqlalchemy-utils = pyprev.sqlalchemy-utils.overridePythonAttrs { doCheck = false; };
         # A case in this file aborts the interpreter.
         zlib-ng = skipTestPaths [ "tests/test_zlib_compliance.py" ] pyprev.zlib-ng;
         # unittestCheckHook ignores disabledTests: take the case out of
