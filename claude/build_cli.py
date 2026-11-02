@@ -8,10 +8,7 @@ import json
 import os
 import platform
 import runpy
-import shlex
 import shutil
-import subprocess
-import tarfile
 import tempfile
 import urllib.request
 from collections.abc import Mapping
@@ -20,67 +17,37 @@ from pathlib import Path
 from typing import Final, TypedDict, cast
 
 
-class DownloadPin(TypedDict):
+class CLIPin(TypedDict):
+    version: str
     url: str
     sha256: str
     size: int
 
 
-class CLIPin(DownloadPin):
-    version: str
-
-
-class ToolPin(DownloadPin):
-    revision: str
-
-
-def _manifest_section(path: Path, key: str) -> dict[str, object]:
+def _load_pin(path: Path) -> CLIPin:
     manifest = cast(object, json.loads(path.read_text()))
     if not isinstance(manifest, dict):
         raise ValueError("Claude CLI manifest must be an object")
-    cli = cast(dict[str, object], manifest)[key]
-    if not isinstance(cli, dict):
+    value = cast(dict[str, object], manifest)["cli"]
+    if not isinstance(value, dict):
         raise ValueError("Claude CLI pin must be an object")
-    return cast(dict[str, object], cli)
-
-
-def _download_pin(data: Mapping[str, object]) -> DownloadPin:
-    url, digest, size = data["url"], data["sha256"], data["size"]
-    if not isinstance(url, str) or not isinstance(digest, str):
-        raise ValueError("Download pin needs a string URL and SHA256")
+    data = cast(dict[str, object], value)
+    version, url, digest, size = data["version"], data["url"], data["sha256"], data["size"]
+    if not isinstance(version, str) or not isinstance(url, str) or not isinstance(digest, str):
+        raise ValueError("Claude CLI pin needs a string version, URL and SHA256")
     if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
-        raise ValueError("Download pin needs a positive integer size")
-    return {"url": url, "sha256": digest, "size": size}
+        raise ValueError("Claude CLI pin needs a positive integer size")
+    return {"version": version, "url": url, "sha256": digest, "size": size}
 
 
-def _load_pin(path: Path) -> CLIPin:
-    data = _manifest_section(path, "cli")
-    version = data["version"]
-    if not isinstance(version, str):
-        raise ValueError("Claude CLI pin needs a string version")
-    return {**_download_pin(data), "version": version}
-
-
-def _load_tool_pin(path: Path) -> ToolPin:
-    data = _manifest_section(path, "bun_graph")
-    revision = data["revision"]
-    if not isinstance(revision, str) or len(revision) != 40 or any(
-            character not in "0123456789abcdef" for character in revision):
-        raise ValueError("bun_graph pin needs a full Git revision")
-    return {**_download_pin(data), "revision": revision}
-
-
-def matches(path: Path, pin: DownloadPin) -> bool:
+def matches(path: Path, pin: CLIPin) -> bool:
     if not path.is_file() or path.stat().st_size != pin["size"]:
         return False
-    digest: Final = hashlib.sha256()
     with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest() == pin["sha256"]
+        return hashlib.file_digest(source, "sha256").hexdigest() == pin["sha256"]
 
 
-def _download(target: Path, pin: DownloadPin) -> Path:
+def _download(target: Path, pin: CLIPin) -> Path:
     if matches(target, pin):
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -110,60 +77,6 @@ def fetch_cli(root: Path, pin: CLIPin) -> Path:
         shutil.copyfile(previous, target)
         target.chmod(0o600)
     return _download(target, pin)
-
-
-def build_bun_graph(root: Path) -> Path:
-    """Compile upstream's pinned extractor with the host C++ toolchain."""
-    pin = _load_tool_pin(root / "vendor.json")
-    compiler = shlex.split(os.environ.get("CXX", "c++"))
-    if not compiler:
-        raise ValueError("CXX must name a compiler")
-    flags = shlex.split(subprocess.check_output(
-        ["pkg-config", "--cflags", "--libs", "source-highlight"], text=True))
-    lib_dir = subprocess.check_output(
-        ["pkg-config", "--variable=libdir", "source-highlight"], text=True).strip()
-    data_dir = subprocess.check_output(
-        ["pkg-config", "--variable=pkgdatadir", "source-highlight"], text=True).strip()
-    if not data_dir:
-        prefix = subprocess.check_output(
-            ["pkg-config", "--variable=prefix", "source-highlight"], text=True).strip()
-        data_dir = str(Path(prefix) / "share/source-highlight")
-    if not (Path(data_dir) / "javascript.lang").is_file():
-        raise RuntimeError("source-highlight JavaScript definitions are unavailable")
-    compiler_version = subprocess.check_output([*compiler, "--version"], text=True)
-    identity = json.dumps([2, pin, compiler, compiler_version, flags, data_dir, lib_dir], sort_keys=True)
-    key = hashlib.sha256(identity.encode()).hexdigest()[:20]
-    target = root / "build/tools" / f"bun_graph-{key}"
-    if target.is_file() and os.access(target, os.X_OK):
-        return target
-    archive = _download(root / "build/cache" / f"patchnar-{pin['revision']}.tar.gz", pin)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="bun-graph-", dir=target.parent) as temporary:
-        directory = Path(temporary)
-        files = ("bun_graph.cc", "patchelf.cc", "patchelf.h", "elf.h", "source_patcher.cc", "source_patcher.h")
-        with tarfile.open(archive, "r:gz") as source:
-            for name in files:
-                member = source.getmember(f"patchnar-{pin['revision']}/src/{name}")
-                if not member.isfile():
-                    raise ValueError("Unexpected non-file in pinned bun_graph sources")
-                contents = source.extractfile(member)
-                if contents is None:
-                    raise ValueError("Missing bun_graph source contents")
-                with contents, (directory / name).open("wb") as output:
-                    shutil.copyfileobj(contents, output)
-        candidate = directory / "bun_graph"
-        # 3.1.9's formatter headers still use dynamic exception specifications.
-        # Its upstream adapter needs only C++14; the ELF parser needs C++23.
-        adapter = directory / "source_patcher.o"
-        subprocess.run([*compiler, "-std=c++14", "-O2",
-                        f"-DSOURCE_HIGHLIGHT_DATA_DIR={json.dumps(data_dir)}",
-                        *flags, "-c", str(directory / "source_patcher.cc"), "-o", str(adapter)], check=True)
-        subprocess.run([*compiler, "-std=c++23", "-O2", "-DPATCHELF_AS_LIBRARY",
-                        "-D_FILE_OFFSET_BITS=64",
-                        str(directory / "bun_graph.cc"), str(directory / "patchelf.cc"),
-                        str(adapter), *flags, f"-Wl,-rpath,{lib_dir}", "-o", str(candidate)], check=True)
-        candidate.replace(target)
-    return target
 
 
 def _fingerprint(root: Path) -> str:
@@ -269,10 +182,9 @@ def build() -> Path:
         if _bundle_matches(bundled, fingerprint):
             return bundled / "claude"
         source = fetch_cli(root, pin)
-        tool = build_bun_graph(root)
         with tempfile.TemporaryDirectory(prefix=".bundled-", dir=package) as temporary:
             staging = Path(temporary) / "runtime"
-            result = unbundle(staging, binary=source, bun_graph=str(tool), pin=pin)
+            result = unbundle(staging, binary=source, pin=pin)
             document = cast(dict[str, object], json.loads(result.manifest.read_text()))
             document["build_fingerprint"] = fingerprint
             _ = result.manifest.write_text(json.dumps(document, indent=2) + "\n")

@@ -24,12 +24,11 @@ a missing bundle is an error rather than a fallback to a global CLI.
 
 ## Build and editable JavaScript
 
-`pixi install` builds the runtime automatically. [`vendor.json`](vendor.json)
-pins Claude Code 2.1.316 and the upstream
-[`bun_graph`](https://github.com/Wenri/patchnar/blob/main/src/bun_graph.cc)
-extractor. [`build_cli.py`](build_cli.py) verifies download sizes and SHA256,
-checks the SDK's CLI version, compiles the pinned extractor with the conda C++
-toolchain and source-highlight, then stages the complete runtime under
+`pixi install` builds the runtime automatically, using
+[`bun_graph`](https://github.com/Wenri/patchnar/blob/main/src/bun_graph.cc) from
+`PATH`. Provide that executable in the build environment. [`vendor.json`](vendor.json)
+pins Claude Code 2.1.316; [`build_cli.py`](build_cli.py) verifies the download's size
+and SHA256, checks the SDK's CLI version, then stages the complete runtime under
 `claude_agent_sdk/_bundled/`:
 
 - `bun`: the private Bun executable with its embedded application graph removed.
@@ -67,6 +66,9 @@ that one checked call to a small UTF-8 conversion shim, preserving Unicode and r
 template contents. The manifest records the five changed instruction bytes and the
 added executable section. Other native sections, RELRO and stack settings are
 preserved and independently checked.
+ELF edits use pyelftools' named header structures; pwntools assembles the relative
+call and locates binutils. The converter controls placement so existing native
+sections stay at their original addresses.
 
 The cache driver loads `libwire.node` through Bun's N-API support and invokes the
 private runtime's own JSC emitter after all source patches. It copies and releases

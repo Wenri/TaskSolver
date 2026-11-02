@@ -1,5 +1,7 @@
 from typing import Literal, overload
 
+def which_binutils(util: str, check_version: Literal[False] = False, *, arch: str = ...) -> str: ...
+
 @overload
 def asm(shellcode: str, vma: int = 0, extract: Literal[True] = True, shared: bool = False,
         *, arch: str = ..., bits: int = ..., endian: str = ..., os: str = ...) -> bytes: ...

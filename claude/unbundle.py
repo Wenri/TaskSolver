@@ -10,7 +10,6 @@ import posixpath
 import re
 import shutil
 import shlex
-import struct
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -18,7 +17,11 @@ from pathlib import Path, PurePosixPath
 from typing import Final, cast
 
 from elftools.common.exceptions import ELFError
+from elftools.construct import Container
+from elftools.elf.constants import P_FLAGS, SH_FLAGS
 from elftools.elf.elffile import ELFFile
+from pwnlib.asm import asm, which_binutils
+from pwnlib.util.misc import align
 
 from .build_cli import CLIPin, _load_pin, matches
 
@@ -185,21 +188,18 @@ def _source_only(source: Path, target: Path, graph: BunGraph) -> None:
 
 def _clean_runtime(source: Path, target: Path) -> None:
     """Remove the application payload while retaining every native allocation."""
-    objcopy = (os.environ.get("OBJCOPY") or shutil.which("x86_64-conda-linux-gnu-objcopy")
-               or shutil.which("objcopy"))
-    if objcopy is None:
-        raise FileNotFoundError("GNU objcopy is required to extract the private Bun runtime")
+    objcopy = os.environ.get("OBJCOPY") or which_binutils("objcopy", arch="amd64")
     subprocess.run([objcopy, "--remove-section", ".bun", str(source), str(target)], check=True)
     target.chmod(0o755)
     # objcopy drops GNU_RELRO and the stack-size hint. Keep the original table,
     # changing only the LOAD sizes that removed the application payload.
     with source.open("rb") as original, target.open("r+b") as cleaned:
         old, new = ELFFile(original), ELFFile(cleaned)
-        offset, count = cast(int, old["e_phoff"]), cast(int, old["e_phnum"])
-        if old["e_phentsize"] != 56 or new["e_phoff"] != offset:
+        offset = old["e_phoff"]
+        if (old.elfclass != 64 or old["e_phentsize"] != old.structs.Elf_Phdr.sizeof()
+                or new["e_phoff"] != offset):
             raise ValueError("Unsupported ELF program-header layout")
-        original.seek(offset)
-        table = bytearray(original.read(count * 56))
+        headers = [segment.header.copy() for segment in old.iter_segments()]
         loads = {segment["p_vaddr"]: segment for segment in new.iter_segments()
                  if segment["p_type"] == "PT_LOAD"}
         application = old.get_section_by_name(".bun")
@@ -216,11 +216,13 @@ def _clean_runtime(source: Path, target: Path) -> None:
                 if not contains_application and any(after[key] != segment[key] for key in (
                         "p_filesz", "p_memsz")):
                     raise ValueError("objcopy resized a LOAD unrelated to the application")
-                struct.pack_into("<QQ", table, index * 56 + 32, after["p_filesz"], after["p_memsz"])
+                headers[index].update(p_filesz=after["p_filesz"], p_memsz=after["p_memsz"])
         cleaned.seek(offset)
-        _ = cleaned.write(table)
-        cleaned.seek(56)
-        _ = cleaned.write(struct.pack("<H", count))
+        for header in headers:
+            old.structs.Elf_Phdr.build_stream(header, cleaned)
+        cleaned.seek(0)
+        new.header["e_phnum"] = len(headers)
+        new.structs.Elf_Ehdr.build_stream(new.header, cleaned)
     with source.open("rb") as original, target.open("rb") as cleaned:
         old, new = ELFFile(original), ELFFile(cleaned)
         bun, data = old.get_section_by_name(".bun"), old.get_section_by_name(".data")
@@ -229,7 +231,7 @@ def _clean_runtime(source: Path, target: Path) -> None:
         if new["e_entry"] != old["e_entry"]:
             raise ValueError("objcopy changed the private Bun entry point")
         for section in old.iter_sections():
-            if not section["sh_flags"] & 2 or section.name == ".bun":
+            if not section["sh_flags"] & SH_FLAGS.SHF_ALLOC or section.name == ".bun":
                 continue
             after = new.get_section_by_name(section.name)
             if (after is None or after["sh_addr"] != section["sh_addr"]
@@ -259,12 +261,13 @@ def _append_utf8_shim(runtime: Path, code: bytes) -> list[dict[str, str | int]]:
     original_call = bytes.fromhex("e8f09f4d01")
     with runtime.open("r+b") as stream:
         elf = ELFFile(stream)
-        if (elf["e_type"] != "ET_EXEC" or elf["e_phentsize"] != 56
-                or elf["e_shentsize"] != 64 or elf.get_section_by_name(".tasksolver.utf8") is not None):
+        phdr, shdr = elf.structs.Elf_Phdr, elf.structs.Elf_Shdr
+        if (elf.elfclass != 64 or not elf.little_endian or elf["e_machine"] != "EM_X86_64"
+                or elf["e_type"] != "ET_EXEC" or elf["e_phentsize"] != phdr.sizeof()
+                or elf["e_shentsize"] != shdr.sizeof()
+                or elf.get_section_by_name(".tasksolver.utf8") is not None):
             raise ValueError("Unsupported private Bun ELF layout for UTF-8 shim")
-        phoff, phnum = cast(int, elf["e_phoff"]), cast(int, elf["e_phnum"])
-        shoff, shnum = cast(int, elf["e_shoff"]), cast(int, elf["e_shnum"])
-        string_index = cast(int, elf["e_shstrndx"])
+        string_index = elf["e_shstrndx"]
         strings = elf.get_section(string_index).data()
         offsets = list(elf.address_offsets(call_address, 5))
         if len(offsets) != 1:
@@ -273,50 +276,55 @@ def _append_utf8_shim(runtime: Path, code: bytes) -> list[dict[str, str | int]]:
         stream.seek(call_offset)
         if stream.read(5) != original_call:
             raise ValueError("Private Bun source-loader call signature changed")
-        stream.seek(phoff)
-        headers = bytearray(stream.read(phnum * 56))
-        stream.seek(shoff)
-        sections = bytearray(stream.read(shnum * 64))
+        headers = [segment.header.copy() for segment in elf.iter_segments()]
+        sections = [section.header.copy() for section in elf.iter_sections()]
         end_address = max(segment["p_vaddr"] + segment["p_memsz"]
                           for segment in elf.iter_segments() if segment["p_type"] == "PT_LOAD")
         # Leave the former .bun start unmapped. BUN_COMPILED.size is already zero.
-        address = (end_address + 4095) // 4096 * 4096 + 4096
-        offset = (stream.seek(0, os.SEEK_END) + 4095) // 4096 * 4096
-        table_size = (phnum + 1) * 56
-        code_start = (table_size + 15) // 16 * 16
+        address = align(4096, end_address) + 4096
+        offset = align(4096, stream.seek(0, os.SEEK_END))
+        table_size = (len(headers) + 1) * phdr.sizeof()
+        code_start = align(16, table_size)
         target = address + code_start
-        replacement = b"\xe8" + struct.pack("<i", target - call_address - 5)
+        replacement = asm(f"call {target:#x}", vma=call_address,
+                          arch="amd64", bits=64, endian="little", os="linux")
+        if len(replacement) != len(original_call) or replacement[:1] != b"\xe8":
+            raise ValueError("UTF-8 shim call must be a five-byte near call")
         phdr_found = False
-        for index, segment in enumerate(elf.iter_segments()):
-            if segment["p_type"] == "PT_PHDR":
-                headers[index * 56:(index + 1) * 56] = struct.pack(
-                    "<IIQQQQQQ", 6, 4, offset, address, address, table_size, table_size, 8)
+        for header in headers:
+            if header["p_type"] == "PT_PHDR":
+                header.update(p_offset=offset, p_vaddr=address, p_paddr=address,
+                              p_filesz=table_size, p_memsz=table_size)
                 phdr_found = True
         if not phdr_found:
             raise ValueError("Private Bun is missing PT_PHDR")
         length = code_start + len(code)
-        headers.extend(struct.pack("<IIQQQQQQ", 1, 5, offset, address, address, length, length, 4096))
+        headers.append(Container(p_type="PT_LOAD", p_flags=P_FLAGS.PF_R | P_FLAGS.PF_X,
+                                 p_offset=offset, p_vaddr=address, p_paddr=address,
+                                 p_filesz=length, p_memsz=length, p_align=4096))
         string_offset = offset + length
         name_offset = len(strings)
         strings += b".tasksolver.utf8\0"
-        section_offset = (string_offset + len(strings) + 7) // 8 * 8
-        struct.pack_into("<QQ", sections, string_index * 64 + 24, string_offset, len(strings))
-        sections.extend(struct.pack("<IIQQQQIIQQ", name_offset, 1, 6, target,
-                                    offset + code_start, len(code), 0, 0, 16, 0))
+        section_offset = align(8, string_offset + len(strings))
+        sections[string_index].update(sh_offset=string_offset, sh_size=len(strings))
+        sections.append(Container(sh_name=name_offset, sh_type="SHT_PROGBITS",
+                                  sh_flags=SH_FLAGS.SHF_ALLOC | SH_FLAGS.SHF_EXECINSTR,
+                                  sh_addr=target, sh_offset=offset + code_start, sh_size=len(code),
+                                  sh_link=0, sh_info=0, sh_addralign=16, sh_entsize=0))
         stream.seek(offset)
-        _ = stream.write(headers)
+        for header in headers:
+            phdr.build_stream(header, stream)
         stream.seek(offset + code_start)
         _ = stream.write(code)
         stream.seek(string_offset)
         _ = stream.write(strings)
         stream.seek(section_offset)
-        _ = stream.write(sections)
-        stream.seek(32)
-        _ = stream.write(struct.pack("<QQ", offset, section_offset))
-        stream.seek(56)
-        _ = stream.write(struct.pack("<H", phnum + 1))
-        stream.seek(60)
-        _ = stream.write(struct.pack("<H", shnum + 1))
+        for section in sections:
+            shdr.build_stream(section, stream)
+        stream.seek(0)
+        elf.header.update(e_phoff=offset, e_shoff=section_offset,
+                          e_phnum=len(headers), e_shnum=len(sections))
+        elf.structs.Elf_Ehdr.build_stream(elf.header, stream)
         stream.seek(call_offset)
         _ = stream.write(replacement)
     return [{"name": "external_source_utf8", "address": call_address,
@@ -601,21 +609,20 @@ def unbundle(output: Path, *, binary: Path | None = None, bun_graph: str = "bun_
 class _Arguments(argparse.Namespace):
     output: str = str(ROOT / "build/editable")
     binary: str | None = None
-    bun_graph: str | None = None
+    bun_graph: str = "bun_graph"
 
 
 def main() -> None:
-    from .build_cli import build_bun_graph, fetch_cli
+    from .build_cli import fetch_cli
 
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--output", default=str(ROOT / "build/editable"))
     _ = parser.add_argument("--binary", help="Pinned executable to copy (never modified)")
-    _ = parser.add_argument("--bun-graph", help="Override the checksum-pinned build extractor")
+    _ = parser.add_argument("--bun-graph", default="bun_graph", help="bun_graph executable (default: PATH)")
     args = parser.parse_args(namespace=_Arguments())
     pin = _load_pin(ROOT / "vendor.json")
     binary = Path(args.binary) if args.binary else fetch_cli(ROOT, pin)
-    tool = args.bun_graph or str(build_bun_graph(ROOT))
-    result = unbundle(Path(args.output), binary=binary, bun_graph=tool, pin=pin)
+    result = unbundle(Path(args.output), binary=binary, bun_graph=args.bun_graph, pin=pin)
     print(result.runtime)
 
 

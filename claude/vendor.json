@@ -9,11 +9,5 @@
     "url": "https://downloads.claude.ai/claude-code-releases/2.1.316/linux-x64/claude",
     "sha256": "fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824",
     "size": 328262000
-  },
-  "bun_graph": {
-    "revision": "6ce459b619135f5dde6d83c130dd9db92897ba67",
-    "url": "https://codeload.github.com/Wenri/patchnar/tar.gz/6ce459b619135f5dde6d83c130dd9db92897ba67",
-    "sha256": "d3fe89acb6e4ae1a056ba74f0a1c21df881e660b7590a0b774bb0e5493ffd2ec",
-    "size": 133924
   }
 }

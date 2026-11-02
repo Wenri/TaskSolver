@@ -235,8 +235,8 @@ Ctrl-C. `--no-attach` with `--web-port` forces web-only operation. Offline check
 `test_webterm_views.py`. Run them through Pixi; they send input only to local stubs.
 
 All Claude launches use the bundled bridged runtime. `claude/build_cli.py` verifies
-and caches the pristine pin, compiles checksum-pinned upstream `bun_graph` with
-source-highlight, and installs a split runtime under the SDK's `_bundled/`:
+and caches the pristine pin, uses the externally provided `bun_graph` on `PATH`,
+and installs a split runtime under the SDK's `_bundled/`:
 `bun` with `.bun` removed, a native `claude` launcher, `source/`, `assets/`,
 `modules/`, and `libwire.node`/`cache.mjs`. The entry disables upstream auto-updates;
 update the pin and rebuild instead. There is no raw runtime launch option or PATH
@@ -244,6 +244,8 @@ fallback. `pixi run python -m claude.unbundle --output PATH` creates an isolated
 Keep the private Bun (`Bun.ant`) and native helper dispatch; `.node` addons move to
 `modules/`, while statically linked helpers remain in Bun. Validate native sections
 and load mappings independently of the converter, allowing only declared patches.
+Use pyelftools' header structures for ELF edits and pwntools for instruction
+assembly and binutils discovery; preserve native placement explicitly.
 Clear bytecode pointers in the extraction-only copy first: packed caches overlap.
 The sidecar loader needs a pin-checked five-byte call redirection to the compiled
 UTF-8 shim in `native_cache.c`; preserve every other native section and the original

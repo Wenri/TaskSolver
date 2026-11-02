@@ -1,8 +1,10 @@
 from collections.abc import Iterator
 from typing import Literal, overload
+from ..construct import Container
 
 class Section:
     name: str
+    header: Container
     @overload
     def __getitem__(self, key: Literal["sh_type"]) -> str | int: ...
     @overload

@@ -16,11 +16,12 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
+from unittest.mock import patch
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from claude.build_cli import CLIPin, _load_pin, build_bun_graph, matches
+from claude.build_cli import CLIPin, _load_pin, matches
 from claude.unbundle import _read_graph, _source_only, unbundle
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from elftools.elf.elffile import ELFFile
@@ -187,6 +188,15 @@ class GraphEditTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertEqual(self.source.read_bytes(), self.fixture.data)
 
+    def test_missing_external_extractor_leaves_no_output(self) -> None:
+        output = self.directory / "output"
+        with patch("claude.unbundle.shutil.which", return_value=None) as locate:
+            with self.assertRaisesRegex(FileNotFoundError, "bun_graph"):
+                unbundle(output, binary=self.source, pin=pin_for(self.fixture.data))
+        locate.assert_called_once_with("bun_graph")
+        self.assertFalse(output.exists())
+        self.assertEqual(self.source.read_bytes(), self.fixture.data)
+
     def test_existing_outputs_including_dangling_symlinks_are_preserved(self) -> None:
         output = self.directory / "output"
         output.mkdir()
@@ -246,11 +256,10 @@ class PinnedRuntimeTests(unittest.TestCase):
         cls.binary = ROOT / "claude/build/cache" / f"claude-{cls.pin['sha256']}"
         if not cls.binary.is_file():
             raise unittest.SkipTest("Build the pinned Claude executable before native unbundle checks")
-        tool = build_bun_graph(ROOT / "claude")
         cls.temporary = tempfile.TemporaryDirectory(prefix="tasksolver-claude-unbundle-test-")
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.directory = Path(cls.temporary.name)
-        built = unbundle(cls.directory / "output", binary=cls.binary, bun_graph=str(tool), pin=cls.pin)
+        built = unbundle(cls.directory / "output", binary=cls.binary, pin=cls.pin)
         relocated = cls.directory / "relocated package # source"
         built.runtime.parent.rename(relocated)
         cls.package = relocated

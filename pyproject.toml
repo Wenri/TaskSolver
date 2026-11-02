@@ -127,13 +127,10 @@ tasksolver = { path = "." }
 # would pull, so it matches the 3D-CoT consumer's conda jiter.
 jiter = "*"
 nodejs = ">=26,<27"
-# NOTE: bun was removed — it pins icu 75, which conflicts with boost 1.91 (icu 78, pulled in
-# for Boost.Thread); nodejs (what pymport uses) is icu-78 and coexists fine. Re-add bun in a
-# separate environment if needed so its icu pin doesn't clash with the default env's boost.
+# Claude ships its private Bun runtime; no separate stock Bun package is needed.
 # GNU make for node-gyp's pymport build.
 make = ">=4"
 pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pymport)
-source-highlight = ">=3.1.9,<4" # patchnar's bun_graph extractor
 # Linux UAPI headers (linux/, asm/): glibc's <limits.h> needs <linux/limits.h>, but this
 # WSLackware host has none in /usr/include (and NixOS has no /usr/include at all). The shim
 # build points -idirafter at this package's sysroot in place — no copy — at
@@ -197,8 +194,6 @@ noarch = false
 # The backend builds without isolation: mirror [build-system].requires here, alongside native
 # tools and headers. setup.py selects this host environment's $PREFIX for native builds.
 [tool.pixi.package.host-dependencies]
-pkg-config = "*"
-source-highlight = ">=3.1.9,<4"
 python = "3.15.*"
 pip = "*"
 setuptools = ">=61"

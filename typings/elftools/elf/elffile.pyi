@@ -1,12 +1,19 @@
 from collections.abc import Iterator
-from typing import BinaryIO
+from typing import BinaryIO, Literal, overload
+from ..construct import Container
 from .sections import Section
 from .segments import Segment
+from .structs import ELFStructs
 
 class ELFFile:
     elfclass: int
     little_endian: bool
+    header: Container
+    structs: ELFStructs
     def __init__(self, stream: BinaryIO) -> None: ...
+    @overload
+    def __getitem__(self, key: Literal["e_entry", "e_phoff", "e_phnum", "e_phentsize", "e_shoff", "e_shnum", "e_shentsize", "e_shstrndx"]) -> int: ...
+    @overload
     def __getitem__(self, key: str) -> object: ...
     def iter_segments(self) -> Iterator[Segment]: ...
     def iter_sections(self) -> Iterator[Section]: ...
