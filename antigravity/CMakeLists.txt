@@ -151,9 +151,13 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/../wirecap/native" "${CMAKE_BINARY_DIR}/wi
 add_executable(agy
   src/antigravity.cpp src/gomod.cpp src/gocall.cpp src/goframe.cpp)
 add_dependencies(agy gen_symbols agy_library)
+# The link options below give the whole RUNPATH. CMake's build-tree entry would add this
+# checkout's vendor/ (libagy.so is linked by path), which $ORIGIN already covers; a packaged agy
+# would keep the build directory there, a path the Nix build rejects.
 set_target_properties(agy PROPERTIES
   OUTPUT_NAME "agy"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor")
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/vendor"
+  SKIP_BUILD_RPATH ON)
 
 target_compile_features(agy PRIVATE cxx_std_23)
 # Suppress Boost.Python's std::auto_ptr warning and allow partial designated initializers.
