@@ -1,7 +1,7 @@
 """Structured Claude Agent SDK calls using the bundled SDK and CLI.
 
-Every turn owns the full async SDK lifecycle. Session follow-ups resume the saved
-Claude session in a new SDK client, avoiding cross-task AnyIO lifecycle ownership.
+One-shot SDK calls own the full async lifecycle. Session follow-ups resume the
+saved conversation; attach_terminal connects to an existing native UI process.
 """
 
 from __future__ import annotations
@@ -10,15 +10,20 @@ import asyncio
 import importlib
 import json
 import os
+from pathlib import Path
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, fields, is_dataclass
 from collections.abc import AsyncIterator, Coroutine, Mapping
 from typing import Final, Self, Unpack, cast
 
 from wirecap.types import JSONObject, JSONValue, json_object
-from .types import AskOptions, MCPServers, Prompt, SDK, SDKOptionsFactory, SDKResultMessage, Tools
+from wirecap.runtime.terminal import TerminalScreen
+from ._env import bundled_cli
+from .types import (AskOptions, MCPServers, Prompt, SDK, SDKOptionsFactory,
+                    SDKResultMessage, TerminalSDK, TerminalSDKClient, Tools)
 
 
 def _load_sdk() -> SDK:
@@ -29,6 +34,26 @@ def _load_sdk() -> SDK:
             "TaskSolver's vendored Claude Agent SDK is unavailable. "
             "Run `pixi install` from the TaskSolver or host workspace."
         ) from exc
+
+
+def attach_terminal(socket_path: str | os.PathLike[str] | TerminalScreen, *,
+                    connect_timeout: float = 30) -> AbstractAsyncContextManager[TerminalSDKClient]:
+    """Attach the official SDK to an already-running bridged Claude UI.
+
+    Configure model, workspace and tool permissions when launching the UI.
+    Constructor SDK options cannot configure an existing process, so this
+    factory deliberately accepts none. The terminal owns permission dialogs.
+    Closing the client detaches it while the UI and its current turn keep running.
+    """
+    from .transport import NativeTransport
+
+    if isinstance(socket_path, TerminalScreen):
+        if socket_path.control_socket is None:
+            raise ValueError("This terminal screen has no Claude SDK control socket")
+        socket_path = socket_path.control_socket
+    sdk = cast(TerminalSDK, _load_sdk())
+    return sdk.ClaudeSDKClient(options=sdk.ClaudeAgentOptions(),
+                              transport=NativeTransport(socket_path, connect_timeout=connect_timeout))
 
 
 def _plain(value: object) -> JSONValue:
@@ -126,6 +151,7 @@ PARENT_SESSION_ENV: Final = (
     "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_EFFORT",
+    "TASKSOLVER_CLAUDE_SOCKET",
 )
 
 
@@ -134,6 +160,13 @@ def _options[OptionsT](sdk: SDKOptionsFactory[OptionsT], *, model: str | None, w
              session_id: str | None, tools: Tools, allowed_tools: Tools,
              permission_mode: str, sdk_options: dict[str, object] | None) -> OptionsT:
     options: dict[str, object] = dict(sdk_options or {})
+    executable = bundled_cli()
+    configured_cli = options.get("cli_path")
+    if configured_cli is not None and (
+            not isinstance(configured_cli, (str, Path))
+            or Path(configured_cli).expanduser().resolve() != Path(executable)):
+        raise ValueError("cli_path must point to TaskSolver's bundled bridged Claude runtime")
+    options["cli_path"] = executable
     env: Final = {name: "" for name in PARENT_SESSION_ENV if os.environ.get(name)}
     configured_env = options.get("env")
     if configured_env is not None:

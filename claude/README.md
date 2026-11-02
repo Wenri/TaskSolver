@@ -1,49 +1,155 @@
 # Claude Agent SDK
 
 `pyclaude` is TaskSolver's Claude backend alongside `pycodex`, `pyagy`, and
-`pykimi`. It uses Anthropic's official Python Agent SDK and its bundled Claude
-Code executable. It does not need native instrumentation or a separate global CLI install.
+`pykimi`. It uses Anthropic's official Python Agent SDK with a bundled Claude
+Code runtime whose JavaScript is extracted and wired to a local bridge. All
+launches use this runtime; no separate global CLI install is needed.
 The `claude-code` and `claude-agent` model aliases select this backend; the direct
 Anthropic Messages adapter remains separate.
 
-For the ordinary Claude UI, run `pixi run python -m tasksolver.terminal claude`.
-It uses the bundled executable in a managed screen, alongside other backends if desired,
-with optional browser viewing. This UI uses Claude's own session store and runs
-separately from SDK calls. See
-[managed terminal screens](../README.md#managed-terminal-screens).
+Run `pixi run python -m tasksolver.terminal claude` for Claude's native UI, with
+optional [browser viewing](../README.md#managed-terminal-screens).
+`pyclaude.attach_terminal(screen)` connects an SDK client to that same process.
+`ask` and `Session` start headless SDK processes instead. Resuming a saved session
+ID starts another process; attaching to a screen controls the running one.
 
-The official Python SDK source is checked into `claude/vendor/sdk` at tag
-`v0.2.176` (commit `2146f9d8985513053e904b13200c8f744b36785a`), and packaged
-as part of TaskSolver. There is no separate `claude-agent-sdk` package dependency.
-`pixi install` builds from this source and bundles the matching Claude Code
-2.1.316 executable from Anthropic's distribution, verified by size and SHA256.
-The pins live in [`vendor.json`](vendor.json); [`build_cli.py`](build_cli.py)
-checks the SDK's CLI version before downloading, reuses verified cached files,
-and replaces the executable only after verification. The executable is packaged
-under `claude_agent_sdk/_bundled/claude` and is not tracked in Git.
-Override the executable path with
-`sdk_options={"cli_path": "/path/to/claude"}` when needed.
+The pristine official Python SDK is checked into `claude/vendor/sdk` at tag
+`v0.2.176` (commit `2146f9d8985513053e904b13200c8f744b36785a`) and packaged
+as part of TaskSolver. Do not install a separate `claude-agent-sdk` distribution.
+The SDK itself uses its existing subprocess `stream-json` protocol for headless
+calls. Native UI attachment uses the SDK's custom transport interface and a
+private Unix socket. Both paths execute the same bridged runtime.
+TaskSolver requires that bundle and rejects `cli_path` overrides pointing elsewhere;
+a missing bundle is an error rather than a fallback to a global CLI.
 
-After changing the wrapper or vendored SDK, run `pixi reinstall --locked tasksolver`
-in the consuming workspace to refresh its installed copy. Omit `--locked` if
-dependencies changed; see the [installation notes](../README.md#install).
+## Build and editable JavaScript
 
-## Native UI and SDK transport
+`pixi install` builds the runtime automatically. [`vendor.json`](vendor.json)
+pins Claude Code 2.1.316 and the upstream
+[`bun_graph`](https://github.com/Wenri/patchnar/blob/main/src/bun_graph.cc)
+extractor. [`build_cli.py`](build_cli.py) verifies download sizes and SHA256,
+checks the SDK's CLI version, compiles the pinned extractor with the conda C++
+toolchain and source-highlight, then stages the complete runtime under
+`claude_agent_sdk/_bundled/`:
 
-In the pinned version, the Agent SDK launches Claude with `stream-json` input and
-output over subprocess pipes. It does not attach to an existing native terminal
-UI. Resuming a session ID starts another process using the saved conversation;
-it does not control the process in a managed screen. Running the parent Python
-under a terminal does not change this protocol.
+- `bun`: the private Bun executable with its embedded application graph removed.
+- `claude`: a small native launcher that starts the external application and preserves native helper dispatch.
+- `source/`: patched JavaScript, the local bridge, and matching `.jsc` sidecars.
+- `assets/`: extracted file and text assets; text adapters preserve the original loader behavior.
+- `modules/`: extracted native `.node` addons.
+- `libwire.node` and `cache.mjs`: the native cache emitter and its JavaScript driver.
+- `manifest.json`: source pins, generated hashes, native patches and build fingerprint.
 
-The SDK accepts a custom transport, but that transport still needs a CLI endpoint
-that handles SDK initialization, control requests and result events. The native
-UI's [inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket)
-accepts peer messages, without providing that SDK protocol.
-[Hooks](https://code.claude.com/docs/en/hooks) can expose native session events,
-but they are not SDK results: a `Stop` hook can be followed by continued work.
-TaskSolver currently exposes screen input through `TerminalScreen`; it does not
-provide a Python SDK attachment to Claude's native UI.
+The pristine executable is cached under `claude/build/cache/` as build input.
+Generated outputs are not tracked in Git. Rebuild the bundle directly with
+`pixi run python -m claude.build_cli`. For an isolated development copy:
+
+```bash
+pixi run python -m claude.unbundle --output claude/build/editable
+claude/build/editable/claude --version
+claude/build/editable/claude
+```
+
+Choose a new output directory; the tool refuses an existing path. Move the whole
+runtime directory together. Source imports, workers and browser helpers resolve
+relative to it. The entry loader disables upstream auto-updates; update the
+package's pin and rebuild to change Claude versions.
+
+Removing `.bun` removes the original JavaScript, bytecode and assets from the
+executable and shrinks its load mapping. Statically linked native helpers such as
+ripgrep and bfs remain in the private runtime; the launcher preserves their
+`argv[0]` dispatch. Native `.node` modules are separate files. Prelinked JavaScript
+records are module metadata, not native addons; the external loader reconstructs
+its module records from the current source.
+
+The pinned Bun sidecar loader treats external source as Latin-1. The build redirects
+that one checked call to a small UTF-8 conversion shim, preserving Unicode and raw
+template contents. The manifest records the five changed instruction bytes and the
+added executable section. Other native sections, RELRO and stack settings are
+preserved and independently checked.
+
+The cache driver loads `libwire.node` through Bun's N-API support and invokes the
+private runtime's own JSC emitter after all source patches. It copies and releases
+the returned native cache, then writes Bun's length/hash footer. Sidecars live
+beside their source because that is where Bun's loader reads them. Cache hits,
+relocation, and rejection after source edits are checked against the real runtime.
+JavaScript can call the addon's `validate()` and `emitModule(origin, sourceBuffer)`
+directly; `emitModule` returns raw JSC bytes. Use `generateCaches` from `cache.mjs`
+to add the source pragma and sidecar framing required by Bun's loader.
+Text assets use UTF-8 files with small CommonJS adapters: ordinary loose Markdown
+loading would otherwise render HTML or return a module namespace instead of text.
+
+Claude's private Bun is necessary for this pin's native UI: stock Bun lacks
+`Bun.ant.CellSegmenter` and other private APIs. This builds on the earlier Nix
+`claude-code-graph.nix` work and the
+[recovery tooling](https://github.com/Wenri/claude-code/tree/main/recovery).
+The current JavaScript comes from the pinned executable.
+
+Every build installs checked JavaScript insertions that register the native
+session controls and forward real engine SDK frames before UI filtering. A changed
+upstream insertion point fails the build. The interactive UI automatically creates
+a private socket, announces it in the terminal and emits one machine-readable
+`[tasksolver-claude-control]` JSON line to stderr. Managed screens use a socket in
+the manager's private directory, exposed as `screen.control_socket`.
+Headless SDK calls keep their stdio channel and create no UI socket.
+
+After source changes, run `pixi reinstall --locked tasksolver` in the consuming
+workspace to refresh installed artifacts. Omit `--locked` if dependencies changed;
+see the [installation notes](../README.md#install).
+
+### SDK control of the native UI
+
+Use `open_terminal("claude", manager=manager)`, then
+`pyclaude.attach_terminal(screen)` for an official SDK client connected to that
+process. `attach_terminal` also accepts a socket path. The factory takes no SDK launch options: configure
+the model, workspace and tool permissions in the native UI or at launch.
+
+This example attaches the existing terminal while Python sends a query. Complete
+the normal startup/trust screens first; after the answer, Ctrl-b d detaches the
+view and finishes the example.
+
+```python
+import asyncio
+from pyclaude import attach_terminal
+from tasksolver.terminal import TerminalManager, open_terminal
+
+async def main() -> None:
+    responses: list[object] = []
+    with TerminalManager(workspace=".") as manager:
+        screen = open_terminal("claude", manager=manager)
+        view = asyncio.create_task(asyncio.to_thread(manager.attach, screen.name))
+        try:
+            async with attach_terminal(screen, connect_timeout=300) as client:
+                await client.query("Briefly describe this project.")
+                async for message in client.receive_response():
+                    responses.append(message)
+            await view
+        finally:
+            manager.close()
+            await view
+    for message in responses:
+        print(message)
+
+asyncio.run(main())
+```
+
+The same screen can have a `WebTerminal` viewer. Browser input requires its
+explicit `writable=True` option. The terminal owns permission dialogs; SDK
+attachment never preapproves tools.
+
+The local channel supports text queries, initialization metadata and interruption
+of the caller's active turn. It rejects images, slash commands, SDK callback
+hooks and other controls explicitly. One SDK query may be pending at a time;
+queries submitted during a human turn fail. Human input queued during an SDK
+turn remains a separate native turn. Responses are routed by the native input
+UUID and engine identity, so a human result cannot complete the SDK query.
+Closing the SDK client leaves the UI and its running turn alive. A new client
+cannot claim the disconnected client's unfinished result.
+
+Offline checks: `test_claude_unbundle.py`, `test_claude_transport.py` and
+`test_claude_native.py` in `test_scripts/`; run the JavaScript lifecycle checks
+with `pixi run node --test test_scripts/test_claude_native_bridge.mjs`.
+Provider authentication and live model behavior require separate validation.
 
 ## Authentication
 

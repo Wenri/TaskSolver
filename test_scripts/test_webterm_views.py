@@ -51,6 +51,11 @@ class WebTerminalViewTests(unittest.TestCase):
             "display-message", "-p", "-t", f"{session}:", "#{window_id}",
         ]).stdout.decode().strip()
 
+    def windows(self, session: str) -> set[str]:
+        return set(self.manager._run([
+            "list-windows", "-t", session, "-F", "#{window_id}",
+        ]).stdout.decode().splitlines())
+
     def clients(self) -> dict[int, str]:
         result: dict[int, str] = {}
         for line in self.manager._run([
@@ -68,7 +73,7 @@ class WebTerminalViewTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail("viewer cleanup did not finish")
 
-    def test_grouped_views_keep_independent_selected_windows(self) -> None:
+    def test_screen_views_contain_only_their_linked_windows(self) -> None:
         first = self.screen("FIRST_SCREEN")
         second = self.screen("SECOND_SCREEN")
         self.assertEqual(self.active_window(), first.window_id)
@@ -81,6 +86,7 @@ class WebTerminalViewTests(unittest.TestCase):
                 second_session = second_sessions.pop()
                 self.assertNotEqual(second_session, "tasksolver")
                 self.assertEqual(self.active_window(second_session), second.window_id)
+                self.assertEqual(self.windows(second_session), {second.window_id})
                 with WebTerminal(self.manager, port=0, screen=first.name) as first_view:
                     with browser(first_view) as first_browser:
                         receive(first_browser, b"FIRST_SCREEN")
@@ -88,6 +94,17 @@ class WebTerminalViewTests(unittest.TestCase):
                         self.assertEqual(len(first_sessions), 1)
                         first_session = first_sessions.pop()
                         self.assertEqual(self.active_window(first_session), first.window_id)
+                        self.assertEqual(self.windows(first_session), {first.window_id})
+                        self.assertEqual(self.manager._run([
+                            "show-options", "-v", "-t", first_session, "prefix",
+                        ]).stdout.decode().strip(), "None")
+                        self.assertEqual(self.manager._run([
+                            "show-options", "-v", "-t", first_session, "status",
+                        ]).stdout.decode().strip(), "off")
+                        third = self.screen("THIRD_SCREEN")
+                        self.assertEqual(self.windows(first_session), {first.window_id})
+                        self.assertEqual(self.windows(second_session), {second.window_id})
+                        self.assertEqual(self.windows("tasksolver"), {first.window_id, second.window_id, third.window_id})
                         # Selecting a local screen must not move either existing viewer.
                         self.manager.attach_argv(screen=second.name)
                         self.assertEqual(self.active_window(), second.window_id)
@@ -105,6 +122,37 @@ class WebTerminalViewTests(unittest.TestCase):
         self.assertTrue(second.alive)
         self.wait_until(lambda: not self.clients())
         self.assertEqual(self.clients(), {})
+
+    def test_closing_one_screen_closes_its_page_and_preserves_other_pages(self) -> None:
+        first = self.screen("FIRST_SCREEN")
+        second = self.screen("SECOND_SCREEN")
+        with WebTerminal(self.manager, port=0, screen=first.name) as first_view, \
+                WebTerminal(self.manager, port=0, screen=second.name, writable=True) as second_view, \
+                WebTerminal(self.manager, port=0) as all_view:
+            with browser(first_view) as first_browser, browser(second_view) as second_browser:
+                receive(first_browser, b"FIRST_SCREEN")
+                receive(second_browser, b"SECOND_SCREEN")
+                before = self.clients()
+                first_clients = {pid: _process_start(pid) for pid, session in before.items()
+                                 if self.windows(session) == {first.window_id}}
+                self.assertEqual(len(first_clients), 1)
+                first.close()
+                self.assertFalse(first_view.alive)
+                self.assertTrue(second_view.alive)
+                self.assertTrue(all_view.alive)
+                self.assertTrue(second.alive)
+                self.wait_until(lambda: all(_process_start(pid) != identity
+                                           for pid, identity in first_clients.items()))
+                second_browser.send(b"0still-writable\r")
+                receive(second_browser, b"REPLY:still-writable")
+                replacement = self.screen("FIRST_SCREEN")
+                with WebTerminal(self.manager, port=0, screen=replacement.name) as replacement_view:
+                    with browser(replacement_view) as replacement_browser:
+                        receive(replacement_browser, b"FIRST_SCREEN")
+                        first_view.close()
+                        replacement.submit("replacement")
+                        receive(replacement_browser, b"REPLY:replacement")
+                        self.assertTrue(second_view.alive)
 
     def test_close_after_forced_ttyd_exit_removes_only_its_clients(self) -> None:
         screen = self.screen("SURVIVING_SCREEN")
@@ -152,13 +200,36 @@ class WebTerminalViewTests(unittest.TestCase):
                     receive(replacement_browser, b"REPLY:new-session")
             self.assertTrue(replacement.alive)
 
+    def test_replaced_screen_during_view_start_does_not_rebind_the_old_page(self) -> None:
+        original = self.screen("ORIGINAL_SCREEN")
+        other = self.screen("OTHER_SCREEN")
+        wait_ready = WebTerminal._wait_ready
+        starting: list[WebTerminal] = []
+        replacements: list[TerminalScreen] = []
+
+        def replace_target(view: WebTerminal, timeout: float) -> None:
+            wait_ready(view, timeout)
+            starting.append(view)
+            original.close()
+            replacements.append(self.screen("ORIGINAL_SCREEN"))
+
+        with patch.object(WebTerminal, "_wait_ready", replace_target), \
+                self.assertRaisesRegex(RuntimeError, "screen is no longer open"):
+            WebTerminal(self.manager, port=0, screen=original.name)
+        self.assertFalse(starting[0].alive)
+        self.assertTrue(replacements[0].alive)
+        self.assertTrue(other.alive)
+        sessions = self.manager._run(["list-sessions", "-F", "#{session_name}"]).stdout.decode().splitlines()
+        self.assertEqual(sessions, ["tasksolver"])
+
     def test_cli_local_and_web_share_one_process_until_keyboard_shutdown(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "screen-state"
 
             def open_echo(_backend: frontend.Backend, *, manager: TerminalManager,
-                          model: str | None = None, capture: bool | str = True) -> TerminalScreen:
-                del model, capture
+                          model: str | None = None, capture: bool | str = True,
+                          sdk_socket: str | os.PathLike[str] | None = None) -> TerminalScreen:
+                del model, capture, sdk_socket
                 screen = manager.open("echo", [
                     sys.executable, "-u", "-c",
                     "import os,sys\npid = str(os.getpid())\n"

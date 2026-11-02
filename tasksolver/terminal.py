@@ -6,13 +6,14 @@ stay in the inherited environment, never in tmux commands or launch files.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import os
 from pathlib import Path
 import sys
 import tempfile
 import threading
+import uuid
 from collections.abc import Sequence
+from contextlib import ExitStack
 from typing import Literal
 
 from wirecap.runtime.terminal import TerminalManager as TerminalManager
@@ -33,14 +34,21 @@ def open_terminal(backend: Backend, *, manager: TerminalManager,
                   name: str | None = None,
                   workspace: str | os.PathLike[str] | None = None,
                   model: str | None = None,
-                  capture: bool | str = True) -> TerminalScreen:
+                  capture: bool | str = True,
+                  sdk_socket: str | os.PathLike[str] | None = None) -> TerminalScreen:
     """Open an interactive UI without submitting a prompt or preapproving tools.
 
     Native backends capture JSONL in the manager's directory by default; pass a
     path to retain it elsewhere, or ``False`` to disable capture. Claude uses its
     native session store and always has ``capture_path=None``.
+    Claude's bridged runtime publishes ``screen.control_socket`` for attachment
+    through ``pyclaude.attach_terminal(screen)``. Its default socket is private
+    to the manager; ``sdk_socket`` can select another private location.
     """
     backend = _backend(backend)
+    if backend == "claude" and sdk_socket is None:
+        sdk_socket = manager.directory / f"claude-{uuid.uuid4().hex}.sock"
+    socket = _claude_control_path(backend, sdk_socket)
     workdir = Path(workspace).expanduser().resolve() if workspace is not None else manager.workspace
     if name is None:
         name = backend
@@ -71,30 +79,43 @@ def open_terminal(backend: Backend, *, manager: TerminalManager,
         command += ["--model", model]
     if capture_path is not None:
         command += ["--capture-path", os.fspath(capture_path)]
+    if socket is not None:
+        command += ["--sdk-socket", os.fspath(socket)]
     try:
-        return manager.open(name, command, cwd=workdir, capture_path=capture_path)
+        with manager._lock:
+            if socket is not None and any(
+                    screen.control_socket == socket for screen in manager.screens.values()):
+                raise ValueError(f"SDK socket path already belongs to a screen: {socket}")
+            screen = manager.open(name, command, cwd=workdir, capture_path=capture_path)
+            screen.control_socket = socket
+            return screen
     except BaseException:
         if temporary_capture and capture_path is not None:
             capture_path.unlink(missing_ok=True)
         raise
 
 
-def _claude_binary() -> str:
-    spec = importlib.util.find_spec("claude_agent_sdk")
-    if spec is None or spec.origin is None:
-        raise FileNotFoundError("The bundled Claude SDK is missing; run pixi install")
-    binary = Path(spec.origin).resolve().parent / "_bundled" / "claude"
-    if not binary.is_file():
-        raise FileNotFoundError(f"The bundled Claude CLI is missing: {binary}; run pixi install")
-    return os.fspath(binary)
+def _claude_control_path(backend: Backend,
+                         socket: str | os.PathLike[str] | None) -> Path | None:
+    if backend != "claude" and socket is not None:
+        raise ValueError("sdk_socket requires the Claude backend")
+    socket_path = Path(os.path.abspath(Path(socket).expanduser())) if socket is not None else None
+    if socket_path is not None:
+        socket_path = socket_path.parent.resolve() / socket_path.name
+    if socket_path is not None and (socket_path.exists() or socket_path.is_symlink()):
+        raise FileExistsError(f"SDK socket path already exists: {socket_path}")
+    return socket_path
 
 
 def _child_command(backend: Backend, workspace: Path, model: str | None,
-                   capture_path: Path | None) -> tuple[list[str], dict[str, str]]:
+                   capture_path: Path | None, *,
+                   sdk_socket: str | os.PathLike[str] | None = None) -> tuple[list[str], dict[str, str]]:
+    socket = _claude_control_path(backend, sdk_socket)
     # A terminal screen is independent of any multiprocessing capture worker
     # or linked CLI that launched the parent Python.
     base = {key: value for key, value in os.environ.items()
-            if not key.startswith(("WIRE_", "AGY_PROC_")) and key != "PYTHONHOME"}
+            if not key.startswith(("WIRE_", "AGY_PROC_"))
+            and key not in ("PYTHONHOME", "TASKSOLVER_CLAUDE_SOCKET")}
     base["PWD"] = os.fspath(workspace)
     capture = capture_path if capture_path is not None else Path(os.devnull)
 
@@ -115,6 +136,7 @@ def _child_command(backend: Backend, workspace: Path, model: str | None,
         env = linked_env(capture, base=base, model=model)
         argv = kimi_argv(None, persistent=True)
     else:
+        from pyclaude._env import bundled_cli
         from pyclaude.client import PARENT_SESSION_ENV
 
         remove = {*PARENT_SESSION_ENV, "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
@@ -122,7 +144,9 @@ def _child_command(backend: Backend, workspace: Path, model: str | None,
         env = {key: value for key, value in base.items()
                if key not in remove and not key.startswith(
                    ("CLAUDE_AGENT_SDK_", "CLAUDE_CODE_SDK_", "CLAUDE_CODE_ENABLE_SDK_"))}
-        return [_claude_binary(), *(["--model", model] if model is not None else [])], env
+        if socket is not None:
+            env["TASKSOLVER_CLAUDE_SOCKET"] = os.fspath(socket)
+        return [bundled_cli(), *(["--model", model] if model is not None else [])], env
 
     env["PYTHONHOME"] = sys.prefix
     if capture_path is None:
@@ -145,6 +169,7 @@ class _Arguments(argparse.Namespace):
     ttyd_bin: str | None
     child: bool
     capture_path: str | None
+    sdk_socket: str | None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -153,14 +178,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--workspace", help="Working directory for the screens (default: current directory)")
     parser.add_argument("--model", help="Model selector passed to each chosen backend")
     parser.add_argument("--no-capture", action="store_true", help="Disable native JSONL capture")
-    parser.add_argument("--web-port", type=int, help="Serve a loopback web terminal on this port")
+    parser.add_argument("--web-port", type=int,
+                        help="Serve one page per screen on consecutive loopback ports (0: automatic)")
     parser.add_argument("--writable", action="store_true", help="Allow typing in the web terminal")
     parser.add_argument("--no-attach", action="store_true", help="Use only the web terminal (with --web-port)")
     parser.add_argument("--tmux-bin", help="Path to the tmux executable")
     parser.add_argument("--ttyd-bin", help="Path to ttyd (with --web-port)")
+    parser.add_argument("--sdk-socket", help="Private Claude SDK socket path (default: manager directory)")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--capture-path", help=argparse.SUPPRESS)
     args = parser.parse_args(argv, namespace=_Arguments())
+    if args.sdk_socket is not None and args.backends.count("claude") != 1:
+        parser.error("--sdk-socket requires exactly one Claude screen")
     if args.writable and args.web_port is None:
         parser.error("--writable requires --web-port")
     if args.no_attach and args.web_port is None:
@@ -169,12 +198,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--ttyd-bin requires --web-port")
     if args.web_port is not None and not 0 <= args.web_port <= 65535:
         parser.error("--web-port must be between 0 and 65535 (0 selects an available port)")
+    if args.web_port and args.web_port + len(args.backends) - 1 > 65535:
+        parser.error("--web-port leaves too few ports for all screens")
     if args.child:
         if len(args.backends) != 1 or args.web_port is not None:
             parser.error("--child requires exactly one backend and no web terminal")
         workspace = Path(args.workspace or os.getcwd()).expanduser().resolve()
         command, env = _child_command(_backend(args.backends[0]), workspace, args.model,
-                                      Path(args.capture_path) if args.capture_path else None)
+                                      Path(args.capture_path) if args.capture_path else None,
+                                      sdk_socket=args.sdk_socket)
         os.chdir(workspace)
         os.execvpe(command[0], command, env)
     if args.capture_path is not None:
@@ -183,7 +215,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     with TerminalManager(workspace=args.workspace, tmux_bin=args.tmux_bin) as manager:
         for backend in args.backends:
             screen = open_terminal(_backend(backend), manager=manager, model=args.model,
-                                   capture=not args.no_capture)
+                                   capture=not args.no_capture,
+                                   sdk_socket=args.sdk_socket if backend == "claude" else None)
             if screen.capture_path is not None:
                 print(f"{screen.name}: capture {screen.capture_path}", flush=True)
         if args.web_port is None:
@@ -194,13 +227,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         from wirecap.runtime.webterm import WebTerminal
 
-        with WebTerminal(manager, port=args.web_port, writable=args.writable,
-                         ttyd_bin=args.ttyd_bin) as web:
-            print(web.url, flush=True)
+        with ExitStack() as viewers:
+            for index, name in enumerate(manager.screens):
+                port = args.web_port + index if args.web_port else 0
+                web = viewers.enter_context(WebTerminal(
+                    manager, screen=name, port=port, writable=args.writable, ttyd_bin=args.ttyd_bin))
+                print(f"{name}: {web.url}", flush=True)
             try:
                 if not args.no_attach and os.isatty(0) and os.isatty(1):
                     manager.attach()
-                    print(f"Web terminal remains available at {web.url}", flush=True)
+                    print("Web terminals remain available at the URLs above.", flush=True)
                 print("Press Ctrl-C to close viewers and screens.", flush=True)
                 threading.Event().wait()
             except KeyboardInterrupt:

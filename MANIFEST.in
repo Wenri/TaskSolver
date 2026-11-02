@@ -1,3 +1,8 @@
 include claude/build_cli.py
+include claude/unbundle.py
+include claude/native_bridge.mjs
+include claude/launcher.c
+include claude/native_cache.c
+include claude/cache.mjs
 include claude/vendor.json
 include claude/README.md

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-from importlib.machinery import ModuleSpec
 import io
 import os
 from pathlib import Path
@@ -39,6 +38,7 @@ class RecordingManager(TerminalManager):
         self.workspace = directory
         self.calls: list[OpenCall] = []
         self._screens: dict[str, TerminalScreen] = {}
+        self._lock = threading.RLock()
         self.attached: list[tuple[str | None, bool]] = []
         self.on_attach: Callable[[], None] | None = None
         self.closed = False
@@ -75,9 +75,10 @@ class RecordingManager(TerminalManager):
 
 
 class WebView:
-    def __init__(self, manager: TerminalManager, *, port: int = 7681,
+    def __init__(self, manager: TerminalManager, *, screen: str | None = None, port: int = 7681,
                  writable: bool = False, ttyd_bin: str | None = None) -> None:
         self.manager = manager
+        self.screen = screen
         self.port = port
         self.writable = writable
         self.ttyd_bin = ttyd_bin
@@ -216,23 +217,58 @@ class TerminalFrontendTests(unittest.TestCase):
             "ANTHROPIC_API_KEY": "private-key", "TASKSOLVER_TERMINAL_SCREEN": "screen-token",
         }
         with patch.dict(os.environ, inherited, clear=True), \
-             patch.object(terminal, "_claude_binary", return_value="/bundled/claude"):
+             patch("pyclaude._env.bundled_cli", return_value="/bundled/claude"):
             command, env = terminal._child_command("claude", ROOT, "sonnet", None)
         self.assertEqual(command, ["/bundled/claude", "--model", "sonnet"])
         self.assertEqual(env, {"ANTHROPIC_API_KEY": "private-key",
                                "TASKSOLVER_TERMINAL_SCREEN": "screen-token", "PWD": str(ROOT)})
 
-    def test_claude_binary_requires_the_sdk_bundle(self) -> None:
+    def test_claude_child_requires_the_bridged_bundle(self) -> None:
+        with patch("pyclaude._env.bundled_cli", side_effect=FileNotFoundError("bundle missing")), \
+             self.assertRaisesRegex(FileNotFoundError, "bundle missing"):
+            terminal._child_command("claude", ROOT, None, None)
+
+    def test_claude_screen_owns_its_sdk_socket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            package = Path(directory) / "claude_agent_sdk"
-            bundle = package / "_bundled" / "claude"
-            spec = ModuleSpec("claude_agent_sdk", loader=None, origin=str(package / "__init__.py"))
-            with patch.object(terminal.importlib.util, "find_spec", return_value=spec):
-                with self.assertRaisesRegex(FileNotFoundError, "bundled Claude CLI is missing"):
-                    terminal._claude_binary()
-                bundle.parent.mkdir(parents=True)
-                bundle.write_text("fixture")
-                self.assertEqual(terminal._claude_binary(), str(bundle))
+            workspace = Path(directory)
+            socket = workspace / "sdk.sock"
+            manager = RecordingManager(workspace)
+            with patch.dict(os.environ, {"TASKSOLVER_CLAUDE_SOCKET": "/parent/socket"}), \
+                 patch("pyclaude._env.bundled_cli", return_value="/bundled/claude"):
+                screen = terminal.open_terminal("claude", manager=manager, sdk_socket=socket)
+                command, env = terminal._child_command(
+                    "claude", workspace, "sonnet", None, sdk_socket=socket)
+                self.assertEqual(os.environ["TASKSOLVER_CLAUDE_SOCKET"], "/parent/socket")
+                _, automatic_env = terminal._child_command("claude", workspace, None, None)
+            self.assertEqual(screen.control_socket, socket)
+            self.assertEqual(command, ["/bundled/claude", "--model", "sonnet"])
+            self.assertEqual(env["TASKSOLVER_CLAUDE_SOCKET"], str(socket))
+            self.assertNotIn("TASKSOLVER_CLAUDE_SOCKET", automatic_env)
+            self.assertEqual(manager.calls[0].command[-2:], ("--sdk-socket", str(socket)))
+            self.assertNotIn("--output-format", command)
+            with self.assertRaisesRegex(ValueError, "already belongs to a screen"):
+                terminal.open_terminal("claude", manager=manager, sdk_socket=socket)
+            alias = workspace / "alias"
+            alias.symlink_to(workspace, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "already belongs to a screen"):
+                terminal.open_terminal("claude", manager=manager, sdk_socket=alias / socket.name)
+            other = terminal.open_terminal("claude", manager=manager)
+            third = terminal.open_terminal("claude", manager=manager)
+            self.assertIsNotNone(other.control_socket)
+            assert other.control_socket is not None
+            self.assertEqual(other.control_socket.parent, workspace)
+            self.assertNotEqual(other.control_socket, third.control_socket)
+
+    def test_sdk_socket_configuration_fails_before_opening_a_screen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RecordingManager(Path(directory))
+            socket = Path(directory) / "sdk.sock"
+            with self.assertRaisesRegex(ValueError, "Claude backend"):
+                terminal.open_terminal("codex", manager=manager, sdk_socket=socket)
+            socket.symlink_to(Path(directory) / "absent")
+            with self.assertRaises(FileExistsError):
+                terminal.open_terminal("claude", manager=manager, sdk_socket=socket)
+            self.assertEqual(manager.calls, [])
 
     def test_cli_attaches_existing_terminal_and_closes_manager(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -253,8 +289,8 @@ class TerminalFrontendTests(unittest.TestCase):
             self.assertTrue(manager.closed)
 
     def test_web_cli_is_headless_and_read_only_by_default(self) -> None:
-        for writable in (False, True):
-            with self.subTest(writable=writable), tempfile.TemporaryDirectory() as directory:
+        for writable, port in ((False, 7681), (True, 7681), (False, 0)):
+            with self.subTest(writable=writable, port=port), tempfile.TemporaryDirectory() as directory:
                 manager = RecordingManager(Path(directory))
                 views: list[WebView] = []
 
@@ -262,9 +298,9 @@ class TerminalFrontendTests(unittest.TestCase):
                                     tmux_bin: str | None = None) -> RecordingManager:
                     return manager
 
-                def web_factory(owner: TerminalManager, *, port: int = 7681,
+                def web_factory(owner: TerminalManager, *, screen: str | None = None, port: int = 7681,
                                 writable: bool = False, ttyd_bin: str | None = None) -> WebView:
-                    view = WebView(owner, port=port, writable=writable, ttyd_bin=ttyd_bin)
+                    view = WebView(owner, screen=screen, port=port, writable=writable, ttyd_bin=ttyd_bin)
                     views.append(view)
                     return view
 
@@ -272,7 +308,7 @@ class TerminalFrontendTests(unittest.TestCase):
                     raise KeyboardInterrupt
 
                 output = io.StringIO()
-                args = ["codex", "--web-port", "7681", "--ttyd-bin", "/custom/ttyd", "--no-capture"]
+                args = ["codex", "codex", "--web-port", str(port), "--ttyd-bin", "/custom/ttyd", "--no-capture"]
                 if writable:
                     args.append("--writable")
                 with patch.object(terminal, "TerminalManager", new=manager_factory), \
@@ -283,11 +319,13 @@ class TerminalFrontendTests(unittest.TestCase):
                     self.assertEqual(terminal.main(args), 0)
                 self.assertEqual(manager.attached, [])
                 self.assertTrue(manager.closed)
-                self.assertEqual(len(views), 1)
-                self.assertEqual(views[0].writable, writable)
-                self.assertEqual(views[0].ttyd_bin, "/custom/ttyd")
-                self.assertTrue(views[0].closed)
-                self.assertIn("http://127.0.0.1:7681", output.getvalue())
+                self.assertEqual([view.screen for view in views], ["codex", "codex-2"])
+                self.assertEqual([view.port for view in views], [port, port + 1 if port else 0])
+                for view in views:
+                    self.assertEqual(view.writable, writable)
+                    self.assertEqual(view.ttyd_bin, "/custom/ttyd")
+                    self.assertTrue(view.closed)
+                    self.assertIn(f"{view.screen}: {view.url}", output.getvalue())
 
     def test_web_cli_attaches_only_a_complete_tty_and_keeps_serving_after_detach(self) -> None:
         cases = ((True, True, False), (True, True, True),
@@ -304,9 +342,9 @@ class TerminalFrontendTests(unittest.TestCase):
                                     tmux_bin: str | None = None) -> RecordingManager:
                     return manager
 
-                def web_factory(owner: TerminalManager, *, port: int = 7681,
+                def web_factory(owner: TerminalManager, *, screen: str | None = None, port: int = 7681,
                                 writable: bool = False, ttyd_bin: str | None = None) -> WebView:
-                    view = WebView(owner, port=port, writable=writable, ttyd_bin=ttyd_bin)
+                    view = WebView(owner, screen=screen, port=port, writable=writable, ttyd_bin=ttyd_bin)
                     views.append(view)
                     return view
 
@@ -324,7 +362,7 @@ class TerminalFrontendTests(unittest.TestCase):
                     self.assertFalse(views[0].closed)
                     self.assertIn("Press Ctrl-C to close viewers and screens.", output.getvalue())
                     if should_attach:
-                        self.assertIn("Web terminal remains available at http://127.0.0.1:7681",
+                        self.assertIn("Web terminals remain available at the URLs above.",
                                       output.getvalue())
                     raise KeyboardInterrupt
 
@@ -350,9 +388,9 @@ class TerminalFrontendTests(unittest.TestCase):
                                     tmux_bin: str | None = None) -> RecordingManager:
                     return manager
 
-                def web_factory(owner: TerminalManager, *, port: int = 7681,
+                def web_factory(owner: TerminalManager, *, screen: str | None = None, port: int = 7681,
                                 writable: bool = False, ttyd_bin: str | None = None) -> WebView:
-                    view = WebView(owner, port=port, writable=writable, ttyd_bin=ttyd_bin)
+                    view = WebView(owner, screen=screen, port=port, writable=writable, ttyd_bin=ttyd_bin)
                     views.append(view)
                     return view
 
@@ -393,7 +431,7 @@ class TerminalFrontendTests(unittest.TestCase):
             raise AssertionError("child must not create another terminal manager")
 
         with patch.object(terminal, "TerminalManager", new=no_manager), \
-             patch.object(terminal, "_claude_binary", return_value="/bundled/claude"), \
+             patch("pyclaude._env.bundled_cli", return_value="/bundled/claude"), \
              patch.object(os, "execvpe", new=execute), patch.object(os, "chdir", new=chdir):
             with self.assertRaises(Executed):
                 terminal.main(["--child", "claude", "--workspace", str(ROOT), "--model", "sonnet"])
@@ -402,7 +440,7 @@ class TerminalFrontendTests(unittest.TestCase):
 
     def test_invalid_cli_options_fail_before_opening_screens(self) -> None:
         cases = (["agy", "--writable"], ["agy", "--no-attach"], ["agy", "--ttyd-bin", "/ttyd"],
-                 ["agy", "--web-port", "65536"], ["agy", "--capture-path", "/tmp/capture"],
+                 ["agy", "--web-port", "65536"], ["agy", "codex", "--web-port", "65535"], ["agy", "--capture-path", "/tmp/capture"],
                  ["--child", "agy", "codex"])
         for args in cases:
             with self.subTest(args=args), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:

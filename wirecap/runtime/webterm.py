@@ -21,8 +21,9 @@ class WebTerminal:
 
     The HTTP server binds only to 127.0.0.1; remote clients can use an SSH
     tunnel. Viewing is read-only unless ``writable=True``. Closing the view
-    leaves the backend screens running; closing their manager or its last screen
-    closes the view.
+    leaves the backend screens running. With ``screen=...``, the page contains
+    only that screen and closes with it. Without a selected screen, the page
+    includes all screens and closes with the manager or its last screen.
     ttyd >=1.7.4 is an optional external executable.
     """
 
@@ -49,6 +50,7 @@ class WebTerminal:
         self.port = port
         self.writable = writable
         try:
+            selected = manager.screens[screen] if screen is not None else None
             attach, self._close_view = manager._create_view(screen=screen, read_only=not writable)
             command = [executable, "--interface", "127.0.0.1", "--port", str(port),
                        "--check-origin", *(["--writable"] if writable else []), *attach]
@@ -60,7 +62,7 @@ class WebTerminal:
                 command, stdin=subprocess.DEVNULL, stdout=self._log,
                 stderr=subprocess.STDOUT, env=env, start_new_session=True)
             self._wait_ready(timeout)
-            manager._register_cleanup(self.close)
+            manager._register_cleanup(self.close, screen=selected)
         except BaseException as error:
             try:
                 self.close()
@@ -121,7 +123,7 @@ class WebTerminal:
                     self._process.wait()
         finally:
             try:
-                # Destroying this grouped session also detaches any ttyd-owned clients.
+                # Destroying this view session also detaches any ttyd-owned clients.
                 # The original session and its backend windows remain alive.
                 if self._close_view is not None:
                     self._close_view()

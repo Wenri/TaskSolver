@@ -105,7 +105,7 @@ license-files = ["LICENSE", "codex/vendor/LICENSE", "codex/vendor/NOTICE", "clau
 [tool.setuptools.package-data]
 "*" = ["py.typed"]
 openai_codex = ["py.typed"]
-claude_agent_sdk = ["py.typed", "_bundled/claude"]
+claude_agent_sdk = ["py.typed", "_bundled/claude", "_bundled/bun", "_bundled/manifest.json", "_bundled/libwire.node", "_bundled/cache.mjs", "_bundled/source/**/*", "_bundled/assets/**/*", "_bundled/modules/**/*"]
 
 # --- pixi workspace + buildable package -----------------------------------
 # Uses the `pixi-build` preview feature: rather than installing this project as
@@ -133,6 +133,7 @@ nodejs = ">=26,<27"
 # GNU make for node-gyp's pymport build.
 make = ">=4"
 pkg-config = "*"           # node-gyp uses pkg-config to find python3-embed (pymport)
+source-highlight = ">=3.1.9,<4" # patchnar's bun_graph extractor
 # Linux UAPI headers (linux/, asm/): glibc's <limits.h> needs <linux/limits.h>, but this
 # WSLackware host has none in /usr/include (and NixOS has no /usr/include at all). The shim
 # build points -idirafter at this package's sysroot in place — no copy — at
@@ -196,6 +197,8 @@ noarch = false
 # The backend builds without isolation: mirror [build-system].requires here, alongside native
 # tools and headers. setup.py selects this host environment's $PREFIX for native builds.
 [tool.pixi.package.host-dependencies]
+pkg-config = "*"
+source-highlight = ">=3.1.9,<4"
 python = "3.15.*"
 pip = "*"
 setuptools = ">=61"

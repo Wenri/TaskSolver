@@ -50,10 +50,10 @@ isolation, so `[build-system].requires` and the native tools must also be in
 `[tool.pixi.package.host-dependencies]`. Under rattler-build `CONDA_PREFIX` is the empty build env:
 `setup.py` (`native_build_env`) points native builds at `$PREFIX` and passes `PY3CONFIG`.
 `BuildPyNative` re-raises native failures as `SystemExit`, since the editable install would
-otherwise only warn. A fresh build work dir has its own `HOME`. With `CARGO_HOME` unset,
-Cargo uses `$HOME/.cargo`, so dependency sources (including the V8 crate) may download again
-even when compiled artifacts in `codex/vendor/codex-rs/target` are reused. A persistent
-`CARGO_HOME` could retain this source cache; the project does not configure one.
+otherwise only warn. A fresh build work dir has its own `HOME`. During conda builds,
+`_build_codex` defaults `CARGO_HOME` to the checkout's `.pixi/cargo-home`, preserving
+dependency sources (including the V8 crate) alongside the compiled artifacts in
+`codex/vendor/codex-rs/target`. An explicit `CARGO_HOME` takes precedence.
 
 **Toolchain.** Conda GCC `>=15,<16` (C++23; GCC 15's constexpr asm strings build agy's stubs).
 After a compiler-major upgrade or removal of a cached build environment, reconfigure the
@@ -62,7 +62,7 @@ native CMake trees from scratch, but keep `antigravity/build/antigravity-*.raw`.
 After source changes run `pixi reinstall --locked tasksolver` in the consuming workspace (without
 `--locked` if dependencies changed); an editable source path does not rebuild natives. Never
 install duplicate `claude-agent-sdk`, `openai-codex` or `openai-codex-cli-bin` distributions, and
-keep `claude/build_cli.py` and `claude/vendor.json` in `MANIFEST.in`.
+keep Claude's build scripts, `native_bridge.mjs` and `vendor.json` in `MANIFEST.in`.
 
 **flash-attn (`cuda` env).** flash-attn 2.8.3.post2 compiles as C++17, which torch >= 2.13
 rejects, so `CXX` is `tools/cxx20-g++` and `NVCC_APPEND_FLAGS=-std=c++20`; drop both once a newer
@@ -223,18 +223,56 @@ child environments. Provider configuration belongs in TaskSolver, generic screen
 lifecycle in wirecap's parent-side runtime. Native capture applies to agy/Codex/Kimi;
 the ordinary Claude UI has no wirecap capture. Default captures are temporary; explicit
 paths persist. `wirecap.runtime.webterm.WebTerminal` uses ttyd for optional browser
-viewing on loopback, with read-only input by default and a grouped tmux session for independent
-local/web screen selection. Use SSH forwarding for remote viewing. Closing the final
-screen closes its viewers; the manager remains reusable. The CLI's `--web-port` also
-attaches the local TTY when available, then keeps serving after local detach until
+viewing on loopback, with read-only input by default. An explicit `screen=` creates
+an independent session containing only that screen's linked window, with tmux navigation
+and status hidden; omitting it creates an all-screen grouped viewer. Closing a screen
+closes its specific viewers; closing the final screen also closes all-screen viewers.
+The manager remains reusable. Use SSH forwarding for remote viewing. The CLI's
+`--web-port` serves one page per screen on consecutive ports (0 selects available ports),
+also attaches the local TTY when available, and keeps serving after local detach until
 Ctrl-C. `--no-attach` with `--web-port` forces web-only operation. Offline checks:
 `test_terminal.py`, `test_tasksolver_terminal.py`, `test_webterm.py` and
 `test_webterm_views.py`. Run them through Pixi; they send input only to local stubs.
 
-The pinned Claude SDK uses subprocess `stream-json` pipes and cannot attach to a
-running native UI. A resumed session ID starts a separate process. The native
-inbox socket and lifecycle hooks are distinct from the SDK control/result
-protocol; do not represent peer messages or `Stop` hooks as SDK result events.
+All Claude launches use the bundled bridged runtime. `claude/build_cli.py` verifies
+and caches the pristine pin, compiles checksum-pinned upstream `bun_graph` with
+source-highlight, and installs a split runtime under the SDK's `_bundled/`:
+`bun` with `.bun` removed, a native `claude` launcher, `source/`, `assets/`,
+`modules/`, and `libwire.node`/`cache.mjs`. The entry disables upstream auto-updates;
+update the pin and rebuild instead. There is no raw runtime launch option or PATH
+fallback. `pixi run python -m claude.unbundle --output PATH` creates an isolated copy.
+Keep the private Bun (`Bun.ant`) and native helper dispatch; `.node` addons move to
+`modules/`, while statically linked helpers remain in Bun. Validate native sections
+and load mappings independently of the converter, allowing only declared patches.
+Clear bytecode pointers in the extraction-only copy first: packed caches overlap.
+The sidecar loader needs a pin-checked five-byte call redirection to the compiled
+UTF-8 shim in `native_cache.c`; preserve every other native section and the original
+RELRO/stack headers. The appended RX section and redirected call are declared in
+the manifest. Do not rewrite Unicode source to ASCII: that changes raw templates.
+
+Generate JSC sidecars from the final modified source through `libwire.node`, using
+the private runtime's own emitter and proper native reference release. Do not reuse
+upstream caches or claim prelinked module metadata is a native addon. The runtime
+reconstructs external module records. Verify actual cache hits, Unicode semantics,
+relocation and stale-source rejection. Preserve text asset primitive exports with
+UTF-8 files and CommonJS adapters; loose Markdown loading changes semantics. Resolve
+source imports and worker/browser paths relative to the installed tree.
+
+The headless SDK uses its existing subprocess `stream-json` protocol. Native UI
+startup automatically exposes a private Unix socket; managed screens publish it as
+`screen.control_socket`. `pyclaude.attach_terminal(screen)` connects the official SDK
+to that process. It also accepts a socket path; no SDK launch options are accepted.
+Configure the model, workspace and permissions at launch or in the UI. A resumed
+session ID starts a separate process; peer inbox messages and `Stop` hooks are not
+SDK results. Keep controls independent from Remote Control gates, tee real engine
+frames without consuming the engine twice, and route results by input UUID and
+engine identity. Native dialogs own permissions. Reject unsupported inputs/controls;
+never fabricate results or let a human result finish an SDK query. Detaching a
+client leaves its turn running and reserved until completion. Source-only and
+transport checks are `test_claude_unbundle.py` and `test_claude_transport.py`;
+`test_claude_native.py` drives the real UI against a loopback model fixture,
+including permission dialogs, and `node --test test_scripts/test_claude_native_bridge.mjs`
+checks the JavaScript bridge lifecycle.
 
 Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protocol directly.
 
@@ -293,8 +331,8 @@ Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protoc
 - **`kimi/`** → the `pykimi` package: Moonshot's Node kimi-code built from a vendored tree, with a
   three-line patch loading the bridge as an N-API addon (`kimi/native/`). See `kimi/README.md`.
 - **`claude/`** → `pyclaude` and the pristine `claude/vendor/sdk`. `claude/vendor.json` pins SDK
-  v0.2.176 and Claude Code 2.1.316; `claude/build_cli.py` verifies and stages the executable under
-  the SDK's `_bundled/` before packaging. See `claude/README.md`.
+  v0.2.176 and Claude Code 2.1.316; `claude/build_cli.py` installs the bridged runtime and
+  its external source, caches, assets and addons under the SDK's `_bundled/` before packaging. See `claude/README.md`.
 
 The PTY paths are symmetric (`agy --print` ≡ `codex exec` ≡ `kimi -p`), so a change to one usually
 belongs in `wirecap/`. `pyagy.Session`, `pycodex.Session` and `pykimi.Session` share

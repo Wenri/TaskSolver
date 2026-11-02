@@ -201,10 +201,11 @@ configuration stays in `tasksolver.terminal`. It creates no desktop windows.
 Agy, Codex and Kimi keep their linked JSONL capture, exposed as `screen.capture_path`.
 Default capture files are temporary and removed when the manager closes. Pass
 `capture="/absolute/path/run.jsonl"` to retain one, or `capture=False` to disable it.
-The ordinary Claude UI uses Claude's own session store and has `capture_path=None`;
-SDK calls through `pyclaude` start separate processes. They cannot attach to the
-running UI, even when resuming its session ID. See
-[Claude's UI and SDK transports](claude/README.md#native-ui-and-sdk-transport).
+Claude uses its own session store and has `capture_path=None`. Its bundled runtime
+always includes the JavaScript bridge: `pyclaude.attach_terminal(screen)` connects
+the official SDK to the same native UI process through `screen.control_socket`.
+`pyclaude.ask` and `Session` use that runtime in headless SDK processes. See
+[Claude native UI control](claude/README.md#sdk-control-of-the-native-ui).
 CLIs may contact their services during startup, so captures can include account and
 configuration metadata before any prompt is sent.
 
@@ -214,13 +215,17 @@ For browser viewing, run:
 pixi run python -m tasksolver.terminal agy codex claude kimi --web-port 7681
 ```
 
-Open the printed loopback URL. When stdin and stdout are terminals, the launcher also
+Each screen gets its own page: agy at port 7681, Codex at 7682, Claude at 7683 and
+Kimi at 7684. Open the printed URLs as separate browser panels or tabs. Each page
+stays on its screen; tmux navigation and its status bar are hidden there.
+`--web-port 0` assigns available ports automatically.
+When stdin and stdout are terminals, the launcher also
 attaches the local terminal, so local and browser views run together. **Ctrl-b d**
-detaches locally while keeping the screens and web view running; **Ctrl-C** at the
+detaches locally while keeping the screens and web pages running; **Ctrl-C** at the
 launcher then closes them. Add `--no-attach` to `--web-port` for web-only operation.
 Without a local TTY, web-only operation is automatic. The browser is read-only by default;
-`--writable` enables typing and tmux screen selection. No browser is opened
-automatically. To view it from another host, forward the port and open
+`--writable` enables typing into each page's agent. No browser is opened
+automatically. To view a panel from another host, forward its port and open
 `http://127.0.0.1:7681` on your computer:
 
 ```bash
@@ -242,9 +247,11 @@ with TerminalManager() as terminals:
         terminals.attach("agy")
 ```
 
-The web view shares the existing processes and keeps its screen selection independent
-of the local view. Closing a view leaves the screens running; closing the last screen
-closes its viewers. The manager can then open new screens and viewers. Closing the
+A screen-specific page links only that screen's tmux window, sharing its existing
+process with the local terminal. Closing a page leaves the screen running; closing
+a screen closes its viewers without affecting other pages. `WebTerminal(terminals)`
+without `screen=` provides an all-screen viewer with independent navigation.
+The manager can open new screens and viewers after the previous ones close. Closing the
 manager closes everything it owns. `port=0` selects an available port. Outside Pixi,
 install tmux and, for browser viewing, ttyd >=1.7.4 on `PATH`. Executables can be
 selected with `tmux_bin=` / `ttyd_bin=` or the CLI's `--tmux-bin` / `--ttyd-bin`.
@@ -259,8 +266,8 @@ The existing `tasksolver.claude_code.ClaudeCodeModel` now uses the official
 [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/python).
 `claude-code*` and `claude-agent*` select the same implementation. The SDK source
 is checked in at `claude/vendor/sdk`; TaskSolver downloads its
-pinned, checksum-verified CLI during the package build, so a separate global CLI
-installation is unnecessary. Set
+pinned, checksum-verified CLI during the package build, extracts its JavaScript and
+installs the local bridge. A separate global CLI installation is unnecessary. Set
 `ANTHROPIC_API_KEY`, pass a key (the `claude` service in a `KeyChain`), or use the
 SDK-supported local authentication. Direct queries and resumable sessions are
 available in `pyclaude`; see [Claude usage](claude/README.md).

@@ -107,6 +107,7 @@ class TerminalScreen:
         self.window_id = window_id
         self.target = pane_id
         self.capture_path = capture_path
+        self.control_socket: Path | None = None
         self._token = token
         self._closed = False
         self._exit_status: int | None = None
@@ -186,14 +187,14 @@ class TerminalScreen:
                 return
             self._closed = True
             self._manager._screens.pop(self.name, None)
-            callbacks: list[Callable[[], None]] = []
+            callbacks = self._manager._screen_cleanups.pop(self.window_id, [])
             if not self._manager._screens:
-                callbacks, self._manager._cleanups = self._manager._cleanups, []
+                callbacks.extend(self._manager._cleanups)
+                self._manager._cleanups = []
         with ExitStack() as cleanup:
             cleanup.callback(self._manager._run, ["kill-window", "-t", self.window_id], check=False)
             cleanup.callback(_stop_screen_processes, self._token)
-            # Grouped viewers lose their session with the final window; close them
-            # explicitly so a later screen can have a fresh, valid viewer.
+            # Close this screen's viewers before removing its shared tmux window.
             for callback in callbacks:
                 cleanup.callback(callback)
 
@@ -225,6 +226,7 @@ class TerminalManager:
         self._lock = threading.RLock()
         self._screens: dict[str, TerminalScreen] = {}
         self._cleanups: list[Callable[[], None]] = []
+        self._screen_cleanups: dict[str, list[Callable[[], None]]] = {}
         self._closed = False
         self._server: subprocess.Popen[bytes] | None = None
         self._directory = tempfile.TemporaryDirectory(prefix="tasksolver-term-")
@@ -370,7 +372,6 @@ class TerminalManager:
                 raise RuntimeError("open a terminal screen before attaching a viewer")
             selected = self._screens[screen] if screen is not None else None
             view = f"view-{uuid.uuid4().hex}"
-            self._run(["new-session", "-d", "-s", view, "-t", _SESSION])
             closed = False
 
             def close_view() -> None:
@@ -381,18 +382,31 @@ class TerminalManager:
                         self._run(["kill-session", "-t", view], check=False)
 
             try:
-                if selected is not None:
-                    self._run(["select-window", "-t", f"{view}:{selected.window_id}"])
+                if selected is None:
+                    self._run(["new-session", "-d", "-s", view, "-t", _SESSION])
+                else:
+                    self._run(["new-session", "-d", "-s", view,
+                               "-x", str(self.width), "-y", str(self.height), ""])
+                    self._run(["link-window", "-k", "-s", selected.window_id, "-t", f"{view}:0"])
+                    # A dedicated page sends keys to its backend, without tmux's
+                    # prefix shortcuts for switching to another session/window.
+                    for option, value in (("prefix", "None"), ("prefix2", "None"), ("status", "off")):
+                        self._run(["set-option", "-t", view, option, value])
             except BaseException:
                 close_view()
                 raise
             return ([self.tmux_bin, "-S", str(self.socket_path), "attach-session", "-E",
                      *(["-r"] if read_only else []), "-t", view], close_view)
 
-    def _register_cleanup(self, callback: Callable[[], None]) -> None:
+    def _register_cleanup(self, callback: Callable[[], None], *, screen: TerminalScreen | None = None) -> None:
         with self._lock:
             self._check_open()
-            self._cleanups.append(callback)
+            if screen is None:
+                self._cleanups.append(callback)
+            else:
+                if self._screens.get(screen.name) is not screen:
+                    raise RuntimeError("viewer screen is no longer open")
+                self._screen_cleanups.setdefault(screen.window_id, []).append(callback)
 
     def _stop_server(self) -> None:
         server = self._server
@@ -417,6 +431,9 @@ class TerminalManager:
             self._closed = True
             screens = list(self._screens.values())
             callbacks, self._cleanups = self._cleanups, []
+            for screen_callbacks in self._screen_cleanups.values():
+                callbacks.extend(screen_callbacks)
+            self._screen_cleanups.clear()
         # Stop viewers first; always continue through panes, server and directory cleanup.
         with ExitStack() as cleanup:
             cleanup.callback(self._directory.cleanup)

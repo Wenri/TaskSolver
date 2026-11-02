@@ -1,8 +1,8 @@
 """Build and bundle the native runtimes described in pyproject.toml.
 
 CMake produces the agy host, libagy.so and wirecap bridge; Cargo links that bridge
-into Codex. Kimi builds its Node bundle and native addon. Claude's pinned executable
-is verified and staged with its SDK. Native failures fail the package build.
+into Codex. Kimi builds its Node bundle and native addon. Claude ships a clean private
+Bun with bridged source, matching caches and a native launcher. Native failures fail the build.
 
 Artifacts are copied into each provider's vendor directory in the wheel. The wheel
 uses a platform and Python ABI tag because its runtimes embed CPython.
@@ -62,10 +62,9 @@ class BuildPyNative(build_py):
         root = os.path.dirname(os.path.abspath(__file__))
         env = native_build_env()
         try:
-            # Both agent SDKs ship from checked-in source. Claude's closed CLI is
-            # fetched by version/hash into that source package before build_py copies it.
-            subprocess.run([sys.executable, os.path.join(root, "claude", "build_cli.py")],
-                           cwd=root, check=True)
+            # Stage Claude's launcher, clean private Bun, source, caches and assets together.
+            subprocess.run([sys.executable, "-m", "claude.build_cli"],
+                           cwd=root, env=env, check=True)
             super().run()
             self._build_antigravity_shim(root, env)   # builds wirecap_bridge + vendor/agy + vendor/libagy.so
             self._build_codex(root, env)              # links the bridge from the shim step → must follow it
@@ -99,6 +98,9 @@ class BuildPyNative(build_py):
         # build.rs links the wirecap_bridge produced above + libpython. LIBCLANG_PATH lets
         # aws-lc-rs/rustls' bindgen find libclang. Idempotent: cargo no-ops when nothing changed.
         env = dict(env)
+        if env.get("CONDA_BUILD") == "1":
+            # rattler-build gives each build a fresh HOME; retain Cargo's source cache.
+            env.setdefault("CARGO_HOME", os.path.join(root, ".pixi", "cargo-home"))
         conda = env.get("CONDA_PREFIX")
         if conda and not env.get("LIBCLANG_PATH"):
             env["LIBCLANG_PATH"] = os.path.join(conda, "lib")

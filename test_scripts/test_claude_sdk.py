@@ -12,14 +12,17 @@ import asyncio
 import base64
 import copy
 import io
+import json
 import os
 import sys
 import tempfile
 import textwrap
 import unittest
-from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from importlib.machinery import ModuleSpec
 from types import SimpleNamespace
 from typing import Final, Literal, cast
 from unittest.mock import patch
@@ -29,7 +32,7 @@ sys.path[:0] = [str(_ROOT / "claude"), str(_ROOT / "claude" / "vendor" / "sdk" /
                str(_ROOT / "codex"), str(_ROOT)]
 
 from PIL import Image
-from pyclaude import client
+from pyclaude import _env, client
 from pyclaude.model import ClaudeAgentModel
 from pyclaude.types import AskOptions
 
@@ -101,6 +104,7 @@ class ResultMessage:
 
 
 class FakeOptions:
+    cli_path: str
     resume: str | None
     env: dict[str, str]
     mcp_servers: dict[str, dict[str, object]]
@@ -169,8 +173,11 @@ class FakeSDK:
             ToolUseBlock=ToolUseBlock, ToolResultBlock=ToolResultBlock,
         )
 
-    def install(self):
-        return patch.object(client, "_load_sdk", return_value=self.module)
+    @contextmanager
+    def install(self) -> Generator[None]:
+        with patch.object(client, "_load_sdk", return_value=self.module), \
+             patch.object(client, "bundled_cli", return_value="/fixture/claude"):
+            yield
 
 
 class NumberAnswer(ParsedAnswer):
@@ -197,6 +204,30 @@ def number_task():
 
 
 class ClaudeSDKTests(unittest.TestCase):
+    def test_headless_calls_select_the_bundled_cli_explicitly(self) -> None:
+        sdk = FakeSDK([ResultMessage()], [ResultMessage()])
+        options: dict[str, object] = {"cli_path": Path("/fixture/claude")}
+        with sdk.install():
+            client.ask("hello")
+            client.ask("hello", sdk_options=options)
+        self.assertEqual([item.cli_path for item in sdk.options], ["/fixture/claude"] * 2)
+        self.assertEqual(options, {"cli_path": Path("/fixture/claude")})
+
+    def test_headless_calls_reject_a_different_cli_before_starting_sdk(self) -> None:
+        sdk = FakeSDK()
+        with sdk.install(), self.assertRaisesRegex(ValueError, "bundled bridged"):
+            client.ask("hello", sdk_options={"cli_path": "/global/raw-claude"})
+        self.assertEqual(sdk.entered, 0)
+        self.assertEqual(sdk.options, [])
+
+    def test_missing_bundle_stops_before_sdk_can_fall_back_to_path(self) -> None:
+        sdk = FakeSDK()
+        with sdk.install(), patch.object(client, "bundled_cli", side_effect=FileNotFoundError("missing bundle")), \
+             self.assertRaisesRegex(FileNotFoundError, "missing bundle"):
+            client.ask("hello")
+        self.assertEqual(sdk.entered, 0)
+        self.assertEqual(sdk.options, [])
+
     def test_result_is_authoritative_and_preserves_metadata(self) -> None:
         sdk: Final = FakeSDK([
             AssistantMessage([TextBlock("99"), ThinkingBlock("Visible thought")]),
@@ -664,9 +695,9 @@ class ClaudeSDKTests(unittest.TestCase):
                 "workspace": directory, "timeout": 10,
                 "extra_env": {"TEST_CLAUDE_PID": str(pid_path),
                               "TEST_CLAUDE_RECEIVED": str(received_path)},
-                "sdk_options": {"cli_path": str(executable)},
             }
-            with patch.object(client, "_load_sdk", return_value=claude_agent_sdk):
+            with patch.object(client, "_load_sdk", return_value=claude_agent_sdk), \
+                 patch.object(client, "bundled_cli", return_value=str(executable)):
                 response: Final = client.ask("2 + 2", **kwargs)
                 self.assertEqual(response.text, "4")
                 self.assertEqual(response.session_id, "stub-session")
@@ -681,6 +712,64 @@ class ClaudeSDKTests(unittest.TestCase):
                 timed_out_pid: Final = int(pid_path.read_text())
                 with self.assertRaises(ProcessLookupError):
                     os.kill(timed_out_pid, 0)
+
+
+class BundledCLITests(unittest.TestCase):
+    def fixture(self, root: Path) -> tuple[Path, ModuleSpec]:
+        package = root / "claude_agent_sdk"
+        directory = package / "_bundled"
+        (directory / "source/root").mkdir(parents=True)
+        binary = directory / "claude"
+        for executable in (binary, directory / "bun"):
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+        for name in ("tasksolver-entry.mjs", "tasksolver-resolver.mjs", "tasksolver-native-bridge.mjs", "root/cli"):
+            (directory / "source" / name).write_text("fixture")
+        (directory / "manifest.json").write_text(json.dumps({"format": 3, "native_bridge": True}))
+        return binary, ModuleSpec("claude_agent_sdk", loader=None, origin=str(package / "__init__.py"))
+
+    def test_complete_executable_bridge_is_resolved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary, spec = self.fixture(Path(directory))
+            with patch.object(_env.importlib.util, "find_spec", return_value=spec):
+                self.assertEqual(_env.bundled_cli(), str(binary.resolve()))
+
+    def test_missing_bundle_does_not_use_a_global_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_cli = root / "claude"
+            global_cli.write_text("#!/bin/sh\nexit 0\n")
+            global_cli.chmod(0o700)
+            spec = ModuleSpec("claude_agent_sdk", loader=None, origin=str(root / "sdk/__init__.py"))
+            with patch.dict(os.environ, {"PATH": str(root)}), \
+                 patch.object(_env.importlib.util, "find_spec", return_value=spec), \
+                 self.assertRaises(FileNotFoundError):
+                _env.bundled_cli()
+
+    def test_missing_graph_rejects_an_executable_runtime(self) -> None:
+        for missing in ("tasksolver-entry.mjs", "tasksolver-resolver.mjs", "tasksolver-native-bridge.mjs", "root/cli"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                binary, spec = self.fixture(Path(directory))
+                (binary.parent / "source" / missing).unlink()
+                with patch.object(_env.importlib.util, "find_spec", return_value=spec), \
+                     self.assertRaisesRegex(FileNotFoundError, "incomplete"):
+                    _env.bundled_cli()
+
+    def test_invalid_or_unbridged_manifest_is_rejected(self) -> None:
+        for document in ("{", "[]", '{"format":3,"native_bridge":false}', '{"format":2,"native_bridge":true}'):
+            with self.subTest(document=document), tempfile.TemporaryDirectory() as directory:
+                binary, spec = self.fixture(Path(directory))
+                (binary.parent / "manifest.json").write_text(document)
+                with patch.object(_env.importlib.util, "find_spec", return_value=spec), self.assertRaises(RuntimeError):
+                    _env.bundled_cli()
+
+    def test_nonexecutable_runtime_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary, spec = self.fixture(Path(directory))
+            binary.chmod(0o600)
+            with patch.object(_env.importlib.util, "find_spec", return_value=spec), \
+                 self.assertRaises(PermissionError):
+                _env.bundled_cli()
 
 
 if __name__ == "__main__":

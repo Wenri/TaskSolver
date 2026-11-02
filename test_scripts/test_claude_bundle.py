@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from setup import BuildPyNative
 
 ROOT: Final = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 BUILD_SCRIPT: Final = ROOT / "claude/build_cli.py"
 SDK_SOURCE: Final = ROOT / "claude/vendor/sdk/src"
 
@@ -49,6 +50,7 @@ class BuildFunction(Protocol):
 
 class DownloadModule(TypedDict):
     build: BuildFunction
+    fetch_cli: Callable[[Path, CLIPin], Path]
     matches: Callable[[Path, CLIPin], bool]
     _load_pin: Callable[[Path], CLIPin]
 
@@ -68,7 +70,7 @@ class ClaudeDownloadTests(unittest.TestCase):
         self.module = cast(DownloadModule, runpy.run_path(str(BUILD_SCRIPT)))
         self.build = self.module["build"]
         self.matches = self.module["matches"]
-        self.target = self.package / "_bundled/claude"
+        self.target = self.root / "build/cache" / f"claude-{self.pin['sha256']}"
         self.addCleanup(patch.stopall)
         old_file = self.build.__globals__["__file__"]
         self.addCleanup(self.build.__globals__.__setitem__, "__file__", old_file)
@@ -76,39 +78,42 @@ class ClaudeDownloadTests(unittest.TestCase):
         patch("platform.system", return_value="Linux").start()
         patch("platform.machine", return_value="x86_64").start()
 
-    def test_verified_download_is_atomic_executable_and_cached(self) -> None:
+    def fetch(self) -> Path:
+        return self.module["fetch_cli"](self.root, self.pin)
+
+    def test_verified_download_is_atomic_private_and_cached(self) -> None:
         with patch("urllib.request.urlopen", return_value=io.BytesIO(self.payload)) as download:
-            self.assertEqual(self.build(), self.target)
+            self.assertEqual(self.fetch(), self.target)
         download.assert_called_once_with(self.pin["url"], timeout=60)
         self.assertEqual(self.target.read_bytes(), self.payload)
-        self.assertEqual(self.target.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(self.target.stat().st_mode & 0o777, 0o600)
         self.assertEqual(list(self.target.parent.glob(".claude-*")), [])
         self.target.chmod(0o600)
         with patch("urllib.request.urlopen", side_effect=AssertionError("Cache hit downloaded")):
-            self.assertEqual(self.build(), self.target)
-        self.assertEqual(self.target.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(self.fetch(), self.target)
+        self.assertEqual(self.target.stat().st_mode & 0o777, 0o600)
 
     def test_same_length_checksum_mismatch_preserves_previous_target(self) -> None:
-        self.target.parent.mkdir()
+        self.target.parent.mkdir(parents=True)
         self.target.write_bytes(b"previous artifact")
         corrupt: Final = b"x" * len(self.payload)
         with patch("urllib.request.urlopen", return_value=io.BytesIO(corrupt)), \
                 self.assertRaisesRegex(RuntimeError, "verification"):
-            self.build()
+            self.fetch()
         self.assertEqual(self.target.read_bytes(), b"previous artifact")
         self.assertEqual(list(self.target.parent.glob(".claude-*")), [])
 
     def test_truncated_download_is_rejected_and_removed(self) -> None:
         with patch("urllib.request.urlopen", return_value=io.BytesIO(self.payload[:-1])), \
                 self.assertRaisesRegex(RuntimeError, "verification"):
-            self.build()
+            self.fetch()
         self.assertFalse(self.target.exists())
         self.assertEqual(list(self.target.parent.glob(".claude-*")), [])
 
     def test_network_failure_removes_temporary_file(self) -> None:
         with patch("urllib.request.urlopen", side_effect=OSError("offline")), \
                 self.assertRaisesRegex(OSError, "offline"):
-            self.build()
+            self.fetch()
         self.assertFalse(self.target.exists())
         self.assertEqual(list(self.target.parent.glob(".claude-*")), [])
 
@@ -169,18 +174,31 @@ class ClaudePackageTests(unittest.TestCase):
             self.assertIn(dependency_name(dependency), declared)
         self.assertNotIn("claude-agent-sdk", declared)
 
-    def test_native_package_retains_verified_bundled_cli(self) -> None:
+    def test_native_package_retains_relocatable_bridged_cli(self) -> None:
         helpers = cast(DownloadModule, runpy.run_path(str(BUILD_SCRIPT)))
         pin = helpers["_load_pin"](ROOT / "claude/vendor.json")
         source: Final = SDK_SOURCE / "claude_agent_sdk/_bundled/claude"
         if not source.exists():
             self.skipTest("Run pixi install to build the pinned Claude runtime first")
-        self.assertTrue(helpers["matches"](source, pin), "Built CLI must match its pin")
+        from claude.build_cli import _bundle_matches
+        source_manifest = json_loads_object(source.with_name("manifest.json").read_text())
+        fingerprint = source_manifest["build_fingerprint"]
+        assert isinstance(fingerprint, str)
+        self.assertTrue(_bundle_matches(source.parent, fingerprint))
+        self.assertEqual(source_manifest["original_sha256"], pin["sha256"])
+        self.assertIs(source_manifest["native_bridge"], True)
+        self.assertFalse(helpers["matches"](source, pin), "Default CLI must be the split-runtime launcher")
 
         from setuptools import Distribution, find_packages
 
         with patch("setuptools.setup"):
             setup = cast(dict[str, object], runpy.run_path(str(ROOT / "setup.py")))
+        config = json_object(cast(JSONValue, tomllib.loads((ROOT / "pyproject.toml").read_text())))
+        package_data = json_object(json_object(json_object(config["tool"])["setuptools"])["package-data"])
+        sdk_patterns: list[str] = []
+        for item in json_array(package_data["claude_agent_sdk"]):
+            assert isinstance(item, str)
+            sdk_patterns.append(item)
         with tempfile.TemporaryDirectory(prefix="tasksolver-claude-package-") as directory:
             sandbox: Final = Path(directory)
             stage: Final = sandbox / "wheel"
@@ -190,7 +208,7 @@ class ClaudePackageTests(unittest.TestCase):
                 "packages": ["pyclaude", *find_packages(str(SDK_SOURCE))],
                 "package_dir": {"pyclaude": str(ROOT / "claude/pyclaude"),
                                 "claude_agent_sdk": str(SDK_SOURCE / "claude_agent_sdk")},
-                "package_data": {"claude_agent_sdk": ["py.typed", "_bundled/claude"]},
+                "package_data": {"claude_agent_sdk": sdk_patterns},
             })
             builder_type = cast("type[BuildPyNative]", setup["BuildPyNative"])
             builder: Final = builder_type(distribution)
@@ -205,10 +223,12 @@ class ClaudePackageTests(unittest.TestCase):
                     patch("subprocess.run") as native_build:
                 builder.run()
             native_build.assert_called_once_with(
-                [sys.executable, str(BUILD_SCRIPT)], cwd=str(ROOT), check=True)
+                [sys.executable, "-m", "claude.build_cli"], cwd=str(ROOT),
+                env=cast(Callable[[], dict[str, str]], setup["native_build_env"])(), check=True)
             bundled: Final = stage / "claude_agent_sdk/_bundled/claude"
-            self.assertTrue(helpers["matches"](bundled, pin))
+            self.assertTrue(_bundle_matches(bundled.parent, fingerprint))
             self.assertTrue(os.access(bundled, os.X_OK))
+            self.assertTrue(os.access(bundled.with_name("bun"), os.X_OK))
             self.assertTrue((stage / "pyclaude/client.py").is_file())
             self.assertTrue((stage / "claude_agent_sdk/py.typed").is_file())
             env: Final = dict(os.environ, PYTHONPATH=str(stage), DISABLE_AUTOUPDATER="1")
@@ -226,6 +246,22 @@ class ClaudePackageTests(unittest.TestCase):
                                             env=env, text=True, capture_output=True,
                                             check=True, timeout=30)
             self.assertIn(pin["version"], version.stdout)
+            manifest_path = bundled.with_name("manifest.json")
+            manifest = json_loads_object(manifest_path.read_text())
+            corruptions: list[tuple[str, JSONValue]] = [
+                ("code_sha256", {}), ("bun_sha256", "0" * 64), ("native_bridge", False)]
+            for field in ("cache_sha256", "asset_sha256", "native_module_sha256", "helper_sha256"):
+                omitted = dict(json_object(manifest[field]))
+                self.assertTrue(omitted, field)
+                omitted.pop("libwire.node" if field == "helper_sha256" else next(iter(omitted)))
+                corruptions.append((field, omitted))
+            for field, value in corruptions:
+                with self.subTest(field=field):
+                    corrupted = dict(manifest)
+                    corrupted[field] = value
+                    manifest_path.write_text(json.dumps(corrupted))
+                    self.assertFalse(_bundle_matches(bundled.parent, fingerprint))
+            manifest_path.write_text(json.dumps(manifest))
 
 
 if __name__ == "__main__":
