@@ -2,15 +2,16 @@
 """Track, adopt and release upstream versions of TaskSolver's four agent runtimes.
 
     python3 tools/runtimes.py check [RUNTIME ...] [--github-output FILE]
-    python3 tools/runtimes.py adopt RUNTIME [--version VERSION]
+    python3 tools/runtimes.py adopt RUNTIME [--version VERSION] [--cli-version VERSION]
     python3 tools/runtimes.py docs [--check]
     python3 tools/runtimes.py bump
     python3 tools/runtimes.py notes [RUNTIME ...]
 
 Each runtime has one pin file. antigravity/vendor.json pins agy's release archive and the binary
-inside it; claude/vendor.json pins the Agent SDK tag and the Claude Code executable that SDK
-expects; codex/vendor.json and kimi/vendor.json pin the upstream tag and commit of their vendored
-trees.
+inside it; claude/vendor.json pins the Agent SDK tag and the Claude Code executable, which are
+released and tracked separately (the executable is never older than the one the SDK bundles);
+codex/vendor.json and kimi/vendor.json pin the upstream tag and commit of their vendored trees,
+whose single tag carries both the CLI and its SDK (Codex's Python SDK, Kimi Code's node SDK).
 
 A vendored tree is its upstream tag plus TaskSolver's patch. Adoption replays that patch onto the
 new release with a three-way merge of trees (base: the pinned tag, ours: the committed tree,
@@ -46,6 +47,9 @@ AGY_MANIFEST: Final = os.environ.get(
     "AGY_MANIFEST_BASE", "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
 ) + "/manifests/linux_amd64.json"
 CLAUDE_RELEASES: Final = "https://downloads.claude.ai/claude-code-releases"
+# What `check` compares: each runtime's separately released parts.
+COMPONENTS: Final = {"agy": ("agy",), "codex": ("codex",), "claude": ("claude-sdk", "claude-cli"),
+                     "kimi": ("kimi",)}
 LATEST: Final = {
     "codex": "https://api.github.com/repos/openai/codex/releases/latest",
     "claude": "https://api.github.com/repos/anthropics/claude-agent-sdk-python/releases/latest",
@@ -164,20 +168,30 @@ def _key(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in cast(list[str], re.findall(r"\d+", version)))
 
 
-def current(runtime: str) -> str:
-    """The pinned version: agy's release, the Agent SDK's for claude, the tag's for codex/kimi."""
-    if runtime == "agy":
+def current(component: str) -> str:
+    """The pinned version of a component (a runtime name means its main part: claude's SDK)."""
+    if component == "agy":
         path = ROOT / "antigravity" / "vendor.json"
         return _text(_object(_load(path), "cli", path), "version", path)
-    tree = TREES[runtime]
+    if component == "claude-cli":
+        path = ROOT / TREES["claude"].pin
+        return _text(_object(_load(path), "cli", path), "version", path)
+    tree = TREES[component.removesuffix("-sdk")]
     path = ROOT / tree.pin
     return _text(_object(_load(path), tree.section, path), "tag", path).removeprefix(tree.tag_prefix)
 
 
-def latest(runtime: str) -> str:
-    """The newest upstream release (stable releases only)."""
-    if runtime == "agy":
+def latest(component: str) -> str:
+    """The newest upstream release of a component (stable releases; Claude Code's latest channel)."""
+    if component == "agy":
         return _text(_get(AGY_MANIFEST), "version", AGY_MANIFEST)
+    if component == "claude-cli":
+        with _open(f"{CLAUDE_RELEASES}/latest") as response:
+            release = response.read().decode().strip()
+        if not release or not release[0].isdigit():
+            raise AdoptionError(f"unexpected Claude Code release {release!r}")
+        return release
+    runtime = component.removesuffix("-sdk")
     url = LATEST[runtime]
     document = _get(url)
     if runtime == "kimi":
@@ -190,9 +204,13 @@ def latest(runtime: str) -> str:
 
 @dataclass(frozen=True)
 class Status:
-    runtime: str
+    name: str           # a component: agy, codex, claude-sdk, claude-cli or kimi
     current: str
     latest: str
+
+    @property
+    def runtime(self) -> str:
+        return self.name.split("-")[0]
 
     @property
     def outdated(self) -> bool:
@@ -214,7 +232,7 @@ def versions() -> dict[str, str]:
     """Every pinned version, keyed as the documentation templates use them."""
     claude = ROOT / TREES["claude"].pin
     return {"agy": current("agy"), "codex": current("codex"), "kimi": current("kimi"),
-            "sdk": current("claude"), "cli": _text(_object(_load(claude), "cli", claude), "version", claude)}
+            "sdk": current("claude-sdk"), "cli": _text(_object(_load(claude), "cli", claude), "version", claude)}
 
 
 # ---- adoption ------------------------------------------------------------------------------------
@@ -303,9 +321,8 @@ def _checkout(directory: str, tree: str) -> None:
     _ = _git("read-tree", f"--prefix={directory}/", "-u", tree)
 
 
-def _claude_cli(sdk: Path) -> dict[str, object]:
-    """The Claude Code executable the SDK at ``sdk`` expects, from Anthropic's release manifest."""
-    version = _claude_cli_version(sdk)
+def _claude_cli(version: str) -> dict[str, object]:
+    """The pin of a Claude Code release, from Anthropic's release manifest."""
     url = f"{CLAUDE_RELEASES}/{version}/manifest.json"
     platform = _object(_object(_get(url), "platforms", url), "linux-x64", url)
     return {"version": version, "url": f"{CLAUDE_RELEASES}/{version}/linux-x64/claude",
@@ -329,16 +346,42 @@ def adopt_tree(runtime: str, version: str | None) -> tuple[str, list[str]]:
     merged, conflicts = merge(tree, base, theirs)
     _checkout(tree.directory, merged)
     upstream |= {"tag": new_tag, "commit": theirs}
-    if runtime == "claude" and not conflicts:
-        document["cli"] = _claude_cli(ROOT / tree.directory)
     _save(path, document)
     return release, conflicts
 
 
-def adopt(runtime: str, version: str | None) -> str:
-    """Adopt ``version`` (default: the latest release) and update the documented versions."""
+def adopt_claude(sdk: str | None, cli: str | None) -> tuple[str, list[str]]:
+    """Move the Agent SDK and the Claude Code pin, each to its own release (default: the latest).
+
+    The executable stays at least as new as the one the SDK bundles."""
+    pinned_sdk, pinned_cli = current("claude-sdk"), current("claude-cli")
+    sdk_release, conflicts = sdk or latest("claude-sdk"), list[str]()
+    if sdk_release != pinned_sdk:
+        _, conflicts = adopt_tree("claude", sdk_release)
+        if conflicts:
+            return f"SDK {sdk_release}", conflicts
+    bundled = _claude_cli_version(ROOT / TREES["claude"].directory)
+    cli_release = cli or max(latest("claude-cli"), bundled, key=_key)
+    if _key(cli_release) < _key(bundled):
+        raise AdoptionError(f"Claude Code {cli_release} is older than the {bundled} Agent SDK {sdk_release} bundles")
+    if sdk_release == pinned_sdk and cli_release == pinned_cli:
+        raise AdoptionError(f"claude is already at SDK {pinned_sdk} with Claude Code {pinned_cli}")
+    if cli_release != pinned_cli:
+        path = ROOT / TREES["claude"].pin
+        document = _load(path)
+        document["cli"] = _claude_cli(cli_release)
+        _save(path, document)
+    return f"SDK {sdk_release}, Claude Code {cli_release}", []
+
+
+def adopt(runtime: str, version: str | None, cli_version: str | None = None) -> str:
+    """Adopt ``version`` (default: the latest release) and update the documented versions.
+
+    For claude, ``version`` is the Agent SDK's and ``cli_version`` Claude Code's."""
     if runtime == "agy":
         release, conflicts = adopt_agy(version), []
+    elif runtime == "claude":
+        release, conflicts = adopt_claude(version, cli_version)
     else:
         release, conflicts = adopt_tree(runtime, version)
     _ = sync_docs()
@@ -426,6 +469,7 @@ class _Arguments(argparse.Namespace):
     runtimes: list[str] = []
     runtime: str = ""
     version: str | None = None
+    cli_version: str | None = None
     github_output: str | None = None
     check: bool = False
 
@@ -439,7 +483,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                            help="append `runtimes` and `targets` (outdated ones) for a workflow step")
     adoption = commands.add_parser("adopt", help="move a runtime to a release (default: the latest)")
     _ = adoption.add_argument("runtime", choices=RUNTIMES)
-    _ = adoption.add_argument("--version")
+    _ = adoption.add_argument("--version", help="the release to adopt (claude: the Agent SDK's)")
+    _ = adoption.add_argument("--cli-version", help="claude only: the Claude Code release to pin")
     docs = commands.add_parser("docs", help="write the pinned versions into the README and pycodex")
     _ = docs.add_argument("--check", action="store_true", help="only report stale files (exit 1)")
     _ = commands.add_parser("bump", help="raise TaskSolver's patch version and print it")
@@ -452,17 +497,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(f"unknown runtime(s): {', '.join(unknown)} (choose from {', '.join(RUNTIMES)})")
     try:
         if args.command == "check":
-            statuses = [Status(runtime, current(runtime), latest(runtime)) for runtime in args.runtimes or RUNTIMES]
+            statuses = [Status(name, current(name), latest(name))
+                        for runtime in args.runtimes or RUNTIMES for name in COMPONENTS[runtime]]
             for status in statuses:
                 state = "update available" if status.outdated else "current"
-                print(f"{status.runtime:<7} pinned {status.current:<10} latest {status.latest:<10} {state}")
+                print(f"{status.name:<10} pinned {status.current:<10} latest {status.latest:<10} {state}")
             if args.github_output:
                 outdated = [status for status in statuses if status.outdated]
+                runtimes = " ".join(dict.fromkeys(status.runtime for status in outdated))
                 with open(args.github_output, "a", encoding="utf-8") as output:
-                    _ = output.write(f"runtimes={' '.join(status.runtime for status in outdated)}\n")
-                    _ = output.write(f"targets={', '.join(f'{s.runtime} {s.latest}' for s in outdated)}\n")
+                    _ = output.write(f"runtimes={runtimes}\n")
+                    _ = output.write(f"targets={', '.join(f'{s.name} {s.latest}' for s in outdated)}\n")
         elif args.command == "adopt":
-            release = adopt(args.runtime, args.version)
+            if args.cli_version is not None and args.runtime != "claude":
+                parser.error("--cli-version applies to claude only")
+            release = adopt(args.runtime, args.version, args.cli_version)
             print(f"adopted {args.runtime} {release}")
         elif args.command == "docs":
             stale = sync_docs(check=args.check)

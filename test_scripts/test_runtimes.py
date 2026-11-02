@@ -143,21 +143,46 @@ class AgyAndClaudeTests(unittest.TestCase):
             self.assertEqual(cache.read_bytes(), binary)
 
     def test_claude_cli_pin_comes_from_the_release_manifest(self) -> None:
+        manifest: dict[str, object] = {"version": "9.9.9", "platforms": {
+            "linux-x64": {"binary": "claude", "checksum": "ab" * 32, "size": 123}}}
+        with patch.object(runtimes, "_get", return_value=manifest) as get:
+            pin = runtimes._claude_cli("9.9.9")
+        get.assert_called_once_with(f"{runtimes.CLAUDE_RELEASES}/9.9.9/manifest.json")
+        self.assertEqual(pin, {"version": "9.9.9", "url": f"{runtimes.CLAUDE_RELEASES}/9.9.9/linux-x64/claude",
+                               "sha256": "ab" * 32, "size": 123})
+
+    def test_claude_code_is_adopted_on_its_own(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            sdk = Path(directory)
-            _write(sdk, {"src/claude_agent_sdk/_cli_version.py": '"""Bundled CLI."""\n\n__cli_version__ = "9.9.9"\n'})
-            manifest: dict[str, object] = {"version": "9.9.9", "platforms": {
-                "linux-x64": {"binary": "claude", "checksum": "ab" * 32, "size": 123}}}
-            with patch.object(runtimes, "_get", return_value=manifest) as get:
-                pin = runtimes._claude_cli(sdk)
-            get.assert_called_once_with(f"{runtimes.CLAUDE_RELEASES}/9.9.9/manifest.json")
-            self.assertEqual(pin, {"version": "9.9.9", "url": f"{runtimes.CLAUDE_RELEASES}/9.9.9/linux-x64/claude",
-                                   "sha256": "ab" * 32, "size": 123})
+            root = Path(directory)
+            cli = {"version": "2.0.0", "url": "https://example.invalid/2.0.0", "sha256": "00" * 32, "size": 1}
+            _write(root, {
+                "claude/vendor.json": json.dumps({"sdk": {"repository": "https://example.invalid/sdk.git",
+                                                          "tag": "v1.0.0", "commit": "c0ffee"}, "cli": cli}),
+                "claude/vendor/sdk/src/claude_agent_sdk/_cli_version.py": '__cli_version__ = "2.0.0"\n'})
+            releases = {"claude-sdk": "1.0.0", "claude-cli": "2.0.1"}
+
+            def newest(component: str) -> str:
+                return releases[component]
+
+            manifest: dict[str, object] = {"platforms": {"linux-x64": {"checksum": "cd" * 32, "size": 2}}}
+            with patch.object(runtimes, "ROOT", root), patch.object(runtimes, "latest", side_effect=newest), \
+                    patch.object(runtimes, "_get", return_value=manifest):
+                self.assertEqual(runtimes.adopt_claude(None, None), ("SDK 1.0.0, Claude Code 2.0.1", []))
+                with self.assertRaisesRegex(AdoptionError, "already at SDK 1.0.0 with Claude Code 2.0.1"):
+                    _ = runtimes.adopt_claude(None, None)
+                with self.assertRaisesRegex(AdoptionError, "older than the 2.0.0 Agent SDK 1.0.0 bundles"):
+                    _ = runtimes.adopt_claude(None, "1.9.9")
+            pin = cast(dict[str, dict[str, object]], json.loads((root / "claude/vendor.json").read_text()))
+            self.assertEqual(pin["sdk"]["tag"], "v1.0.0")
+            self.assertEqual(pin["cli"], {"version": "2.0.1", "url": f"{runtimes.CLAUDE_RELEASES}/2.0.1/linux-x64/claude",
+                                          "sha256": "cd" * 32, "size": 2})
 
 
 class ReleaseTests(unittest.TestCase):
     def test_version_order(self) -> None:
         self.assertTrue(Status("agy", "1.4.11", "1.4.12").outdated)
+        self.assertEqual((Status("claude-cli", "2.1.316", "2.1.317").runtime, Status("claude-sdk", "1", "1").runtime),
+                         ("claude", "claude"))
         self.assertTrue(Status("kimi", "2.9.9", "2.10.0").outdated)
         self.assertFalse(Status("codex", "0.166.0", "0.166.0").outdated)
         self.assertFalse(Status("codex", "0.167.0", "0.166.0").outdated)
@@ -195,8 +220,8 @@ class ReleaseTests(unittest.TestCase):
                 _ = runtimes.bump()
 
     def test_check_reports_outdated_runtimes_for_the_workflow(self) -> None:
-        latest = {"agy": "9.9.9", "codex": runtimes.current("codex"), "claude": runtimes.current("claude"),
-                  "kimi": "9.9.9"}
+        latest = {"agy": "9.9.9", "codex": runtimes.current("codex"), "claude-sdk": runtimes.current("claude-sdk"),
+                  "claude-cli": runtimes.current("claude-cli"), "kimi": "9.9.9"}
 
         def release(runtime: str) -> str:
             return latest[runtime]
@@ -205,6 +230,10 @@ class ReleaseTests(unittest.TestCase):
             output = Path(directory) / "output"
             self.assertEqual(runtimes.main(["check", "--github-output", str(output)]), 0)
             self.assertEqual(output.read_text(), "runtimes=agy kimi\ntargets=agy 9.9.9, kimi 9.9.9\n")
+            latest |= {"agy": runtimes.current("agy"), "kimi": runtimes.current("kimi"), "claude-cli": "9.9.9"}
+            output.unlink()
+            self.assertEqual(runtimes.main(["check", "claude", "--github-output", str(output)]), 0)
+            self.assertEqual(output.read_text(), "runtimes=claude\ntargets=claude-cli 9.9.9\n")
         self.assertIn("| agy | ", runtimes.notes(["agy"]))
         self.assertIn("(updated)", runtimes.notes(["agy"]))
 

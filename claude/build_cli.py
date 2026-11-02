@@ -40,6 +40,14 @@ def _load_pin(path: Path) -> CLIPin:
     return {"version": version, "url": url, "sha256": digest, "size": size}
 
 
+def at_least(version: str, minimum: str) -> bool:
+    """``version >= minimum`` for dotted numeric releases; any other pair must match exactly."""
+    try:
+        return tuple(map(int, version.split("."))) >= tuple(map(int, minimum.split(".")))
+    except ValueError:
+        return version == minimum
+
+
 def matches(path: Path, pin: CLIPin) -> bool:
     if not path.is_file() or path.stat().st_size != pin["size"]:
         return False
@@ -168,9 +176,11 @@ def build() -> Path:
     root = Path(__file__).resolve().parent
     pin = _load_pin(root / "vendor.json")
     package = root / "vendor/sdk/src/claude_agent_sdk"
+    # The pin may run ahead of the release the SDK bundles: Claude Code is tracked on its own.
     sdk_version = cast(Mapping[str, object], runpy.run_path(str(package / "_cli_version.py")))["__cli_version__"]
-    if sdk_version != pin["version"]:
-        raise RuntimeError("Claude CLI pin does not match the vendored SDK")
+    if not isinstance(sdk_version, str) or not at_least(pin["version"], sdk_version):
+        raise RuntimeError(f"Claude CLI pin {pin['version']} does not satisfy the vendored SDK's "
+                           f"Claude Code {sdk_version} (the pin must be that release or newer)")
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
         raise RuntimeError("TaskSolver's bundled native runtimes require Linux x86-64")
     work = root / "build"

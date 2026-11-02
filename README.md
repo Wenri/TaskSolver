@@ -70,7 +70,7 @@ pixi run reconstruct --agy ~/Downloads/antigravity --claude=/path/to/claude --ta
 
 ### Releases and runtime updates
 
-`.github/workflows/runtime-updates.yml` runs twice a day (04:17 and 16:17 UTC), on pushes to `main` that change code (docs, Nix and CI files excluded), and on demand. Each run checks for new releases of agy, Codex, the Claude Agent SDK (with the Claude Code release it pins) and Kimi Code:
+`.github/workflows/runtime-updates.yml` runs twice a day (04:17 and 16:17 UTC), on pushes to `main` that change code (docs, Nix and CI files excluded), and on demand. Each run checks every separately released part: agy; Codex, whose release tag carries both the CLI and its Python SDK; the Claude Agent SDK and the Claude Code CLI, tracked independently; and Kimi Code, whose tag carries the CLI and its node SDK:
 
 - **A new runtime release** is adopted with `tools/runtimes.py`, which replays TaskSolver's patches onto it with a three-way merge. The workflow then builds the workspace, runs the offline tests, builds the redistributable bundle, raises the patch version, tags and pushes, and publishes a GitHub **pre-release** of the latest code with the `.conda` attached.
 - **A push with nothing to adopt** only builds and runs the offline tests.
@@ -79,8 +79,9 @@ pixi run reconstruct --agy ~/Downloads/antigravity --claude=/path/to/claude --ta
 An adoption that needs hand work (a patch conflict, an agy release whose hooked functions changed, a Claude Code release the native bridge does not support yet, a failing test) goes to a `runtime-updates/run-<id>` branch and an issue instead, and scheduled and push runs skip it while the issue is open. The same steps run locally:
 
 ```bash
-python3 tools/runtimes.py check                 # pinned vs latest
+python3 tools/runtimes.py check                 # pinned vs latest, per SDK and CLI
 python3 tools/runtimes.py adopt agy              # or codex, claude, kimi; --version X.Y.Z
+python3 tools/runtimes.py adopt claude --cli-version X.Y.Z   # Claude Code alone, ahead of the SDK
 pixi install --locked && pixi run python test_scripts/test_runtimes.py
 ```
 

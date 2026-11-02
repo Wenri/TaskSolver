@@ -120,9 +120,23 @@ class ClaudeDownloadTests(unittest.TestCase):
     def test_sdk_cli_version_disagreement_rejected_before_download(self) -> None:
         (self.package / "_cli_version.py").write_text('__cli_version__ = "different"\n')
         with patch("urllib.request.urlopen") as download, \
-                self.assertRaisesRegex(RuntimeError, "pin does not match"):
+                self.assertRaisesRegex(RuntimeError, "does not satisfy"):
             self.build()
         download.assert_not_called()
+
+    def test_cli_pin_may_run_ahead_of_the_sdk(self) -> None:
+        pin: CLIPin = {**self.pin, "version": "2.1.317"}
+        (self.root / "vendor.json").write_text(json.dumps({"cli": pin}))
+        for bundled, accepted in (("2.1.316", True), ("2.1.317", True), ("2.1.318", False)):
+            with self.subTest(bundled=bundled):
+                (self.package / "_cli_version.py").write_text(f'__cli_version__ = "{bundled}"\n')
+                # Past the version rule the build reaches its platform check.
+                expected = "Linux x86-64" if accepted else "does not satisfy"
+                with patch("platform.machine", return_value="aarch64"), \
+                        patch("urllib.request.urlopen") as download, \
+                        self.assertRaisesRegex(RuntimeError, expected):
+                    self.build()
+                download.assert_not_called()
 
     def test_wrong_platform_rejected_before_download(self) -> None:
         with patch("platform.machine", return_value="aarch64"), \

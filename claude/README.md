@@ -26,7 +26,8 @@ a missing bundle is an error rather than a fallback to a global CLI.
 `pixi install` builds the runtime automatically, using
 [`bun_graph`](https://github.com/Wenri/patchnar/blob/main/src/bun_graph.cc) from
 `PATH`. Provide that executable in the build environment. [`vendor.json`](vendor.json)
-pins the Claude Code release that SDK expects; [`build_cli.py`](build_cli.py) verifies the download's size
+pins a Claude Code release that is the one the SDK bundles or newer, since `tools/runtimes.py`
+follows Claude Code's own releases; [`build_cli.py`](build_cli.py) checks that, verifies the download's size
 and SHA256, checks the SDK's CLI version, then stages the complete runtime under
 `claude_agent_sdk/_bundled/`:
 

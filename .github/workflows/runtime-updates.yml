@@ -2,8 +2,9 @@
 #
 # Runs twice a day, on pushes to main that change code (docs, Nix and CI files excluded), and on
 # demand. `tools/runtimes.py check` compares the pins (antigravity/vendor.json, codex/vendor.json,
-# claude/vendor.json, kimi/vendor.json) with the latest releases of agy, Codex, the Claude Agent
-# SDK (and the Claude Code release it pins) and Kimi Code. Each run picks one mode:
+# claude/vendor.json, kimi/vendor.json) with the latest releases of every separately released
+# part: agy, Codex (CLI and Python SDK in one tag), the Claude Agent SDK and the Claude Code CLI
+# (tracked independently), and Kimi Code (CLI and node SDK in one tag). Each run picks one mode:
 #
 #   prerelease  a runtime is outdated: `tools/runtimes.py adopt` replays TaskSolver's patches onto
 #               the new release; build, offline tests, the redistributable conda bundle (no agy or
@@ -188,12 +189,13 @@ jobs:
       - name: Refresh the Nix hashes
         if: env.MODE != 'validate' && hashFiles('nix/update-hashes') != ''
         run: |
-          # After the build, which completes codex's Cargo.lock. Refresh only when an input of
-          # nix/hashes.json changed since the commit that last wrote it.
+          # After the build, which completes codex's Cargo.lock. A refresh refetches about 3.3 GB
+          # (the Codex crates with the rusty_v8 checkout, the Kimi pnpm store), so it runs only when
+          # an input of nix/hashes.json changed since the commit that last wrote it.
           base=$(git log -1 --format=%H -- nix/hashes.json)
           if [ -z "$base" ] || ! git diff --quiet "$base" -- codex/vendor/codex-rs/Cargo.lock \
                kimi/vendor/kimi-code/pnpm-lock.yaml ':(glob)kimi/vendor/kimi-code/**/package.json' \
-               claude/vendor.json nix; then
+               claude/vendor.json package.nix flake.lock nix/update-hashes; then
             nix/update-hashes 2>&1 | tee "$RUNNER_TEMP/nix-hashes.log"
           fi
 
@@ -213,11 +215,20 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Raise the version
+        id: version
+        if: env.MODE != 'validate'
+        run: echo "version=$(python3 tools/runtimes.py bump)" >> "$GITHUB_OUTPUT"
+
       - name: Build the redistributable bundle
         if: env.MODE != 'validate'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # After the bump, so the package carries the version it is released under.
           pixi publish --target-dir dist 2>&1 | tee "$RUNNER_TEMP/publish.log"
-          pixi run python tools/check_bundle.py dist/*.conda 2>&1 | tee -a "$RUNNER_TEMP/publish.log"
+          pixi run python tools/check_bundle.py dist/tasksolver-"$VERSION"-*.conda 2>&1 |
+            tee -a "$RUNNER_TEMP/publish.log"
 
       - name: Build the Nix package
         if: inputs.nix_build && hashFiles('flake.nix') != ''
@@ -226,8 +237,9 @@ jobs:
       - name: Commit, tag and push
         id: publish
         if: env.MODE != 'validate'
+        env:
+          version: ${{ steps.version.outputs.version }}
         run: |
-          version=$(python3 tools/runtimes.py bump)
           # shellcheck disable=SC2086  # RUNTIMES is a space-separated list
           python3 tools/runtimes.py notes $RUNTIMES > "$RUNNER_TEMP/notes.md"
           git add -A
@@ -267,23 +279,23 @@ jobs:
             git tag -f -a "v$version" -m "TaskSolver $version"
             git push --atomic origin HEAD:main "v$version"
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Create the GitHub release
         if: env.MODE != 'validate'
         env:
-          VERSION: ${{ steps.publish.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           prerelease=()
           if [ "$MODE" = prerelease ]; then prerelease=(--prerelease); fi
-          gh release create "v$VERSION" dist/*.conda --verify-tag --title "TaskSolver $VERSION" \
+          gh release create "v$VERSION" dist/tasksolver-"$VERSION"-*.conda --verify-tag --title "TaskSolver $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${prerelease[@]}"
 
       - name: Upload to prefix.dev
         if: env.MODE == 'release' && vars.PREFIX_CHANNEL != ''
         env:
           CHANNEL: ${{ vars.PREFIX_CHANNEL }}
-        run: pixi upload prefix --channel "$CHANNEL" --generate-attestation dist/*.conda
+          VERSION: ${{ steps.version.outputs.version }}
+        run: pixi upload prefix --channel "$CHANNEL" --generate-attestation dist/tasksolver-"$VERSION"-*.conda
 
       - name: Hand a failed adoption over
         if: failure() && env.RUNTIMES != '' && steps.adopt.conclusion != 'skipped' && steps.publish.conclusion != 'success'

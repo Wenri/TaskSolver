@@ -79,7 +79,10 @@ checkout (agy's BOOKS mirror, the SDK's CLI version, the Python minor). Codex (A
 
 **Runtime updates.** Each runtime has one pin file: `antigravity/vendor.json`, `claude/vendor.json`,
 `codex/vendor.json`, `kimi/vendor.json`. `tools/runtimes.py` (stdlib only) compares them with
-upstream (`check`) and adopts a release (`adopt`). agy re-pins its archive and extracted binary.
+upstream (`check`) per separately released part (agy, codex's tag with its CLI and Python SDK, the
+Claude Agent SDK and Claude Code's latest channel, kimi-code's tag with its CLI and node SDK) and
+adopts a release (`adopt`; `--cli-version` pins Claude Code alone). agy re-pins its archive and
+extracted binary. The restore helper couples a target to the checkout by Agent SDK version.
 The vendored trees replay TaskSolver's patch onto the new tag by a three-way merge of trees (base:
 the pinned tag, ours: `HEAD`'s committed tree, theirs: the new tag), so commit vendored edits
 first. Conflicted files keep their markers and are named; codex's `Cargo.lock` takes upstream's
@@ -377,7 +380,8 @@ Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protoc
 - **`kimi/`** → the `pykimi` package: Moonshot's Node kimi-code built from a vendored tree, with a
   three-line patch loading the bridge as an N-API addon (`kimi/native/`). See `kimi/README.md`.
 - **`claude/`** → `pyclaude` and the pristine `claude/vendor/sdk`. `claude/vendor.json` pins the SDK
-  tag and the Claude Code release it expects; `claude/build_cli.py` installs the bridged runtime and
+  tag and a Claude Code release, tracked separately and never older than the one the SDK bundles
+  (`build_cli.py` enforces it); `claude/build_cli.py` installs the bridged runtime and
   its external source, caches, assets and addons under the SDK's `_bundled/` before packaging. See `claude/README.md`.
 
 The PTY paths are symmetric (`agy --print` ≡ `codex exec` ≡ `kimi -p`), so a change to one usually

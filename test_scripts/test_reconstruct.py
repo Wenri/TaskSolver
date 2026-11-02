@@ -34,12 +34,12 @@ from tasksolver.reconstruct import (
     agy_pin,
     claude_candidates,
     claude_pin,
-    cli_version,
     expand,
     install_agy,
     install_claude,
     mismatch,
     resolve_target,
+    sdk_version,
     seed,
     select,
 )
@@ -204,18 +204,19 @@ class TargetTests(unittest.TestCase):
         self.assertIsNotNone(target.pyagy)
         self.assertIsNotNone(target.claude_sdk)
 
-    def test_cli_version_is_read_without_importing(self) -> None:
-        self.assertEqual(cli_version(ROOT / reconstruct.SDK_DIR), claude_pin(ROOT).version)
+    def test_sdk_version_is_read_without_importing(self) -> None:
+        sdk = cast(dict[str, dict[str, str]], json.loads((ROOT / "claude/vendor.json").read_text()))["sdk"]["tag"]
+        self.assertEqual("v" + str(sdk_version(ROOT / reconstruct.SDK_DIR)), sdk)
 
     def test_target_must_match_the_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory) / "site-packages"
             _ = _write(site / "pyagy" / reconstruct.BOOKS, "BOOKS = ()\n")
-            _ = _write(site / "claude_agent_sdk/_cli_version.py", '__cli_version__ = "0.0.1"\n')
+            _ = _write(site / "claude_agent_sdk/_version.py", '__version__ = "0.0.1"\n')
             target = resolve_target(str(site))
             with self.assertRaisesRegex(ReconstructError, "book table"):
                 _ = reconstruct.agy_job(ROOT, target, None)
-            with self.assertRaisesRegex(ReconstructError, "expects Claude Code 0.0.1"):
+            with self.assertRaisesRegex(ReconstructError, "is Agent SDK 0.0.1"):
                 _ = reconstruct.claude_job(ROOT, target, None)
 
 
@@ -237,9 +238,10 @@ class MainTests(unittest.TestCase):
             for name in ("agy", "libagy.so"):
                 _ = _write(checkout / "antigravity/vendor" / name, name.encode(), 0o755)
             _ = _write(checkout / reconstruct.SDK_DIR / "_bundled/claude", b"launcher", 0o755)
+            _ = _write(checkout / reconstruct.SDK_DIR / "_version.py", '__version__ = "0.9.9"\n')
             site = root / f"env/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
             _ = _write(site / "pyagy" / reconstruct.BOOKS, "BOOKS = ()\n")
-            _ = _write(site / "claude_agent_sdk/_cli_version.py", '__cli_version__ = "9.9.9"\n')
+            _ = _write(site / "claude_agent_sdk/_version.py", '__version__ = "0.9.9"\n')
             agy = _write(root / "downloads/agy", agy_bytes, 0o755)
             claude = _write(root / "downloads/claude", claude_bytes, 0o755)
 

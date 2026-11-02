@@ -317,16 +317,16 @@ def resolve_target(target: str | None) -> Target:
     raise ReconstructError(f"target {path} does not exist")
 
 
-def cli_version(sdk: Path) -> str | None:
-    """``__cli_version__`` of an installed claude_agent_sdk, read without importing it."""
+def sdk_version(sdk: Path) -> str | None:
+    """``__version__`` of a claude_agent_sdk package, read without importing it."""
     try:
-        tree = ast.parse((sdk / "_cli_version.py").read_text(encoding="utf-8"))
+        tree = ast.parse((sdk / "_version.py").read_text(encoding="utf-8"))
     except (OSError, SyntaxError, ValueError):
         return None
     for node in tree.body:
         if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
                 and isinstance(node.value.value, str)
-                and any(isinstance(name, ast.Name) and name.id == "__cli_version__" for name in node.targets)):
+                and any(isinstance(name, ast.Name) and name.id == "__version__" for name in node.targets)):
             return node.value.value
     return None
 
@@ -449,10 +449,10 @@ def claude_job(source: Path, target: Target, explicit: Path | None) -> Job:
         raise ReconstructError(f"{target.label} has no claude_agent_sdk package; install tasksolver there first")
     pin = claude_pin(source)
     in_place = target.claude_sdk.resolve() == (source / SDK_DIR).resolve()
-    installed = cli_version(target.claude_sdk)
-    if not in_place and installed != pin.version:
-        raise ReconstructError(f"{target.claude_sdk} expects Claude Code {installed}, the checkout pins "
-                               f"{pin.version}; use a checkout at the installed version")
+    installed, checkout = sdk_version(target.claude_sdk), sdk_version(source / SDK_DIR)
+    if not in_place and installed != checkout:
+        raise ReconstructError(f"{target.claude_sdk} is Agent SDK {installed}, the checkout's is "
+                               f"{checkout}; use a checkout at the installed version")
     _require_tools("claude", ("bun_graph",))
     return Job(pin, target.claude_sdk, in_place, explicit, lambda: claude_candidates(pin, Path.home()),
                build_claude,
