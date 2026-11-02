@@ -53,7 +53,15 @@ let
   claudePins = readJSON "claude/vendor.json";
   sdkVersion = lib.removePrefix "v" claudePins.sdk.tag;
 
-  codexRs = "${src}/codex/vendor/codex-rs";
+  # Content-addressed copies of the subtrees the runtimes build from, so a
+  # change elsewhere in the tree (docs, a version bump) leaves them built.
+  subtree =
+    dir:
+    builtins.path {
+      name = baseNameOf dir;
+      path = "${src}/${dir}";
+    };
+  codexRs = subtree "codex/vendor/codex-rs";
   codexVersion =
     (builtins.fromTOML (builtins.readFile "${codexRs}/Cargo.toml")).workspace.package.version;
   # The hashes the pins cannot carry, kept by nix/update-hashes: the crates
@@ -102,9 +110,9 @@ let
 
   # The static bridge Codex links (setup.py's standalone wirecap/native build).
   bridge = stdenv.mkDerivation {
-    pname = "tasksolver-wirecap-bridge";
-    inherit version;
-    src = "${src}/wirecap/native";
+    # Unversioned: Codex links it, so TaskSolver's releases must not move it.
+    name = "tasksolver-wirecap-bridge";
+    src = subtree "wirecap/native";
     nativeBuildInputs = [
       cmake
       ninja
@@ -161,7 +169,11 @@ let
   # taken: give it the store's loader first.
   claudeRuntime = stdenv.mkDerivation {
     pname = "tasksolver-claude-runtime";
-    inherit version src;
+    inherit (claudePins.cli) version;
+    # `claude/` itself, unpacked beside the build so `claude.build_cli` runs
+    # as a package.
+    src = subtree "claude";
+    sourceRoot = ".";
     nativeBuildInputs = [
       (python.withPackages (ps: [
         ps.pyelftools
@@ -279,8 +291,9 @@ python.pkgs.buildPythonPackage {
   pnpmRoot = kimiRoot;
   pnpmDeps = fetchPnpmDeps {
     pname = "tasksolver-kimi-code";
-    inherit version pnpm;
-    src = "${src}/${kimiRoot}";
+    inherit pnpm;
+    inherit ((lib.importJSON "${subtree kimiRoot}/apps/kimi-code/package.json")) version;
+    src = subtree kimiRoot;
     fetcherVersion = 3;
     hash = hashes.kimiPnpm;
   };
