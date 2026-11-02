@@ -37,6 +37,14 @@ error or cancellation. The Python decoder accumulates each ID separately, so con
 requests cannot merge their text or exchange request metadata. Both transports use the same
 Responses event decoder.
 
+TaskSolver changes these upstream files (Apache-2.0 §4(b)): it adds the `codex-rs/wirecap/`
+crate (`Cargo.toml`, `build.rs`, `src/lib.rs`) and modifies `codex-rs/Cargo.toml` and
+`Cargo.lock` (the workspace member and its dependency); `cli/Cargo.toml`, `cli/build.rs` and
+`cli/src/main.rs` (link flags, bridge start and stop); `codex-api/Cargo.toml`,
+`src/endpoint/responses.rs`, `src/endpoint/responses_websocket.rs`, `src/sse/mod.rs` and
+`src/sse/responses.rs` (the capture guards); and `core/Cargo.toml`. Every other file is the
+release pinned in [`vendor.json`](vendor.json).
+
 Keep these transport-boundary patches when updating the vendored snapshot.
 `python3 tools/runtimes.py adopt codex [--version X.Y.Z]` replays them onto a new release with a
 three-way merge against the pinned tag (`Cargo.lock` takes upstream's copy, which the unlocked
@@ -47,7 +55,7 @@ the same upstream snapshot.
 
 ## Build + run
 Built from source as a **gnu-dynamic** ELF (NOT the static-musl release artifact — it must embed
-the pixi libpython) by **`pixi install`** (setup.py's build_py, after the shim) →
+the pixi libpython) by **`pixi install`** (setup.py's build_py, after the standalone wirecap bridge) →
 `vendor/codex-rs/target/release/codex`, then bundled into the wheel at `pycodex/vendor/codex` and
 resolved from the package or its source checkout. The build is **required, with no skip/opt-out** (a wheel without codex can't
 run the `codex` backend). Needs `rust`, `clang`/`libclang`, `openssl`, `libcap` (pixi host-deps).

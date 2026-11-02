@@ -43,7 +43,7 @@ pixi run python test_scripts/text_only.py --model claude-code
 pixi shell                                                # drop into the environment
 ```
 
-The pixi workspace is configured in `pyproject.toml`: it pins Python 3.15 and Node.js 26 and builds TaskSolver as a Linux x86-64 package via the `pixi-build` backend. The package build compiles the Antigravity shim, Rust Codex binary, and Kimi Code bundle plus native addon. It also packages the checked-in Claude and Codex Python SDKs and fetches the pinned Claude Code executable after verifying its size and SHA256.
+The pixi workspace is configured in `pyproject.toml`: it pins Python 3.15 and Node.js 26 and builds TaskSolver as a Linux x86-64 package via the `pixi-build` backend. A local package build compiles the Antigravity shim, Rust Codex binary, and Kimi Code bundle plus native addon. It also packages the checked-in Claude and Codex Python SDKs and fetches the pinned Claude Code executable after verifying its size and SHA256. A redistributable conda build (`pixi publish`) leaves the agy and Claude Code runtimes out; see [Redistributable bundles](#redistributable-bundles).
 
 The workspace defines **two** environments: the **default** env (`pixi install`) carries the core API / CLI backends plus the UI/plotting tools — **no GPU required**; the **`cuda`** env (`pixi install -e cuda`) adds the local HuggingFace + torch (cu134) adapters and **flash-attn**, with the CUDA 13.4 toolkit (nvcc + headers) from conda-forge, so it needs an NVIDIA GPU whose driver supports CUDA 13.4 but no host CUDA toolkit, and builds flash-attn from source on first run (uv caches the wheel afterward). Node.js 26 is also pinned in the package's build environment because Kimi's frozen dependency graph excludes Node.js 25.
 
@@ -293,8 +293,9 @@ The existing `tasksolver.claude_code.ClaudeCodeModel` now uses the official
 [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/python).
 `claude-code*` and `claude-agent*` select the same implementation. The SDK source
 is checked in at `claude/vendor/sdk`; TaskSolver downloads its
-pinned, checksum-verified CLI during the package build, extracts its JavaScript and
-installs the local bridge. A separate global CLI installation is unnecessary. Set
+pinned, checksum-verified CLI during a local package build, extracts its JavaScript and
+installs the local bridge (`pixi run reconstruct --claude` does the same for a
+redistributable bundle). A separate global CLI installation is unnecessary. Set
 `ANTHROPIC_API_KEY`, pass a key (the `claude` service in a `KeyChain`), or use the
 SDK-supported local authentication. Direct queries and resumable sessions are
 available in `pyclaude`; see [Claude usage](claude/README.md).

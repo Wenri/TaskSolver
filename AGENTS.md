@@ -92,7 +92,10 @@ to one Claude Code release (`claude/unbundle.py`), so a Claude bump always needs
 
 **Toolchain.** Conda GCC `>=15,<16` (C++23; GCC 15's constexpr asm strings build agy's stubs).
 After a compiler-major upgrade or removal of a cached build environment, reconfigure the
-native CMake trees from scratch, but keep `antigravity/build/antigravity-*.raw`.
+native CMake trees (`antigravity/build`, `wirecap/native/build`, `kimi/native/build`) from
+scratch, but keep `antigravity/build/antigravity-*.raw`. `CMakeCache.txt` keeps the compiler path
+it first found, so a stale tree fails with `goframe.cpp: #error "agy stubs require GCC 15 …"` even
+when the build environment has GCC 15.
 
 After source changes run `pixi reinstall --locked tasksolver` in the consuming workspace (without
 `--locked` if dependencies changed); an editable source path does not rebuild natives. Never

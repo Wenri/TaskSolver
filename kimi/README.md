@@ -51,7 +51,7 @@ installs with `--frozen-lockfile`). Then run `pixi reinstall --locked tasksolver
 the bundle and addon.
 
 ## Build + run
-Built by **`pixi install`** (setup.py's `_build_kimi`, after the shim so the bridge exists):
+Built by **`pixi install`** (setup.py's `_build_kimi`; the addon compiles its own copy of the wirecap bridge):
 
 1. the CLI bundle — `pnpm install --frozen-lockfile` then `tsdown` (invoked as
    `npx -y pnpm@<pin> …`, honoring the vendored `packageManager` field; conda-forge has no pnpm
