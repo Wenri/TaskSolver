@@ -1,24 +1,44 @@
-# Adopt new upstream releases of the four agent runtimes, build, test and release.
+# Track the four agent runtimes, then build, test and publish TaskSolver.
 #
-# Daily, `tools/runtimes.py check` compares the pins (antigravity/vendor.json, codex/vendor.json,
+# Runs twice a day, on pushes to main that change code (docs, Nix and CI files excluded), and on
+# demand. `tools/runtimes.py check` compares the pins (antigravity/vendor.json, codex/vendor.json,
 # claude/vendor.json, kimi/vendor.json) with the latest releases of agy, Codex, the Claude Agent
-# SDK (and the Claude Code release it pins) and Kimi Code. For each outdated runtime the release
-# job runs `tools/runtimes.py adopt`, which replays TaskSolver's patches onto the new release, then
-# builds the workspace, runs the offline tests, builds the redistributable conda bundle (without
-# agy and Claude Code), raises the patch version, tags, pushes and publishes a GitHub release.
+# SDK (and the Claude Code release it pins) and Kimi Code. Each run picks one mode:
+#
+#   prerelease  a runtime is outdated: `tools/runtimes.py adopt` replays TaskSolver's patches onto
+#               the new release; build, offline tests, the redistributable conda bundle (no agy or
+#               Claude Code), patch bump, tag, push and a GitHub pre-release of the latest code.
+#   release     a manual run with `release` checked: the same, published as a full release.
+#   validate    a push with nothing to adopt: build and offline tests only.
+#   none        a scheduled run with nothing to adopt.
 #
 # An adoption that needs hand work (patch conflicts, a failed agy conversion, a Claude Code release
 # the native bridge does not support yet, a failing test) is pushed to `runtime-updates/run-<id>`
-# and reported in an issue; scheduled runs skip those targets while the issue stays open.
+# and reported in an issue; scheduled and push runs skip that target while the issue stays open.
+# The commits and tags this workflow pushes with GITHUB_TOKEN start no new runs.
 #
 # Repository variables: RUNTIME_RUNNER (JSON runs-on value, default "ubuntu-24.04"; a self-hosted
-# runner keeps the build caches) and PREFIX_CHANNEL (prefix.dev channel for the conda package,
-# using trusted publishing; unset skips the upload).
+# runner keeps the build caches) and PREFIX_CHANNEL (prefix.dev channel for full releases, using
+# trusted publishing; unset skips the upload).
 name: Runtime updates
 
 on:
   schedule:
-    - cron: "17 4 * * *"
+    - cron: "17 4,16 * * *"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - LICENSE
+      - .gitignore
+      - .gitattributes
+      - ".github/**"
+      - ".agents/**"
+      - ".claude/**"
+      - ".vscode/**"
+      - "**.nix"
+      - flake.lock
+      - "nix/**"
   workflow_dispatch:
     inputs:
       runtimes:
@@ -26,11 +46,11 @@ on:
         type: string
         default: ""
       release:
-        description: Build and release even when no runtime is outdated
+        description: Publish a full release (after adopting any outdated runtimes)
         type: boolean
         default: false
       nix_build:
-        description: Also build the Nix package (a second full Codex build)
+        description: Also build the Nix package (a second Codex build on a cold runner)
         type: boolean
         default: false
 
@@ -61,30 +81,38 @@ jobs:
     outputs:
       runtimes: ${{ steps.check.outputs.runtimes }}
       targets: ${{ steps.check.outputs.targets }}
+      mode: ${{ steps.check.outputs.mode }}
     steps:
       - uses: actions/checkout@v7.0.1
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.runtimes }}
+          FULL_RELEASE: ${{ inputs.release }}
         run: |
           # shellcheck disable=SC2086  # REQUESTED is a space-separated list
           python3 tools/runtimes.py check $REQUESTED --github-output "$RUNNER_TEMP/check.out"
           runtimes=$(sed -n 's/^runtimes=//p' "$RUNNER_TEMP/check.out")
           targets=$(sed -n 's/^targets=//p' "$RUNNER_TEMP/check.out")
           title="Runtime update needs hand work: $targets"
-          if [ -n "$runtimes" ] && [ "$GITHUB_EVENT_NAME" = schedule ] &&
+          if [ -n "$runtimes" ] && [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] &&
              gh issue list --state open --search "\"$title\" in:title" --json title --jq '.[].title' |
              grep -qxF "$title"; then
             echo "::notice::Skipping $targets: an open issue tracks its hand work"
             runtimes="" targets=""
           fi
-          { echo "runtimes=$runtimes"; echo "targets=$targets"; } >> "$GITHUB_OUTPUT"
+          if [ "$FULL_RELEASE" = true ]; then mode=release
+          elif [ -n "$runtimes" ]; then mode=prerelease
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then mode=validate
+          else mode=none
+          fi
+          echo "::notice::Mode $mode${targets:+, adopting $targets}"
+          { echo "runtimes=$runtimes"; echo "targets=$targets"; echo "mode=$mode"; } >> "$GITHUB_OUTPUT"
 
   release:
-    name: Adopt, build and release
+    name: Adopt, build and publish
     needs: check
-    if: needs.check.outputs.runtimes != '' || inputs.release
+    if: needs.check.outputs.mode != 'none'
     runs-on: ${{ fromJSON(vars.RUNTIME_RUNNER || '"ubuntu-24.04"') }}
     timeout-minutes: 360
     permissions:
@@ -97,6 +125,7 @@ jobs:
     env:
       RUNTIMES: ${{ needs.check.outputs.runtimes }}
       TARGETS: ${{ needs.check.outputs.targets }}
+      MODE: ${{ needs.check.outputs.mode }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Make room on the hosted runner
@@ -145,13 +174,22 @@ jobs:
           for runtime in $RUNTIMES; do
             python3 tools/runtimes.py adopt "$runtime" 2>&1 | tee -a "$RUNNER_TEMP/adopt.log"
           done
-          if [ -x nix/update-hashes ]; then
-            nix/update-hashes 2>&1 | tee -a "$RUNNER_TEMP/adopt.log"
-          fi
           git status --short | tee -a "$RUNNER_TEMP/adopt.log"
 
       - name: Build the workspace (agy, Codex, Claude Code and Kimi Code)
         run: pixi install --locked 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Refresh the Nix hashes
+        if: env.MODE != 'validate' && hashFiles('nix/update-hashes') != ''
+        run: |
+          # After the build, which completes codex's Cargo.lock. Refresh only when an input of
+          # nix/hashes.json changed since the last tag (always before the first one).
+          last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -z "$last" ] || ! git diff --quiet "$last" -- codex/vendor/codex-rs/Cargo.lock \
+               kimi/vendor/kimi-code/pnpm-lock.yaml ':(glob)kimi/vendor/kimi-code/**/package.json' \
+               claude/vendor.json nix; then
+            nix/update-hashes 2>&1 | tee "$RUNNER_TEMP/nix-hashes.log"
+          fi
 
       - name: Offline tests
         run: |
@@ -170,6 +208,7 @@ jobs:
           done
 
       - name: Build the redistributable bundle
+        if: env.MODE != 'validate'
         run: |
           pixi publish --target-dir dist 2>&1 | tee "$RUNNER_TEMP/publish.log"
           pixi run python tools/check_bundle.py dist/*.conda 2>&1 | tee -a "$RUNNER_TEMP/publish.log"
@@ -180,6 +219,7 @@ jobs:
 
       - name: Commit, tag and push
         id: publish
+        if: env.MODE != 'validate'
         run: |
           version=$(python3 tools/runtimes.py bump)
           # shellcheck disable=SC2086  # RUNTIMES is a space-separated list
@@ -196,20 +236,27 @@ jobs:
             echo "$unexpected"
             exit 1
           fi
-          git commit -m "Release $version${TARGETS:+: adopt $TARGETS}"
+          if [ "$MODE" = prerelease ]; then
+            git commit -m "Pre-release $version: adopt $TARGETS"
+          else
+            git commit -m "Release $version${TARGETS:+: adopt $TARGETS}"
+          fi
           git tag -a "v$version" -m "TaskSolver $version"
-          git push origin HEAD:main "v$version"
+          git push --atomic origin HEAD:main "v$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Create the GitHub release
+        if: env.MODE != 'validate'
         env:
           VERSION: ${{ steps.publish.outputs.version }}
         run: |
+          prerelease=()
+          if [ "$MODE" = prerelease ]; then prerelease=(--prerelease); fi
           gh release create "v$VERSION" dist/*.conda --verify-tag --title "TaskSolver $VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md"
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${prerelease[@]}"
 
       - name: Upload to prefix.dev
-        if: vars.PREFIX_CHANNEL != ''
+        if: env.MODE == 'release' && vars.PREFIX_CHANNEL != ''
         env:
           CHANNEL: ${{ vars.PREFIX_CHANNEL }}
         run: pixi upload prefix --channel "$CHANNEL" --generate-attestation dist/*.conda

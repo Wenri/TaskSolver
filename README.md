@@ -70,7 +70,13 @@ pixi run reconstruct --agy ~/Downloads/antigravity --claude=/path/to/claude --ta
 
 ### Releases and runtime updates
 
-`.github/workflows/runtime-updates.yml` checks daily for new releases of agy, Codex, the Claude Agent SDK (with the Claude Code release it pins) and Kimi Code. It adopts each one with `tools/runtimes.py`, which replays TaskSolver's patches onto the new release with a three-way merge, then builds the workspace, runs the offline tests, builds the redistributable bundle, raises the patch version and publishes a GitHub release with the `.conda` attached. An adoption that needs hand work (a patch conflict, an agy release whose hooked functions changed, a Claude Code release the native bridge does not support yet, a failing test) goes to a `runtime-updates/run-<id>` branch and an issue instead. The same steps run locally:
+`.github/workflows/runtime-updates.yml` runs twice a day (04:17 and 16:17 UTC), on pushes to `main` that change code (docs, Nix and CI files excluded), and on demand. Each run checks for new releases of agy, Codex, the Claude Agent SDK (with the Claude Code release it pins) and Kimi Code:
+
+- **A new runtime release** is adopted with `tools/runtimes.py`, which replays TaskSolver's patches onto it with a three-way merge. The workflow then builds the workspace, runs the offline tests, builds the redistributable bundle, raises the patch version, tags and pushes, and publishes a GitHub **pre-release** of the latest code with the `.conda` attached.
+- **A push with nothing to adopt** only builds and runs the offline tests.
+- **A full release** is manual: run the workflow with `release` checked (Actions, *Runtime updates*, *Run workflow*, or `gh workflow run runtime-updates.yml -f release=true`). It adopts any outdated runtime first.
+
+An adoption that needs hand work (a patch conflict, an agy release whose hooked functions changed, a Claude Code release the native bridge does not support yet, a failing test) goes to a `runtime-updates/run-<id>` branch and an issue instead, and scheduled and push runs skip it while the issue is open. The same steps run locally:
 
 ```bash
 python3 tools/runtimes.py check                 # pinned vs latest
@@ -78,7 +84,7 @@ python3 tools/runtimes.py adopt agy              # or codex, claude, kimi; --ver
 pixi install --locked && pixi run python test_scripts/test_runtimes.py
 ```
 
-Repository variables tune the workflow: `RUNTIME_RUNNER` (a JSON `runs-on` value, e.g. a self-hosted runner that keeps build caches between runs) and `PREFIX_CHANNEL` (also upload the package to that prefix.dev channel through trusted publishing).
+Repository variables tune the workflow: `RUNTIME_RUNNER` (a JSON `runs-on` value, e.g. a self-hosted runner that keeps build caches between runs; a cold build on a hosted runner takes about four hours) and `PREFIX_CHANNEL` (also upload full releases to that prefix.dev channel through trusted publishing).
 
 For à-la-carte use, the same groups are portable `[project.optional-dependencies]` extras — `tasksolver[local]` (torch + HuggingFace adapters, **including flash-attn**) and `tasksolver[app]` (UI/plotting) — so the package stays installable as a dependency by uv and pixi (a consumer points at its own torch index). Core dependency versions are resolved by the consuming workspace, with compatibility bounds for the agent SDKs and native capture dependencies; `flash-attn` has no prebuilt wheels for new Pythons and builds from source, so `tasksolver[local]` needs CUDA. Its newest PyPI release (2.8.3.post2) also compiles with C++17 and fails against torch >= 2.13, whose headers need C++20; TaskSolver's `cuda` env therefore forces C++20 for that build (`tools/cxx20-g++` plus `NVCC_APPEND_FLAGS`), as upstream's unreleased `main` does.
 

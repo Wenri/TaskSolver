@@ -84,11 +84,14 @@ The vendored trees replay TaskSolver's patch onto the new tag by a three-way mer
 the pinned tag, ours: `HEAD`'s committed tree, theirs: the new tag), so commit vendored edits
 first. Conflicted files keep their markers and are named; codex's `Cargo.lock` takes upstream's
 copy, which the unlocked build completes. `docs` keeps the README pin table and pycodex's
-`client_version` in step with the pins. `.github/workflows/runtime-updates.yml` runs this daily:
-adopt, `nix/update-hashes` when present, `pixi install --locked`, the offline tests, `pixi publish`
-checked by `tools/check_bundle.py`, then `bump`, tag, push and a GitHub release with `notes`. A
-failure goes to branch `runtime-updates/run-<id>` plus an issue. The Claude native bridge is gated
-to one Claude Code release (`claude/unbundle.py`), so a Claude bump always needs it revisited.
+`client_version` in step with the pins. `.github/workflows/runtime-updates.yml` runs twice a day,
+on code pushes to `main` and on demand: adopt, `pixi install --locked`, `nix/update-hashes` when an
+input of `nix/hashes.json` changed since the last tag, the offline tests, `pixi publish` checked by
+`tools/check_bundle.py`, then `bump`, an atomic push of the commit and tag, and a GitHub release
+with `notes`. An adoption publishes a pre-release of the latest code; a push with nothing to adopt
+only builds and tests; a full release is a manual dispatch with `release`. A failed adoption goes
+to branch `runtime-updates/run-<id>` plus an issue. The Claude native bridge is gated to one Claude
+Code release (`claude/unbundle.py`), so a Claude bump always needs it revisited.
 
 **Toolchain.** Conda GCC `>=15,<16` (C++23; GCC 15's constexpr asm strings build agy's stubs).
 After a compiler-major upgrade or removal of a cached build environment, reconfigure the
