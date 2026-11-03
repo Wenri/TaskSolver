@@ -3,6 +3,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* The private Bun's C++ entry points are stripped. claude/unbundle.py writes bun_natives.h
+ * from `bun_graph --natives`, which locates them by their instructions in the pinned build:
+ * WIRE_BUN_* addresses and the WIRE_BUN_*_CODE bytes libwire.node re-checks before calling. */
+#include "bun_natives.h"
+
 struct bun_string {
     uint8_t tag;
     uint8_t padding[7];
@@ -23,7 +28,7 @@ struct bun_string wire_bun_clone_utf8(const unsigned char *bytes, size_t length)
     const struct bun_string input = {2, {0}, (uintptr_t)bytes | (UINT64_C(1) << 61), length};
     void *impl;
     typedef void (*convert_fn)(void **, const struct bun_string *);
-    ((convert_fn)(uintptr_t)0x2c55230)(&impl, &input);
+    ((convert_fn)(uintptr_t)WIRE_BUN_TO_WTF)(&impl, &input);
     return (struct bun_string){1, {0}, (uintptr_t)impl, 0};
 }
 #else
@@ -33,10 +38,9 @@ struct bun_string wire_bun_clone_utf8(const unsigned char *bytes, size_t length)
 #define NAPI_VERSION 8
 #include <node_api.h>
 
-/* Claude 2.1.316's private Bun 71c9bf0c, ET_EXEC. The C++ entry points are
- * stripped, so validate their instructions before calling their C ABI.
- * ZigSourceProvider.cpp owns generation; CachedBytecode's refcount release is
- * inlined in the Rust caller at 0x7b3e7d9 (destructor followed by mi_free).
+/* The private Bun is ET_EXEC, so its addresses are absolute. ZigSourceProvider.cpp owns
+ * generation; Bun releases a CachedBytecode inline (its destructor, then mi_free), and
+ * wire_bun_emit_module repeats that release for the reference it receives.
  */
 struct target {
     uintptr_t address;
@@ -45,16 +49,9 @@ struct target {
     bool executable;
 };
 
-static const unsigned char emit_code[] =
-    "\x55\x48\x89\xe5\x48\x83\xec\x20\x4c\x89\xc0\x41\x89\xc8\x89\xd1"
-    "\x0f\x28\x45\x10\x0f\x11\x44\x24\x08\x4c\x89\x0c\x24\xba\x01\x00"
-    "\x00\x00\x49\x89\xc1\xe8\x06\x00\x00\x00\x48\x83\xc4\x20\x5d\xc3";
-static const unsigned char destroy_code[] =
-    "\x55\x48\x89\xe5\x41\x57\x41\x56\x53\x50\x48\x89\xfb\x8b\x47\x64"
-    "\x4c\x8b\x77\x58\x48\x85\xc0\x75\x2d\x83\x7b\x60\x00\x78\x78\x4d";
-static const unsigned char free_code[] =
-    "\x55\x48\x89\xe5\x48\x89\xfe\x48\x8b\x05\x42\xa4\x22\x06\x48\x89"
-    "\xf9\x48\xc1\xe9\x1d\x48\x8b\x44\xc8\x50\x89\xf1\xc1\xe9\x0d\x81";
+static const unsigned char emit_code[] = WIRE_BUN_EMIT_CODE;
+static const unsigned char destroy_code[] = WIRE_BUN_DESTROY_CODE;
+static const unsigned char free_code[] = WIRE_BUN_FREE_CODE;
 
 static int mapped_targets(struct dl_phdr_info *info, size_t size, void *opaque)
 {
@@ -80,9 +77,9 @@ static int mapped_targets(struct dl_phdr_info *info, size_t size, void *opaque)
 static int wire_bun_validate(void)
 {
     struct target targets[] = {
-        {0x7b4f070, emit_code, sizeof emit_code - 1, false},
-        {0x2e83be0, destroy_code, sizeof destroy_code - 1, false},
-        {0x2a6dd30, free_code, sizeof free_code - 1, false},
+        {WIRE_BUN_EMIT, emit_code, sizeof emit_code - 1, false},
+        {WIRE_BUN_DESTROY, destroy_code, sizeof destroy_code - 1, false},
+        {WIRE_BUN_FREE, free_code, sizeof free_code - 1, false},
     };
     dl_iterate_phdr(mapped_targets, targets);
     for (size_t i = 0; i < sizeof targets / sizeof targets[0]; ++i)
@@ -111,7 +108,7 @@ static int wire_bun_emit_module(const unsigned char *url, size_t url_length,
     const unsigned char *bytes = NULL;
     size_t length = 0;
     void *handle = NULL;
-    if (!((emit_fn)(uintptr_t)0x7b4f070)(&origin, &text, UINT32_MAX, true,
+    if (!((emit_fn)(uintptr_t)WIRE_BUN_EMIT)(&origin, &text, UINT32_MAX, true,
                                        &bytes, &length, &handle, NULL))
         return 2;
     if (!bytes || !length || !handle)
@@ -123,8 +120,8 @@ static int wire_bun_emit_module(const unsigned char *url, size_t url_length,
     if (!*references)
         abort();
     if (*references == 1) {
-        ((release_fn)(uintptr_t)0x2e83be0)(handle);
-        ((release_fn)(uintptr_t)0x2a6dd30)(handle);
+        ((release_fn)(uintptr_t)WIRE_BUN_DESTROY)(handle);
+        ((release_fn)(uintptr_t)WIRE_BUN_FREE)(handle);
     } else
         --*references;
     if (!copy)

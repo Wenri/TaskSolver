@@ -20,6 +20,19 @@ from unittest.mock import patch
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+# Private Bun entry points verified by disassembly, keyed by the Claude executable's SHA256.
+KNOWN_NATIVES: Final[dict[str, dict[str, int]]] = {
+    "fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824": {  # Claude Code 2.1.316
+        "module_bytecode_generator": 0x7B4F070, "cached_bytecode_destructor": 0x2E83BE0,
+        "mi_free": 0x2A6DD30, "bun_string_to_wtf": 0x2C55230,
+        "latin1_clone": 0x7E6D0A0, "bundled_source_clone_call": 0x69930AB,
+    },
+    "eb224419e344575faa4a1f39b290b649425a10cd5ee2ef1d003480cd9ae57eb0": {  # Claude Code 2.1.317
+        "module_bytecode_generator": 0x7DA9280, "cached_bytecode_destructor": 0x36C2A50,
+        "mi_free": 0x3229900, "bun_string_to_wtf": 0x3453EF0,
+        "latin1_clone": 0x34B1090, "bundled_source_clone_call": 0x6CE4F7B,
+    },
+}
 
 from claude.build_cli import CLIPin, _load_pin, matches
 from claude.unbundle import _read_graph, _source_only, unbundle
@@ -331,12 +344,16 @@ class PinnedRuntimeTests(unittest.TestCase):
         assert isinstance(address, int) and isinstance(target_address, int)
         assert isinstance(original_hex, str) and isinstance(replacement_hex, str)
         original_call, replacement_call = bytes.fromhex(original_hex), bytes.fromhex(replacement_hex)
-        self.assertEqual(address, 0x69930AB)
+        natives = json_object(manifest["bun_natives"])
+        known = KNOWN_NATIVES.get(self.pin["sha256"])
+        if known is not None:  # bun_graph's locator must keep finding the entry points verified by hand
+            self.assertEqual(natives, known)
+        self.assertEqual(address, natives["bundled_source_clone_call"])
         self.assertEqual(len(original_call), 5)
         self.assertEqual(len(replacement_call), 5)
         self.assertEqual(original_call[0], 0xE8)
         self.assertEqual(replacement_call[0], 0xE8)
-        self.assertEqual(address + 5 + struct.unpack("<i", original_call[1:])[0], 0x7E6D0A0)
+        self.assertEqual(address + 5 + struct.unpack("<i", original_call[1:])[0], natives["latin1_clone"])
         self.assertEqual(address + 5 + struct.unpack("<i", replacement_call[1:])[0], target_address)
         with self.binary.open("rb") as original, self.bun.open("rb") as runtime:
             before, after = ELFFile(original), ELFFile(runtime)
@@ -421,8 +438,12 @@ class PinnedRuntimeTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), expected, module.name)
                 records.append({"name": module.name, "path": str(path), "loader": module.loader,
                                 "sha256": hashlib.sha256(expected).hexdigest()})
-        self.assertEqual(len(records), 232)
-        self.assertEqual(sum(record["loader"] == 13 for record in records), 98)
+        assets = sum(module.loader != 1 for module in graph.modules)
+        texts = sum(module.loader == 13 for module in graph.modules)
+        self.assertGreater(assets, 100)  # Claude ships a few hundred assets; zero would mean a lost graph
+        self.assertGreater(texts, 0)
+        self.assertEqual(len(records), assets)
+        self.assertEqual(sum(record["loader"] == 13 for record in records), texts)
         script = self.directory / "all-assets.mjs"
         script.write_text(
             f'import {json.dumps((self.source / "tasksolver-resolver.mjs").as_uri())};\n'
@@ -438,12 +459,12 @@ class PinnedRuntimeTests(unittest.TestCase):
             'const clipboard=import.meta.require("/$bunfs/root/clipboard-napi.node");\n'
             'if(typeof clipboard.getLinuxClipboardText!=="function"||\n'
             '   typeof clipboard.setLinuxClipboardText!=="function")throw Error("native addon exports");\n'
-            'console.log("232 assets, 98 text modules");\n'
+            f'console.log("{assets} assets, {texts} text modules");\n'
         )
         result = subprocess.run([str(self.bun), str(script)], cwd=self.directory,
                                 text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "232 assets, 98 text modules")
+        self.assertEqual(result.stdout.strip(), f"{assets} assets, {texts} text modules")
 
     def test_native_applets_keep_original_dispatch(self) -> None:
         with tempfile.TemporaryDirectory(dir=self.directory) as directory:

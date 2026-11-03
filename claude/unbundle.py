@@ -12,9 +12,10 @@ import shutil
 import shlex
 import subprocess
 import sys
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path, PurePosixPath
-from typing import Final, cast
+from typing import BinaryIO, Final, cast
 
 from elftools.common.exceptions import ELFError
 from elftools.construct import Container
@@ -32,6 +33,10 @@ PREFIX: Final = "/$bunfs/"
 RECORD_SIZE: Final = 52
 SOURCE_HASHES: Final = 1 << 5
 SUPPORTED_FLAGS: Final = (1 << 14) - 1
+# Minified JavaScript identifiers. Every source contract below is anchored on property names
+# and string literals, captures the minified names it needs, and must match exactly once.
+IDENTIFIER: Final = r"[A-Za-z_$][\w$]*"
+NATIVE_CHECK_BYTES: Final = 48  # opening bytes of each called entry point libwire.node re-checks
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,18 @@ class BunGraph:
     @property
     def entry(self) -> BunModule:
         return self.modules[self.entry_index]
+
+
+@dataclass(frozen=True)
+class BunNatives:
+    """The private Bun's stripped entry points, as `bun_graph --natives` locates them."""
+
+    module_bytecode_generator: int
+    cached_bytecode_destructor: int
+    mi_free: int
+    bun_string_to_wtf: int
+    latin1_clone: int
+    bundled_source_clone_call: int
 
 
 @dataclass(frozen=True)
@@ -253,12 +270,16 @@ def _clean_runtime(source: Path, target: Path) -> None:
                 raise ValueError("Clean Bun still maps the removed application payload")
 
 
-def _append_utf8_shim(runtime: Path, code: bytes) -> list[dict[str, str | int]]:
-    """Append compiled code without moving native sections or rewriting dynamic metadata."""
+def _append_utf8_shim(runtime: Path, code: bytes, natives: BunNatives) -> list[dict[str, str | int]]:
+    """Append compiled code without moving native sections or rewriting dynamic metadata.
+
+    The already-bundled source loader clones file contents as Latin-1; its one call is
+    redirected to the shim, which builds the same string from UTF-8 instead.
+    """
     if not code or len(code) > 4096:
         raise ValueError("Unexpected UTF-8 loader shim size")
-    call_address = 0x69930AB
-    original_call = bytes.fromhex("e8f09f4d01")
+    call_address = natives.bundled_source_clone_call
+    original_call = b"\xe8" + (natives.latin1_clone - call_address - 5).to_bytes(4, "little", signed=True)
     with runtime.open("r+b") as stream:
         elf = ELFFile(stream)
         phdr, shdr = elf.structs.Elf_Phdr, elf.structs.Elf_Shdr
@@ -332,6 +353,79 @@ def _append_utf8_shim(runtime: Path, code: bytes) -> list[dict[str, str | int]]:
              "target": target, "section": ".tasksolver.utf8"}]
 
 
+def _mapped_code(elf: ELFFile, address: int, length: int) -> bool:
+    return any(segment["p_type"] == "PT_LOAD" and segment["p_flags"] & P_FLAGS.PF_X
+               and segment["p_vaddr"] <= address
+               and address + length <= segment["p_vaddr"] + segment["p_filesz"]
+               for segment in elf.iter_segments())
+
+
+def _read_code(elf: ELFFile, stream: BinaryIO, address: int, length: int) -> bytes:
+    offsets = list(elf.address_offsets(address, length))
+    if len(offsets) != 1:
+        raise ValueError(f"Private Bun code at {address:#x} is not mapped uniquely")
+    _ = stream.seek(offsets[0])
+    return stream.read(length)
+
+
+def _read_natives(source: Path, bun_graph: str) -> BunNatives:
+    """Locate the private Bun's stripped entry points with bun_graph, then check them here.
+
+    bun_graph finds each one by its instructions, so the addresses follow the pinned build;
+    the report is trusted only for addresses inside its code that this module verifies.
+    """
+    try:
+        completed = subprocess.run([bun_graph, str(source), "--natives"], check=True,
+                                   capture_output=True, text=True, timeout=300)
+    except subprocess.CalledProcessError as error:
+        raise ValueError("bun_graph --natives could not locate the private Bun entry points "
+                         f"(it needs patchnar's native discovery): {cast(object, error.stderr)}") from error
+    document = cast(object, json.loads(completed.stdout))
+    if not isinstance(document, dict) or cast(dict[str, object], document).get("format") != 1:
+        raise ValueError("bun_graph --natives returned an unsupported report")
+    reported = cast(dict[str, object], document).get("natives")
+    if not isinstance(reported, dict):
+        raise ValueError("bun_graph --natives reported no entry points")
+    values = cast(dict[str, object], reported)
+    addresses: dict[str, int] = {}
+    for field in fields(BunNatives):
+        value = values.get(field.name)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"bun_graph --natives did not locate {field.name}")
+        addresses[field.name] = value
+    natives = BunNatives(**addresses)
+    with source.open("rb") as stream:
+        elf = ELFFile(stream)
+        for name, address in addresses.items():
+            length = 5 if name == "bundled_source_clone_call" else NATIVE_CHECK_BYTES
+            if not _mapped_code(elf, address, length):
+                raise ValueError(f"bun_graph located {name} outside the private Bun's code")
+        call = _read_code(elf, stream, natives.bundled_source_clone_call, 5)
+    if (call[0] != 0xE8 or natives.bundled_source_clone_call + 5
+            + int.from_bytes(call[1:], "little", signed=True) != natives.latin1_clone):
+        raise ValueError("bun_graph's source clone call does not call its Latin-1 clone")
+    return natives
+
+
+def _natives_header(runtime: Path, natives: BunNatives) -> str:
+    """native_cache.c's private Bun ABI: the located addresses and the code libwire.node re-checks."""
+    with runtime.open("rb") as stream:
+        elf = ELFFile(stream)
+
+        def code(address: int) -> str:
+            return "".join(f"\\x{byte:02x}" for byte in _read_code(elf, stream, address, NATIVE_CHECK_BYTES))
+
+        return "\n".join((
+            "/* Generated by claude/unbundle.py from `bun_graph --natives`. */",
+            f"#define WIRE_BUN_TO_WTF {natives.bun_string_to_wtf:#x}",
+            f"#define WIRE_BUN_EMIT {natives.module_bytecode_generator:#x}",
+            f"#define WIRE_BUN_DESTROY {natives.cached_bytecode_destructor:#x}",
+            f"#define WIRE_BUN_FREE {natives.mi_free:#x}",
+            f'#define WIRE_BUN_EMIT_CODE "{code(natives.module_bytecode_generator)}"',
+            f'#define WIRE_BUN_DESTROY_CODE "{code(natives.cached_bytecode_destructor)}"',
+            f'#define WIRE_BUN_FREE_CODE "{code(natives.mi_free)}"')) + "\n"
+
+
 def _digest(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -373,35 +467,110 @@ def _prepare_code(directory: Path, output: Path, graph: BunGraph) -> dict[str, d
     return modules
 
 
-def _install_loader(directory: Path, graph: BunGraph) -> None:
+_IMPORT: Final = re.compile(r'import\{([^}]*)\}from"([^"]+)"')
+_EXPORT: Final = re.compile(r"export\{([^}]*)\}")
+_REQUIRE: Final = re.compile(r"(?<![\w$.])(" + IDENTIFIER + r")=import\.meta\.require(?![\w$(])")
+_CLASSIFIER: Final = re.compile(
+    r"function (" + IDENTIFIER + r')\(\)\{return typeof Bun<"u"&&Bun\.isStandaloneExecutable===!0\}')
+
+
+def _code_texts(directory: Path, graph: BunGraph) -> dict[str, str]:
+    """Every extracted JavaScript module's text, keyed by its /$bunfs/ name."""
+    return {module.name: (directory / module.relative_path).read_text(encoding="utf-8")
+            for module in graph.modules if module.loader == 1}
+
+
+def _sole(pattern: re.Pattern[str], texts: Mapping[str, str], contract: str,
+          literal: str) -> tuple[str, re.Match[str]]:
+    """The one match of a source contract across modules (prefiltered by a literal it contains)."""
+    found = [(name, match) for name, text in texts.items() if literal in text
+             for match in pattern.finditer(text)]
+    if len(found) != 1:
+        raise ValueError(f"Claude source contract '{contract}' matched {len(found)} times, not once")
+    return found[0]
+
+
+def _bindings(clause: str) -> list[tuple[str, str]]:
+    """`a,b as c` from an import or export clause, as (name, alias) pairs."""
+    pairs: list[tuple[str, str]] = []
+    for item in clause.split(","):
+        name, _, alias = item.strip().partition(" as ")
+        if name:
+            pairs.append((name, alias or name))
+    return pairs
+
+
+def _exported(text: str, local: str, contract: str) -> str:
+    names = {alias for clause in _EXPORT.finditer(text)
+             for name, alias in _bindings(clause.group(1)) if name == local}
+    if len(names) != 1:
+        raise ValueError(f"Claude source contract '{contract}' is not exported once")
+    return names.pop()
+
+
+def _imported(text: str, module: str, name: str, contract: str) -> str:
+    """The binding `text` gives the export `name` of `module`."""
+    names = {alias for clause in _IMPORT.finditer(text) if clause.group(2) == module
+             for original, alias in _bindings(clause.group(1)) if original == name}
+    if len(names) != 1:
+        raise ValueError(f"Claude source contract '{contract}' is not imported once")
+    return names.pop()
+
+
+def _require_aliases(texts: Mapping[str, str]) -> set[str]:
+    """Names for import.meta.require: the bundler runtime's binding and its importers' names."""
+    aliases: set[str] = set()
+    for module, text in texts.items():
+        if "=import.meta.require" not in text:
+            continue
+        for match in _REQUIRE.finditer(text):
+            local = match.group(1)
+            aliases.add(local)
+            exported = {alias for clause in _EXPORT.finditer(text)
+                        for name, alias in _bindings(clause.group(1)) if name == local}
+            for other in texts.values():
+                for clause in _IMPORT.finditer(other):
+                    if clause.group(2) == module:
+                        aliases.update(alias for name, alias in _bindings(clause.group(1)) if name in exported)
+    return aliases
+
+
+def _install_loader(directory: Path, graph: BunGraph) -> dict[str, str]:
     """Resolve extracted modules and filesystem assets relative to the installation."""
-    code_names = {module.name for module in graph.modules if module.loader == 1}
+    texts = _code_texts(directory, graph)
+    code_names = set(texts)
     by_name = {module.name: module for module in graph.modules}
     worker = PREFIX + "root/src/plugins/functionHooks/hooks-worker/hooks-worker.js"
     pattern = re.compile(r'''(["'])(/\$bunfs/[^"'\n]+)\1''')
-    for module in graph.modules:
-        if module.loader != 1:
-            continue
-        path = directory / module.relative_path
-        text = path.read_text(encoding="utf-8")
+    # Module paths passed to import syntax or to the bundler's import.meta.require stay
+    # /$bunfs/ names for the resolver; every other literal must name a relocatable file.
+    requires = "".join(rf"|(?<![\w$.]){re.escape(alias)}\(" for alias in sorted(_require_aliases(texts)))
+    importing = re.compile(r"(?:from|import|import\(|\.require\(" + requires + r")$")
+    for name, text in texts.items():
+        module = by_name[name]
 
         def relocate(match: re.Match[str]) -> str:
-            name = match.group(2)
-            target = by_name.get(name)
+            path = match.group(2)
+            target = by_name.get(path)
             if target is None:
                 return match.group()
-            before = text[max(0, match.start() - 30):match.start()]
-            if before.endswith(("from", "import", "import(", ".require(", "Be(")):
+            if importing.search(text, max(0, match.start() - 30), match.start()):
                 return match.group()
-            if target.loader != 5 and name != worker:
-                raise ValueError(f"Unsupported non-import JavaScript path in {module.name}: {name}")
+            if target.loader != 5 and path != worker:
+                raise ValueError(f"Unsupported non-import JavaScript path in {module.name}: {path}")
             physical = ("../assets/" if target.loader == 5 else "") + target.relative_path
             relative = posixpath.relpath(physical,
                                         posixpath.dirname(module.relative_path))
             return f"Bun.fileURLToPath(new URL({json.dumps('./' + relative)},import.meta.url))"
 
-        text = pattern.sub(relocate, text)
-        _ = path.write_text(text, encoding="utf-8")
+        texts[name] = pattern.sub(relocate, text)
+    # The native package classifier keys Claude's packaged-runtime paths off the compiled
+    # executable; the split runtime is that same package.
+    classifier, match = _sole(_CLASSIFIER, texts, "native-package classifier", "Bun.isStandaloneExecutable")
+    text = texts[classifier]
+    texts[classifier] = text[:match.start()] + f"function {match.group(1)}(){{return!0}}" + text[match.end():]
+    for name, text in texts.items():
+        _ = (directory / by_name[name].relative_path).write_text(text, encoding="utf-8")
     paths = {name: "./" + name.removeprefix(PREFIX) for name in code_names}
     for index, module in enumerate(graph.modules):
         if module.loader == 10:
@@ -434,54 +603,152 @@ def _install_loader(directory: Path, graph: BunGraph) -> None:
                                     posixpath.dirname(worker.removeprefix(PREFIX)))
         _ = path.write_text(f"import {json.dumps(relative)};\n"
                             f"await import({json.dumps('./' + original.name)});\n", encoding="utf-8")
-    native_format = directory / "root/chunk-cgr0tezp.js"
-    text = native_format.read_text(encoding="utf-8")
-    before = 'function sp(){return typeof Bun<"u"&&Bun.isStandaloneExecutable===!0}'
-    if text.count(before) != 1:
-        raise ValueError("Pinned native-package classifier did not match exactly once")
-    _ = native_format.write_text(text.replace(before, "function sp(){return!0}"), encoding="utf-8")
+    return {"native_package_classifier": classifier}
 
 
-def _patch_native_bridge(directory: Path, version: str) -> None:
-    """Attach to the native prompt queue and tee its sole SDK-event consumer."""
-    if version != "2.1.316":
-        raise ValueError("Native terminal bridge only supports Claude Code 2.1.316")
-    relative = "root/chunk-18hwfzwa.js"
-    module = directory / relative
-    text = module.read_text(encoding="utf-8")
-    mount = (
-        "let tsQueue=Nu();P(()=>TS_LOCAL.attach({engine:h._engine,get sessionId(){return ze.id},"
-        "enqueue:(frame)=>tsQueue.enqueue({value:frame.message.content,mode:\"prompt\","
-        "agentId:et(),uuid:frame.uuid,turnAttributionKey:frame.uuid,"
-        "origin:{kind:\"human\"},skipSlashCommands:!0}),"
-        "isBusy:()=>h.guard.isActive||h.isExternalLoading,"
-        "hasQueued:(uuid)=>tsQueue.getCommandQueue().some((command)=>command.uuid===uuid),"
-        "onReady:(socketPath)=>h._requireHost().addNotification({key:\"tasksolver-local-bridge-ready\","
-        "kind:\"feedback\",text:\"Python SDK socket: \"+socketPath,priority:\"immediate\",timeoutMs:15000}),"
-        "onError:(message)=>h._requireHost().addNotification({key:\"tasksolver-local-bridge-error\","
-        "kind:\"warning\",text:message,priority:\"immediate\"}),"
-        "interrupt:()=>h.cancel(\"remote\")}),[h,ze.id,tsQueue]);"
-    )
-    edits = (
-        ("return wvt(Xe,x,At,rt,kt,()=>", mount + "return wvt(Xe,x,At,rt,kt,()=>"),
-        ('x.input.enqueue({type:"user",message:We?.message??{role:"user",content:""},parent_tool_use_id:null});',
-         'x.input.enqueue({type:"user",message:We?.message??{role:"user",content:""},parent_tool_use_id:null,uuid:TS_LOCAL.userUuid(h,We?.uuid)});'),
-        ("let kt;try{Be?.();while(!0){let{value:At,done:It}=await h.next();if(It)break;",
-         "let kt;try{TS_LOCAL.begin(h,We?.uuid);Be?.();while(!0){let{value:At,done:It}=await h.next();if(It)break;TS_LOCAL.emit(h,We?.uuid,At);"),
-        ("finally{Xe()}return kt}function SIe(",
-         "finally{TS_LOCAL.finish(h,We?.uuid);Xe()}return kt}function SIe("),
-    )
-    for index, (before, after) in enumerate(edits):
-        if text.count(before) != 1:
-            raise ValueError(f"Native bridge source contract {index + 1} did not match exactly once")
-        text = text.replace(before, after)
+_CONSUMER: Final = re.compile(r"async function " + IDENTIFIER + r"\((\{engine:[^{}]*\})\)\{")
+_COMPONENT: Final = re.compile(r"function " + IDENTIFIER + r"\((\{turn:[^{}]*\})\)\{")
+_FUNCTION: Final = re.compile(r"(?:async )?function " + IDENTIFIER + r"\(")
+_AGENT: Final = re.compile(r"agentId:(" + IDENTIFIER + r')\(\),mode:"prompt",priority:"next",'
+                           r'origin:\{kind:"human"\},skipSlashCommands:!0')
+_EFFECT: Final = re.compile(r"(?<![\w$])(" + IDENTIFIER + r")=function\((" + IDENTIFIER + r"),(" + IDENTIFIER
+                            + r")\)\{return " + IDENTIFIER + r"\.H\.useEffect\(\2,\3\)\}")
+_QUEUE_HOOK: Final = re.compile(r"function (" + IDENTIFIER + r")\(\)\{return " + IDENTIFIER + r"\(("
+                                + IDENTIFIER + r")\)\?\?" + IDENTIFIER + r"\(\)\}")
+_QUEUE_PROVIDER: Final = re.compile(r"\{queue:(" + IDENTIFIER + r"),children:" + IDENTIFIER + r"\}=")
+# Members of Claude's turn, host and command queue that the mounted bridge calls.
+_BRIDGE_MEMBERS: Final = ("._engine", "._requireHost()", ".addNotification(", ".isExternalLoading",
+                          ".guard.isActive", ".getCommandQueue()", "turnAttributionKey:", '.cancel("remote")')
+_MOUNT: Final = (
+    "let tsQueue={queue}();{effect}(()=>TS_LOCAL.attach({engine:{turn}._engine,get sessionId(){return {session}.id},"
+    "enqueue:(frame)=>tsQueue.enqueue({value:frame.message.content,mode:\"prompt\","
+    "agentId:{agent}(),uuid:frame.uuid,turnAttributionKey:frame.uuid,"
+    "origin:{kind:\"human\"},skipSlashCommands:!0}),"
+    "isBusy:()=>{turn}.guard.isActive||{turn}.isExternalLoading,"
+    "hasQueued:(uuid)=>tsQueue.getCommandQueue().some((command)=>command.uuid===uuid),"
+    "onReady:(socketPath)=>{turn}._requireHost().addNotification({key:\"tasksolver-local-bridge-ready\","
+    "kind:\"feedback\",text:\"Python SDK socket: \"+socketPath,priority:\"immediate\",timeoutMs:15000}),"
+    "onError:(message)=>{turn}._requireHost().addNotification({key:\"tasksolver-local-bridge-error\","
+    "kind:\"warning\",text:message,priority:\"immediate\"}),"
+    "interrupt:()=>{turn}.cancel(\"remote\")}),[{turn},{session}.id,tsQueue]);"
+)
+
+
+def _parameters(clause: str, contract: str, keys: tuple[str, ...]) -> dict[str, str]:
+    """A function's `{key:local,...}` destructured parameters (no defaults or nesting)."""
+    names: dict[str, str] = {}
+    for item in clause[1:-1].split(","):
+        key, _, local = item.partition(":")
+        if not re.fullmatch(IDENTIFIER, key) or not re.fullmatch(IDENTIFIER, local):
+            raise ValueError(f"Claude source contract '{contract}' has unsupported parameters")
+        names[key] = local
+    if missing := [key for key in keys if key not in names]:
+        raise ValueError(f"Claude source contract '{contract}' lacks parameters {missing}")
+    return names
+
+
+def _within(pattern: str, text: str, header: re.Match[str], contract: str) -> re.Match[str]:
+    """The one match of `pattern` in the body that follows `header`, up to the next function."""
+    following = _FUNCTION.search(text, header.end())
+    end = len(text) if following is None else following.start()
+    found = list(re.compile(pattern).finditer(text, header.end(), end))
+    if len(found) != 1:
+        raise ValueError(f"Claude source contract '{contract}' matched {len(found)} times, not once")
+    return found[0]
+
+
+def _patch_native_bridge(directory: Path, graph: BunGraph) -> dict[str, str]:
+    """Attach to the native prompt queue and tee its sole SDK-event consumer.
+
+    Each edit is found by Claude's property names and string literals, never by its
+    minified names or chunk files, so a release that keeps these code shapes needs no port.
+    """
+    texts = _code_texts(directory, graph)
+    edits: dict[str, list[tuple[int, int, str]]] = {}
+    # The turn consumer: tag the queued prompt's user message and tee every engine frame.
+    consumer_module, consumer = _sole(_CONSUMER, texts, "SDK turn consumer", "({engine:")
+    text = texts[consumer_module]
+    names = _parameters(consumer.group(1), "SDK turn consumer", ("engine", "feed", "newMessages", "onRead"))
+    engine, feed = names["engine"], names["feed"]
+    user = _within(r"let (" + IDENTIFIER + r")=" + re.escape(names["newMessages"]) + r"\.findLast\(\(("
+                   + IDENTIFIER + r')\)=>\2\.type==="user"\);', text, consumer, "turn user message").group(1)
+    enqueue = _within(re.escape(f'{feed}.input.enqueue({{type:"user",message:{user}?.message??'
+                                '{role:"user",content:""},parent_tool_use_id:null});'),
+                      text, consumer, "turn input enqueue")
+    release = _within(r"(" + IDENTIFIER + r")=await " + re.escape(feed) + r"\.readLock\.acquire\(\)",
+                      text, consumer, "turn read lock").group(1)
+    loop = _within(r"let (" + IDENTIFIER + r");try\{" + re.escape(names["onRead"]) + r"\?\.\(\);while\(!0\)\{let\{value:("
+                   + IDENTIFIER + r"),done:(" + IDENTIFIER + r")\}=await " + re.escape(engine) + r"\.next\(\);if\(\3\)break;",
+                   text, consumer, "turn event loop")
+    result, frame, done = loop.group(1), loop.group(2), loop.group(3)
+    final = _within(re.escape(f"}}finally{{{release}()}}return {result}}}"), text, consumer, "turn release")
+    edits[consumer_module] = [
+        (enqueue.end() - 3, enqueue.end() - 3, f",uuid:TS_LOCAL.userUuid({engine},{user}?.uuid)"),
+        (loop.start(), loop.end(),
+         f"let {result};try{{TS_LOCAL.begin({engine},{user}?.uuid);{names['onRead']}?.();while(!0){{"
+         f"let{{value:{frame},done:{done}}}=await {engine}.next();if({done})break;"
+         f"TS_LOCAL.emit({engine},{user}?.uuid,{frame});"),
+        (final.start() + len("}finally{"), final.start() + len("}finally{"),
+         f"TS_LOCAL.finish({engine},{user}?.uuid);"),
+    ]
+    # The native turn's component, the one {turn:...} component that renders the session's
+    # tools: mount the bridge on its session, turn and prompt queue before that return.
+    session_view = (r"return " + IDENTIFIER + r"\((?:" + IDENTIFIER + r",)*\(\)=>\(\{session:(" + IDENTIFIER
+                    + r"),tools:")
+    components: list[tuple[str, re.Match[str], re.Match[str]]] = []
+    for name, other in texts.items():
+        for header in (_COMPONENT.finditer(other) if "({turn:" in other else ()):
+            try:
+                components.append((name, header, _within(session_view, other, header, "native turn session")))
+            except ValueError:
+                continue
+    if len(components) != 1:
+        raise ValueError(f"Claude source contract 'native turn component' matched {len(components)} times, not once")
+    component_module, component, view = components[0]
+    text = texts[component_module]
+    turn = _parameters(component.group(1), "native turn component", ("turn",))["turn"]
+    agents = {match.group(1) for match in _AGENT.finditer(text)}
+    if len(agents) != 1:
+        raise ValueError("Claude source contract 'prompt agent id' did not name one function")
+    react, effect = _sole(_EFFECT, texts, "React useEffect", ".H.useEffect(")
+    queues = [(name, hook.group(1)) for name, other in texts.items()
+              if "{queue:" in other and ".Provider,{value:" in other
+              for hook in _QUEUE_HOOK.finditer(other)
+              for provider in _QUEUE_PROVIDER.finditer(other)
+              if f"{hook.group(2)}.Provider,{{value:{provider.group(1)}," in other]
+    if len(queues) != 1:
+        raise ValueError(f"Claude source contract 'command queue hook' matched {len(queues)} times, not once")
+    queue_module, queue = queues[0]
+    bound = {
+        "turn": turn, "session": view.group(1), "agent": agents.pop(),
+        "effect": _imported(text, react, _exported(texts[react], effect.group(1), "React useEffect"),
+                            "React useEffect"),
+        "queue": _imported(text, queue_module, _exported(texts[queue_module], queue, "command queue hook"),
+                           "command queue hook"),
+    }
+    if missing := [member for member in _BRIDGE_MEMBERS if not any(member in other for other in texts.values())]:
+        raise ValueError(f"Claude source contract 'bridge members' lacks {missing}")
+    mount = re.sub(r"\{(turn|session|agent|effect|queue)\}", lambda match: bound[match.group(1)], _MOUNT)
+    edits.setdefault(component_module, []).append((view.start(), view.start(), mount))
     helper = directory / "tasksolver-native-bridge.mjs"
     shutil.copyfile(ROOT / "native_bridge.mjs", helper)
-    text = "import * as TS_LOCAL from '../tasksolver-native-bridge.mjs';\n" + text
-    _ = module.write_text(text, encoding="utf-8")
+    by_name = {item.name: item for item in graph.modules}
+    for name, changes in edits.items():
+        text = texts[name]
+        position = len(text)
+        for start, end, replacement in sorted(changes, reverse=True):
+            if end > position:
+                raise ValueError("Claude source contracts overlap")
+            text, position = text[:start] + replacement + text[end:], start
+        relative = posixpath.relpath(helper.name, posixpath.dirname(by_name[name].relative_path))
+        text = f"import * as TS_LOCAL from '{relative if relative.startswith('.') else './' + relative}';\n" + text
+        _ = (directory / by_name[name].relative_path).write_text(text, encoding="utf-8")
+    return {"turn_consumer": consumer_module, "turn_component": component_module,
+            **{f"bridge_{key}": value for key, value in sorted(bound.items())}}
 
 
-def _compile_helpers(output: Path, staging: Path) -> tuple[Path, list[dict[str, str | int]]]:
+def _compile_helpers(output: Path, staging: Path,
+                     natives: BunNatives) -> tuple[Path, list[dict[str, str | int]]]:
     compiler = shlex.split(os.environ.get("CC", "cc"))
     if not compiler:
         raise ValueError("CC must name a compiler")
@@ -494,10 +761,11 @@ def _compile_helpers(output: Path, staging: Path) -> tuple[Path, list[dict[str, 
                     if (Path(prefix) / "include/node/node_api.h").is_file()), None)
     if include is None:
         raise FileNotFoundError("Node's node_api.h is required to build libwire.node")
-    subprocess.run([*compiler, "-std=c11", "-shared", "-fPIC", "-O2", "-I", str(include),
+    _ = (staging / "bun_natives.h").write_text(_natives_header(output / "bun", natives), encoding="utf-8")
+    subprocess.run([*compiler, "-std=c11", "-shared", "-fPIC", "-O2", "-I", str(include), "-I", str(staging),
                     str(ROOT / "native_cache.c"), "-ldl", "-o", str(output / "libwire.node")], check=True)
     shim = staging / "utf8-shim.o"
-    subprocess.run([*compiler, "-std=c11", "-O2", "-c", "-DTASKSOLVER_BUN_UTF8_SHIM",
+    subprocess.run([*compiler, "-std=c11", "-O2", "-c", "-DTASKSOLVER_BUN_UTF8_SHIM", "-I", str(staging),
                     "-fno-pic", "-fno-pie", "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
                     "-fno-unwind-tables", str(ROOT / "native_cache.c"), "-o", str(shim)], check=True)
     with shim.open("rb") as stream:
@@ -506,7 +774,7 @@ def _compile_helpers(output: Path, staging: Path) -> tuple[Path, list[dict[str, 
         if section is None or any(item["sh_type"] in ("SHT_REL", "SHT_RELA") and item["sh_size"]
                                   for item in elf.iter_sections()):
             raise ValueError("UTF-8 shim must be self-contained native code without relocations")
-        patches = _append_utf8_shim(output / "bun", section.data())
+        patches = _append_utf8_shim(output / "bun", section.data(), natives)
     shutil.copyfile(ROOT / "cache.mjs", output / "cache.mjs")
     return launcher, patches
 
@@ -573,12 +841,13 @@ def unbundle(output: Path, *, binary: Path | None = None, bun_graph: str = "bun_
         stripped.unlink()
         module_metadata = _prepare_code(extracted, output, graph)
         directory, assets, modules = (output / name for name in ("source", "assets", "modules"))
-        _install_loader(directory, graph)
-        _patch_native_bridge(directory, selected_pin["version"])
+        source_contracts = _install_loader(directory, graph)
+        source_contracts |= _patch_native_bridge(directory, graph)
+        natives = _read_natives(source, executable)
         entrypoint = directory / graph.entry.relative_path
         bun = output / "bun"
         _clean_runtime(source, bun)
-        candidate, native_patches = _compile_helpers(output, staging)
+        candidate, native_patches = _compile_helpers(output, staging, natives)
         caches = _generate_caches(output, staging)
         hashes = _tree_hashes(directory, skip_cache=True)
         runtime = output / "claude"
@@ -595,6 +864,8 @@ def unbundle(output: Path, *, binary: Path | None = None, bun_graph: str = "bun_
             "helper_sha256": {name: _digest(output / name) for name in ("libwire.node", "cache.mjs")},
             "module_metadata": module_metadata,
             "native_patches": native_patches,
+            "bun_natives": asdict(natives),
+            "source_contracts": source_contracts,
             "native_bridge": True,
         }
         _ = manifest.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")

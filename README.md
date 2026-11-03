@@ -76,7 +76,7 @@ pixi run reconstruct --agy ~/Downloads/antigravity --claude=/path/to/claude --ta
 - **A push with nothing to adopt** only builds and runs the offline tests.
 - **A full release** is manual: run the workflow with `release` checked (Actions, *Runtime updates*, *Run workflow*, or `gh workflow run runtime-updates.yml -f release=true`). It adopts any outdated runtime first.
 
-An adoption that needs hand work (a patch conflict, an agy release whose hooked functions changed, a Claude Code release the native bridge does not support yet, a failing test) goes to a `runtime-updates/run-<id>` branch and an issue instead, and scheduled and push runs skip it while the issue is open. The same steps run locally:
+An adoption that needs hand work (a patch conflict, an agy release whose hooked functions changed, a Claude Code release whose code no longer matches the unbundler's source contracts or bun_graph's native signatures, a failing test) goes to a `runtime-updates/run-<id>` branch and an issue instead. While the issue is open, scheduled and push runs hold that runtime at the versions it names and still adopt the others; a newer release of the held runtime is tried again. The same steps run locally:
 
 ```bash
 python3 tools/runtimes.py check                 # pinned vs latest, per SDK and CLI

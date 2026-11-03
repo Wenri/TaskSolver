@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Track, adopt and release upstream versions of TaskSolver's four agent runtimes.
 
-    python3 tools/runtimes.py check [RUNTIME ...] [--github-output FILE]
+    python3 tools/runtimes.py check [RUNTIME ...] [--github-output FILE [--held FILE]]
+    python3 tools/runtimes.py title TARGETS
     python3 tools/runtimes.py adopt RUNTIME [--version VERSION] [--cli-version VERSION]
     python3 tools/runtimes.py docs [--check]
     python3 tools/runtimes.py bump
@@ -35,7 +36,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPResponse
 from pathlib import Path
@@ -215,6 +216,35 @@ class Status:
     @property
     def outdated(self) -> bool:
         return _key(self.latest) > _key(self.current)
+
+    @property
+    def target(self) -> str:
+        return f"{self.name} {self.latest}"
+
+
+# The workflow opens one issue titled HAND_WORK + targets when an adoption needs hand work.
+HAND_WORK: Final = "Runtime update needs hand work: "
+
+
+def hand_work_title(targets: str) -> str:
+    return HAND_WORK + targets
+
+
+def held_targets(titles: Iterable[str]) -> set[str]:
+    """The `component version` targets that open hand-work issues track."""
+    return {target.strip() for title in titles if title.startswith(HAND_WORK)
+            for target in title.removeprefix(HAND_WORK).split(",") if target.strip()}
+
+
+def adoptable(outdated: Sequence[Status], held: set[str]) -> list[Status]:
+    """The outdated components to adopt now: each runtime's, unless issues hold all its targets.
+
+    A held runtime is retried once upstream moves past the versions its issue names.
+    """
+    runtimes = {status.runtime for status in outdated}
+    held_runtimes = {runtime for runtime in runtimes
+                     if {status.target for status in outdated if status.runtime == runtime} <= held}
+    return [status for status in outdated if status.runtime not in held_runtimes]
 
 
 def _claude_cli_version(sdk: Path) -> str:
@@ -471,6 +501,8 @@ class _Arguments(argparse.Namespace):
     version: str | None = None
     cli_version: str | None = None
     github_output: str | None = None
+    held: str | None = None
+    targets: str = ""
     check: bool = False
 
 
@@ -481,6 +513,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     _ = check.add_argument("runtimes", nargs="*", metavar="RUNTIME", help=", ".join(RUNTIMES))
     _ = check.add_argument("--github-output", metavar="FILE",
                            help="append `runtimes` and `targets` (outdated ones) for a workflow step")
+    _ = check.add_argument("--held", metavar="FILE",
+                           help="open issue titles, one per line: hand-work issues hold their runtimes "
+                                "at the versions they name")
+    title = commands.add_parser("title", help="print the hand-work issue title for a check's targets")
+    _ = title.add_argument("targets", help="the check's `targets` output")
     adoption = commands.add_parser("adopt", help="move a runtime to a release (default: the latest)")
     _ = adoption.add_argument("runtime", choices=RUNTIMES)
     _ = adoption.add_argument("--version", help="the release to adopt (claude: the Agent SDK's)")
@@ -504,10 +541,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"{status.name:<10} pinned {status.current:<10} latest {status.latest:<10} {state}")
             if args.github_output:
                 outdated = [status for status in statuses if status.outdated]
-                runtimes = " ".join(dict.fromkeys(status.runtime for status in outdated))
+                held: set[str] = (held_targets(Path(args.held).read_text(encoding="utf-8").splitlines())
+                                  if args.held else set())
+                adopt_now = adoptable(outdated, held)
+                for status in outdated:
+                    if status not in adopt_now:
+                        print(f"held: {status.target} (an open issue tracks its hand work)")
+                runtimes = " ".join(dict.fromkeys(status.runtime for status in adopt_now))
                 with open(args.github_output, "a", encoding="utf-8") as output:
                     _ = output.write(f"runtimes={runtimes}\n")
-                    _ = output.write(f"targets={', '.join(f'{s.name} {s.latest}' for s in outdated)}\n")
+                    _ = output.write(f"targets={', '.join(status.target for status in adopt_now)}\n")
+        elif args.command == "title":
+            print(hand_work_title(args.targets))
         elif args.command == "adopt":
             if args.cli_version is not None and args.runtime != "claude":
                 parser.error("--cli-version applies to claude only")

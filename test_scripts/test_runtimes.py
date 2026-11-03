@@ -237,6 +237,29 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("| agy | ", runtimes.notes(["agy"]))
         self.assertIn("(updated)", runtimes.notes(["agy"]))
 
+    def test_hand_work_issues_hold_only_their_runtime_at_their_versions(self) -> None:
+        latest = {"agy": "9.9.9", "codex": runtimes.current("codex"), "claude-sdk": "9.9.9",
+                  "claude-cli": "9.9.9", "kimi": "9.9.9"}
+
+        def release(runtime: str) -> str:
+            return latest[runtime]
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(runtimes, "latest", side_effect=release):
+            output, issues = Path(directory) / "output", Path(directory) / "issues"
+            # claude is held at exactly these versions; kimi's issue names an older release.
+            _ = issues.write_text(runtimes.hand_work_title("claude-sdk 9.9.9, claude-cli 9.9.9") + "\n"
+                                  + runtimes.hand_work_title("kimi 1.0.0") + "\nAn unrelated issue\n")
+            self.assertEqual(runtimes.main(["check", "--github-output", str(output), "--held", str(issues)]), 0)
+            self.assertEqual(output.read_text(), "runtimes=agy kimi\ntargets=agy 9.9.9, kimi 9.9.9\n")
+            latest["claude-cli"] = "9.9.10"  # a newer Claude Code release retries the held runtime
+            output.unlink()
+            self.assertEqual(runtimes.main(["check", "--github-output", str(output), "--held", str(issues)]), 0)
+            self.assertEqual(output.read_text(), "runtimes=agy claude kimi\n"
+                             "targets=agy 9.9.9, claude-sdk 9.9.9, claude-cli 9.9.10, kimi 9.9.9\n")
+        with patch("sys.stdout", new_callable=io.StringIO) as printed:
+            self.assertEqual(runtimes.main(["title", "agy 9.9.9"]), 0)
+        self.assertEqual(printed.getvalue(), "Runtime update needs hand work: agy 9.9.9\n")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -93,9 +93,12 @@ input of `nix/hashes.json` changed since the commit that last wrote it, the offl
 `tools/check_bundle.py`, then `bump`, an atomic push of the commit and tag, and a GitHub release
 with `notes`. An adoption publishes a pre-release of the latest code; a push with nothing to adopt
 only builds and tests; a full release is a manual dispatch with `release`. A failed adoption goes
-to branch `runtime-updates/run-<id>` plus an issue. The Claude native bridge is gated to one Claude
-Code release (`claude/unbundle.py`), so a Claude bump always needs it revisited. The workflow does
-not build the Nix package; the downstream Nix configuration that pins TaskSolver does.
+to branch `runtime-updates/run-<id>` plus an issue titled by `runtimes.py title`. While it is open,
+`check --held` holds only its runtimes at the versions it names; the others still adopt, and a newer
+release of a held runtime is tried again. A Claude bump needs no port while upstream keeps the code
+shapes that `claude/unbundle.py`'s source contracts and `bun_graph --natives`' signatures describe;
+a miss fails the build naming the contract or entry point. The workflow does not build the Nix
+package; the downstream Nix configuration that pins TaskSolver does.
 
 **Toolchain.** Conda GCC `>=15,<16` (C++23; GCC 15's constexpr asm strings build agy's stubs).
 After a compiler-major upgrade or removal of a cached build environment, reconfigure the
@@ -280,7 +283,8 @@ Ctrl-C. `--no-attach` with `--web-port` forces web-only operation. Offline check
 `test_webterm_views.py`. Run them through Pixi; they send input only to local stubs.
 
 All Claude launches use the bundled bridged runtime. `claude/build_cli.py` verifies
-and caches the pristine pin, uses the externally provided `bun_graph` on `PATH`,
+and caches the pristine pin, uses the externally provided `bun_graph` on `PATH`
+(patchnar's, with `--natives`; the workflow pins it as `PATCHNAR_REF`),
 and installs a split runtime under the SDK's `_bundled/`:
 `bun` with `.bun` removed, a native `claude` launcher, `source/`, `assets/`,
 `modules/`, and `libwire.node`/`cache.mjs`. The entry disables upstream auto-updates;
@@ -292,10 +296,18 @@ and load mappings independently of the converter, allowing only declared patches
 Use pyelftools' header structures for ELF edits and pwntools for instruction
 assembly and binutils discovery; preserve native placement explicitly.
 Clear bytecode pointers in the extraction-only copy first: packed caches overlap.
-The sidecar loader needs a pin-checked five-byte call redirection to the compiled
-UTF-8 shim in `native_cache.c`; preserve every other native section and the original
-RELRO/stack headers. The appended RX section and redirected call are declared in
-the manifest. Do not rewrite Unicode source to ASCII: that changes raw templates.
+The already-bundled source loader clones files as Latin-1; its one call gets a
+five-byte redirection to the compiled UTF-8 shim in `native_cache.c`. Preserve every
+other native section and the original RELRO/stack headers. The appended RX section
+and redirected call are declared in the manifest. Do not rewrite Unicode source to
+ASCII: that changes raw templates. Never hard-code private Bun addresses:
+`bun_graph --natives` locates that call and the entry points `libwire.node` calls by
+masked instruction signatures that must match once in `.text`; `unbundle.py` checks
+the report against the binary and writes `bun_natives.h` (addresses and the code the
+addon re-checks). `KNOWN_NATIVES` in `test_claude_unbundle.py` holds hand-verified
+reports for known builds. Source patches are content contracts too: anchor them on
+Claude's property names and string literals, capture the minified names they need,
+require exactly one match across all modules, and never key them on chunk names.
 
 Generate JSC sidecars from the final modified source through `libwire.node`, using
 the private runtime's own emitter and proper native reference release. Do not reuse

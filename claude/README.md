@@ -25,7 +25,8 @@ a missing bundle is an error rather than a fallback to a global CLI.
 
 `pixi install` builds the runtime automatically, using
 [`bun_graph`](https://github.com/Wenri/patchnar/blob/main/src/bun_graph.cc) from
-`PATH`. Provide that executable in the build environment. [`vendor.json`](vendor.json)
+`PATH`. Provide that executable in the build environment: patchnar's, new enough
+for `--natives`, which reports the private Bun entry points the runtime calls. [`vendor.json`](vendor.json)
 pins a Claude Code release that is the one the SDK bundles or newer, since `tools/runtimes.py`
 follows Claude Code's own releases; [`build_cli.py`](build_cli.py) checks that, verifies the download's size
 and SHA256, checks the SDK's CLI version, then stages the complete runtime under
@@ -61,11 +62,17 @@ ripgrep and bfs remain in the private runtime; the launcher preserves their
 records are module metadata, not native addons; the external loader reconstructs
 its module records from the current source.
 
-The pinned Bun sidecar loader treats external source as Latin-1. The build redirects
-that one checked call to a small UTF-8 conversion shim, preserving Unicode and raw
-template contents. The manifest records the five changed instruction bytes and the
-added executable section. Other native sections, RELRO and stack settings are
-preserved and independently checked.
+Bun's loader clones already-bundled external source as Latin-1. The build redirects
+that one call to a small UTF-8 conversion shim, preserving Unicode and raw template
+contents. The manifest records the five changed instruction bytes and the added
+executable section. Other native sections, RELRO and stack settings are preserved
+and independently checked.
+The private Bun is stripped and every Claude Code release relinks it, so nothing is
+pinned to an address: `bun_graph --natives` finds that call and the entry points the
+cache emitter calls (the module bytecode generator, CachedBytecode's release, BunString
+conversion) by their instructions, each matching exactly once. The build checks the
+report against the executable, compiles the addresses and the code `libwire.node`
+re-checks into `bun_natives.h`, and records the report as the manifest's `bun_natives`.
 ELF edits use pyelftools' named header structures; pwntools assembles the relative
 call and locates binutils. The converter controls placement so existing native
 sections stay at their original addresses.
@@ -88,8 +95,12 @@ Claude's private Bun is necessary for this pin's native UI: stock Bun lacks
 The current JavaScript comes from the pinned executable.
 
 Every build installs checked JavaScript insertions that register the native
-session controls and forward real engine SDK frames before UI filtering. A changed
-upstream insertion point fails the build. The interactive UI automatically creates
+session controls and forward real engine SDK frames before UI filtering. Each is a
+content contract: found by Claude's property names and string literals, capturing the
+minified names it needs, and required to match exactly once across all modules, so a
+re-minified release with renamed chunks needs no port. A contract that stops matching
+fails the build, naming it; the manifest's `source_contracts` records the modules and
+names each build resolved. The interactive UI automatically creates
 a private socket, announces it in the terminal and emits one machine-readable
 `[tasksolver-claude-control]` JSON line to stderr. Managed screens use a socket in
 the manager's private directory, exposed as `screen.control_socket`.

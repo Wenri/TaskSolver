@@ -14,8 +14,10 @@
 #   none        a scheduled run with nothing to adopt.
 #
 # An adoption that needs hand work (patch conflicts, a failed agy conversion, a Claude Code release
-# the native bridge does not support yet, a failing test) is pushed to `runtime-updates/run-<id>`
-# and reported in an issue; scheduled and push runs skip that target while the issue stays open.
+# whose source or private Bun no longer matches the unbundler's contracts, a failing test) is pushed
+# to `runtime-updates/run-<id>` and reported in an issue. While that issue is open, scheduled and
+# push runs hold its runtimes at the versions it names and still adopt the others; a newer upstream
+# release of a held runtime is tried again.
 # The commits and tags this workflow pushes with GITHUB_TOKEN start no new runs. It keeps
 # nix/hashes.json current but does not build the Nix package: the downstream Nix configuration
 # that pins TaskSolver builds and tests it.
@@ -67,8 +69,9 @@ env:
     pyproject.toml README.md antigravity/vendor.json codex/vendor.json claude/vendor.json
     kimi/vendor.json codex/vendor claude/vendor/sdk kimi/vendor/kimi-code codex/pycodex/sdk.py
     nix/hashes.json
-  # github:Wenri/patchnar 0.22.0, which provides bun_graph for unbundling Claude Code.
-  PATCHNAR_REF: 6ce459b619135f5dde6d83c130dd9db92897ba67
+  # github:Wenri/patchnar 0.22.0, whose bun_graph unbundles Claude Code and (--natives) locates the
+  # private Bun entry points the split runtime calls.
+  PATCHNAR_REF: f0091edbc4e4f6b3cf956a210f07111d3b63f76b
 
 jobs:
   check:
@@ -89,17 +92,18 @@ jobs:
           REQUESTED: ${{ inputs.runtimes }}
           FULL_RELEASE: ${{ inputs.release }}
         run: |
+          held=()
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+            # Open hand-work issues hold their runtimes at the versions they name.
+            gh issue list --state open --limit 200 --json title --jq '.[].title' > "$RUNNER_TEMP/issues.txt"
+            held=(--held "$RUNNER_TEMP/issues.txt")
+          fi
           # shellcheck disable=SC2086  # REQUESTED is a space-separated list
-          python3 tools/runtimes.py check $REQUESTED --github-output "$RUNNER_TEMP/check.out"
+          python3 tools/runtimes.py check $REQUESTED --github-output "$RUNNER_TEMP/check.out" "${held[@]}" |
+            tee "$RUNNER_TEMP/check.log"
+          sed -n 's/^held: /::notice::Held /p' "$RUNNER_TEMP/check.log"
           runtimes=$(sed -n 's/^runtimes=//p' "$RUNNER_TEMP/check.out")
           targets=$(sed -n 's/^targets=//p' "$RUNNER_TEMP/check.out")
-          title="Runtime update needs hand work: $targets"
-          if [ -n "$runtimes" ] && [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] &&
-             gh issue list --state open --search "\"$title\" in:title" --json title --jq '.[].title' |
-             grep -qxF "$title"; then
-            echo "::notice::Skipping $targets: an open issue tracks its hand work"
-            runtimes="" targets=""
-          fi
           if [ "$FULL_RELEASE" = true ]; then mode=release
           elif [ -n "$runtimes" ]; then mode=prerelease
           elif [ "$GITHUB_EVENT_NAME" = push ]; then mode=validate
@@ -207,11 +211,15 @@ jobs:
               test_kimi_session test_kimi_bundle test_wire_session test_wire_process test_wire_bridge \
               test_wirecap_framing test_mcp_serializers test_terminal test_tasksolver_terminal test_webterm \
               test_webterm_views test_agy_symbols test_agy_stubs test_appresponse test_config \
-              test_system_messages test_agy_system_message_queue test_agy_system_message_api; do
+              test_system_messages test_agy_system_message_queue test_agy_system_message_api \
+              test_claude_native; do
             echo "::group::$test"
             pixi run python "test_scripts/$test.py" 2>&1 | tee -a "$RUNNER_TEMP/tests.log"
             echo "::endgroup::"
           done
+          # The native UI and bridge checks prove that a Claude release's source contracts still
+          # hold at run time, against a loopback model.
+          pixi run node --test test_scripts/test_claude_native_bridge.mjs 2>&1 | tee -a "$RUNNER_TEMP/tests.log"
 
       - name: Raise the version
         id: version
@@ -315,7 +323,7 @@ jobs:
             if [ -n "$log" ]; then tail -n 80 "$log"; fi
             echo '```'
           } > "$RUNNER_TEMP/issue.md"
-          title="Runtime update needs hand work: $TARGETS"
+          title=$(python3 tools/runtimes.py title "$TARGETS")
           number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
             --jq "map(select(.title == \"$title\"))[0].number // empty")
           if [ -n "$number" ]; then
