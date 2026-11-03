@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Sequence
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
@@ -103,6 +104,18 @@ def test_env_contract() -> None:
         check(env.get("KIMI_CODE_NO_AUTO_UPDATE") == "1", "auto-update off")
         env = linked_env(cap, base={"PYTHONHOME": "/mine", "CONDA_PREFIX": "/conda"})
         check(env.get("PYTHONHOME") == "/mine", "pre-set PYTHONHOME respected")
+        # The interpreter's own prefix is the home when it is a complete environment holding these
+        # packages (a Nix python.withPackages environment), even under someone else's CONDA_PREFIX.
+        prefix = os.path.join(td, "env")
+        lib = os.path.join(prefix, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}")
+        os.makedirs(os.path.join(lib, "site-packages"))
+        open(os.path.join(lib, "os.py"), "w").close()
+        with mock.patch.object(sys, "prefix", prefix):
+            check("PYTHONHOME" not in linked_env(cap, base={}), "no PYTHONHOME from a prefix without wirecap")
+            os.makedirs(os.path.join(lib, "site-packages", "wirecap"))
+            check(linked_env(cap, base={}).get("PYTHONHOME") == prefix, "PYTHONHOME from a complete env's prefix")
+            check(linked_env(cap, base={"CONDA_PREFIX": "/conda"}).get("PYTHONHOME") == prefix,
+                  "a complete env's prefix wins over another CONDA_PREFIX")
 
 
 def test_env_home_model_precedence() -> None:

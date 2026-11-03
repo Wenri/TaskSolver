@@ -121,8 +121,10 @@ class TestOptions(TypedDict):
 
 
 def running(pid: int) -> bool:
-    path: Final = Path(f"/proc/{pid}/stat")
-    return path.exists() and path.read_text().split(") ", 1)[1][0] != "Z"
+    try:  # the process may be reaped between any check and the read
+        return Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1][0] != "Z"
+    except FileNotFoundError:
+        return False
 
 
 def main() -> None:

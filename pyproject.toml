@@ -232,6 +232,9 @@ nodejs = ">=26,<27"
 
 [tool.pixi.tasks]
 typecheck = "basedpyright"
+# The agent runtimes' terminal screens: `pixi run tasksolver agy codex claude kimi [--web-port PORT]`,
+# as the Nix package's `tasksolver` command.
+tasksolver = "python -m tasksolver.terminal"
 # node-gyp finds python3-embed via PKG_CONFIG_PATH when compiling pymport from source.
 npm-install = { cmd = "npm_config_build_from_source=true CXXFLAGS='-std=c++17' npm install", env = { PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig" } }
 # PYTHONHOME: the pymport-embedded interpreter needs it to find the conda stdlib.

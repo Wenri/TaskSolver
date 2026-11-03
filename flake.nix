@@ -48,7 +48,9 @@
         in
         {
           tasksolver = tasksolverFor pkgs;
-          default = self.packages.${system}.tasksolver;
+          # `tasksolver` (`nix run`'s program: the terminal screens) and `tasksolver-python`.
+          launcher = self.packages.${system}.tasksolver.launcher;
+          default = self.packages.${system}.launcher;
         };
     };
 }

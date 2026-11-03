@@ -155,6 +155,10 @@ an N-API addon (`kimi/native/build/wirecap_node.node` in the source checkout) th
 global namespace (`dlopen(RTLD_GLOBAL|RTLD_NOLOAD)`) before `wire_start()` so Python's C extensions
 resolve the C API. Their exec/PTY clients use `WirePtyPopen` and `mp_child`, with the capture JSONL
 authoritative; the Codex SDK drives app-server over JSON-RPC and merges SDK results with capture.
+The bridge's `Py_InitializeEx` imports the capture modules through `site`, so each launcher sets
+the CLI's `PYTHONHOME` from `wirecap.runtime.vendor.python_home`: the running interpreter's prefix
+when it is a complete environment holding `wirecap` (a Nix `python.withPackages` environment, as
+the flake's `launcher` runs), else `CONDA_PREFIX` (pixi's editable workspace).
 
 - `__init__(api_key, task, model=...)`
 - `prepare_payload(question, max_tokens, ...)` → provider request dict (a staticmethod on the HTTP
@@ -262,8 +266,11 @@ own MCP and tool children. Tests: `test_codex_argv.py`, `test_codex_process.py`.
 
 **Interactive screens.** `tasksolver.terminal.open_terminal` launches the ordinary
 agy/Codex/Claude/Kimi UI in `wirecap.runtime.terminal.TerminalManager`, using a private
-tmux server. Pixi supplies tmux and ttyd >=1.7.4; non-Pixi environments must provide
-these executables on `PATH` (ttyd is only needed for browser viewing).
+tmux server. Pixi supplies tmux and ttyd >=1.7.4 (`pixi run tasksolver BACKEND...`). The Nix
+package pins nixpkgs' by store path (`TMUX_BIN`, `TTYD_BIN`, and pykimi's `NODE_BIN` for Node 26,
+substituted in `package.nix`), and its launcher's `tasksolver` command opens the screens
+(`nix/launcher.nix`, the flake's default package). Other environments must provide tmux and ttyd
+on `PATH` (ttyd is only needed for browser viewing).
 Python attaches its existing TTY; never open a desktop terminal. Screens
 keep running across detach until the manager closes. Each screen carries an inherited
 `TASKSOLVER_TERMINAL_SCREEN` ownership marker for descendant cleanup; preserve it in

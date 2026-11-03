@@ -12,7 +12,7 @@ authoritative for the returned turns).
 import os
 from collections.abc import Mapping, Sequence
 
-from wirecap.runtime.vendor import vendored
+from wirecap.runtime.vendor import python_home, vendored
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pycodex
 
@@ -47,9 +47,9 @@ def linked_env(capture: str | os.PathLike[str], module: str = "pycodex.codex_pro
     env["WIRE_ENABLE"] = "1"
     env["WIRE_MODULE"] = module
     env["WIRE_CAPTURE"] = os.path.abspath(capture)
-    conda = env.get("CONDA_PREFIX")
-    if conda and not env.get("PYTHONHOME"):
-        env["PYTHONHOME"] = conda          # embedded interpreter finds the conda stdlib + site-packages
+    home = python_home(env)
+    if home and not env.get("PYTHONHOME"):
+        env["PYTHONHOME"] = home           # embedded interpreter finds this env's stdlib + site-packages
     env.setdefault("CODEX_DISABLE_UPDATE_CHECK", "1")
     if extra_env:
         env.update(extra_env)

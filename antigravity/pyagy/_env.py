@@ -6,7 +6,7 @@ Used by AgyProcess and test_scripts/run-agy.sh.
 import os
 from collections.abc import Mapping, MutableMapping, Sequence
 
-from wirecap.runtime.vendor import vendored
+from wirecap.runtime.vendor import python_home, vendored
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pyagy
 
@@ -64,8 +64,9 @@ def linked_env(capture: str | os.PathLike[str] = "agy-capture.jsonl",
     # Point the embedded interpreter's prefix at the launching env (mirrors pycodex) so `site`
     # resolves pyagy/wirecap from THIS env's site-packages — the same copy the parent imported —
     # rather than the shim's build-env prefix. The env must be the shim's Python version.
-    if env.get("CONDA_PREFIX"):
-        env.setdefault("PYTHONHOME", env["CONDA_PREFIX"])
+    home = python_home(env)
+    if home:
+        env.setdefault("PYTHONHOME", home)
     if log:
         env["AGY_PROC_LOG"] = os.path.abspath(log)
     for key, value in (extra_env or {}).items():

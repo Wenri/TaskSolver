@@ -20,6 +20,9 @@ from typing import Self
 
 __all__ = ["TerminalManager", "TerminalScreen"]
 
+# A packager's tmux by absolute path (the Nix package pins nixpkgs'); None looks it up on PATH.
+TMUX_BIN: str | None = None
+
 _SCREEN_ENV = "TASKSOLVER_TERMINAL_SCREEN"
 _SESSION = "tasksolver"
 _FORMAT = "#{window_id}\t#{pane_id}"
@@ -219,9 +222,9 @@ class TerminalManager:
         self._env = dict(os.environ if env is None else env)
         self._env.pop("TMUX", None)
         self._env.pop("TMUX_PANE", None)
-        executable = shutil.which(tmux_bin or "tmux", path=self._env.get("PATH"))
+        executable = shutil.which(tmux_bin or TMUX_BIN or "tmux", path=self._env.get("PATH"))
         if executable is None:
-            raise FileNotFoundError(f"tmux executable not found: {tmux_bin or 'tmux'}")
+            raise FileNotFoundError(f"tmux executable not found: {tmux_bin or TMUX_BIN or 'tmux'}")
         self.tmux_bin = str(Path(executable).resolve())
         self._lock = threading.RLock()
         self._screens: dict[str, TerminalScreen] = {}

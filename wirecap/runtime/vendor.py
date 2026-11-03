@@ -14,9 +14,27 @@ resolve them the same three ways, so the lookup lives here once:
 There is deliberately NO env override: the artifacts are build-id/ABI coupled to the package (the
 shim's symbol offsets are resolved against exactly the vendored agy), so pointing this at an
 arbitrary binary produces a run without active books.
+
+``python_home`` picks the prefix those artifacts' embedded interpreter runs from.
 """
 import os
 import sys
+from collections.abc import Mapping
+
+
+def python_home(env: Mapping[str, str]) -> str | None:
+    """The prefix a linked CLI's embedded interpreter takes as ``PYTHONHOME``.
+
+    The native bridge's ``Py_InitializeEx`` runs ``site`` and imports the capture modules from that
+    prefix's site-packages, so it must be the environment this process runs from: this interpreter's
+    own prefix when it is a complete environment holding these packages (a Nix ``python.withPackages``
+    environment, or a conda one with TaskSolver installed), else the active conda or pixi environment
+    (``CONDA_PREFIX``; pixi's editable workspace keeps the packages outside site-packages). None keeps
+    the embedded interpreter's default: a virtual environment's prefix has no standard library."""
+    lib = os.path.join(sys.prefix, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}")
+    if os.path.isfile(os.path.join(lib, "os.py")) and os.path.isdir(os.path.join(lib, "site-packages", "wirecap")):
+        return sys.prefix
+    return env.get("CONDA_PREFIX") or None
 
 
 def vendored(pkg_dir: str, pkg_name: str, in_pkg_rel: str, sibling_rel: str) -> str:

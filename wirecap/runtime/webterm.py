@@ -15,6 +15,9 @@ from typing import BinaryIO, Self
 
 from .terminal import TerminalManager
 
+# A packager's ttyd by absolute path (the Nix package pins nixpkgs'); None looks it up on PATH.
+TTYD_BIN: str | None = None
+
 
 class WebTerminal:
     """Attach a browser to managed screens without starting another backend.
@@ -34,7 +37,7 @@ class WebTerminal:
             raise ValueError("port must be between 0 and 65535")
         if not 0 < timeout < float("inf"):
             raise ValueError("timeout must be finite and positive")
-        executable = shutil.which(ttyd_bin or "ttyd")
+        executable = shutil.which(ttyd_bin or TTYD_BIN or "ttyd")
         if executable is None:
             raise FileNotFoundError("web terminal viewing requires ttyd >=1.7.4 on PATH")
         # Earlier ttyd releases accept input by default and use the opposite flag.

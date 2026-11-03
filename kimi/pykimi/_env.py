@@ -14,7 +14,7 @@ import os
 import shutil
 from collections.abc import Mapping, Sequence
 
-from wirecap.runtime.vendor import vendored
+from wirecap.runtime.vendor import python_home, vendored
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # .../pykimi
 
@@ -33,9 +33,15 @@ KIMI_MAIN = _vendored("vendor/main.mjs", "../vendor/kimi-code/apps/kimi-code/dis
 WIRE_NODE_ADDON = _vendored("vendor/wirecap_node.node", "../native/build/wirecap_node.node")
 
 
+# A packager's Node 26 by absolute path (the Nix package pins nixpkgs'); None looks it up.
+NODE_BIN: str | None = None
+
+
 def node_bin() -> str:
-    """The Node runtime for the bundle — the env's node (the addon links the env's libpython,
-    same-env coupling as codex's gnu-dynamic build), else PATH."""
+    """The Node runtime for the bundle — a packager's pin, else the env's node (the addon links
+    the env's libpython, same-env coupling as codex's gnu-dynamic build), else PATH."""
+    if NODE_BIN:
+        return NODE_BIN
     conda = os.environ.get("CONDA_PREFIX")
     if conda:
         candidate = os.path.join(conda, "bin", "node")
@@ -68,9 +74,9 @@ def linked_env(capture: str | os.PathLike[str], module: str = "pykimi.kimi_proce
     env["WIRE_CAPTURE"] = os.path.abspath(capture)
     env["WIRE_NODE_ADDON"] = os.path.abspath(WIRE_NODE_ADDON)
     env.setdefault("WIRE_MAXCOPY", "8388608")
-    conda = env.get("CONDA_PREFIX")
-    if conda and not env.get("PYTHONHOME"):
-        env["PYTHONHOME"] = conda          # embedded interpreter finds the conda stdlib + site-packages
+    home = python_home(env)
+    if home and not env.get("PYTHONHOME"):
+        env["PYTHONHOME"] = home           # embedded interpreter finds this env's stdlib + site-packages
     env.setdefault("KIMI_CODE_NO_AUTO_UPDATE", "1")
     if extra_env:
         env.update(extra_env)

@@ -22,6 +22,10 @@
 # claude_agent_sdk/_bundled, where pyclaude looks for it, so the SDK comes
 # from python315 with the runtime added and the vendored copy stays out of the
 # wheel. agy and Claude Code are proprietary, hence `unfree`.
+#
+# Runtime tools are nixpkgs' packages, pinned by store path: tmux and ttyd for
+# the terminal screens, Node 26 for Kimi Code. passthru.launcher has the
+# `tasksolver` and `tasksolver-python` commands (nix/launcher.nix).
 {
   lib,
   stdenv,
@@ -40,6 +44,8 @@
   pkg-config,
   linuxHeaders,
   libclang,
+  tmux,
+  ttyd,
   src,
   patchnar,
   agyArchive ? null,
@@ -184,8 +190,8 @@ let
     postPatch = ''
       substituteInPlace claude/unbundle.py \
         --replace-fail \
-          '        candidate, native_patches = _compile_helpers(output, staging)' \
-          '        candidate, native_patches = _compile_helpers(output, staging)
+          '        candidate, native_patches = _compile_helpers(output, staging, natives)' \
+          '        candidate, native_patches = _compile_helpers(output, staging, natives)
               subprocess.run([os.environ["PATCHELF"], "--set-interpreter",
                               os.environ["TASKSOLVER_BUN_INTERPRETER"], str(bun)], check=True)'
     '';
@@ -229,129 +235,142 @@ let
 
   pnpm = pnpm_11.override { nodejs = nodejs_26; };
   kimiRoot = "kimi/vendor/kimi-code";
-in
-python.pkgs.buildPythonPackage {
-  pname = "tasksolver";
-  inherit version src;
-  pyproject = true;
 
-  postPatch = ''
-    # Nixpkgs' pnpm instead of `npx -y pnpm@<pin>`, offline over the
-    # pnpmConfigHook store; Codex is the pre-placed `codex`, and the Claude
-    # runtime ships with claudeSdk.
-    substituteInPlace setup.py \
-      --replace-fail 'pnpm = ["npx", "-y", pin]' 'pnpm = ["pnpm"]' \
-      --replace-fail '"install", "--frozen-lockfile",' '"install", "--offline", "--frozen-lockfile",' \
-      --replace-fail '["cargo", "build", "--release", "-p", "codex-cli"]' '["true"]' \
-      --replace-fail 'self._build_claude(root, env)' 'pass'
-    substituteInPlace pyproject.toml \
-      --replace-fail ', "claude/vendor/sdk/src"]' ']' \
-      --replace-fail ', "claude_agent_sdk*"]' ']'
-  '';
+  tasksolver = python.pkgs.buildPythonPackage {
+    pname = "tasksolver";
+    inherit version src;
+    pyproject = true;
 
-  build-system = with python.pkgs; [
-    setuptools
-    lief
-    pyelftools
-    capstone
-    pwntools
-  ];
-  dependencies =
-    (with python.pkgs; [
-      loguru
-      pillow
-      numpy
-      requests
-      tqdm
-      shortuuid
-      pymongo
-      openai
-      anthropic
-      anyio
-      sniffio
-      mcp
-      jsonschema
-      typing-extensions
-      pydantic
-      packaging
-      google-generativeai
-      pygit2
-    ])
-    ++ [ claudeSdk ];
-  # The bound is the Codex SDK's, above nixpkgs 26.05's packaging.
-  pythonRelaxDeps = [ "packaging" ];
+    postPatch = ''
+      # Nixpkgs' pnpm instead of `npx -y pnpm@<pin>`, offline over the
+      # pnpmConfigHook store; Codex is the pre-placed `codex`, and the Claude
+      # runtime ships with claudeSdk.
+      substituteInPlace setup.py \
+        --replace-fail 'pnpm = ["npx", "-y", pin]' 'pnpm = ["pnpm"]' \
+        --replace-fail '"install", "--frozen-lockfile",' '"install", "--offline", "--frozen-lockfile",' \
+        --replace-fail '["cargo", "build", "--release", "-p", "codex-cli"]' '["true"]' \
+        --replace-fail 'self._build_claude(root, env)' 'pass'
+      substituteInPlace pyproject.toml \
+        --replace-fail ', "claude/vendor/sdk/src"]' ']' \
+        --replace-fail ', "claude_agent_sdk*"]' ']'
+      # Nixpkgs' runtime tools by store path rather than PATH: tmux and ttyd
+      # for the terminal screens, Node 26 for Kimi Code.
+      substituteInPlace wirecap/runtime/terminal.py \
+        --replace-fail 'TMUX_BIN: str | None = None' 'TMUX_BIN: str | None = "${lib.getExe tmux}"'
+      substituteInPlace wirecap/runtime/webterm.py \
+        --replace-fail 'TTYD_BIN: str | None = None' 'TTYD_BIN: str | None = "${lib.getExe ttyd}"'
+      substituteInPlace kimi/pykimi/_env.py \
+        --replace-fail 'NODE_BIN: str | None = None' 'NODE_BIN: str | None = "${lib.getExe nodejs_26}"'
+    '';
 
-  nativeBuildInputs = [
-    cmake
-    ninja
-    pkg-config
-    nodejs_26
-    pnpm
-    (pnpmConfigHook.override { inherit pnpm; })
-  ];
-  # setup.py runs CMake and Ninja itself, in three trees.
-  dontUseCmakeConfigure = true;
-  dontUseNinjaBuild = true;
-  dontUseNinjaInstall = true;
-  dontUseNinjaCheck = true;
-
-  pnpmRoot = kimiRoot;
-  pnpmDeps = fetchPnpmDeps {
-    pname = "tasksolver-kimi-code";
-    inherit pnpm;
-    inherit ((lib.importJSON "${subtree kimiRoot}/apps/kimi-code/package.json")) version;
-    src = subtree kimiRoot;
-    fetcherVersion = 3;
-    hash = hashes.kimiPnpm.hash;
-  };
-
-  env = {
-    CONDA_PREFIX = prefix;
-    # pnpm would otherwise fetch the packageManager field's exact version.
-    npm_config_manage_package_manager_versions = "false";
-  };
-
-  preBuild = ''
-    export HOME=$TMPDIR
-    # Where antigravity/CMakeLists.txt caches the download it verified.
-    mkdir -p antigravity/build
-    tar -xzf ${agyArchive'} -C antigravity/build antigravity
-    echo "${agyPin.sha512}  antigravity/build/antigravity" | sha512sum -c
-    mv antigravity/build/antigravity antigravity/build/antigravity-${agyPin.archive_sha512}.raw
-    install -Dm755 ${codex}/bin/codex codex/vendor/codex-rs/target/release/codex
-  '';
-
-  # libagy.so's build-id is bound to symbols.json, and the natives' rpaths
-  # name the prefix: no strip, no rpath shrinking.
-  dontStrip = true;
-  dontPatchELF = true;
-
-  pythonImportsCheck = [ "tasksolver" ];
-  # pyclaude requires the bundled runtime where the SDK keeps it.
-  postInstallCheck = ''
-    PYTHONPATH=$out/${python.sitePackages}:$PYTHONPATH ${python.interpreter} -c \
-      'from pyclaude._env import bundled_cli; print(bundled_cli())'
-  '';
-
-  passthru = {
-    inherit
-      bridge
-      codex
-      prefix
-      claudeRuntime
-      claudeSdk
-      ;
-    agyArchive = agyArchive';
-    claudeExecutable = claudeExecutable';
-  };
-
-  meta = {
-    description = "Provider-agnostic VLM query flow with API, agent SDK, linked CLI and local backends";
-    homepage = "https://github.com/Wenri/TaskSolver";
-    license = with lib.licenses; [
-      gpl3Only
-      unfree
+    build-system = with python.pkgs; [
+      setuptools
+      lief
+      pyelftools
+      capstone
+      pwntools
     ];
-    platforms = [ "x86_64-linux" ];
+    dependencies =
+      (with python.pkgs; [
+        loguru
+        pillow
+        numpy
+        requests
+        tqdm
+        shortuuid
+        pymongo
+        openai
+        anthropic
+        anyio
+        sniffio
+        mcp
+        jsonschema
+        typing-extensions
+        pydantic
+        packaging
+        google-generativeai
+        pygit2
+      ])
+      ++ [ claudeSdk ];
+    # The bound is the Codex SDK's, above nixpkgs 26.05's packaging.
+    pythonRelaxDeps = [ "packaging" ];
+
+    nativeBuildInputs = [
+      cmake
+      ninja
+      pkg-config
+      nodejs_26
+      pnpm
+      (pnpmConfigHook.override { inherit pnpm; })
+    ];
+    # setup.py runs CMake and Ninja itself, in three trees.
+    dontUseCmakeConfigure = true;
+    dontUseNinjaBuild = true;
+    dontUseNinjaInstall = true;
+    dontUseNinjaCheck = true;
+
+    pnpmRoot = kimiRoot;
+    pnpmDeps = fetchPnpmDeps {
+      pname = "tasksolver-kimi-code";
+      inherit pnpm;
+      inherit ((lib.importJSON "${subtree kimiRoot}/apps/kimi-code/package.json")) version;
+      src = subtree kimiRoot;
+      fetcherVersion = 3;
+      hash = hashes.kimiPnpm.hash;
+    };
+
+    env = {
+      CONDA_PREFIX = prefix;
+      # pnpm would otherwise fetch the packageManager field's exact version.
+      npm_config_manage_package_manager_versions = "false";
+    };
+
+    preBuild = ''
+      export HOME=$TMPDIR
+      # Where antigravity/CMakeLists.txt caches the download it verified.
+      mkdir -p antigravity/build
+      tar -xzf ${agyArchive'} -C antigravity/build antigravity
+      echo "${agyPin.sha512}  antigravity/build/antigravity" | sha512sum -c
+      mv antigravity/build/antigravity antigravity/build/antigravity-${agyPin.archive_sha512}.raw
+      install -Dm755 ${codex}/bin/codex codex/vendor/codex-rs/target/release/codex
+    '';
+
+    # libagy.so's build-id is bound to symbols.json, and the natives' rpaths
+    # name the prefix: no strip, no rpath shrinking.
+    dontStrip = true;
+    dontPatchELF = true;
+
+    pythonImportsCheck = [ "tasksolver" ];
+    # pyclaude requires the bundled runtime where the SDK keeps it.
+    postInstallCheck = ''
+      PYTHONPATH=$out/${python.sitePackages}:$PYTHONPATH ${python.interpreter} -c \
+        'from pyclaude._env import bundled_cli; print(bundled_cli())'
+    '';
+
+    passthru = {
+      inherit
+        bridge
+        codex
+        prefix
+        claudeRuntime
+        claudeSdk
+        ;
+      agyArchive = agyArchive';
+      claudeExecutable = claudeExecutable';
+      # `tasksolver` (the terminal screens) and `tasksolver-python`, from an
+      # environment of their own.
+      launcher = callPackage ./nix/launcher.nix { inherit python tasksolver; };
+    };
+
+    meta = {
+      description = "Provider-agnostic VLM query flow with API, agent SDK, linked CLI and local backends";
+      homepage = "https://github.com/Wenri/TaskSolver";
+      license = with lib.licenses; [
+        gpl3Only
+        unfree
+      ];
+      platforms = [ "x86_64-linux" ];
+    };
   };
-}
+in
+tasksolver

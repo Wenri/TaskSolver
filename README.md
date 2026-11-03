@@ -93,14 +93,17 @@ Credentials are supplied via a `KeyChain` (loading files like `system/credential
 
 ### Nix
 
-The flake builds TaskSolver for x86_64-linux on nixpkgs 26.05, with Python 3.15 and all four runtimes:
+The flake builds TaskSolver for x86_64-linux on nixpkgs 26.05, with Python 3.15 and all four runtimes, and runs it without pixi:
 
 ```bash
-nix build github:Wenri/TaskSolver      # or .#default in a checkout
-nix/update-hashes                      # after a runtime bump: refresh nix/hashes.json
+nix run github:Wenri/TaskSolver -- agy codex claude kimi --web-port 7681   # the terminal screens
+nix profile install github:Wenri/TaskSolver   # `tasksolver` and `tasksolver-python` on PATH
+nix/update-hashes                             # after a runtime bump: refresh nix/hashes.json
 ```
 
-The build fetches the agy and Claude Code releases pinned in `antigravity/vendor.json` and `claude/vendor.json` and derives `libagy.so` and Claude's runtime from them on the building machine, as the editable workspace does; Codex and Kimi Code build from the vendored sources. Since agy and Claude Code are proprietary, the package is marked unfree: the flake's own `packages` allow it, and a consuming configuration sets `nixpkgs.config.allowUnfree`. In another flake, apply `overlays.deps` first. It adds what TaskSolver needs above nixpkgs: the pinned Claude Agent SDK, and LIEF 1.x and fixes for the Python 3.15 package set, which nixpkgs 26.05 does not build yet. Then apply `overlays.default`, which adds `pkgs.tasksolver`. `package.nix` also takes a consumer's own builds of the pinned runtimes (`agyArchive`, `claudeExecutable`, `codexBase`). The first build takes hours, since no binary cache holds the Python 3.15 set and Codex compiles from source. `nix/hashes.json` holds the hashes the pins cannot carry (the Codex crates, the Kimi Code pnpm store, the rusty_v8 assets and the SDK source), and `nix/update-hashes` recomputes them: each entry records what it was computed from, so a run recomputes only the entries whose inputs moved (`--force` recomputes all).
+The default package, `launcher` ([`nix/launcher.nix`](nix/launcher.nix)), has two commands on one Python environment: `tasksolver BACKEND...`, which opens the terminal screens as `pixi run tasksolver` does, and `tasksolver-python`, that environment's interpreter, for scripts (`tasksolver-python test_scripts/text_only.py --model claude-code`). The package depends on nixpkgs' tmux, ttyd (for `--web-port`) and Node 26 (for Kimi Code) by store path, so neither command changes `PATH`. The runtimes' embedded interpreters take the launching environment as `PYTHONHOME`, the role `CONDA_PREFIX` plays under pixi. `.#tasksolver` is the Python package alone, and `.#launcher.env` the environment.
+
+The build fetches the agy and Claude Code releases pinned in `antigravity/vendor.json` and `claude/vendor.json` and derives `libagy.so` and Claude's runtime from them on the building machine, as the editable workspace does; Codex and Kimi Code build from the vendored sources. Since agy and Claude Code are proprietary, the package is marked unfree: the flake's own `packages` allow it, and a consuming configuration sets `nixpkgs.config.allowUnfree`. In another flake, apply `overlays.deps` first. It adds what TaskSolver needs above nixpkgs: the pinned Claude Agent SDK, and LIEF 1.x and fixes for the Python 3.15 package set, which nixpkgs 26.05 does not build yet. Then apply `overlays.default`, which adds `pkgs.tasksolver`, with its commands as `pkgs.tasksolver.launcher`. `package.nix` also takes a consumer's own builds of the pinned runtimes (`agyArchive`, `claudeExecutable`, `codexBase`). The first build takes hours, since no binary cache holds the Python 3.15 set and Codex compiles from source. `nix/hashes.json` holds the hashes the pins cannot carry (the Codex crates, the Kimi Code pnpm store, the rusty_v8 assets and the SDK source), and `nix/update-hashes` recomputes them: each entry records what it was computed from, so a run recomputes only the entries whose inputs moved (`--force` recomputes all).
 
 ## Verify the CLI integrations
 
@@ -207,10 +210,12 @@ Run the native agy, Codex, Claude and Kimi interfaces in named screens inside th
 terminal that is already running Python:
 
 ```bash
-pixi run python -m tasksolver.terminal agy codex claude kimi
+pixi run tasksolver agy codex claude kimi
 ```
 
-Pixi supplies [tmux](https://github.com/tmux/tmux/wiki/Getting-Started) and
+Without pixi, the Nix package's `tasksolver` command takes the same arguments
+(`nix run github:Wenri/TaskSolver -- agy codex claude kimi`; see [Nix](#nix)).
+Pixi and the Nix package supply [tmux](https://github.com/tmux/tmux/wiki/Getting-Started) and
 [ttyd](https://github.com/tsl0922/ttyd) **1.7.4 or newer**.
 TaskSolver owns a private tmux server; your existing tmux sessions are unaffected.
 Press **Ctrl-b w** to choose a screen, **Ctrl-b n/p** for next/previous, and
@@ -257,7 +262,7 @@ configuration metadata before any prompt is sent.
 For browser viewing, run:
 
 ```bash
-pixi run python -m tasksolver.terminal agy codex claude kimi --web-port 7681
+pixi run tasksolver agy codex claude kimi --web-port 7681
 ```
 
 Each screen gets its own page: agy at port 7681, Codex at 7682, Claude at 7683 and
