@@ -13,7 +13,7 @@
     "binding": "sha256-Pk1f7Nvg+YpgF+adfKglGad/sDLF615M2+zdPi7FGdU="
   },
   "claudeAgentSdk": {
-    "tag": "v0.2.176",
-    "hash": "sha256-rOaat2IX4C041kOIBEnb+5CA6kjYgIuMCVYZU6MiI1U="
+    "tag": "v0.2.177",
+    "hash": "sha256-b5jNymkhtdWxNrzsLa3AyqXxitXNxznYIyHd/uvP3oo="
   }
 }
