@@ -147,8 +147,15 @@ in
 
         # Test suites with cases 3.15 changed under them.
         exceptiongroup = skipTests [ "test_nameerror_suggestions_in_group" ] pyprev.exceptiongroup;
+        # test_find_uses_provided_random passes or fails by xdist's test
+        # placement: 3.15's linecache warns that a traceback frame's module
+        # globals lack a __spec__.loader (an error under the suite's filters)
+        # unless that worker already cached the file.
         hypothesis = skipTestPaths [ "tests/cover/test_lookup.py" ] (
-          skipTests [ "test_interactive_example_does_not_emit_warning" ] pyprev.hypothesis
+          skipTests [
+            "test_interactive_example_does_not_emit_warning"
+            "test_find_uses_provided_random"
+          ] pyprev.hypothesis
         );
         meson-python = skipTests [
           "test_limited_api"
