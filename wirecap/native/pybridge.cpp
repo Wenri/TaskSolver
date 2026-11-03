@@ -7,6 +7,7 @@
 #define PY_SSIZE_T_CLEAN   /* Py_ssize_t lengths in Python C-API formats */
 #include <boost/python.hpp>   /* pulls in Python.h first, with the right guards */
 #include "wirecap.h"
+#include "wire_logline.h"
 
 #include <boost/thread.hpp>
 #include <boost/thread/condition_variable.hpp>
@@ -22,7 +23,7 @@
 
 namespace bp = boost::python;
 
-#define PYLOG(...) do { std::fprintf(stderr, "[wirecap/py] " __VA_ARGS__); std::fputc('\n', stderr); } while (0)
+#define PYLOG(...) wire_logline(STDERR_FILENO, "[wirecap/py] " __VA_ARGS__)
 
 namespace {
 

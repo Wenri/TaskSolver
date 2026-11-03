@@ -3,6 +3,7 @@
  */
 #include "goframe.h"
 #include "gomod.h"
+#include "wire_logline.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -11,8 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#define GLOG(...) do { std::fprintf(stderr, "[antigravity/gomod] " __VA_ARGS__); \
-                       std::fputc('\n', stderr); std::fflush(stderr); } while (0)
+#define GLOG(...) wire_logline(STDERR_FILENO, "[antigravity/gomod] " __VA_ARGS__)
 
 /* go1.27: FuncTabBucketSize = 256*MINFUNC, MINFUNC = 16. */
 #define GO_FUNCTAB_BUCKET 4096

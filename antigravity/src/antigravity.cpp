@@ -8,6 +8,7 @@
 #define _GNU_SOURCE
 #endif
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <link.h>
 #include <elf.h>
 #include <cstdio>
@@ -17,14 +18,14 @@
 #include "gocall.h"
 #include "goframe.h"
 #include "gomod.h"
+#include "wire_logline.h"
 #include "symbols_gen.h"
 #include "wirecap.h"
 #include <cstddef>
 
 /* ---- logging -------------------------------------------------------------- */
-static FILE *g_logf;
-#define LOG(...) do { FILE *f = g_logf ? g_logf : stderr; \
-    std::fprintf(f, "[antigravity] " __VA_ARGS__); std::fputc('\n', f); std::fflush(f); } while (0)
+static int g_logfd = -1;   /* AGY_PROC_LOG, opened for append; stderr when unset */
+#define LOG(...) wire_logline(g_logfd >= 0 ? g_logfd : STDERR_FILENO, "[antigravity] " __VA_ARGS__)
 
 extern "C" void agy_rt0_go(int argc, char **argv);
 
@@ -93,7 +94,7 @@ static void agy_init(void)
     if (std::getenv("_AGY_SBOXSERVE")) return;            /* skip sandbox-server children */
 
     const char *logpath = std::getenv("AGY_PROC_LOG");
-    if (logpath && *logpath) g_logf = std::fopen(logpath, "ae");
+    if (logpath && *logpath) g_logfd = open(logpath, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
     agy_set_real_exe(std::getenv("AGY_PROC_REAL_EXE"));
 
     /* build-id guard: refuse to enable books on a different libagy.so build */

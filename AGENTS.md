@@ -360,6 +360,9 @@ Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protoc
     GCC LTO (`TASKSOLVER_LTO`, default on); the archive holds fat LTO objects because codex's Rust
     link cannot read GCC bytecode. Repeated starts share one worker; shutdown drains accepted
     events, joins once and prevents restart. Event-kind strings must live for the process lifetime.
+    The bridge's and agy host's diagnostics go through `wire_logline.h`, one `write(2)` per line:
+    glibc writes printf output to an unbuffered stderr in 128-byte pieces, and the worker, embedded
+    Python and Go share fd 2, so `fprintf` plus `fputc('\n')` lines came out split.
     Shared regressions: `test_wire_process.py`, `test_wire_session.py`, `test_wire_bridge.py`,
     and `test_wirecap_framing.py`.
 - **`antigravity/`** → the `pyagy` package: Google's Go `agy` converted into `vendor/libagy.so`

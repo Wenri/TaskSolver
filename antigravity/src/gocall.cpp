@@ -4,6 +4,7 @@
 #endif
 #include "gomod.h"
 #include "gocall.h"
+#include "wire_logline.h"
 #include "procdef.h"
 #include "symbols_gen.h"
 #include "wirecap.h"
@@ -19,8 +20,7 @@
 #include <new>
 #include <string_view>
 
-#define GHLOG(...) do { std::fprintf(stderr, "[antigravity/gobook] " __VA_ARGS__); \
-                        std::fputc('\n', stderr); std::fflush(stderr); } while (0)
+#define GHLOG(...) wire_logline(STDERR_FILENO, "[antigravity/gobook] " __VA_ARGS__)
 
 /* Null until agy_enable_books, which runs before Go starts. */
 __attribute__((used, externally_visible)) agy_book_fn g_agy_on[BK_COUNT];
@@ -433,7 +433,6 @@ void agy_enable_books(uint64_t base, bool conv_id)
         n_asm += (h.mech == AGY_ASMGO);
         GHLOG("cgo-trampoline %.*s", (int)h.id.size(), h.id.data());
     }
-    std::fprintf(stderr, "[antigravity] cgocall-trampoline: installed %d/%d row(s) (%d asmcgo, %d full-cgo)\n",
+    wire_logline(STDERR_FILENO, "[antigravity] cgocall-trampoline: installed %d/%d row(s) (%d asmcgo, %d full-cgo)",
                  n_tramp, BK_COUNT, n_asm, n_tramp - n_asm);
-    std::fflush(stderr);
 }

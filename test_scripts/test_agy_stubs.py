@@ -377,7 +377,9 @@ class AgyStubTests(unittest.TestCase):
             with self.subTest(conversation_id=conv_id):
                 diagnostics, kinds = self.run_version({"AGY_PROC_CONV_ID": "1" if conv_id else None})
                 self.assertIn("build-id ok", diagnostics)
-                self.assertIn("-> RETURN", diagnostics)
+                # Whole lines: the embedded worker writes to stderr while these are logged.
+                self.assertRegex(diagnostics, r"(?m)^\[antigravity/gobook\] os\.readlink\(/proc/self/exe\): "
+                                              r"kernel=.+ -> RETURN .+$")
                 installed = set(re.findall(r"^\[antigravity/gobook\] cgo-trampoline (\w+)$",
                                            diagnostics, re.M))
                 expected = {row["id"] for row in enabled_books() if conv_id or row["id"] != "file_open"}
