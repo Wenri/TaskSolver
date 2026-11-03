@@ -25,11 +25,11 @@ let
     pkg.overridePythonAttrs (old: {
       disabledTestPaths = (old.disabledTestPaths or [ ]) ++ paths;
     });
-in
-{
+
   # LIEF 1.x for the agy conversion (antigravity/symbols/make_libagy.py);
-  # nixpkgs has 0.17.0. Each python3xxPackages.lief is this package's `py`
-  # output for that interpreter, so it follows.
+  # nixpkgs has 0.17.0. Only Python 3.15's lief takes it (below): nixpkgs'
+  # nodejs links the top-level lief from 25.6 on, so replacing that one
+  # would build every nodejs from source.
   lief = prev.lief.overrideAttrs (
     finalAttrs: _: {
       version = "1.0.0";
@@ -41,7 +41,8 @@ in
       };
     }
   );
-
+in
+{
   pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
     (_: pyprev: {
       # The Claude Agent SDK at claude/vendor.json's tag (nixpkgs has 0.2.82),
@@ -73,6 +74,9 @@ in
     (
       _: pyprev:
       lib.optionalAttrs (pyprev.pythonAtLeast "3.15") {
+        # LIEF 1.x's `py` output, as python-packages.nix makes each
+        # python3xxPackages.lief from the top-level one.
+        lief = (pyprev.toPythonModule (lief.override { python3 = pyprev.python; })).py;
         # TaskSolver's bound (pyproject's build-system, >=0.33,<0.34): the
         # Claude runtime's ELF edit passes Container.update() keywords that
         # 0.32 rejects. 3.15 is TaskSolver's interpreter, so the bump stays here.
