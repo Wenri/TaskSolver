@@ -62,11 +62,11 @@ current() {
 }
 prefetch() { nix store prefetch-file --json "$@" | jq -r .hash; }
 # drv ATTR: the store path of ATTR's derivation, as the file now stands.
-drv() { nix eval --raw "$flake#default.$1.drvPath"; }
+drv() { nix eval --raw "$flake#tasksolver.$1.drvPath"; }
 # fod ATTR: the hash Nix reports for ATTR built with its hash emptied.
 fod() {
   local log
-  log=$(nix build --no-link "$flake#default.$1" 2>&1 || true)
+  log=$(nix build --no-link "$flake#tasksolver.$1" 2>&1 || true)
   sed -n 's/^ *got: *\(sha256-[A-Za-z0-9+/=]*\)$/\1/p' <<<"$log" | tail -1 | grep . ||
     { echo "$log" >&2; echo "update-hashes: no hash for $1" >&2; return 1; }
 }
