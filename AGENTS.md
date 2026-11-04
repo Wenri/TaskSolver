@@ -95,17 +95,21 @@ with `notes`. An adoption publishes a pre-release of the latest code; a push wit
 only builds and tests; a full release is a manual dispatch with `release`. A failed adoption goes
 to branch `runtime-updates/run-<id>` plus an issue titled by `runtimes.py title`. While it is open,
 `check --held` holds only its runtimes at the versions it names; the others still adopt, and a newer
-release of a held runtime is tried again. A Claude bump needs no port while upstream keeps the code
+release of a held runtime is tried again. To retry the same versions after a fix, close the issue
+and delete its branch before pushing the fix to `main`: the push's run reads the open issues when
+it checks. A Claude bump needs no port while upstream keeps the code
 shapes that `claude/unbundle.py`'s source contracts and `bun_graph --natives`' signatures describe;
 a miss fails the build naming the contract or entry point. The workflow does not build the Nix
 package; the downstream Nix configuration that pins TaskSolver does.
 
 **Toolchain.** Conda GCC `>=15,<16` (C++23; GCC 15's constexpr asm strings build agy's stubs).
-After a compiler-major upgrade or removal of a cached build environment, reconfigure the
-native CMake trees (`antigravity/build`, `wirecap/native/build`, `kimi/native/build`) from
-scratch, but keep `antigravity/build/antigravity-*.raw`. `CMakeCache.txt` keeps the compiler path
-it first found, so a stale tree fails with `goframe.cpp: #error "agy stubs require GCC 15 …"` even
-when the build environment has GCC 15.
+After a compiler-major upgrade or removal of a cached build environment (`pixi reinstall` removes
+the earlier `.pixi/bld/tasksolver/*` environments), reconfigure the native CMake trees
+(`antigravity/build`, `wirecap/native/build`, `kimi/native/build`) from scratch, but keep
+`antigravity/build/antigravity-*.raw`. `CMakeCache.txt` keeps the compiler and ninja paths it
+first found, so a stale tree fails with `goframe.cpp: #error "agy stubs require GCC 15 …"` even
+when the build environment has GCC 15, or with `Running '…/bin/ninja' '--version' failed with:
+no such file or directory` once that environment is gone.
 
 After source changes run `pixi reinstall --locked tasksolver` in the consuming workspace (without
 `--locked` if dependencies changed); an editable source path does not rebuild natives. Never
