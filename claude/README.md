@@ -53,7 +53,9 @@ claude/build/editable/claude
 Choose a new output directory; the tool refuses an existing path. Move the whole
 runtime directory together. Source imports, workers and browser helpers resolve
 relative to it. The entry loader disables upstream auto-updates; update the
-package's pin and rebuild to change Claude versions.
+package's pin and rebuild to change Claude versions. The runtime never registers
+itself as the OS `claude-cli://` handler, which upstream does from interactive
+sessions (a source contract skips it).
 
 Removing `.bun` removes the original JavaScript, bytecode and assets from the
 executable and shrinks its load mapping. Statically linked native helpers such as

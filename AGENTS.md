@@ -299,8 +299,10 @@ and caches the pristine pin, uses the externally provided `bun_graph` on `PATH`
 and installs a split runtime under the SDK's `_bundled/`:
 `bun` with `.bun` removed, a native `claude` launcher, `source/`, `assets/`,
 `modules/`, and `libwire.node`/`cache.mjs`. The entry disables upstream auto-updates;
-update the pin and rebuild instead. There is no raw runtime launch option or PATH
-fallback. `pixi run python -m claude.unbundle --output PATH` creates an isolated copy.
+update the pin and rebuild instead. A source contract keeps interactive sessions from
+registering the runtime as the OS `claude-cli://` handler. There is no raw runtime
+launch option or PATH fallback. `pixi run python -m claude.unbundle --output PATH`
+creates an isolated copy.
 Keep the private Bun (`Bun.ant`) and native helper dispatch; `.node` addons move to
 `modules/`, while statically linked helpers remain in Bun. Validate native sections
 and load mappings independently of the converter, allowing only declared patches.

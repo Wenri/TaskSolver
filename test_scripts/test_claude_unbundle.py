@@ -312,6 +312,14 @@ class PinnedRuntimeTests(unittest.TestCase):
         self.assertEqual(probe.returncode, 0, probe.stderr)
         self.assertEqual(probe.stdout.strip(), "external graph with native cells")
 
+    def test_runtime_skips_the_os_deep_link_registration(self) -> None:
+        manifest = json_loads_object((self.package / "manifest.json").read_text())
+        module = json_object(manifest["source_contracts"])["deep_link_registration"]
+        assert isinstance(module, str)
+        text = (self.source / module.removeprefix("/$bunfs/")).read_text(encoding="utf-8")
+        self.assertIn("if(!0)return;", text)
+        self.assertNotIn('.disableDeepLinkRegistration==="disable")return;', text)
+
     def test_launcher_preserves_disabled_project_configuration_autoloading(self) -> None:
         workspace = self.directory / "project-with-bun-config"
         workspace.mkdir()

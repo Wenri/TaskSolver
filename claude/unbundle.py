@@ -472,6 +472,7 @@ _EXPORT: Final = re.compile(r"export\{([^}]*)\}")
 _REQUIRE: Final = re.compile(r"(?<![\w$.])(" + IDENTIFIER + r")=import\.meta\.require(?![\w$(])")
 _CLASSIFIER: Final = re.compile(
     r"function (" + IDENTIFIER + r')\(\)\{return typeof Bun<"u"&&Bun\.isStandaloneExecutable===!0\}')
+_DEEP_LINK: Final = re.compile(r"if\(" + IDENTIFIER + r'\(\)\.disableDeepLinkRegistration==="disable"\)return;')
 
 
 def _code_texts(directory: Path, graph: BunGraph) -> dict[str, str]:
@@ -569,6 +570,12 @@ def _install_loader(directory: Path, graph: BunGraph) -> dict[str, str]:
     classifier, match = _sole(_CLASSIFIER, texts, "native-package classifier", "Bun.isStandaloneExecutable")
     text = texts[classifier]
     texts[classifier] = text[:match.start()] + f"function {match.group(1)}(){{return!0}}" + text[match.end():]
+    # Interactive sessions register the OS claude-cli:// handler as ~/.local/bin/claude or
+    # process.execPath, this installation's launcher, and xdg-mime then rewrites mimeapps.list;
+    # a packaged runtime skips that, as disableDeepLinkRegistration does.
+    deep_link, match = _sole(_DEEP_LINK, texts, "deep-link registration", "disableDeepLinkRegistration")
+    text = texts[deep_link]
+    texts[deep_link] = text[:match.start()] + "if(!0)return;" + text[match.end():]
     for name, text in texts.items():
         _ = (directory / by_name[name].relative_path).write_text(text, encoding="utf-8")
     paths = {name: "./" + name.removeprefix(PREFIX) for name in code_names}
@@ -603,7 +610,7 @@ def _install_loader(directory: Path, graph: BunGraph) -> dict[str, str]:
                                     posixpath.dirname(worker.removeprefix(PREFIX)))
         _ = path.write_text(f"import {json.dumps(relative)};\n"
                             f"await import({json.dumps('./' + original.name)});\n", encoding="utf-8")
-    return {"native_package_classifier": classifier}
+    return {"native_package_classifier": classifier, "deep_link_registration": deep_link}
 
 
 _CONSUMER: Final = re.compile(r"async function " + IDENTIFIER + r"\((\{engine:[^{}]*\})\)\{")
