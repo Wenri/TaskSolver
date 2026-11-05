@@ -21,7 +21,7 @@ from elftools.common.exceptions import ELFError
 from elftools.construct import Container
 from elftools.elf.constants import P_FLAGS, SH_FLAGS
 from elftools.elf.elffile import ELFFile
-from pwnlib.asm import asm, which_binutils
+from pwnlib.asm import asm
 from pwnlib.util.misc import align
 
 from .build_cli import CLIPin, _load_pin, matches
@@ -193,83 +193,78 @@ def _read_graph(binary: Path) -> BunGraph:
                     None if hashes is None else section_offset + 8 + hashes)
 
 
-def _source_only(source: Path, target: Path, graph: BunGraph) -> None:
-    """Prevent old bun_graph from expanding shared bytecode once per module."""
-    shutil.copyfile(source, target)
-    target.chmod(0o600)
-    with target.open("r+b") as stream:
-        for module in graph.modules:
-            stream.seek(module.record_offset + 24)
-            _ = stream.write(bytes(16))  # bytecode and module-info pointer pairs
+BUN_PAYLOAD_SEGMENT = 0x6FB00002   # PT_BUN_PAYLOAD: spans the payload since Bun's ahead-of-time compiler
+_SEGMENT_FIELDS = ("p_type", "p_offset", "p_vaddr", "p_paddr", "p_filesz", "p_memsz", "p_flags", "p_align")
 
 
-def _clean_runtime(source: Path, target: Path) -> None:
-    """Remove the application payload while retaining every native allocation."""
-    objcopy = os.environ.get("OBJCOPY") or which_binutils("objcopy", arch="amd64")
-    subprocess.run([objcopy, "--remove-section", ".bun", str(source), str(target)], check=True)
+def _clean_runtime(source: Path, target: Path, bun_graph: str) -> None:
+    """Have bun_graph remove the application payload, then check every native allocation here.
+
+    ``bun_graph --clean`` knows both of Bun's payload layouts: the writable PT_LOAD grown over
+    the payload, and PT_BUN_PAYLOAD with up to three PT_LOAD pieces. Against the original, the
+    program headers other than the payload's, every loaded section's bytes, the entry point and
+    the cleared standalone-graph pointer are checked independently of it.
+    """
+    _ = subprocess.run([bun_graph, str(source), "--clean", str(target)], check=True,
+                       capture_output=True, text=True, timeout=300)
     target.chmod(0o755)
-    # objcopy drops GNU_RELRO and the stack-size hint. Keep the original table,
-    # changing only the LOAD sizes that removed the application payload.
-    with source.open("rb") as original, target.open("r+b") as cleaned:
-        old, new = ELFFile(original), ELFFile(cleaned)
-        offset = old["e_phoff"]
-        if (old.elfclass != 64 or old["e_phentsize"] != old.structs.Elf_Phdr.sizeof()
-                or new["e_phoff"] != offset):
-            raise ValueError("Unsupported ELF program-header layout")
-        headers = [segment.header.copy() for segment in old.iter_segments()]
-        loads = {segment["p_vaddr"]: segment for segment in new.iter_segments()
-                 if segment["p_type"] == "PT_LOAD"}
-        application = old.get_section_by_name(".bun")
-        if application is None:
-            raise ValueError("Private Bun input is missing its application section")
-        for index, segment in enumerate(old.iter_segments()):
-            if segment["p_type"] == "PT_LOAD":
-                after = loads.get(segment["p_vaddr"])
-                if after is None or any(after[key] != segment[key] for key in (
-                        "p_offset", "p_vaddr", "p_paddr", "p_flags", "p_align")):
-                    raise ValueError("objcopy changed a native LOAD mapping")
-                contains_application = (segment["p_vaddr"] <= application["sh_addr"]
-                                        < segment["p_vaddr"] + segment["p_memsz"])
-                if not contains_application and any(after[key] != segment[key] for key in (
-                        "p_filesz", "p_memsz")):
-                    raise ValueError("objcopy resized a LOAD unrelated to the application")
-                headers[index].update(p_filesz=after["p_filesz"], p_memsz=after["p_memsz"])
-        cleaned.seek(offset)
-        for header in headers:
-            old.structs.Elf_Phdr.build_stream(header, cleaned)
-        cleaned.seek(0)
-        new.header["e_phnum"] = len(headers)
-        new.structs.Elf_Ehdr.build_stream(new.header, cleaned)
     with source.open("rb") as original, target.open("rb") as cleaned:
         old, new = ELFFile(original), ELFFile(cleaned)
-        bun, data = old.get_section_by_name(".bun"), old.get_section_by_name(".data")
-        if bun is None or data is None or new.get_section_by_name(".bun") is not None:
+        if (old.elfclass != 64 or old["e_phentsize"] != old.structs.Elf_Phdr.sizeof()
+                or new["e_phoff"] != old["e_phoff"] or new["e_phnum"] != old["e_phnum"]):
+            raise ValueError("Unsupported ELF program-header layout")
+        application, data = old.get_section_by_name(".bun"), old.get_section_by_name(".data")
+        if application is None or data is None or new.get_section_by_name(".bun") is not None:
             raise ValueError("Unexpected clean Bun ELF layout")
         if new["e_entry"] != old["e_entry"]:
-            raise ValueError("objcopy changed the private Bun entry point")
+            raise ValueError("bun_graph changed the private Bun entry point")
+        start = application["sh_addr"]
+        before, after = list(old.iter_segments()), list(new.iter_segments())
+        spans = [index for index, header in enumerate(before) if header["p_type"] == BUN_PAYLOAD_SEGMENT]
+        if len(spans) > 1:
+            raise ValueError("Private Bun input maps its application twice")
+        reserved: set[int] = set(spans)
+        if spans:
+            span = before[spans[0]]
+            for index in range(spans[0] + 1, min(spans[0] + 4, len(before))):
+                header = before[index]
+                inside = (header["p_type"] == "PT_LOAD" and span["p_vaddr"] <= header["p_vaddr"]
+                          and header["p_vaddr"] + header["p_memsz"] <= span["p_vaddr"] + span["p_memsz"])
+                if header["p_type"] != "PT_NULL" and not inside:
+                    break
+                reserved.add(index)
+        for index, (was, now) in enumerate(zip(before, after)):
+            if index in reserved:
+                if now["p_type"] != "PT_NULL" or any(now[key] for key in _SEGMENT_FIELDS[1:]):
+                    raise ValueError("bun_graph kept a header of the application payload")
+            elif (not spans and was["p_type"] == "PT_LOAD"
+                  and was["p_vaddr"] <= start < was["p_vaddr"] + was["p_memsz"]):
+                # The section layout: the writable PT_LOAD shrinks back to its native sections.
+                if (any(now[key] != was[key] for key in _SEGMENT_FIELDS if key not in ("p_filesz", "p_memsz"))
+                        or now["p_memsz"] < now["p_filesz"] or now["p_vaddr"] + now["p_memsz"] > start):
+                    raise ValueError("bun_graph did not shrink the application's LOAD mapping")
+            elif any(now[key] != was[key] for key in _SEGMENT_FIELDS):
+                raise ValueError("bun_graph changed a native program header")
         for section in old.iter_sections():
             if not section["sh_flags"] & SH_FLAGS.SHF_ALLOC or section.name == ".bun":
                 continue
-            after = new.get_section_by_name(section.name)
-            # A NOBITS section (.bss, .tbss) has no file bytes: its sh_offset is nominal, and
-            # objcopy realigns it (2.1.318's .tbss moved 8 bytes). The program headers, kept
-            # from the original, place it in memory.
+            copy = new.get_section_by_name(section.name)
+            # A NOBITS section (.bss, .tbss) has no file bytes: its offset is nominal, and the
+            # program headers place it in memory.
             stored = section["sh_type"] != "SHT_NOBITS"
-            if (after is None or any(after[key] != section[key] for key in ("sh_type", "sh_addr", "sh_size"))
-                    or stored and (after["sh_offset"] != section["sh_offset"] or after.data() != section.data())):
-                raise ValueError(f"objcopy changed native section {section.name}")
-        # The pinned ELF stores BUN_COMPILED.size in the padding after .data.
-        # Removing .bun must clear it and remove the old payload's mapping.
-        marker = data["sh_offset"] + data["sh_size"]
+            if (copy is None or any(copy[key] != section[key] for key in ("sh_type", "sh_addr", "sh_size"))
+                    or stored and (copy["sh_offset"] != section["sh_offset"] or copy.data() != section.data())):
+                raise ValueError(f"bun_graph changed native section {section.name}")
+        # The linked `.bun`, BUN_COMPILED in the padding after .data, holds the payload's
+        # address: the clean runtime must read zero there and map nothing at that address.
+        marker = -(-(data["sh_offset"] + data["sh_size"]) // 8) * 8
         original.seek(marker)
         cleaned.seek(marker)
-        if (int.from_bytes(original.read(8), "little") != bun["sh_addr"]
-                or cleaned.read(8) != bytes(8)):
+        if int.from_bytes(original.read(8), "little") != start or cleaned.read(8) != bytes(8):
             raise ValueError("Private Bun standalone-graph pointer was not cleared")
-        for segment in new.iter_segments():
-            if (segment["p_type"] == "PT_LOAD"
-                    and segment["p_vaddr"] <= bun["sh_addr"]
-                    < segment["p_vaddr"] + segment["p_memsz"]):
+        for header in after:
+            if (header["p_type"] in ("PT_LOAD", BUN_PAYLOAD_SEGMENT)
+                    and header["p_vaddr"] <= start < header["p_vaddr"] + header["p_memsz"]):
                 raise ValueError("Clean Bun still maps the removed application payload")
 
 
@@ -841,14 +836,12 @@ def unbundle(output: Path, *, binary: Path | None = None, bun_graph: str = "bun_
     try:
         staging = output / ".build"
         staging.mkdir(mode=0o700)
-        stripped = staging / "source-only"
-        _source_only(source, stripped, graph)
         extracted = staging / "extracted"
         extracted.mkdir()
-        completed = subprocess.run([executable, str(stripped), "--extract", str(extracted)],
-                                   check=True, capture_output=True, text=True, timeout=120)
+        # Without the packed, shared bytecode, which the runtime regenerates from the edited source.
+        completed = subprocess.run([executable, str(source), "--extract", str(extracted), "--no-bytecode"],
+                                   check=True, capture_output=True, text=True, timeout=300)
         _ = (output / "bun-graph.txt").write_text(completed.stdout, encoding="utf-8")
-        stripped.unlink()
         module_metadata = _prepare_code(extracted, output, graph)
         directory, assets, modules = (output / name for name in ("source", "assets", "modules"))
         source_contracts = _install_loader(directory, graph)
@@ -856,7 +849,7 @@ def unbundle(output: Path, *, binary: Path | None = None, bun_graph: str = "bun_
         natives = _read_natives(source, executable)
         entrypoint = directory / graph.entry.relative_path
         bun = output / "bun"
-        _clean_runtime(source, bun)
+        _clean_runtime(source, bun, executable)
         candidate, native_patches = _compile_helpers(output, staging, natives)
         caches = _generate_caches(output, staging)
         hashes = _tree_hashes(directory, skip_cache=True)

@@ -306,9 +306,15 @@ creates an isolated copy.
 Keep the private Bun (`Bun.ant`) and native helper dispatch; `.node` addons move to
 `modules/`, while statically linked helpers remain in Bun. Validate native sections
 and load mappings independently of the converter, allowing only declared patches.
-Use pyelftools' header structures for ELF edits and pwntools for instruction
-assembly and binutils discovery; preserve native placement explicitly.
-Clear bytecode pointers in the extraction-only copy first: packed caches overlap.
+`bun_graph --clean` removes the application payload (either of Bun's layouts:
+the writable PT_LOAD grown over it, or `PT_BUN_PAYLOAD` with its pieces since
+Bun's ahead-of-time compiler), and `--extract --no-bytecode` leaves the packed,
+shared bytecode out; `unbundle.py` checks the clean runtime against the
+original on its own. Anything that reads or rewrites the Bun binary belongs in
+`bun_graph` (patchnar), not here. A payload of ahead-of-time compiled code has
+no source to patch: bun_graph refuses it, and such a release needs a decision,
+not a port. Use pyelftools' header structures for ELF edits and pwntools for
+instruction assembly; preserve native placement explicitly.
 The already-bundled source loader clones files as Latin-1; its one call gets a
 five-byte redirection to the compiled UTF-8 shim in `native_cache.c`. Preserve every
 other native section and the original RELRO/stack headers. The appended RX section

@@ -32,10 +32,15 @@ KNOWN_NATIVES: Final[dict[str, dict[str, int]]] = {
         "mi_free": 0x3229900, "bun_string_to_wtf": 0x3453EF0,
         "latin1_clone": 0x34B1090, "bundled_source_clone_call": 0x6CE4F7B,
     },
+    "708c77b204db30086ff6f1ed34577bda03e1be74ced80557cbf7b54249ebf0bd": {  # Claude Code 2.1.318
+        "module_bytecode_generator": 0x7EE4440, "cached_bytecode_destructor": 0x364BC00,
+        "mi_free": 0x31D9640, "bun_string_to_wtf": 0x33EFB40,
+        "latin1_clone": 0x3447630, "bundled_source_clone_call": 0x6DCFE65,
+    },
 }
 
 from claude.build_cli import CLIPin, _load_pin, matches
-from claude.unbundle import _read_graph, _source_only, unbundle
+from claude.unbundle import _read_graph, unbundle
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from elftools.elf.elffile import ELFFile
 from pyclaude.client import PARENT_SESSION_ENV
@@ -133,15 +138,6 @@ class GraphEditTests(unittest.TestCase):
         self.fixture = graph_fixture()
         self.source = self.directory / "original"
         self.source.write_bytes(self.fixture.data)
-
-    def test_extractor_copy_invalidates_every_cache_without_changing_source_or_assets(self) -> None:
-        destination = self.directory / "source-only"
-        _source_only(self.source, destination, _read_graph(self.source))
-        expected = bytearray(self.fixture.data)
-        for record in self.fixture.records:
-            expected[record + 24:record + 40] = bytes(16)
-        self.assertEqual(destination.read_bytes(), bytes(expected))
-        self.assertEqual(self.source.read_bytes(), self.fixture.data)
 
     def test_malformed_directory_entry_and_content_ranges_are_rejected(self) -> None:
         cases = {
@@ -243,7 +239,7 @@ class GraphEditTests(unittest.TestCase):
         extractor.write_text(
             f"#!{sys.executable}\n"
             "import pathlib, sys\n"
-            "root = pathlib.Path(sys.argv[-1]) / 'root'\n"
+            "root = pathlib.Path(sys.argv[sys.argv.index('--extract') + 1]) / 'root'\n"
             "root.mkdir()\n"
             f"(root / 'cli').symlink_to({str(target)!r})\n"
         )

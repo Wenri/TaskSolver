@@ -69,9 +69,10 @@ env:
     pyproject.toml README.md antigravity/vendor.json codex/vendor.json claude/vendor.json
     kimi/vendor.json codex/vendor claude/vendor/sdk kimi/vendor/kimi-code codex/pycodex/sdk.py
     nix/hashes.json
-  # github:Wenri/patchnar 0.22.0, whose bun_graph unbundles Claude Code and (--natives) locates the
-  # private Bun entry points the split runtime calls.
-  PATCHNAR_REF: f0091edbc4e4f6b3cf956a210f07111d3b63f76b
+  # github:Wenri/patchnar 0.22.0, whose bun_graph unbundles Claude Code: --extract, --clean (the
+  # runtime without its payload, either of Bun's layouts) and --natives (the private Bun entry
+  # points the split runtime calls).
+  PATCHNAR_REF: 489cfe3852316855530f74022e451f79f4638f56
 
 jobs:
   check:

@@ -57,8 +57,12 @@ package's pin and rebuild to change Claude versions. The runtime never registers
 itself as the OS `claude-cli://` handler, which upstream does from interactive
 sessions (a source contract skips it).
 
-Removing `.bun` removes the original JavaScript, bytecode and assets from the
-executable and shrinks its load mapping. Statically linked native helpers such as
+`bun_graph --clean` removes `.bun`, the original JavaScript, bytecode and assets,
+from the executable and unmaps it: in Bun 1.4's layout the writable load segment
+shrinks back to its native sections, and in the layout of Bun's ahead-of-time
+compiler (`PT_BUN_PAYLOAD` with its own pieces) the reserved headers go back to
+`PT_NULL`. A payload of compiled machine code has no source to patch, so bun_graph
+refuses to extract it. Statically linked native helpers such as
 ripgrep and bfs remain in the private runtime; the launcher preserves their
 `argv[0]` dispatch. Native `.node` modules are separate files. Prelinked JavaScript
 records are module metadata, not native addons; the external loader reconstructs
@@ -76,8 +80,9 @@ conversion) by their instructions, each matching exactly once. The build checks 
 report against the executable, compiles the addresses and the code `libwire.node`
 re-checks into `bun_natives.h`, and records the report as the manifest's `bun_natives`.
 ELF edits use pyelftools' named header structures; pwntools assembles the relative
-call and locates binutils. The converter controls placement so existing native
-sections stay at their original addresses.
+call. Reading or rewriting the Bun binary itself is bun_graph's job (patchnar); the
+build checks its results against the original on its own. The converter controls
+placement so existing native sections stay at their original addresses.
 
 The cache driver loads `libwire.node` through Bun's N-API support and invokes the
 private runtime's own JSC emitter after all source patches. It copies and releases
