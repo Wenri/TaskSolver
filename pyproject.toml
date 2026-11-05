@@ -98,6 +98,9 @@ app = [
 [tool.setuptools.packages.find]
 where = [".", "antigravity", "codex", "kimi", "claude", "codex/vendor/sdk/python/src", "claude/vendor/sdk/src"]
 include = ["tasksolver*", "wirecap*", "pyagy*", "pycodex*", "pykimi*", "pyclaude*", "openai_codex*", "claude_agent_sdk*"]
+# The C bridge's sources and its in-tree CMake build: namespace discovery would take each
+# directory for a package, and CMake removes its scratch directories during the build.
+exclude = ["wirecap.native", "wirecap.native.*"]
 
 [tool.setuptools]
 license-files = ["LICENSE", "codex/vendor/LICENSE", "codex/vendor/NOTICE", "claude/vendor/sdk/LICENSE",
