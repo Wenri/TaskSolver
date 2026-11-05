@@ -208,9 +208,9 @@ jobs:
               test_runtimes test_reconstruct test_claude_sdk test_claude_bundle test_claude_unbundle \
               test_claude_transport test_codex_sdk test_codex_sdk_native test_chat_mode test_codex_argv \
               test_codex_process test_responses_decode test_kimi_argv test_kimi_decode test_kimi_process \
-              test_kimi_session test_kimi_bundle test_wire_session test_wire_process test_wire_bridge \
-              test_wirecap_framing test_mcp_serializers test_terminal test_tasksolver_terminal test_webterm \
-              test_webterm_views test_agy_symbols test_agy_stubs test_appresponse test_config \
+              test_kimi_session test_kimi_bundle test_kimi_capture test_wire_session test_wire_process \
+              test_wire_bridge test_wirecap_framing test_mcp_serializers test_terminal test_tasksolver_terminal \
+              test_webterm test_webterm_views test_agy_symbols test_agy_stubs test_appresponse test_config \
               test_system_messages test_agy_system_message_queue test_agy_system_message_api \
               test_claude_native; do
             echo "::group::$test"

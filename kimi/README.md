@@ -184,14 +184,20 @@ Offline, with Node and the built artifacts:
 
 ```bash
 pixi run python test_scripts/test_kimi_bundle.py
+pixi run python test_scripts/test_kimi_capture.py
 ```
 
-This stages the artifacts through the package's bundling step, then runs outside the
-checkout with no `node_modules`: Python artifact resolution, CLI `--version`, and the sibling
+`test_kimi_bundle.py` stages the artifacts through the package's bundling step, then runs outside
+the checkout with no `node_modules`: Python artifact resolution, CLI `--version`, and the sibling
 search worker opening an empty index. It catches missing npm dependencies or workers that a
 source-tree launch can hide. It skips when the build/runtime is absent and fails on a partial
-artifact set. These checks do not validate authenticated model calls, and a skip is not a
-pass. `kimi vis` remains unavailable in this linked build because the web asset is stubbed.
+artifact set. `test_kimi_capture.py` runs one `pykimi.ask` print-mode turn of the real bundle
+and addon against an OpenAI-compatible model on loopback (the `KIMI_MODEL_*` family, a scoped
+`kimi_home`). It checks each emit site: the `kimi_request` with the prompt, `kimi_wire`
+records, and the decoded `kimi_turn` (answer, usage, the streamed parts, the finish event).
+So after an update it catches an emit site that moved or vanished. These checks do not validate
+authenticated model calls, and a skip is not a pass. `kimi vis` remains unavailable in this
+linked build because the web asset is stubbed.
 
 Live (needs the built bundle + addon):
 
