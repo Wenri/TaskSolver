@@ -251,9 +251,12 @@ def _clean_runtime(source: Path, target: Path) -> None:
             if not section["sh_flags"] & SH_FLAGS.SHF_ALLOC or section.name == ".bun":
                 continue
             after = new.get_section_by_name(section.name)
-            if (after is None or after["sh_addr"] != section["sh_addr"]
-                    or after["sh_offset"] != section["sh_offset"]
-                    or after.data() != section.data()):
+            # A NOBITS section (.bss, .tbss) has no file bytes: its sh_offset is nominal, and
+            # objcopy realigns it (2.1.318's .tbss moved 8 bytes). The program headers, kept
+            # from the original, place it in memory.
+            stored = section["sh_type"] != "SHT_NOBITS"
+            if (after is None or any(after[key] != section[key] for key in ("sh_type", "sh_addr", "sh_size"))
+                    or stored and (after["sh_offset"] != section["sh_offset"] or after.data() != section.data())):
                 raise ValueError(f"objcopy changed native section {section.name}")
         # The pinned ELF stores BUN_COMPILED.size in the padding after .data.
         # Removing .bun must clear it and remove the old payload's mapping.
