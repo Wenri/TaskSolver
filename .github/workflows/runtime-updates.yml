@@ -13,11 +13,14 @@
 #   validate    a push with nothing to adopt: build and offline tests only.
 #   none        a scheduled run with nothing to adopt.
 #
-# An adoption that needs hand work (patch conflicts, a failed agy conversion, a Claude Code release
-# whose source or private Bun no longer matches the unbundler's contracts, a failing test) is pushed
-# to `runtime-updates/run-<id>` and reported in an issue. While that issue is open, scheduled and
+# Runtimes adopt independently. One whose adoption fails (a patch conflict upstream moved more
+# than its hooks, a failed agy conversion) is shelved onto `runtime-updates/run-<id>-<runtime>` with
+# an issue, and the run goes on with the others; a temporary failure (the network, an upstream
+# service: exit 75) is skipped until the next run. A build or test failure hands the remaining
+# adoptions over together on `runtime-updates/run-<id>`. While an issue is open, scheduled and
 # push runs hold its runtimes at the versions it names and still adopt the others; a newer upstream
-# release of a held runtime is tried again.
+# release of a held runtime is tried again. When main gains code during a build, the release is not
+# pushed (it was not tested on that code); a new run is dispatched instead.
 # The commits and tags this workflow pushes with GITHUB_TOKEN start no new runs. It keeps
 # nix/hashes.json current but does not build the Nix package: the downstream Nix configuration
 # that pins TaskSolver builds and tests it.
@@ -123,6 +126,7 @@ jobs:
       contents: write
       issues: write
       id-token: write
+      actions: write
     defaults:
       run:
         shell: bash
@@ -131,6 +135,7 @@ jobs:
       TARGETS: ${{ needs.check.outputs.targets }}
       MODE: ${{ needs.check.outputs.mode }}
       GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Make room on the hosted runner
         if: runner.environment == 'github-hosted'
@@ -181,16 +186,41 @@ jobs:
       - name: Adopt upstream releases
         id: adopt
         run: |
+          adopted=()
           for runtime in $RUNTIMES; do
-            python3 tools/runtimes.py adopt "$runtime" 2>&1 | tee -a "$RUNNER_TEMP/adopt.log"
+            status=0
+            python3 tools/runtimes.py adopt "$runtime" > "$RUNNER_TEMP/adopt-$runtime.log" 2>&1 || status=$?
+            tee -a "$RUNNER_TEMP/adopt.log" < "$RUNNER_TEMP/adopt-$runtime.log"
+            if [ "$status" = 0 ]; then adopted+=("$runtime"); continue; fi
+            targets=$(python3 tools/runtimes.py targets "$TARGETS" "$runtime")
+            if [ "$status" = 75 ]; then
+              echo "::warning::Adopting $targets failed temporarily; the next run retries it"
+              python3 tools/runtimes.py shelve "$runtime" --discard
+              continue
+            fi
+            # This runtime needs hand work on its own branch; the others go on.
+            branch="runtime-updates/run-$GITHUB_RUN_ID-$runtime"
+            commit=$(python3 tools/runtimes.py shelve "$runtime" --message "Adopt $targets (needs hand work, run $GITHUB_RUN_ID)")
+            tools/hand_over.sh "$commit" "$branch" "$targets" "$RUNNER_TEMP/adopt-$runtime.log"
+            echo "::error::Adopting $targets needs hand work: branch $branch"
           done
           git status --short | tee -a "$RUNNER_TEMP/adopt.log"
+          # What the rest of the run releases: the adopted subset (the later steps read these outputs).
+          runtimes="${adopted[*]}"
+          mode=$MODE
+          if [ -z "$runtimes" ] && [ "$MODE" = prerelease ]; then
+            echo "::notice::No runtime adopted; building and testing main as it is"
+            mode=validate
+          fi
+          # shellcheck disable=SC2086  # a space-separated list
+          { echo "runtimes=$runtimes"; echo "targets=$(python3 tools/runtimes.py targets "$TARGETS" $runtimes)"
+            echo "mode=$mode"; } >> "$GITHUB_OUTPUT"
 
       - name: Build the workspace (agy, Codex, Claude Code and Kimi Code)
         run: pixi install --locked 2>&1 | tee "$RUNNER_TEMP/build.log"
 
       - name: Refresh the Nix hashes
-        if: env.MODE != 'validate' && hashFiles('nix/update-hashes') != ''
+        if: steps.adopt.outputs.mode != 'validate' && hashFiles('nix/update-hashes') != ''
         run: |
           # After the build, which completes codex's Cargo.lock. A refresh refetches about 3.3 GB
           # (the Codex crates with the rusty_v8 checkout, the Kimi pnpm store), so it runs only when
@@ -204,7 +234,9 @@ jobs:
 
       - name: Offline tests
         run: |
-          pixi run typecheck 2>&1 | tee "$RUNNER_TEMP/tests.log"
+          # Every suite runs; the failures are listed together at the end.
+          failed=()
+          pixi run typecheck 2>&1 | tee "$RUNNER_TEMP/tests.log" || failed+=(typecheck)
           for test in \
               test_runtimes test_reconstruct test_claude_sdk test_claude_bundle test_claude_unbundle \
               test_claude_transport test_codex_sdk test_codex_sdk_native test_chat_mode test_codex_argv \
@@ -215,20 +247,26 @@ jobs:
               test_system_messages test_agy_system_message_queue test_agy_system_message_api \
               test_claude_native; do
             echo "::group::$test"
-            pixi run python "test_scripts/$test.py" 2>&1 | tee -a "$RUNNER_TEMP/tests.log"
+            pixi run python "test_scripts/$test.py" 2>&1 | tee -a "$RUNNER_TEMP/tests.log" || failed+=("$test")
             echo "::endgroup::"
           done
           # The native UI and bridge checks prove that a Claude release's source contracts still
           # hold at run time, against a loopback model.
-          pixi run node --test test_scripts/test_claude_native_bridge.mjs 2>&1 | tee -a "$RUNNER_TEMP/tests.log"
+          pixi run node --test test_scripts/test_claude_native_bridge.mjs 2>&1 | tee -a "$RUNNER_TEMP/tests.log" ||
+            failed+=(test_claude_native_bridge)
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "FAILED: ${failed[*]}" | tee -a "$RUNNER_TEMP/tests.log"
+            echo "::error::Failed: ${failed[*]}"
+            exit 1
+          fi
 
       - name: Raise the version
         id: version
-        if: env.MODE != 'validate'
+        if: steps.adopt.outputs.mode != 'validate'
         run: echo "version=$(python3 tools/runtimes.py bump)" >> "$GITHUB_OUTPUT"
 
       - name: Build the redistributable bundle
-        if: env.MODE != 'validate'
+        if: steps.adopt.outputs.mode != 'validate'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -239,9 +277,12 @@ jobs:
 
       - name: Commit, tag and push
         id: publish
-        if: env.MODE != 'validate'
+        if: steps.adopt.outputs.mode != 'validate'
         env:
           version: ${{ steps.version.outputs.version }}
+          MODE: ${{ steps.adopt.outputs.mode }}
+          RUNTIMES: ${{ steps.adopt.outputs.runtimes }}
+          TARGETS: ${{ steps.adopt.outputs.targets }}
         run: |
           # shellcheck disable=SC2086  # RUNTIMES is a space-separated list
           python3 tools/runtimes.py notes $RUNTIMES > "$RUNNER_TEMP/notes.md"
@@ -276,6 +317,7 @@ jobs:
             if [ -n "$moved" ]; then
               echo "::error::main gained code changes during the build; not releasing untested code:"
               echo "$moved"
+              echo "retry=true" >> "$GITHUB_OUTPUT"
               exit 1
             fi
             git rebase origin/main
@@ -284,9 +326,10 @@ jobs:
           fi
 
       - name: Create the GitHub release
-        if: env.MODE != 'validate'
+        if: steps.adopt.outputs.mode != 'validate'
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          MODE: ${{ steps.adopt.outputs.mode }}
         run: |
           prerelease=()
           if [ "$MODE" = prerelease ]; then prerelease=(--prerelease); fi
@@ -294,16 +337,24 @@ jobs:
             --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${prerelease[@]}"
 
       - name: Upload to prefix.dev
-        if: env.MODE == 'release' && vars.PREFIX_CHANNEL != ''
+        if: steps.adopt.outputs.mode == 'release' && vars.PREFIX_CHANNEL != ''
         env:
           CHANNEL: ${{ vars.PREFIX_CHANNEL }}
           VERSION: ${{ steps.version.outputs.version }}
         run: pixi upload prefix --channel "$CHANNEL" --generate-attestation dist/tasksolver-"$VERSION"-*.conda
 
-      - name: Hand a failed adoption over
-        if: failure() && env.RUNTIMES != '' && steps.adopt.conclusion != 'skipped' && steps.publish.conclusion != 'success'
+      - name: Retry on the moved main
+        if: failure() && steps.publish.outputs.retry == 'true'
         env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGETS: ${{ steps.adopt.outputs.targets }}
+        run: |
+          echo "::notice::main gained code changes during the build; a new run adopts $TARGETS on them"
+          gh workflow run runtime-updates.yml --ref main
+
+      - name: Hand a failed build or test over
+        if: failure() && steps.adopt.outputs.runtimes != '' && steps.publish.conclusion != 'success' && steps.publish.outputs.retry != 'true'
+        env:
+          TARGETS: ${{ steps.adopt.outputs.targets }}
         run: |
           branch="runtime-updates/run-$GITHUB_RUN_ID"
           git reset -q
@@ -313,22 +364,5 @@ jobs:
             fi
           done
           git commit -qm "Adopt $TARGETS (needs hand work, run $GITHUB_RUN_ID)" || true
-          git push --force origin "HEAD:refs/heads/$branch"
           log=$(find "$RUNNER_TEMP" -maxdepth 1 -name '*.log' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
-          {
-            echo "Adopting **$TARGETS** failed in [run $GITHUB_RUN_ID]($RUN_URL)."
-            echo "The attempt is on branch \`$branch\`; finish it there and merge, or close this issue to retry."
-            echo
-            echo "Last lines of \`$(basename "${log:-none}")\`:"
-            echo '```'
-            if [ -n "$log" ]; then tail -n 80 "$log"; fi
-            echo '```'
-          } > "$RUNNER_TEMP/issue.md"
-          title=$(python3 tools/runtimes.py title "$TARGETS")
-          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
-            --jq "map(select(.title == \"$title\"))[0].number // empty")
-          if [ -n "$number" ]; then
-            gh issue comment "$number" --body-file "$RUNNER_TEMP/issue.md"
-          else
-            gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md"
-          fi
+          tools/hand_over.sh HEAD "$branch" "$TARGETS" "${log:-/dev/null}"

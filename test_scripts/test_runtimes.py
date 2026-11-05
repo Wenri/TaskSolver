@@ -261,5 +261,171 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(printed.getvalue(), "Runtime update needs hand work: agy 9.9.9\n")
 
 
+HOOKS: Final = (
+    runtimes.Hook(r"import \{ createHash \} from 'node:crypto';", "import { emitEvent, emitRequest } from '#/wiretap';"),
+    runtimes.Hook(r"(?P<indent>\s*)(?:const )?recorded = this\.recordRequest\((?P<input>\w+)\);",
+                  "{indent}emitRequest({input});"),
+    runtimes.Hook(r"(?P<indent>\s*)switch \(event\.type\) \{", "{indent}emitEvent(event);", before=True),
+)
+OLD_SOURCE: Final = (
+    "import { createHash } from 'node:crypto';\n"
+    "import { Service } from '#/service';\n"
+    "export class Requester extends Service {\n"
+    "  async run(request: Request): Promise<Finish> {\n"
+    "    const logInput = this.describe(request);\n"
+    "    this.logRequest(logInput);\n"
+    "    const recorded = this.recordRequest(logInput);\n"
+    "    let finish: Finish | undefined;\n"
+    "    for await (const event of request.requester.request(input, signal)) {\n"
+    "      switch (event.type) {\n"
+    "        case 'part':\n"
+    "          await onPart(event.part);\n"
+    "          break;\n"
+    "        case 'finish':\n"
+    "          finish = event;\n"
+    "          break;\n"
+    "      }\n"
+    "    }\n"
+    "    return finish;\n"
+    "  }\n"
+    "}\n"
+)
+# The next release renames the file, logs the request from a callback and adds an event.
+NEW_SOURCE: Final = OLD_SOURCE.replace(
+    "    const recorded = this.recordRequest(logInput);\n"
+    "    let finish: Finish | undefined;\n"
+    "    for await (const event of request.requester.request(input, signal)) {\n",
+    "    let recorded: Recorded;\n"
+    "    let finish: Finish | undefined;\n"
+    "    for await (const event of generateModel(request, signal, {\n"
+    "      onAttempt: (attemptInput) => {\n"
+    "        recorded = this.recordRequest(attemptInput);\n"
+    "      },\n"
+    "    })) {\n",
+).replace("        case 'finish':\n", "        case 'usage':\n          usage = event.usage;\n          break;\n        case 'finish':\n")
+
+
+def patched(source: str) -> str:
+    text = runtimes.apply_hooks(HOOKS, source)
+    assert text is not None
+    return text
+
+
+class HookFixture(UpstreamFixture):
+    """v1 vendors src/old.ts with the hooks; v2 renames it to src/new.ts and rewrites it."""
+
+    def __init__(self, root: Path, new_source: str = NEW_SOURCE) -> None:
+        super().__init__(root)
+        self.release("v1.1", {"src/old.ts": OLD_SOURCE})
+        _write(self.checkout / "vendor/up", {"src/old.ts": patched(OLD_SOURCE)})
+        _ = (self.checkout / "pin.json").write_text(json.dumps({"upstream": {
+            "repository": self.upstream.as_uri(), "tag": "v1.1", "commit": "unknown"}}))
+        _ = _git(self.checkout, "add", "-A")
+        _ = _git(self.checkout, "commit", "-qm", "vendor v1.1 with hooks")
+        (self.upstream / "src/old.ts").unlink()
+        self.release("v2", {"src/new.ts": new_source})
+        self.tree = Tree("pin.json", "upstream", "vendor/up", "v", ("Cargo.lock",), (HOOKS,))
+
+
+class HookTests(unittest.TestCase):
+    def test_hooks_are_placed_by_their_anchors(self) -> None:
+        text = patched(NEW_SOURCE)
+        lines = text.splitlines()
+        self.assertEqual(lines[1], "import { emitEvent, emitRequest } from '#/wiretap';")
+        self.assertEqual(lines[lines.index("        recorded = this.recordRequest(attemptInput);") + 1],
+                         "        emitRequest(attemptInput);")
+        self.assertEqual(lines[lines.index("      switch (event.type) {") - 1], "      emitEvent(event);")
+        self.assertEqual(text.replace("import { emitEvent, emitRequest } from '#/wiretap';\n", "")
+                         .replace("        emitRequest(attemptInput);\n", "").replace("      emitEvent(event);\n", ""),
+                         NEW_SOURCE)
+        self.assertIsNone(runtimes.apply_hooks(HOOKS, text), "already hooked")
+        self.assertIsNone(runtimes.apply_hooks(HOOKS, NEW_SOURCE.replace("      switch (event.type) {\n",
+                                                                         "      switch (event.type) {\n" * 2)),
+                          "an ambiguous anchor")
+        self.assertIsNone(runtimes.apply_hooks(HOOKS, NEW_SOURCE.replace("createHash", "createHmac")), "a missing anchor")
+
+    def test_hooks_follow_a_renamed_and_rewritten_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = HookFixture(Path(directory))
+            with patch.object(runtimes, "ROOT", fixture.checkout), patch.dict(runtimes.TREES, {"kimi": fixture.tree}), \
+                    patch("sys.stdout", new_callable=io.StringIO) as printed:
+                release, conflicts = runtimes.adopt_tree("kimi", "2")
+            self.assertEqual((release, conflicts), ("2", []))
+            self.assertIn("re-inserted", printed.getvalue())
+            self.assertEqual((fixture.checkout / "vendor/up/src/new.ts").read_text(), patched(NEW_SOURCE))
+            self.assertFalse((fixture.checkout / "vendor/up/src/old.ts").exists())
+            self.assertEqual(_git(fixture.checkout, "status", "--porcelain", "--", "vendor/up/src/new.ts"), "A  vendor/up/src/new.ts")
+
+    def test_an_ambiguous_anchor_leaves_the_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            twice = NEW_SOURCE.replace("      switch (event.type) {\n", "      switch (event.type) {\n      switch (event.type) {\n")
+            fixture = HookFixture(Path(directory), twice)
+            with patch.object(runtimes, "ROOT", fixture.checkout), patch.dict(runtimes.TREES, {"kimi": fixture.tree}):
+                _, conflicts = runtimes.adopt_tree("kimi", "2")
+            self.assertEqual(conflicts, ["src/new.ts"])
+            self.assertIn("<<<<<<<", (fixture.checkout / "vendor/up/src/new.ts").read_text())
+
+
+class ShelveTests(unittest.TestCase):
+    def test_shelve_commits_the_attempt_and_restores_the_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = UpstreamFixture(Path(directory))
+            fixture.release("v2", {"a.txt": LINES.replace("line 2\n", "line 2 upstream\n"), "n.txt": "new\n"})
+            head = _git(fixture.checkout, "rev-parse", "HEAD")
+            patches = (patch.object(runtimes, "ROOT", fixture.checkout), patch.dict(runtimes.TREES, {"kimi": fixture.tree}),
+                       patch.dict(runtimes.RUNTIME_PATHS, {"kimi": ("pin.json", "vendor/up")}),
+                       patch.object(runtimes, "sync_docs", return_value=[]))
+            for active in patches:
+                _ = active.start()
+                self.addCleanup(active.stop)
+            _, conflicts = runtimes.adopt_tree("kimi", "2")
+            self.assertEqual(conflicts, ["a.txt"])
+            commit = runtimes.shelve("kimi", "Adopt kimi 2 (needs hand work)")
+            assert commit is not None
+            self.assertEqual(_git(fixture.checkout, "rev-parse", "HEAD"), head)
+            self.assertEqual(_git(fixture.checkout, "rev-parse", f"{commit}^"), head)
+            self.assertEqual(_git(fixture.checkout, "log", "-1", "--format=%s", commit), "Adopt kimi 2 (needs hand work)")
+            self.assertIn("<<<<<<<", _git(fixture.checkout, "show", f"{commit}:vendor/up/a.txt"))
+            self.assertEqual(_git(fixture.checkout, "show", f"{commit}:vendor/up/n.txt"), "new")
+            self.assertIn('"tag": "v2"', _git(fixture.checkout, "show", f"{commit}:pin.json"))
+            # The checkout is back at HEAD's runtime, clean, with the release's new file gone.
+            self.assertEqual(_git(fixture.checkout, "status", "--porcelain"), "")
+            self.assertEqual((fixture.checkout / "vendor/up/a.txt").read_text(), LINES.replace("line 2\n", "line 2 patched\n"))
+            self.assertFalse((fixture.checkout / "vendor/up/n.txt").exists())
+            self.assertIn('"tag": "v1"', (fixture.checkout / "pin.json").read_text())
+            _, conflicts = runtimes.adopt_tree("kimi", "2")
+            self.assertEqual(conflicts, ["a.txt"])
+            self.assertIsNone(runtimes.shelve("kimi", None))
+            self.assertEqual(_git(fixture.checkout, "status", "--porcelain"), "")
+
+
+class WorkflowHelperTests(unittest.TestCase):
+    def test_targets_are_filtered_by_runtime(self) -> None:
+        targets = "agy 1.5.1, claude-sdk 0.2.178, claude-cli 2.1.318, kimi 2.5.1"
+        self.assertEqual(runtimes.targets_for(targets, ["claude", "kimi"]), "claude-sdk 0.2.178, claude-cli 2.1.318, kimi 2.5.1")
+        self.assertEqual(runtimes.targets_for(targets, []), "")
+        with patch("sys.stdout", new_callable=io.StringIO) as printed:
+            self.assertEqual(runtimes.main(["targets", targets, "agy"]), 0)
+        self.assertEqual(printed.getvalue(), "agy 1.5.1\n")
+
+    def test_temporary_failures_exit_75(self) -> None:
+        import email.message
+        import urllib.error
+        unavailable = urllib.error.HTTPError("https://example.invalid", 503, "unavailable", email.message.Message(), None)
+        missing = urllib.error.HTTPError("https://example.invalid", 404, "missing", email.message.Message(), None)
+        self.assertTrue(runtimes.temporary(urllib.error.URLError("name resolution failed")))
+        self.assertTrue(runtimes.temporary(unavailable))
+        self.assertTrue(runtimes.temporary(TimeoutError()))
+        self.assertTrue(runtimes.temporary(AdoptionError("git fetch failed: fatal: unable to access 'https://x': Could not resolve host: x")))
+        self.assertFalse(runtimes.temporary(missing))
+        self.assertFalse(runtimes.temporary(AdoptionError("kimi 2: TaskSolver's patch conflicts with upstream")))
+        with patch.object(runtimes, "latest", side_effect=urllib.error.URLError("down")), \
+                patch("sys.stderr", new_callable=io.StringIO) as errors:
+            self.assertEqual(runtimes.main(["check", "agy"]), runtimes.EX_TEMPFAIL)
+        self.assertIn("temporary failure", errors.getvalue())
+        with patch.object(runtimes, "latest", side_effect=missing), patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(runtimes.main(["check", "agy"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

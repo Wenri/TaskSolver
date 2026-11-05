@@ -3,7 +3,9 @@
 
     python3 tools/runtimes.py check [RUNTIME ...] [--github-output FILE [--held FILE]]
     python3 tools/runtimes.py title TARGETS
+    python3 tools/runtimes.py targets TARGETS [RUNTIME ...]
     python3 tools/runtimes.py adopt RUNTIME [--version VERSION] [--cli-version VERSION]
+    python3 tools/runtimes.py shelve RUNTIME (--message MESSAGE | --discard)
     python3 tools/runtimes.py docs [--check]
     python3 tools/runtimes.py bump
     python3 tools/runtimes.py notes [RUNTIME ...]
@@ -16,8 +18,16 @@ whose single tag carries both the CLI and its SDK (Codex's Python SDK, Kimi Code
 
 A vendored tree is its upstream tag plus TaskSolver's patch. Adoption replays that patch onto the
 new release with a three-way merge of trees (base: the pinned tag, ours: the committed tree,
-theirs: the new tag). Conflicted files keep their markers and the adoption fails naming them; a
-lock file that the build regenerates (codex's Cargo.lock) takes the new release's copy instead.
+theirs: the new tag). A lock file that the build regenerates (codex's Cargo.lock) takes the new
+release's copy. A tree may declare hooks: the lines its patch inserts into an upstream file (Kimi
+Code's emit sites), each placed by an anchor line. When upstream moves or rewrites the code
+around them, the conflicted file becomes the new release's copy with the hooks re-inserted,
+provided every anchor matches exactly one line; other conflicted files keep their markers and the
+adoption fails naming them.
+
+Runtimes adopt independently: `shelve` commits a failed attempt onto HEAD for its own hand-over
+branch and restores the runtime's files, so the others still release. A network or upstream
+service failure exits 75 (EX_TEMPFAIL): the workflow skips that runtime and the next run retries.
 
 Standard library only (Python >= 3.12), so the workflow's check job needs no pixi environment.
 """
@@ -27,6 +37,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -35,6 +46,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -44,6 +56,7 @@ from typing import Final, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIMES: Final = ("agy", "codex", "claude", "kimi")
+EX_TEMPFAIL: Final = 75   # sysexits.h: a failure a later run may not see
 AGY_MANIFEST: Final = os.environ.get(
     "AGY_MANIFEST_BASE", "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
 ) + "/manifests/linux_amd64.json"
@@ -66,6 +79,18 @@ class AdoptionError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class Hook:
+    """A line the patch inserts into an upstream file, placed by an anchor line.
+
+    ``anchor`` is a regular expression exactly one line of the file must match in full; ``line``
+    names the anchor's groups as ``{name}`` (``{indent}`` for the anchor's indentation)."""
+
+    anchor: str
+    line: str
+    before: bool = False            # insert before the anchor's line, else after it
+
+
+@dataclass(frozen=True)
 class Tree:
     """A vendored upstream tree, its pin file and how its release tags are named."""
 
@@ -74,12 +99,39 @@ class Tree:
     directory: str                  # the vendored tree, relative to the repository root
     tag_prefix: str                 # release tag = tag_prefix + version
     regenerated: tuple[str, ...]    # tree-relative lock files the build rewrites: take theirs
+    # Each inner tuple: every line the patch adds to one upstream file. A conflicted file is
+    # resolved by the first group whose anchors all match it once, so list a file's lines whole.
+    hooks: tuple[tuple[Hook, ...], ...] = ()
 
+
+# Kimi Code's emit sites (kimi/README.md): the request path, agent/loop/requester.ts
+# (agent/llmRequester/llmRequesterService.ts before 2.5.0), and the wire journal.
+_KIMI_HOOKS: Final = (
+    (
+        Hook(r"import \{ createHash \} from 'node:crypto';",
+             "import { wiretapEmitEvent, wiretapEmitRequest } from '#/wiretap/wiretap';"),
+        Hook(r"(?P<indent>\s*)(?:const )?recorded = this\.recordRequest\((?P<input>\w+)\);",
+             "{indent}wiretapEmitRequest({input});"),
+        Hook(r"(?P<indent>\s*)switch \(event\.type\) \{", "{indent}wiretapEmitEvent(event);", before=True),
+    ),
+    (
+        Hook(r"import \{ onUnexpectedError \} from '#/_base/errors/unexpectedError';",
+             "import { wiretapEmitWireRecord } from '#/wiretap/wiretap';"),
+        Hook(r"(?P<indent>\s*)this\.lines \+= 1;", "{indent}wiretapEmitWireRecord(record, this.wireScope);", before=True),
+    ),
+)
 
 TREES: Final = {
     "codex": Tree("codex/vendor.json", "upstream", "codex/vendor", "rust-v", ("codex-rs/Cargo.lock",)),
     "claude": Tree("claude/vendor.json", "sdk", "claude/vendor/sdk", "v", ()),
-    "kimi": Tree("kimi/vendor.json", "upstream", "kimi/vendor/kimi-code", "@moonshot-ai/kimi-code@", ()),
+    "kimi": Tree("kimi/vendor.json", "upstream", "kimi/vendor/kimi-code", "@moonshot-ai/kimi-code@", (), _KIMI_HOOKS),
+}
+# What an adoption of each runtime changes, for `shelve`: its pin and its vendored tree.
+RUNTIME_PATHS: Final = {
+    "agy": ("antigravity/vendor.json",),
+    "codex": ("codex/vendor.json", "codex/vendor"),
+    "claude": ("claude/vendor.json", "claude/vendor/sdk"),
+    "kimi": ("kimi/vendor.json", "kimi/vendor/kimi-code"),
 }
 
 # Pinned versions written into prose and code: (file, line pattern, replacement template).
@@ -155,12 +207,23 @@ def _digest(path: Path, algorithm: str) -> str:
         return hashlib.file_digest(stream, algorithm).hexdigest()
 
 
-def _git(*args: str, env: Mapping[str, str] | None = None) -> str:
-    result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True,
+def _git(*args: str, env: Mapping[str, str] | None = None, stdin: str | None = None) -> str:
+    result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, input=stdin,
                             env=None if env is None else {**os.environ, **env})
     if result.returncode != 0:
         raise AdoptionError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def temporary(error: BaseException) -> bool:
+    """A failure a later run may not see: the network, an upstream service, a timeout."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code == 429 or error.code >= 500
+    if isinstance(error, (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError)):
+        return True
+    return isinstance(error, AdoptionError) and re.search(
+        r"unable to access|Could not resolve host|Connection (timed out|refused|reset)|early EOF|RPC failed",
+        str(error)) is not None
 
 
 # ---- versions ------------------------------------------------------------------------------------
@@ -309,26 +372,78 @@ def _commit(tree: str, *parents: str) -> str:
     return _git(*arguments, env=_IDENTITY)
 
 
-def _take(merged: str, theirs: str, paths: Sequence[str]) -> str:
-    """``merged`` with ``paths`` replaced by their copies in the tree ``theirs``."""
+def _entry(tree: str, path: str) -> tuple[str, str] | None:
+    """The mode and blob of ``path`` in ``tree``, or None when it has no such file."""
+    entry = _git("ls-tree", tree, "--", path)
+    if not entry:
+        return None
+    mode, _kind, rest = entry.split(" ", 2)
+    return mode, rest.split("\t", 1)[0]
+
+
+def _rewrite(merged: str, entries: Mapping[str, tuple[str, str] | None]) -> str:
+    """``merged`` with each path replaced by a (mode, blob) entry, or removed by None."""
     with tempfile.TemporaryDirectory() as directory:
         index = {"GIT_INDEX_FILE": str(Path(directory) / "index")}
         _ = _git("read-tree", merged, env=index)
-        for path in paths:
-            entry = _git("ls-tree", theirs, "--", path)
-            if entry:
-                mode, _kind, rest = entry.split(" ", 2)
-                _ = _git("update-index", "--add", "--cacheinfo", f"{mode},{rest.split(chr(9), 1)[0]},{path}",
-                         env=index)
-            else:
+        for path, entry in entries.items():
+            if entry is None:
                 _ = _git("update-index", "--force-remove", "--", path, env=index)
+            else:
+                _ = _git("update-index", "--add", "--cacheinfo", f"{entry[0]},{entry[1]},{path}", env=index)
         return _git("write-tree", env=index)
 
 
-def merge(tree: Tree, base: str, theirs: str) -> tuple[str, list[str]]:
+def _take(merged: str, theirs: str, paths: Sequence[str]) -> str:
+    """``merged`` with ``paths`` replaced by their copies in the tree ``theirs``."""
+    return _rewrite(merged, {path: _entry(theirs, path) for path in paths})
+
+
+def apply_hooks(hooks: Sequence[Hook], text: str) -> str | None:
+    """``text`` with every hook inserted at its anchor.
+
+    None unless each anchor matches exactly one line and no hook's line is there already."""
+    lines = text.split("\n")
+    inserts: list[tuple[int, str]] = []
+    for hook in hooks:
+        matches = [(index, match) for index, line in enumerate(lines)
+                   if (match := re.fullmatch(hook.anchor, line)) is not None]
+        if len(matches) != 1:
+            return None
+        index, match = matches[0]
+        groups = match.groupdict()
+        line = re.sub(r"\{(\w+)\}", lambda token: groups.get(token.group(1), token.group(0)), hook.line)
+        if line in lines:
+            return None
+        inserts.append((index if hook.before else index + 1, line))
+    for position, line in sorted(inserts, reverse=True):   # from the bottom, so indices stay valid
+        lines.insert(position, line)
+    return "\n".join(lines)
+
+
+def _rehook(tree: Tree, theirs: str, path: str) -> tuple[str, str] | None:
+    """The new release's copy of a conflicted file with the tree's hooks re-inserted, as an entry."""
+    entry = _entry(theirs, path)
+    if entry is None or not tree.hooks:
+        return None
+    mode, blob = entry
+    try:
+        text = subprocess.run(["git", "cat-file", "blob", blob], cwd=ROOT, capture_output=True,
+                              check=True, encoding="utf-8").stdout
+    except (subprocess.CalledProcessError, UnicodeDecodeError):
+        return None
+    for group in tree.hooks:
+        resolved = apply_hooks(group, text)
+        if resolved is not None:
+            return mode, _git("hash-object", "-w", "--stdin", stdin=resolved)
+    return None
+
+
+def merge(tree: Tree, base: str, theirs: str) -> tuple[str, list[str], list[str]]:
     """Replay the committed tree's changes since commit ``base`` onto commit ``theirs``.
 
-    Returns the merged tree and the files left in conflict (they carry conflict markers)."""
+    Returns the merged tree, the files left in conflict (they carry conflict markers) and the
+    files the tree's hooks resolved."""
     root = _commit(_git("rev-parse", f"{base}^{{tree}}"))
     ours = _commit(_git("rev-parse", f"HEAD:{tree.directory}"), root)
     theirs_tree = _git("rev-parse", f"{theirs}^{{tree}}")
@@ -342,7 +457,12 @@ def merge(tree: Tree, base: str, theirs: str) -> tuple[str, list[str]]:
     regenerated = [path for path in conflicts if path in tree.regenerated]
     if regenerated:
         merged = _take(merged, theirs_tree, regenerated)
-    return merged, [path for path in conflicts if path not in tree.regenerated]
+    rehooked = {path: entry for path in conflicts if path not in tree.regenerated
+                and (entry := _rehook(tree, theirs_tree, path)) is not None}
+    if rehooked:
+        merged = _rewrite(merged, rehooked)
+    remaining = [path for path in conflicts if path not in tree.regenerated and path not in rehooked]
+    return merged, remaining, sorted(rehooked)
 
 
 def _checkout(directory: str, tree: str) -> None:
@@ -373,7 +493,10 @@ def adopt_tree(runtime: str, version: str | None) -> tuple[str, list[str]]:
     if _git("status", "--porcelain", "--", tree.directory):
         raise AdoptionError(f"{tree.directory} has uncommitted changes; commit or stash them first")
     base, theirs = _fetch(repository, old_tag), _fetch(repository, new_tag)
-    merged, conflicts = merge(tree, base, theirs)
+    merged, conflicts, rehooked = merge(tree, base, theirs)
+    for hooked in rehooked:
+        print(f"{runtime} {release}: upstream moved the code around TaskSolver's hooks in {hooked}; "
+              "re-inserted them (check them against kimi/README.md and run the capture tests)")
     _checkout(tree.directory, merged)
     upstream |= {"tag": new_tag, "commit": theirs}
     _save(path, document)
@@ -419,6 +542,41 @@ def adopt(runtime: str, version: str | None, cli_version: str | None = None) -> 
         raise AdoptionError(f"{runtime} {release}: TaskSolver's patch conflicts with upstream in "
                             f"{len(conflicts)} file(s) under {TREES[runtime].directory}: " + ", ".join(conflicts))
     return release
+
+
+def shelve(runtime: str, message: str | None) -> str | None:
+    """Set a failed adoption aside and restore the runtime, so the other runtimes' adoptions go on.
+
+    With ``message``, the runtime's files as they stand (its pin, its tree with any conflict
+    markers, files the release added) are committed onto HEAD, which stays put; the commit is
+    returned for a hand-over branch. Then the runtime's paths return to HEAD's, files the new
+    release added go (ignored build outputs stay), and the documented versions follow the pins."""
+    paths = RUNTIME_PATHS[runtime]
+    commit = None
+    if message is not None:
+        with tempfile.TemporaryDirectory() as directory:
+            index = {"GIT_INDEX_FILE": str(Path(directory) / "index")}
+            _ = _git("read-tree", "HEAD", env=index)
+            _ = _git("add", "-A", "--", *paths, env=index)
+            identity: dict[str, str] = {}
+            try:
+                _ = _git("config", "--get", "user.email")
+            except AdoptionError:
+                identity = dict(_IDENTITY)
+            commit = _git("commit-tree", "--no-gpg-sign", _git("write-tree", env=index), "-p", "HEAD",
+                          "-m", message, env={**identity, **index})
+    _ = _git("reset", "-q", "HEAD", "--", *paths)
+    _ = _git("checkout", "HEAD", "--", *paths)
+    _ = _git("clean", "-fdq", "--", *paths)
+    _ = sync_docs()
+    return commit
+
+
+def targets_for(targets: str, runtimes: Iterable[str]) -> str:
+    """The `component version` entries of a check's targets that belong to ``runtimes``."""
+    keep = set(runtimes)
+    entries = [entry.strip() for entry in targets.split(",") if entry.strip()]
+    return ", ".join(entry for entry in entries if entry.split(" ")[0].split("-")[0] in keep)
 
 
 def sync_docs(check: bool = False) -> list[str]:
@@ -504,6 +662,8 @@ class _Arguments(argparse.Namespace):
     held: str | None = None
     targets: str = ""
     check: bool = False
+    message: str | None = None
+    discard: bool = False
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -518,10 +678,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 "at the versions they name")
     title = commands.add_parser("title", help="print the hand-work issue title for a check's targets")
     _ = title.add_argument("targets", help="the check's `targets` output")
+    targets = commands.add_parser("targets", help="print the entries of a check's targets that belong to runtimes")
+    _ = targets.add_argument("targets", help="the check's `targets` output")
+    _ = targets.add_argument("runtimes", nargs="*", metavar="RUNTIME", help="the runtimes to keep")
     adoption = commands.add_parser("adopt", help="move a runtime to a release (default: the latest)")
     _ = adoption.add_argument("runtime", choices=RUNTIMES)
     _ = adoption.add_argument("--version", help="the release to adopt (claude: the Agent SDK's)")
     _ = adoption.add_argument("--cli-version", help="claude only: the Claude Code release to pin")
+    shelving = commands.add_parser("shelve", help="set a failed adoption aside and restore the runtime")
+    _ = shelving.add_argument("runtime", choices=RUNTIMES)
+    way = shelving.add_mutually_exclusive_group(required=True)
+    _ = way.add_argument("--message", help="commit the attempt onto HEAD with this message; print the commit")
+    _ = way.add_argument("--discard", action="store_true", help="drop the attempt")
     docs = commands.add_parser("docs", help="write the pinned versions into the README and pycodex")
     _ = docs.add_argument("--check", action="store_true", help="only report stale files (exit 1)")
     _ = commands.add_parser("bump", help="raise TaskSolver's patch version and print it")
@@ -553,6 +721,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _ = output.write(f"targets={', '.join(status.target for status in adopt_now)}\n")
         elif args.command == "title":
             print(hand_work_title(args.targets))
+        elif args.command == "targets":
+            print(targets_for(args.targets, args.runtimes))
+        elif args.command == "shelve":
+            commit = shelve(args.runtime, args.message)
+            if commit:
+                print(commit)
         elif args.command == "adopt":
             if args.cli_version is not None and args.runtime != "claude":
                 parser.error("--cli-version applies to claude only")
@@ -569,7 +743,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(tasksolver_version())
         else:
             print(notes(args.runtimes), end="")
-    except (AdoptionError, OSError, ValueError) as error:
+    except (AdoptionError, OSError, ValueError, http.client.HTTPException) as error:
+        if temporary(error):
+            print(f"temporary failure: {error}", file=sys.stderr)
+            return EX_TEMPFAIL
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0

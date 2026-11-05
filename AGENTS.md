@@ -92,12 +92,20 @@ on code pushes to `main` and on demand: adopt, `pixi install --locked`, `nix/upd
 input of `nix/hashes.json` changed since the commit that last wrote it, the offline tests, `pixi publish` checked by
 `tools/check_bundle.py`, then `bump`, an atomic push of the commit and tag, and a GitHub release
 with `notes`. An adoption publishes a pre-release of the latest code; a push with nothing to adopt
-only builds and tests; a full release is a manual dispatch with `release`. A failed adoption goes
-to branch `runtime-updates/run-<id>` plus an issue titled by `runtimes.py title`. While it is open,
-`check --held` holds only its runtimes at the versions it names; the others still adopt, and a newer
-release of a held runtime is tried again. To retry the same versions after a fix, close the issue
-and delete its branch before pushing the fix to `main`: the push's run reads the open issues when
-it checks. A Claude bump needs no port while upstream keeps the code
+only builds and tests; a full release is a manual dispatch with `release`. Runtimes adopt
+independently: a runtime whose adoption fails is shelved (`runtimes.py shelve`) onto its own
+branch `runtime-updates/run-<id>-<runtime>` with an issue titled by `runtimes.py title`
+(`tools/hand_over.sh`), and the run goes on with the others; a build or test failure hands the
+remaining adoptions over together on `runtime-updates/run-<id>`. While an issue is open,
+`check --held` holds only its runtimes at the versions it names; a newer release of a held runtime
+is tried again. To retry the same versions after a fix, close the issue and delete its branch
+before pushing the fix to `main`: the push's run reads the open issues when it checks. A network
+or upstream-service failure exits 75 and is retried by the next run without a hand-over. When
+`main` gains code during a build, the release is not pushed and a new run is dispatched instead.
+A vendored tree may declare hooks (`Tree.hooks`; Kimi's emit sites): when upstream moves or
+rewrites the code around them, the conflicted file takes the new release's copy with the hooks
+re-inserted, provided each anchor matches once, and `test_kimi_capture.py` proves them at run
+time. A Claude bump needs no port while upstream keeps the code
 shapes that `claude/unbundle.py`'s source contracts and `bun_graph --natives`' signatures describe;
 a miss fails the build naming the contract or entry point. The workflow does not build the Nix
 package; the downstream Nix configuration that pins TaskSolver does.
