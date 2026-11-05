@@ -27,6 +27,8 @@ def _vendored(in_pkg_rel: str, sibling_rel: str) -> str:
 # The from-source, wirecap-patched codex (gnu-dynamic; embeds the pixi libpython): the bundled
 # pycodex/vendor/codex (wheel) or the cargo output in a checkout.
 CODEX_BIN = _vendored("vendor/codex", "../vendor/codex-rs/target/release/codex")
+#: The interactive TUI's startup release check, off: a pinned build updates by its pin.
+NO_UPDATE_CHECK: tuple[str, str] = ("-c", "check_for_update_on_startup=false")
 
 
 def linked_env(capture: str | os.PathLike[str], module: str = "pycodex.codex_process",
@@ -50,7 +52,6 @@ def linked_env(capture: str | os.PathLike[str], module: str = "pycodex.codex_pro
     home = python_home(env)
     if home and not env.get("PYTHONHOME"):
         env["PYTHONHOME"] = home           # embedded interpreter finds this env's stdlib + site-packages
-    env.setdefault("CODEX_DISABLE_UPDATE_CHECK", "1")
     if extra_env:
         env.update(extra_env)
     if codex_home:
@@ -89,7 +90,9 @@ def codex_argv(prompt: str | None, workspace: str, model: str | None = None,
             argv = [bin_, *([prompt] if prompt else [])]
         # The bundled binary has no upstream daemon package layout. Keep its
         # app-server and capture worker owned by this interactive process.
-        argv += ["-C", workspace, "--no-daemon"]
+        # The TUI checks for a newer release at startup (the config key defaults
+        # to true; no environment variable gates it): the pin is the update path.
+        argv += ["-C", workspace, "--no-daemon", *NO_UPDATE_CHECK]
     else:
         # One-shot, the direct counterpart of `agy --print`. `codex exec resume` is the
         # non-interactive resume (exec/src/cli.rs Command::Resume); with --last the

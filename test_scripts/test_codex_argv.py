@@ -31,7 +31,7 @@ except ImportError:
 
 from pycodex import config as codex_config  # noqa: E402
 from pycodex import sessions  # noqa: E402
-from pycodex._env import codex_argv, linked_env  # noqa: E402
+from pycodex._env import NO_UPDATE_CHECK, codex_argv, linked_env  # noqa: E402
 
 _failures: list[str] = []
 
@@ -61,19 +61,25 @@ def test_argv_stdin() -> None:
     check(argv == [BIN, "exec", "-", "--skip-git-repo-check", "-C", WS],
           "positional becomes -")
     argv = codex_argv("p", WS, codex_bin=BIN, persistent=True, prompt_via_stdin=True)
-    check(argv == [BIN, "p", "-C", WS, "--no-daemon"], "TUI ignores prompt_via_stdin")
+    check(argv == [BIN, "p", "-C", WS, "--no-daemon", *NO_UPDATE_CHECK], "TUI ignores prompt_via_stdin")
 
 
 def test_argv_interactive_owned_process() -> None:
     print("[offline] codex_argv: interactive sessions own their app-server")
     argv = codex_argv(None, WS, codex_bin=BIN, persistent=True)
-    check(argv == [BIN, "-C", WS, "--no-daemon"], "TUI avoids packaged daemon discovery")
+    check(argv == [BIN, "-C", WS, "--no-daemon", *NO_UPDATE_CHECK], "TUI avoids packaged daemon discovery")
     argv = codex_argv(None, WS, codex_bin=BIN, persistent=True, session_id="saved-thread")
-    check(argv == [BIN, "resume", "saved-thread", "-C", WS, "--no-daemon"],
+    check(argv == [BIN, "resume", "saved-thread", "-C", WS, "--no-daemon", *NO_UPDATE_CHECK],
           "interactive resume keeps the app-server in this process")
     argv = codex_argv(None, WS, codex_bin=BIN, persistent=True, continue_latest=True)
-    check(argv == [BIN, "resume", "--last", "-C", WS, "--no-daemon"],
+    check(argv == [BIN, "resume", "--last", "-C", WS, "--no-daemon", *NO_UPDATE_CHECK],
           "interactive latest resume keeps the app-server in this process")
+    # An unknown config key only logs a warning, so a renamed key would silently bring the
+    # startup update check back: the override must name a key the vendored config still reads.
+    key = NO_UPDATE_CHECK[1].split("=")[0]
+    config_toml = os.path.join(_CODEX, "vendor", "codex-rs", "config", "src", "config_toml.rs")
+    with open(config_toml, encoding="utf-8") as source:
+        check(f"pub {key}: Option<bool>," in source.read(), f"{key} is a config key of the vendored codex")
 
 
 def test_argv_resume_drops_C() -> None:

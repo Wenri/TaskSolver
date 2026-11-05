@@ -10,7 +10,9 @@ For the native UI, run `pixi run python -m tasksolver.terminal codex`; it also w
 alongside agy, Claude and Kimi screens, with simultaneous local and browser views.
 Interactive launches, including `pycodex.Session`, use `--no-daemon`: the bundled
 binary lacks the upstream daemon package layout, so its app-server and capture stay
-owned by the screen or session. See [managed terminal screens](../README.md#managed-terminal-screens).
+owned by the screen or session. They also pass `-c check_for_update_on_startup=false`
+(`pycodex._env.NO_UPDATE_CHECK`): the TUI otherwise checks for a newer release at
+startup, and no environment variable turns that off. The pin is the update path. See [managed terminal screens](../README.md#managed-terminal-screens).
 
 ## Layout
 

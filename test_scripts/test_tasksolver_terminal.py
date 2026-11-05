@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 for source in (ROOT, ROOT / "antigravity", ROOT / "claude", ROOT / "codex", ROOT / "kimi"):
     sys.path.insert(0, os.fspath(source))
 
+from pycodex._env import NO_UPDATE_CHECK
 from tasksolver import terminal
 from wirecap.runtime.terminal import TerminalManager, TerminalScreen
 
@@ -189,7 +190,7 @@ class TerminalFrontendTests(unittest.TestCase):
                         self.assertEqual(command[1:], ["--model", "test-model"])
                     elif backend == "codex":
                         self.assertEqual(command[1:], ["-C", str(workspace), "--no-daemon",
-                                                       "-m", "test-model"])
+                                                       *NO_UPDATE_CHECK, "-m", "test-model"])
                     else:
                         self.assertEqual(len(command), 2)
                         self.assertEqual(env["KIMI_MODEL_NAME"], "test-model")
