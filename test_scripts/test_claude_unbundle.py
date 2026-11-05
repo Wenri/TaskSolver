@@ -232,6 +232,15 @@ class GraphEditTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertEqual(self.source.read_bytes(), self.fixture.data)
 
+    def test_an_older_bun_graph_is_named_as_the_cause(self) -> None:
+        extractor = self.directory / "old-extractor"
+        extractor.write_text("#!/bin/sh\necho 'unknown argument: --no-bytecode' >&2\nexit 1\n")
+        extractor.chmod(0o700)
+        output = self.directory / "output"
+        with self.assertRaisesRegex(ValueError, "patchnar 489cfe38"):
+            unbundle(output, binary=self.source, bun_graph=str(extractor), pin=pin_for(self.fixture.data))
+        self.assertFalse(output.exists())
+
     def test_extractor_symlink_is_rejected_without_touching_its_target(self) -> None:
         target = self.directory / "keep"
         target.write_text("untouched")

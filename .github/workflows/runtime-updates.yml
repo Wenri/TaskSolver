@@ -20,7 +20,9 @@
 # adoptions over together on `runtime-updates/run-<id>`. While an issue is open, scheduled and
 # push runs hold its runtimes at the versions it names and still adopt the others; a newer upstream
 # release of a held runtime is tried again. When main gains code during a build, the release is not
-# pushed (it was not tested on that code); a new run is dispatched instead.
+# pushed (it was not tested on that code); a new run is dispatched instead. A failure of the
+# adoption step itself (the script, not an adoption) holds nothing, so each scheduled run repeats it
+# until the script is fixed.
 # The commits and tags this workflow pushes with GITHUB_TOKEN start no new runs. It keeps
 # nix/hashes.json current but does not build the Nix package: the downstream Nix configuration
 # that pins TaskSolver builds and tests it.
@@ -102,12 +104,20 @@ jobs:
             gh issue list --state open --limit 200 --json title --jq '.[].title' > "$RUNNER_TEMP/issues.txt"
             held=(--held "$RUNNER_TEMP/issues.txt")
           fi
+          status=0
           # shellcheck disable=SC2086  # REQUESTED is a space-separated list
-          python3 tools/runtimes.py check $REQUESTED --github-output "$RUNNER_TEMP/check.out" "${held[@]}" |
-            tee "$RUNNER_TEMP/check.log"
+          python3 tools/runtimes.py check $REQUESTED --github-output "$RUNNER_TEMP/check.out" "${held[@]}" 2>&1 |
+            tee "$RUNNER_TEMP/check.log" || status=$?
           sed -n 's/^held: /::notice::Held /p' "$RUNNER_TEMP/check.log"
-          runtimes=$(sed -n 's/^runtimes=//p' "$RUNNER_TEMP/check.out")
-          targets=$(sed -n 's/^targets=//p' "$RUNNER_TEMP/check.out")
+          runtimes=$(sed -n 's/^runtimes=//p' "$RUNNER_TEMP/check.out" 2> /dev/null || true)
+          targets=$(sed -n 's/^targets=//p' "$RUNNER_TEMP/check.out" 2> /dev/null || true)
+          if [ "$status" = 75 ]; then
+            # An upstream service or the network: nothing to adopt now; a push still validates.
+            echo "::warning::Checking upstream failed temporarily; the next run retries"
+            runtimes="" targets=""
+          elif [ "$status" != 0 ]; then
+            exit "$status"
+          fi
           if [ "$FULL_RELEASE" = true ]; then mode=release
           elif [ -n "$runtimes" ]; then mode=prerelease
           elif [ "$GITHUB_EVENT_NAME" = push ]; then mode=validate

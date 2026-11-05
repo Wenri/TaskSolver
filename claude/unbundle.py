@@ -12,7 +12,7 @@ import shutil
 import shlex
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Final, cast
@@ -194,6 +194,20 @@ def _read_graph(binary: Path) -> BunGraph:
 
 
 BUN_PAYLOAD_SEGMENT = 0x6FB00002   # PT_BUN_PAYLOAD: spans the payload since Bun's ahead-of-time compiler
+BUN_GRAPH_REQUIREMENT = "bun_graph from patchnar 489cfe38 or later (--clean, --extract --no-bytecode, --natives)"
+
+
+def _bun_graph(executable: str, arguments: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
+    """Run bun_graph; an older build that rejects one of the options is named as the cause."""
+    try:
+        return subprocess.run([executable, *arguments], check=True, capture_output=True, text=True, timeout=timeout)
+    except subprocess.CalledProcessError as error:
+        output = cast(object, error.stderr)
+        stderr = output if isinstance(output, str) else ""
+        if "unknown argument: --" in stderr:
+            raise ValueError(f"{executable} is too old ({stderr.strip()}); the Claude build needs "
+                             f"{BUN_GRAPH_REQUIREMENT}") from error
+        raise
 _SEGMENT_FIELDS = ("p_type", "p_offset", "p_vaddr", "p_paddr", "p_filesz", "p_memsz", "p_flags", "p_align")
 
 
@@ -205,8 +219,7 @@ def _clean_runtime(source: Path, target: Path, bun_graph: str) -> None:
     program headers other than the payload's, every loaded section's bytes, the entry point and
     the cleared standalone-graph pointer are checked independently of it.
     """
-    _ = subprocess.run([bun_graph, str(source), "--clean", str(target)], check=True,
-                       capture_output=True, text=True, timeout=300)
+    _ = _bun_graph(bun_graph, [str(source), "--clean", str(target)], timeout=300)
     target.chmod(0o755)
     with source.open("rb") as original, target.open("rb") as cleaned:
         old, new = ELFFile(original), ELFFile(cleaned)
@@ -839,8 +852,7 @@ def unbundle(output: Path, *, binary: Path | None = None, bun_graph: str = "bun_
         extracted = staging / "extracted"
         extracted.mkdir()
         # Without the packed, shared bytecode, which the runtime regenerates from the edited source.
-        completed = subprocess.run([executable, str(source), "--extract", str(extracted), "--no-bytecode"],
-                                   check=True, capture_output=True, text=True, timeout=300)
+        completed = _bun_graph(executable, [str(source), "--extract", str(extracted), "--no-bytecode"], timeout=300)
         _ = (output / "bun-graph.txt").write_text(completed.stdout, encoding="utf-8")
         module_metadata = _prepare_code(extracted, output, graph)
         directory, assets, modules = (output / name for name in ("source", "assets", "modules"))

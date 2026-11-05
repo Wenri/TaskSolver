@@ -46,8 +46,12 @@ runs without the source tree's `node_modules` or `package.json`. After an update
 The wiretap helper is separate from upstream code. Preserve the three emit sites and the
 ESM packaging config when updating the source: `python3 tools/runtimes.py adopt kimi
 [--version X.Y.Z]` replays the wiretap module, the emit sites and the `tsdown.config.ts` edits onto
-a new release with a three-way merge against the pinned tag, keeps the gitignored build output,
-and names any conflicted file to fix by hand. `pnpm-lock.yaml` comes from upstream (the build
+a new release with a three-way merge against the pinned tag and keeps the gitignored build output.
+The emit sites are also declared as hooks (`_KIMI_HOOKS` in `tools/runtimes.py`: each line and the
+anchor line that places it). When upstream moves or rewrites the code around them, as 2.5.0 did,
+the conflicted file takes the new release's copy with the hooks re-inserted, provided each anchor
+matches exactly one line; any other conflicted file is named to fix by hand. So an emit site
+changed here must change its hook too, and `test_kimi_capture.py` is the proof either way. `pnpm-lock.yaml` comes from upstream (the build
 installs with `--frozen-lockfile`). Then run `pixi reinstall --locked tasksolver`, which rebuilds
 the bundle and addon.
 

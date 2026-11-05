@@ -303,7 +303,8 @@ Ctrl-C. `--no-attach` with `--web-port` forces web-only operation. Offline check
 
 All Claude launches use the bundled bridged runtime. `claude/build_cli.py` verifies
 and caches the pristine pin, uses the externally provided `bun_graph` on `PATH`
-(patchnar's, with `--natives`; the workflow pins it as `PATCHNAR_REF`),
+(patchnar's, 489cfe38 or later for `--clean`, `--no-bytecode` and `--natives`; the workflow pins it as
+`PATCHNAR_REF`),
 and installs a split runtime under the SDK's `_bundled/`:
 `bun` with `.bun` removed, a native `claude` launcher, `source/`, `assets/`,
 `modules/`, and `libwire.node`/`cache.mjs`. The entry disables upstream auto-updates;
