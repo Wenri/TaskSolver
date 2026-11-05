@@ -9,6 +9,7 @@ import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/share
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { DisposableStore } from '#/_base/di/lifecycle';
+import { Event } from '#/_base/event';
 import { createServices } from '#/_base/di/test';
 import { ILogService } from '#/_base/log/log';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
@@ -29,6 +30,7 @@ import { IMcpRegistryService } from '#/app/mcpRegistry/mcpRegistry';
 import { McpRegistryService } from '#/app/mcpRegistry/mcpRegistryService';
 import { IPluginService } from '#/app/plugin/plugin';
 import type { PluginMcpServerEntry } from '#/app/plugin/types';
+import { ITelemetryService, noopTelemetryService } from '#/app/telemetry/telemetry';
 import { ErrorCodes, Error2 } from '#/errors';
 import { McpConnectionManager } from '#/mcpCore/connection-manager';
 import { McpOAuthService, type McpOAuthEvent } from '#/mcpCore/oauth/service';
@@ -40,12 +42,14 @@ import { IHostProcessService } from '#/os/interface/hostProcess';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
-import { FakeRuntime } from '#/runtime/fakeRuntime';
+import { FakeEnvironment } from '#/environment/fakeEnvironment';
 import type { WorkspaceInstance } from '#/workspace/workspaceInstance/workspaceInstance';
+import { IWorkspaceInstanceManager } from '#/workspace/workspaceInstance/workspaceInstanceManager';
+import { IEnvironmentService, type EnvironmentResolver } from '#/app/environment/environment';
 import {
-  IRuntimeResolver,
-  IWorkspaceInstanceManager,
-} from '#/workspace/workspaceInstance/workspaceInstanceManager';
+  IWorkspaceTrustStore,
+  WorkspaceTrustStore,
+} from '#/workspace/workspaceTrust/workspaceTrustStore';
 
 import { stubLog } from '../../_base/log/stubs';
 import {
@@ -102,10 +106,10 @@ describe('McpManagementService', () => {
     }));
     findContaining = vi.fn<IWorkspaceInstanceManager['findContaining']>(() => undefined);
     const hostProcess = new HostProcessService();
-    const runtime = Object.assign(
-      new FakeRuntime(
-        { workspaceId: 'test-workspace', runtimeId: 'local', generation: 'test-generation' },
-        { capabilities: ['process'] },
+    const environment = Object.assign(
+      new FakeEnvironment(
+        { environmentId: 'local', generation: 'test-generation' },
+        { capabilities: ['process'], host: { homeDir: home } },
       ),
       { process: hostProcess },
     );
@@ -140,12 +144,15 @@ describe('McpManagementService', () => {
           get: async <T>() => (trusted ? ({} as T) : undefined),
           list: async () => [],
         });
+        reg.defineInstance(ITelemetryService, noopTelemetryService);
+        reg.define(IWorkspaceTrustStore, WorkspaceTrustStore);
         reg.define(IMcpRegistryService, McpRegistryService);
         reg.defineInstance(IMcpOAuthService, oauth);
         reg.definePartialInstance(IConfigService, {
           get ready() {
             return configReady;
           },
+          onDidSectionChange: Event.None as IConfigService['onDidSectionChange'],
           get: (<T = unknown,>(_domain: string): T => undefined as T) as IConfigService['get'],
         });
         reg.defineInstance(IAgentIdentity, {
@@ -153,10 +160,11 @@ describe('McpManagementService', () => {
           resolved: () => identityReady,
           current: () => identitySnapshot,
         });
-        reg.defineInstance(IRuntimeResolver, {
+        reg.definePartialInstance(IEnvironmentService, {
           _serviceBrand: undefined,
-          inspect: () => runtime,
-          acquire: () => ({ runtime, track: (resource) => resource, dispose: () => {} }),
+          inspect: () => environment,
+          acquire: () => ({ environment, track: (resource) => resource, dispose: () => {} }),
+          acquireWhenReady: async () => ({ environment, track: (resource) => resource, dispose: () => {} }),
         });
         reg.definePartialInstance(IWorkspaceInstanceManager, { findContaining, acquire });
         reg.defineInstance(ILogService, stubLog());
@@ -348,6 +356,38 @@ describe('McpManagementService', () => {
       const remaining = await management.removeServer('alpha');
       expect(remaining).toEqual([]);
       await expect(store.list()).resolves.toEqual([]);
+    });
+
+    it('invalidates the previous OAuth identity when a global server URL changes without a workspace', async () => {
+      const previousUrl = 'https://mcp.example.test/mcp-a';
+      const nextUrl = 'https://mcp.example.test/mcp-b';
+      await management.addServer({ name: 'alpha', transport: 'http', url: previousUrl });
+      await seedTokens('alpha', previousUrl, { access_token: 'token' });
+
+      await management.updateServer({ name: 'alpha', transport: 'http', url: nextUrl });
+
+      expect((await oauth.tokenState('alpha', previousUrl)).hasTokens).toBe(false);
+    });
+
+    it('invalidates the OAuth identity when a global server is removed without a workspace', async () => {
+      const url = 'https://mcp.example.test/mcp';
+      await management.addServer({ name: 'alpha', transport: 'http', url });
+      await seedTokens('alpha', url, { access_token: 'token' });
+
+      await management.removeServer('alpha');
+
+      expect((await oauth.tokenState('alpha', url)).hasTokens).toBe(false);
+    });
+
+    it('retains a removed global server OAuth identity while another configuration uses it', async () => {
+      const url = 'https://mcp.example.test/mcp';
+      await management.addServer({ name: 'alpha', transport: 'http', url });
+      await seedTokens('alpha', url, { access_token: 'token' });
+      oauth.setConfigurationSource({}, [['alpha', url]]);
+
+      await management.removeServer('alpha');
+
+      expect((await oauth.tokenState('alpha', url)).hasTokens).toBe(true);
     });
 
     it('waits for live config reconciliation listeners before returning', async () => {
@@ -727,138 +767,7 @@ describe('McpManagementService', () => {
       expect(result.success).toBe(true);
       expect(result.output).toContain('Available tools: 4');
       expect(result.output).toContain('- echo: Echoes input text');
-      expect(findContaining).toHaveBeenCalledWith(cwd);
-      expect(acquire).not.toHaveBeenCalled();
-    }, 20000);
-
-    it('retains the containing workspace through a nested cwd probe and its shutdown', async () => {
-      const cwd = mkdtempSync(join(tmpdir(), 'kimi-mcp-management-nested-'));
-      tempDirs.push(cwd);
-      const workspace = { id: 'test-workspace' } as unknown as WorkspaceInstance;
-      findContaining.mockReturnValue(workspace);
-      const events: string[] = [];
-      const dispose = vi.fn(() => {
-        events.push('release');
-      });
-      acquire.mockImplementation(async () => {
-        events.push('acquire');
-        return { instance: workspace, dispose };
-      });
-      const originalConnectAll = McpConnectionManager.prototype.connectAll;
-      const connectAll = vi.spyOn(McpConnectionManager.prototype, 'connectAll').mockImplementation(
-        function (this: McpConnectionManager, configs) {
-          events.push('connect');
-          return originalConnectAll.call(this, configs);
-        },
-      );
-      let notifyShutdownStarted: () => void = () => undefined;
-      const shutdownStarted = new Promise<void>((resolve) => {
-        notifyShutdownStarted = resolve;
-      });
-      let allowShutdown: () => void = () => undefined;
-      const shutdownGate = new Promise<void>((resolve) => {
-        allowShutdown = resolve;
-      });
-      const originalShutdown = McpConnectionManager.prototype.shutdown;
-      const shutdown = vi.spyOn(McpConnectionManager.prototype, 'shutdown').mockImplementation(
-        async function (this: McpConnectionManager) {
-          events.push('shutdown-start');
-          notifyShutdownStarted();
-          await shutdownGate;
-          await originalShutdown.call(this);
-          events.push('shutdown-end');
-        },
-      );
-      const probe = management.testServer({
-        server: {
-          name: 'stdio-probe',
-          transport: 'stdio',
-          command: process.execPath,
-          args: [stdioFixture],
-        },
-        cwd,
-      });
-      try {
-        await shutdownStarted;
-        expect(events).toEqual(['acquire', 'connect', 'shutdown-start']);
-        expect(dispose).not.toHaveBeenCalled();
-        allowShutdown();
-        const result = await probe;
-        expect(result.success).toBe(true);
-        expect(result.output).toContain('Available tools: 4');
-        expect(findContaining).toHaveBeenCalledWith(cwd);
-        expect(acquire).toHaveBeenCalledWith({ workspaceId: 'test-workspace' });
-        expect(dispose).toHaveBeenCalledTimes(1);
-        expect(events).toEqual(['acquire', 'connect', 'shutdown-start', 'shutdown-end', 'release']);
-      } finally {
-        allowShutdown();
-        await probe.catch(() => {});
-        connectAll.mockRestore();
-        shutdown.mockRestore();
-      }
-    }, 20000);
-
-    it('rejects a non-local runtime_id probe when no workspace contains the cwd', async () => {
-      const cwd = mkdtempSync(join(tmpdir(), 'kimi-mcp-management-remote-miss-'));
-      tempDirs.push(cwd);
-
-      await expect(
-        management.testServer({
-          server: {
-            name: 'stdio-probe',
-            transport: 'stdio',
-            command: process.execPath,
-            args: [stdioFixture],
-            runtime_id: 'remote',
-          },
-          cwd,
-        }),
-      ).rejects.toMatchObject({
-        code: ErrorCodes.REQUEST_INVALID,
-        message: expect.stringContaining('runtime_id "remote"'),
-      });
-      expect(findContaining).toHaveBeenCalledWith(cwd);
-      expect(acquire).not.toHaveBeenCalled();
-    });
-
-    it('probes a non-local runtime_id through the containing workspace', async () => {
-      const cwd = mkdtempSync(join(tmpdir(), 'kimi-mcp-management-remote-hit-'));
-      tempDirs.push(cwd);
-      findContaining.mockReturnValue({ id: 'test-workspace' } as unknown as WorkspaceInstance);
-
-      const result = await management.testServer({
-        server: {
-          name: 'stdio-probe',
-          transport: 'stdio',
-          command: process.execPath,
-          args: [stdioFixture],
-          runtime_id: 'remote',
-        },
-        cwd,
-      });
-
-      expect(result.success).toBe(true);
-      expect(findContaining).toHaveBeenCalledWith(cwd);
-      expect(acquire).toHaveBeenCalledWith({ workspaceId: 'test-workspace' });
-    }, 20000);
-
-    it('keeps the transient local probe for an explicit local runtime_id', async () => {
-      const cwd = mkdtempSync(join(tmpdir(), 'kimi-mcp-management-local-explicit-'));
-      tempDirs.push(cwd);
-
-      const result = await management.testServer({
-        server: {
-          name: 'stdio-probe',
-          transport: 'stdio',
-          command: process.execPath,
-          args: [stdioFixture],
-          runtime_id: 'local',
-        },
-        cwd,
-      });
-
-      expect(result.success).toBe(true);
-      expect(findContaining).toHaveBeenCalledWith(cwd);
+      expect(findContaining).not.toHaveBeenCalled();
       expect(acquire).not.toHaveBeenCalled();
     }, 20000);
 
@@ -932,7 +841,7 @@ describe('McpManagementService', () => {
 
       releaseIdentity();
       await expect(probe).resolves.toMatchObject({ success: true });
-      expect(findContaining).toHaveBeenCalledWith(cwd);
+      expect(findContaining).not.toHaveBeenCalled();
       expect(acquire).not.toHaveBeenCalled();
     }, 20000);
 
@@ -1381,6 +1290,7 @@ describe('McpManagementService', () => {
       );
       const cancel = vi.fn(async () => undefined);
       const begin = vi.spyOn(oauth, 'beginAuthorization').mockResolvedValue({
+        waitId: 'project-auth-wait',
         authorizationUrl: new URL('https://project.example.test/authorize'),
         complete: vi.fn(async () => undefined),
         cancel,
@@ -1615,6 +1525,7 @@ describe('McpManagementService', () => {
       });
       const cancel = vi.fn(async () => undefined);
       const beginSpy = vi.spyOn(oauth, 'beginAuthorization').mockResolvedValue({
+        waitId: 'idle-auth-wait',
         authorizationUrl: new URL('https://oauthable.example.test/authorize'),
         complete: vi.fn(async () => undefined),
         cancel,

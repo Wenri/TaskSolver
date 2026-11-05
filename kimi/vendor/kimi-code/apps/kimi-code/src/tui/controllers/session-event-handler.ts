@@ -29,7 +29,6 @@ import type {
   TurnStepInterruptedEvent,
   TurnStepRetryingEvent,
   TurnStepStartedEvent,
-  TokenUsage,
   WarningEvent,
 } from '@moonshot-ai/kimi-code-sdk';
 
@@ -72,6 +71,7 @@ import { currentTheme } from '#/tui/theme';
 import type { ColorToken } from '#/tui/theme';
 import { errorReportHintLine } from '../constant/feedback';
 import { formatStepDebugTiming } from '#/utils/usage/debug-timing';
+import { isTurnPromptEvent, isTurnSteerEvent, isUserSteerOrigin } from '../utils/steer-delivery';
 import { nextTranscriptId } from '../utils/transcript-id';
 import type { BtwPanelController } from './btw-panel';
 import { isPluginMcpToolName, PluginUpdateNotifier } from './plugin-update-notifier';
@@ -108,10 +108,11 @@ export interface SessionEventHost {
   showError(msg: string): void;
   showStatus(msg: string, color?: ColorToken): void;
   showNotice(title: string, detail?: string): void;
+  refreshPluginCommands(session?: Session): Promise<void>;
+  refreshEnvironmentSlot(): Promise<void>;
   updateActivityPane(): void;
   track(event: string, props?: Record<string, unknown>): void;
   recordSessionActivity(): void;
-  noteStepUsage(usage: TokenUsage | undefined): void;
   noteCompactionFinished(): void;
   handleCompactionCancelled?(): void;
   handleBackgroundTaskStatus?(info: BackgroundTaskInfo): void;
@@ -127,8 +128,13 @@ export interface SessionEventHost {
   sendQueuedMessage(session: Session, item: QueuedMessage): void;
   shiftQueuedMessage(): QueuedMessage | undefined;
   steerQueuedMessagesIntoRunningTurn(): void;
+  acknowledgeSteerDelivery?(input: unknown, promptIds?: readonly string[]): void;
+  acknowledgeSteerTurnPrompt?(promptId: string | undefined, input: unknown, origin: unknown): void;
+  acknowledgeSteerTurnStarted?(promptId?: string): void;
+  releaseSteerDelivery?(promptId: string): void;
   lastCompactionTrigger: CompactionStartedEvent['trigger'] | undefined;
   autoCompactionSerial: number;
+  completedCompactionSerial: number;
   handleTurnStarted?(event: TurnStartedEvent): void;
   handleTurnEnded?(event: TurnEndedEvent): void;
   readonly btwPanelController: BtwPanelController;
@@ -159,6 +165,8 @@ export class SessionEventHandler {
       new PluginUpdateNotifier({
         getSession: () => this.host.session,
         workDir: host.state.appState.workDir,
+        reloadPlugins: async () => host.session?.reloadPlugins(),
+        refreshPluginCommands: async () => host.refreshPluginCommands(host.session),
         notify: (message) => {
           this.host.showStatus(message, 'warning');
         },
@@ -288,6 +296,17 @@ export class SessionEventHandler {
     if ('turnId' in event && event.turnId !== undefined) {
       this.host.streamingUI.setTurnId(String(event.turnId));
     }
+    const rawEvent: object = event;
+    if (isTurnSteerEvent(rawEvent)) {
+      if (isUserSteerOrigin(rawEvent)) {
+        this.host.acknowledgeSteerDelivery?.(rawEvent.input, rawEvent.promptIds);
+      }
+      return;
+    }
+    if (isTurnPromptEvent(rawEvent)) {
+      this.host.acknowledgeSteerTurnPrompt?.(rawEvent.promptId, rawEvent.input, rawEvent.origin);
+      return;
+    }
 
     switch (event.type) {
       case 'turn.started': this.handleTurnBegin(event); break;
@@ -330,6 +349,7 @@ export class SessionEventHandler {
       case 'background.task.terminated':
         this.handleBackgroundTaskEvent(event); break;
       case 'cron.fired': this.handleCronFired(event); break;
+      case 'environment.status.changed': void this.host.refreshEnvironmentSlot(); break;
       case 'mcp.server.status': this.renderMcpServerStatus(event.server); break;
       case 'tool.list.updated': break;
       default: break;
@@ -348,6 +368,7 @@ export class SessionEventHandler {
   // ---------------------------------------------------------------------------
 
   private handleTurnBegin(event: TurnStartedEvent): void {
+    this.host.acknowledgeSteerTurnStarted?.(event.promptId);
     this.host.handleTurnStarted?.(event);
     this.currentTurnHasAssistantText = false;
     if (event.origin?.kind === 'plugin_command') {
@@ -392,6 +413,9 @@ export class SessionEventHandler {
     event: Extract<Event, { type: 'prompt.completed' }>,
     sendQueued: (item: QueuedMessage) => void,
   ): void {
+    if (event.reason === 'blocked' || event.reason === 'failed') {
+      this.host.releaseSteerDelivery?.(event.promptId);
+    }
     if (event.reason !== 'blocked') return;
     this.host.programStatus?.failRequest('Turn blocked by a prompt hook');
     this.host.streamingUI.finalizeTurn(sendQueued);
@@ -458,7 +482,7 @@ export class SessionEventHandler {
   private handleStepCompleted(event: TurnStepCompletedEvent): void {
     this.host.streamingUI.flushNow();
     this.clearStepRetry();
-    this.host.noteStepUsage(event.usage);
+    this.host.recordSessionActivity();
     this.maybeShowDebugTiming(event);
 
     if (event.providerFinishReason === 'filtered') {
@@ -1175,6 +1199,7 @@ export class SessionEventHandler {
     // Cancellations do not count: the context was not cut, so a queued
     // /compact must still fire.
     if (this.host.lastCompactionTrigger === 'auto') this.host.autoCompactionSerial += 1;
+    this.host.completedCompactionSerial += 1;
     this.host.streamingUI.endCompaction(
       event.result.tokensBefore,
       event.result.tokensAfter,
@@ -1182,8 +1207,7 @@ export class SessionEventHandler {
     );
     // A completed compaction just refreshed and shrank the cached context —
     // count it as activity so the next submit isn't judged against the
-    // pre-compaction timestamp, and reset the cache-break baseline (the drop
-    // is expected). Cancellations do neither: the context was not cut.
+    // pre-compaction timestamp. Cancellations do not count as activity.
     this.host.recordSessionActivity();
     if (!this.compactionFailed) this.host.noteCompactionFinished();
     this.host.surveyController.notifyCompactionFinished();
@@ -1201,7 +1225,7 @@ export class SessionEventHandler {
 
   private finishCompaction(sendQueued: (item: QueuedMessage) => void): void {
     const hasActiveTurn = this.host.streamingUI.hasActiveTurn();
-    if (!hasActiveTurn) {
+    if (!hasActiveTurn && !this.host.state.queuedMessageDispatchPending) {
       const next = this.host.shiftQueuedMessage();
       if (next !== undefined) {
         this.host.state.queuedMessageDispatchPending = true;

@@ -97,6 +97,41 @@ describe('Session skills', () => {
     }
   });
 
+  it('does not merge skills from session-only additional dirs', async () => {
+    const homeDir = await makeTempDir(tempDirs, 'kimi-sdk-skills-home-');
+    const workDir = await makeTempDir(tempDirs, 'kimi-sdk-skills-work-');
+    const additionalDir = await makeTempDir(tempDirs, 'kimi-sdk-skills-additional-');
+    await writeSkill(additionalDir, 'session-only', [
+      '---',
+      'name: session-only',
+      'description: Session-only skill',
+      '---',
+      '',
+      'Do not load this skill.',
+    ]);
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      const first = await harness.createSession({
+        id: 'ses_sdk_session_only_skills_a',
+        workDir,
+        additionalDirs: [additionalDir],
+      });
+      const second = await harness.createSession({
+        id: 'ses_sdk_session_only_skills_b',
+        workDir,
+      });
+      const hasSessionOnlySkill = (skills: readonly SkillSummary[]) =>
+        skills.some((skill) => skill.name === 'session-only');
+
+      expect(hasSessionOnlySkill(await first.listSkills())).toBe(false);
+      expect(hasSessionOnlySkill(await second.listSkills())).toBe(false);
+      expect(hasSessionOnlySkill(await harness.listWorkspaceSkills(workDir))).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('lists session skills without exposing content', async () => {
     const homeDir = await makeTempDir(tempDirs, 'kimi-sdk-skills-home-');
     const workDir = await makeTempDir(tempDirs, 'kimi-sdk-skills-work-');
@@ -215,19 +250,26 @@ describe('Session skills', () => {
     }
   });
 
-  it('forwards the steerIfActive option and the skill args to the RPC input', async () => {
-    const promptWithSkills = vi.fn(async () => {});
+  it('forwards the steerIfActive option and returns the skill submission identity', async () => {
+    const submission = {
+      promptId: 'prompt-skill-1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      state: 'queued',
+      steered: false,
+    } as const;
+    const promptWithSkills = vi.fn(async () => submission);
     const session = new Session({
       id: 'ses_skill_steer_option',
       workDir: '/tmp/work',
       rpc: { promptWithSkills } as unknown as SDKRpcClientBase,
     });
 
-    await session.promptWithSkills(
+    const result = await session.promptWithSkills(
       '/review src/app.ts',
       [{ name: 'review', args: 'src/app.ts' }],
       { steerIfActive: true },
     );
+    expect(result).toEqual(submission);
     expect(promptWithSkills).toHaveBeenLastCalledWith({
       sessionId: 'ses_skill_steer_option',
       input: [{ type: 'text', text: '/review src/app.ts' }],

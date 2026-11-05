@@ -1,4 +1,6 @@
-Read a UTF-8 or UTF-16 text file from the local filesystem, or a `kimi-file://` attachment of this session.
+Read a UTF-8 or UTF-16 text file from the active environment's filesystem, or a `kimi-file://` attachment of this session.
+
+The path may be a `kimi-file://` attachment reference. Its bytes come from the current session's storage, independently of the workspace environment. Next Read keeps the reference so pagination also works after a fork. For a binary attachment, the error includes a server-local path when available; a converter must be able to access that filesystem. ReadMediaFile accepts the same reference for images and videos.
 
 If the user provides a concrete file path to a text file, call Read directly. Do not `Glob`, `ls`, or otherwise pre-check known text file paths; missing or invalid file paths return errors you can handle.
 

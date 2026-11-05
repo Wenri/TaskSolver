@@ -1,6 +1,7 @@
 import {
   ErrorCodes,
   IAgentChangeNotifierService,
+  IAgentGoalService,
   IAgentContextMemoryService,
   IAgentProfileService,
   IAgentConversationUndoService,
@@ -26,6 +27,7 @@ import {
   IWorkspaceInstanceManager,
   IWorkspaceService,
   closeSessionById,
+  ensureMainAgent as ensureMainAgentContext,
   getLiveSessionById,
   programForSession,
   resolveSubagentModelPool,
@@ -45,6 +47,7 @@ import { SessionMetaUpdated } from '@moonshot-ai/agent-core-v2/session/sessionMe
 import { ErrorCode } from '../protocol/error-codes';
 import { pageResponseSchema } from '../protocol/pagination';
 import { toProtocolMessage } from '../services/messages/messageProjection';
+import { loadWorkspaceVisibility } from '../services/workspaceVisibility';
 import {
   archiveSessionResponseSchema,
   compactSessionRequestSchema,
@@ -53,10 +56,11 @@ import {
   createSessionRequestSchema,
   deleteSessionResponseSchema,
   forkSessionRequestSchema,
+  editSessionGoalRequestSchema,
+  editSessionGoalResponseSchema,
   getSessionGoalResponseSchema,
   listSessionChildrenResponseSchema,
   sessionAbortResponseSchema,
-  sessionStatusResponseSchema,
   sessionWarningsResponseSchema,
   startBtwSessionResponseSchema,
   takeoverSessionResponseSchema,
@@ -79,7 +83,11 @@ import { defineRoute } from '../middleware/defineRoute';
 import { readLegacyStatus } from '../services/legacyStatus/legacyStatus';
 import { ensureMainAgent, MAIN_AGENT_ID } from '../transport/mainAgent';
 import { type ActionTable, dispatchAction } from './action-dispatch';
-import { sendMappedError, sessionConflictErrors } from './sessionErrors';
+import { sendEnvironmentError } from './environment';
+import {
+  sendMappedError as sendSessionMappedError,
+  sessionConflictErrors,
+} from './sessionErrors';
 import { applySessionAgentConfig } from './sessionAgentConfig';
 import { updateSessionProfile } from './sessionProfile';
 
@@ -97,6 +105,14 @@ interface SessionRouteHost {
     options: { preHandler: unknown[]; schema?: Record<string, unknown> } | undefined,
     handler: (
       req: { id: string; query: unknown; params: unknown },
+      reply: { send(payload: unknown): unknown },
+    ) => Promise<void> | void,
+  ): unknown;
+  patch(
+    path: string,
+    options: { preHandler: unknown[]; schema?: Record<string, unknown> },
+    handler: (
+      req: { id: string; body: unknown; params: unknown; headers: Record<string, unknown> },
       reply: { send(payload: unknown): unknown },
     ) => Promise<void> | void,
   ): unknown;
@@ -171,6 +187,7 @@ const sessionActionRequestSchema = z.preprocess(
   z.object({
     title: z.string().min(1).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
+    turn_index: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
     instruction: z.string().optional(),
     count: z.number().int().positive().optional(),
     page_size: z.number().int().min(1).max(100).optional(),
@@ -179,15 +196,7 @@ const sessionActionRequestSchema = z.preprocess(
 
 const detailsSchema = z.array(z.object({ path: z.string(), message: z.string() }));
 
-export interface SessionsRoutesDeps {
-  readonly sessionEventCursor: (sessionId: string) => Promise<{ seq: number; epoch: string }>;
-}
-
-export function registerSessionsRoutes(
-  app: SessionRouteHost,
-  core: Scope,
-  deps: SessionsRoutesDeps,
-): void {
+export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void {
   const createRoute = defineRoute(
     {
       method: 'POST',
@@ -198,6 +207,8 @@ export function registerSessionsRoutes(
         [ErrorCode.VALIDATION_FAILED]: { detailsSchema },
         [ErrorCode.WORKSPACE_NOT_FOUND]: {},
         [ErrorCode.FS_PATH_NOT_FOUND]: {},
+        [ErrorCode.ENVIRONMENT_NOT_FOUND]: {},
+        [ErrorCode.ENVIRONMENT_UNAVAILABLE]: {},
       },
       description: 'Create a new session',
       tags: ['sessions'],
@@ -218,6 +229,7 @@ export function registerSessionsRoutes(
 
       const registry = core.accessor.get(IWorkspaceService);
       let workDir: string;
+      let bucket: { readonly id: string; readonly root: string } | undefined;
       if (workspaceId !== undefined) {
         const workspace = await registry.get(workspaceId);
         if (workspace === undefined) {
@@ -245,23 +257,30 @@ export function registerSessionsRoutes(
           return;
         }
         workDir = workspace.root;
+        bucket = workspace;
       } else {
         workDir = callerCwd as string;
       }
 
       try {
-        const touched = await registry.createOrTouch(workDir);
+        const resolved =
+          bucket === undefined
+            ? await registry.createOrTouch(workDir)
+            : ((await registry.touch(bucket.id)) ?? bucket);
         const handle = await core.accessor.get(ISessionManager).create({
-          workspaceId: touched.id,
+          workspaceId: resolved.id,
           workDir,
+          environmentId: body.environment_id,
+          environmentCwd: body.environment_cwd,
+          ensureMainAgent: body.environment_id !== undefined && body.environment_id !== 'local',
         });
         if (typeof body.title === 'string') {
           await handle.accessor.get(ISessionMetadata).setTitle(body.title);
         }
         const meta = await handle.accessor.get(ISessionMetadata).read();
         const session = toWireSession(
-          { ...meta, workspaceId: touched.id },
-          touched.root,
+          { ...meta, workspaceId: resolved.id },
+          resolved.root,
           { busy: false, mainTurnActive: false, pendingInteraction: 'none' },
         );
         core.accessor.get(IEventService).publish(
@@ -296,8 +315,7 @@ export function registerSessionsRoutes(
       const raw = req.query;
       const archivedOnly = raw.archived_only === true;
 
-      const workspaces = await core.accessor.get(IWorkspaceService).list();
-      const roots = new Map(workspaces.map((w) => [w.id, w.root]));
+      const { roots, visibleWorkspaceIds } = await loadWorkspaceVisibility(core);
 
       if (raw.workspace_id !== undefined && !roots.has(raw.workspace_id)) {
         reply.send(
@@ -344,6 +362,7 @@ export function registerSessionsRoutes(
           if (page.items.length === 0) break;
           let exhausted = false;
           for (const summary of page.items) {
+            if (!visibleWorkspaceIds.has(summary.workspaceId)) continue;
             if (!newerThanCursor(summary)) {
               exhausted = true;
               break;
@@ -375,6 +394,7 @@ export function registerSessionsRoutes(
         });
         const eligible: Eligible[] = [];
         for (const summary of page.items) {
+          if (!visibleWorkspaceIds.has(summary.workspaceId)) continue;
           const cwd = summary.cwd ?? roots.get(summary.workspaceId);
           if (cwd === undefined) continue;
           if (raw.exclude_empty === true && (summary.lastPrompt ?? '').length === 0) continue;
@@ -424,7 +444,6 @@ export function registerSessionsRoutes(
     },
     async (req, reply) => {
       const { session_id } = req.params;
-      const cursor = await deps.sessionEventCursor(session_id);
       const summary = await core.accessor.get(ISessionIndex).get(session_id);
       if (summary === undefined) {
         reply.send(
@@ -445,10 +464,7 @@ export function registerSessionsRoutes(
         return;
       }
       reply.send(
-        okEnvelope(
-          toWireSession(summary, cwd, resolveSessionFacts(core, session_id), cursor.seq),
-          req.id,
-        ),
+        okEnvelope(toWireSession(summary, cwd, resolveSessionFacts(core, session_id)), req.id),
       );
     },
   );
@@ -771,35 +787,6 @@ export function registerSessionsRoutes(
     createChildRoute.handler as Parameters<SessionRouteHost['post']>[2],
   );
 
-  const statusRoute = defineRoute(
-    {
-      method: 'GET',
-      path: '/sessions/{session_id}/status',
-      params: sessionIdParamSchema,
-      success: { data: sessionStatusResponseSchema },
-      errors: {
-        [ErrorCode.VALIDATION_FAILED]: { detailsSchema },
-        [ErrorCode.SESSION_NOT_FOUND]: {},
-      },
-      description: 'Get realtime session status (best-effort in this slice)',
-      tags: ['sessions'],
-    },
-    async (req, reply) => {
-      try {
-        const { session_id } = req.params;
-        const status = await core.accessor.get(ISessionLegacyService).status(session_id);
-        reply.send(okEnvelope(status, req.id));
-      } catch (error) {
-        sendMappedError(reply, req, error);
-      }
-    },
-  );
-  app.get(
-    statusRoute.path,
-    statusRoute.options,
-    statusRoute.handler as Parameters<SessionRouteHost['get']>[2],
-  );
-
   const goalRoute = defineRoute(
     {
       method: 'GET',
@@ -827,6 +814,51 @@ export function registerSessionsRoutes(
     goalRoute.path,
     goalRoute.options,
     goalRoute.handler as Parameters<SessionRouteHost['get']>[2],
+  );
+
+  const editGoalRoute = defineRoute(
+    {
+      method: 'PATCH',
+      path: '/sessions/{session_id}/goal',
+      params: sessionIdParamSchema,
+      body: editSessionGoalRequestSchema,
+      success: { data: editSessionGoalResponseSchema },
+      errors: {
+        [ErrorCode.VALIDATION_FAILED]: { detailsSchema },
+        [ErrorCode.SESSION_NOT_FOUND]: {},
+        [ErrorCode.GOAL_NOT_FOUND]: {},
+        [ErrorCode.GOAL_STATUS_INVALID]: {},
+        [ErrorCode.GOAL_OBJECTIVE_EMPTY]: {},
+        [ErrorCode.GOAL_OBJECTIVE_TOO_LONG]: {},
+      },
+      description: 'Edit the objective of the current session goal in place',
+      tags: ['sessions'],
+    },
+    async (req, reply) => {
+      try {
+        const { session_id } = req.params;
+        const session = await resumeSessionById(core.accessor, session_id);
+        if (session === undefined) {
+          throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${session_id} does not exist`);
+        }
+        const { agentId } = await ensureMainAgentContext(session);
+        const agent = session.accessor.get(IAgentLifecycleService).handleOf(agentId);
+        if (agent === undefined) {
+          throw new Error2(ErrorCodes.AGENT_NOT_FOUND, 'Main agent was not found');
+        }
+        const goal = await agent.accessor
+          .get(IAgentGoalService)
+          .editGoalObjective({ objective: req.body.objective });
+        reply.send(okEnvelope(goal, req.id));
+      } catch (error) {
+        sendMappedError(reply, req, error);
+      }
+    },
+  );
+  app.patch(
+    editGoalRoute.path,
+    editGoalRoute.options,
+    editGoalRoute.handler as Parameters<SessionRouteHost['patch']>[2],
   );
 
   const sessionWarningsRoute = defineRoute(
@@ -926,6 +958,7 @@ async function forkSessionAction(
       sourceSessionId: id,
       title: body.title,
       metadata: body.metadata,
+      turnIndex: body.turn_index,
     });
     const session = toWireSession(
       { ...meta, workspaceId: lease.instance.program.workspaceId },
@@ -972,16 +1005,11 @@ async function undoSessionAction(
   );
   const history = agent.accessor.get(IAgentContextMemoryService).get();
   requestLog(req)?.info({ session_id: id, action: 'undo' }, 'session action completed');
-  const legacy = core.accessor.get(ISessionLegacyService);
-  const [summary, status] = await Promise.all([
-    core.accessor.get(ISessionIndex).get(id),
-    legacy.status(id),
-  ]);
+  const summary = await core.accessor.get(ISessionIndex).get(id);
   reply.send(
     okEnvelope(
       {
         messages: pageUndoMessages(id, summary?.createdAt ?? 0, history, body.page_size),
-        status,
       },
       req.id,
     ),
@@ -1115,6 +1143,7 @@ async function reloadSessionAction(ctx: SessionActionCtx): Promise<void> {
         staleNotifier.notifyAgentsMdChanges(),
         staleNotifier.notifySkillChanges(),
         staleNotifier.notifySubagentChanges({}),
+        staleNotifier.notifyWorkspaceDirsChanges(),
       ]).catch(() => undefined);
     }
     throw error;
@@ -1133,6 +1162,7 @@ async function reloadSessionAction(ctx: SessionActionCtx): Promise<void> {
     await notifier.notifyAgentsMdChanges();
     await notifier.notifySkillChanges();
     await notifier.notifySubagentChanges({ previousSubagentNames, previousModelPool });
+    await notifier.notifyWorkspaceDirsChanges();
   }
   const meta = await handle.accessor.get(ISessionMetadata).read();
   const sessionCtx = handle.accessor.get(ISessionContext);
@@ -1153,10 +1183,7 @@ async function refreshWorkspaceCatalogs(
   if (workspaceId !== undefined) {
     const target = core.accessor.get(IWorkspaceInstanceManager).get(workspaceId);
     if (target !== undefined) {
-      await target.program.instructions.reload();
-      await target.program.skills.reload();
-      await target.program.agentProfiles.reload().catch(() => undefined);
-      await target.program.userAgentProfiles.reload().catch(() => undefined);
+      await target.program.reload();
     }
   }
   const sessions = core.accessor.get(ISessionManager).list();
@@ -1187,7 +1214,6 @@ export function toWireSession(
   fields: SessionWireFields,
   cwd: string,
   facts: SessionFacts,
-  lastSeq?: number,
 ): Session {
   return {
     id: fields.id,
@@ -1209,7 +1235,6 @@ export function toWireSession(
     usage: emptySessionUsage(),
     permission_rules: [],
     message_count: 0,
-    last_seq: lastSeq ?? 0,
   };
 }
 
@@ -1315,4 +1340,13 @@ function buildValidationEnvelope(
     request_id: requestId,
     details,
   };
+}
+
+function sendMappedError(
+  reply: { send(payload: unknown): unknown },
+  req: { id: string },
+  error: unknown,
+): void {
+  if (sendEnvironmentError(reply, req.id, error)) return;
+  sendSessionMappedError(reply, req, error);
 }

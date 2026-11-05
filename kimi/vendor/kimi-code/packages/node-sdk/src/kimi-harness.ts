@@ -9,6 +9,7 @@ import type { ConfigSectionChange, SDKRpcClientBase } from '#/rpc';
 import type {
   AuthenticateMcpServerOptions,
   AppMcpServerInspection,
+  CapabilityInstallOptions,
   CapabilityStatus,
   ConfigDiagnostics,
   CreateSessionOptions,
@@ -21,6 +22,7 @@ import type {
   ImportCustomRegistryOptions,
   ImportCustomRegistryResult,
   GlobalMcpServerAuthStatus,
+  InstallPluginInput,
   KimiConfig,
   KimiConfigPatch,
   KimiHostIdentity,
@@ -42,6 +44,9 @@ import type {
   SessionSummary,
   SessionSummaryPage,
   SkillSummary,
+  GitPullRequest,
+  GitQueryInput,
+  GitStatusSummary,
   SuggestFilesInput,
   SuggestFilesResult,
   TelemetryClient,
@@ -51,9 +56,10 @@ import type {
   Unsubscribe,
   UploadFileOptions,
   WorkspaceTrustInfo,
+  WorkspaceTrustInfoOptions,
 } from '#/types';
 
-export interface KimiHarnessRuntimeOptions {
+export interface KimiHarnessEnvironmentOptions {
   readonly identity?: KimiHostIdentity;
   readonly uiMode?: string;
   readonly homeDir: string;
@@ -73,6 +79,9 @@ export interface KimiHarnessRuntimeOptions {
   readonly sessionStartedDynamicProperties?: () => TelemetryProperties;
   readonly imageLimits?: ImageLimits | undefined;
 }
+
+/** @deprecated Use {@link KimiHarnessEnvironmentOptions}. */
+export type KimiHarnessRuntimeOptions = KimiHarnessEnvironmentOptions;
 
 export class KimiHarness {
   readonly homeDir: string;
@@ -97,7 +106,7 @@ export class KimiHarness {
 
   constructor(
     private readonly rpc: SDKRpcClientBase,
-    options: KimiHarnessRuntimeOptions,
+    options: KimiHarnessEnvironmentOptions,
   ) {
     this.identity = options.identity;
     this.uiMode = options.uiMode ?? DEFAULT_SESSION_STARTED_UI_MODE;
@@ -138,6 +147,10 @@ export class KimiHarness {
 
   setTelemetryContext(patch: TelemetryContextPatch): void {
     this.telemetry.setContext?.(patch);
+  }
+
+  async resolveSessionEnvironment(options: Pick<CreateSessionOptions, 'workDir' | 'environmentId' | 'environmentCwd'>) {
+    return this.rpc.resolveSessionEnvironment(options);
   }
 
   async createSession(options: CreateSessionOptions): Promise<Session> {
@@ -332,6 +345,10 @@ export class KimiHarness {
     return this.rpc.listWorkspaceSkills(workDir);
   }
 
+  async getWorkspaceAdditionalDirs(workDir: string): Promise<readonly string[]> {
+    return this.rpc.getWorkspaceAdditionalDirs(workDir);
+  }
+
   /**
    * File suggestions for @ mention-style completion under `workDir`, no
    * session required. `undefined` on the v1 engine, which has no equivalent
@@ -339,6 +356,24 @@ export class KimiHarness {
    */
   async suggestFiles(workDir: string, input: SuggestFilesInput): Promise<SuggestFilesResult | undefined> {
     return this.rpc.suggestFiles(workDir, input);
+  }
+
+  /**
+   * Git working-tree summary of `workDir` on this machine, or of a live
+   * session's working directory on the environment it runs on. `null` when
+   * the directory is not inside a git work tree or git is unavailable there.
+   */
+  async getGitStatus(workDir: string, input: GitQueryInput = {}): Promise<GitStatusSummary | null> {
+    return this.rpc.getGitStatus(workDir, input);
+  }
+
+  /**
+   * Pull request of the current branch, resolved the same way as
+   * {@link getGitStatus}. `null` when there is none, the HEAD is detached,
+   * or `gh` is unavailable.
+   */
+  async getGitPullRequest(workDir: string, input: GitQueryInput = {}): Promise<GitPullRequest | null> {
+    return this.rpc.getGitPullRequest(workDir, input);
   }
 
   /**
@@ -361,15 +396,15 @@ export class KimiHarness {
 
   /**
    * Workspace-level MCP server list, no session required. The v2 engine owns
-   * one shared connection set per workspace handler, so `/mcp` is inspectable
+   * one shared connection set per workspace `Program`, so `/mcp` is inspectable
    * before the first session exists; empty on the v1 engine.
    */
   async listWorkspaceMcpServers(workDir: string): Promise<readonly McpServerInfo[]> {
     return this.rpc.listWorkspaceMcpServers(workDir);
   }
 
-  async installPlugin(source: string): Promise<PluginSummary> {
-    return this.rpc.installPlugin(source);
+  async installPlugin(input: string | InstallPluginInput): Promise<PluginSummary> {
+    return this.rpc.installPlugin(input);
   }
 
   async setPluginEnabled(id: string, enabled: boolean): Promise<void> {
@@ -406,8 +441,8 @@ export class KimiHarness {
     return capabilityRpc(this.rpc).getCapability(id);
   }
 
-  async installCapability(id: string): Promise<CapabilityStatus> {
-    return capabilityRpc(this.rpc).installCapability(id);
+  async installCapability(id: string, options?: CapabilityInstallOptions): Promise<CapabilityStatus> {
+    return capabilityRpc(this.rpc).installCapability(id, options);
   }
 
   /**
@@ -415,8 +450,11 @@ export class KimiHarness {
    * always-trusted workspace). Querying may register the workDir as a
    * workspace, which session creation would do anyway.
    */
-  async getWorkspaceTrustInfo(workDir: string): Promise<WorkspaceTrustInfo> {
-    return this.rpc.getWorkspaceTrustInfo(workDir);
+  async getWorkspaceTrustInfo(
+    workDir: string,
+    options?: WorkspaceTrustInfoOptions,
+  ): Promise<WorkspaceTrustInfo> {
+    return this.rpc.getWorkspaceTrustInfo(workDir, options);
   }
 
   /** Mark `workDir` as trusted; project-level MCP servers connect live afterwards. */

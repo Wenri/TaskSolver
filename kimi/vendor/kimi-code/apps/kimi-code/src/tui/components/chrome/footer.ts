@@ -15,8 +15,9 @@ import { ALL_TIPS, type ToolbarTip } from '#/tui/constant/tips';
 import { isRainbowDancing, renderDanceFooterModel } from '#/tui/easter-eggs/dance';
 import { currentTheme } from '#/tui/theme';
 import type { ColorPalette } from '#/tui/theme/colors';
-import type { AppState } from '#/tui/types';
+import type { AppState, EnvironmentSlotState } from '#/tui/types';
 import { PERMISSION_MODE_DISPLAY_NAMES } from '#/tui/utils/permission-mode';
+import { SpinnerTicker } from '#/tui/utils/spinner-ticker';
 import {
   StatusLineCommandRunner,
   type StatusLinePayload,
@@ -27,6 +28,7 @@ import {
   formatPullRequestBadge,
   type GitStatus,
   type GitStatusCache,
+  type GitStatusSource,
 } from '#/utils/git/git-status';
 import {
   formatTokenCount,
@@ -37,9 +39,10 @@ import {
 /** What the footer's fixed ctrl+o hint offers: expand collapsed tool output, or collapse it again. */
 export type ToolOutputExpandHint = 'expand' | 'collapse';
 
-const DEFAULT_STATUS_LINE_ITEMS = ['mode', 'goal', 'model', 'tasks', 'cwd', 'git'] as const;
+const DEFAULT_STATUS_LINE_ITEMS = ['mode', 'goal', 'model', 'tasks', 'environment', 'cwd', 'git'] as const;
 
 const MAX_CWD_SEGMENTS = 3;
+const MAX_ENVIRONMENT_REASON_WIDTH = 40;
 const GOAL_TIMER_INTERVAL_MS = 1_000;
 
 // Toolbar tips — rotates every 10s. Most tips are short and pair up (two
@@ -151,14 +154,17 @@ function modelDisplayName(state: AppState): string {
   return effective?.displayName ?? effective?.model ?? state.model;
 }
 
-function shortenCwd(path: string): string {
+function isRemoteEnvironment(environment: AppState['environment']): environment is EnvironmentSlotState {
+  return environment !== undefined && environment.environmentId !== 'local';
+}
+
+function shortenCwd(path: string, home: string | undefined): string {
   if (!path) return path;
-  const home = process.env['HOME'] ?? '';
   let work = path;
-  if (home && path === home) {
+  if (home !== undefined && home.length > 0 && path === home) {
     return '~';
   }
-  if (home && path.startsWith(home + '/')) {
+  if (home !== undefined && home.length > 0 && path.startsWith(home + '/')) {
     work = '~' + path.slice(home.length);
   }
 
@@ -192,17 +198,27 @@ export function formatFooterGitBadge(status: GitStatus, colors: ColorPalette): s
   return `${base} ${pullRequest}`;
 }
 
+/** Where the footer reads git state for a given app state; a new key replaces the cache. */
+export interface FooterGitBinding {
+  readonly key: string;
+  readonly source: GitStatusSource;
+}
+
 export class FooterComponent implements Component {
   private state: AppState;
   private readonly onRefresh: () => void;
-  private gitCache: GitStatusCache;
-  private gitCacheWorkDir: string;
+  private gitBinding: ((state: AppState) => FooterGitBinding | null) | null = null;
+  private gitCache: GitStatusCache | null = null;
+  private gitCacheKey: string | null = null;
   private transientHint: string | null = null;
   private warningHint: string | null = null;
   private expandHintProvider: (() => ToolOutputExpandHint | null) | null = null;
   private goalSnapshotKey: string | null = null;
   private goalObservedAtMs = Date.now();
   private goalTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly environmentSpinner = new SpinnerTicker(() => {
+    this.onRefresh();
+  });
   private statusLineRunner: StatusLineCommandRunner | null = null;
   /**
    * Non-terminal background-task counts split by kind so the footer can
@@ -217,27 +233,40 @@ export class FooterComponent implements Component {
   constructor(state: AppState, onRefresh: () => void = () => {}) {
     this.state = state;
     this.onRefresh = onRefresh;
-    this.gitCacheWorkDir = state.workDir;
-    this.gitCache = createGitStatusCache(state.workDir, {
-      onChange: this.onRefresh,
-    });
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
+    this.syncEnvironmentSpinner(state.environment);
     this.syncStatusLineRunner(state);
   }
 
   setState(state: AppState): void {
-    if (state.workDir !== this.gitCacheWorkDir) {
-      this.gitCache.dispose();
-      this.gitCacheWorkDir = state.workDir;
-      this.gitCache = createGitStatusCache(state.workDir, {
-        onChange: this.onRefresh,
-      });
+    this.syncGitCache(state);
+    if (state.environment?.status === 'ready' && this.state.environment?.status !== 'ready') {
+      this.gitCache?.refresh();
     }
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
+    this.syncEnvironmentSpinner(state.environment);
     this.syncStatusLineRunner(state);
     this.state = state;
+  }
+
+  /**
+   * Resolves the git source for each app state. Until it is set, or while it
+   * resolves to `null`, the git slot stays empty.
+   */
+  setGitBinding(resolve: (state: AppState) => FooterGitBinding | null): void {
+    this.gitBinding = resolve;
+    this.syncGitCache(this.state);
+  }
+
+  private syncGitCache(state: AppState): void {
+    const binding = this.gitBinding?.(state) ?? null;
+    const key = binding?.key ?? null;
+    if (key === this.gitCacheKey) return;
+    this.gitCache?.dispose();
+    this.gitCacheKey = key;
+    this.gitCache = binding === null ? null : createGitStatusCache(binding.source, { onChange: this.onRefresh });
   }
 
   private syncStatusLineRunner(state: AppState): void {
@@ -301,7 +330,7 @@ export class FooterComponent implements Component {
   }
 
   refreshGitStatus(): void {
-    this.gitCache.refresh();
+    this.gitCache?.refresh();
   }
 
   invalidate(): void {}
@@ -436,6 +465,7 @@ export class FooterComponent implements Component {
       goal: [],
       model: [],
       tasks: [],
+      environment: [],
       cwd: [],
       git: [],
       tips: [],
@@ -499,10 +529,51 @@ export class FooterComponent implements Component {
     }
     slots['tasks'] = taskBadges;
 
-    const cwd = shortenCwd(state.workDir);
+    // Environment slot: the local environment renders nothing; a remote binding
+    // shows its bare environment id ahead of the cwd — error-colored while
+    // disconnected, with the first connect-error line appended so the failure
+    // reason is visible at a glance. A pending environment (never connected or
+    // deliberately reaped while idle) is not a failure and renders dim like a
+    // ready one. While connecting, a braille spinner ticks ahead of the id (see
+    // syncEnvironmentSpinner for the bounded timer).
+    const environment = state.environment;
+    const remote = isRemoteEnvironment(environment);
+    if (remote) {
+      const tone =
+        environment.status === 'disconnected'
+          ? colors.error
+          : environment.status === 'ready' || environment.status === 'pending'
+            ? colors.textDim
+            : colors.warning;
+      const label = environment.environmentId;
+      const reason =
+        environment.status === 'disconnected' && environment.connectError !== undefined
+          ? environment.connectError.split('\n', 1)[0]
+          : undefined;
+      const spinner =
+        environment.status === 'connecting' ? `${this.environmentSpinner.current} ` : '';
+      slots['environment'] = [
+        chalk.hex(tone)(
+          reason === undefined
+            ? `${spinner}${label}`
+            : `${spinner}${label} (${truncateToWidth(reason, MAX_ENVIRONMENT_REASON_WIDTH, '…')})`,
+        ),
+      ];
+    }
+
+    // A remote-bound session works on the target host, so the slot shows the
+    // binding cwd rather than the frozen local workDir. The environment-info
+    // surface (getEnvironment/listEnvironments) does not carry the remote home dir,
+    // so the remote path shortens by segments only and never claims ~ — a
+    // wrong ~ would be worse than a full path.
+    const bindingCwd = remote ? environment.cwd : undefined;
+    const cwd =
+      bindingCwd !== undefined
+        ? shortenCwd(bindingCwd, undefined)
+        : shortenCwd(state.workDir, process.env['HOME']);
     if (cwd) slots['cwd'] = [chalk.hex(colors.textDim)(cwd)];
 
-    const git = this.gitCache.getStatus();
+    const git = this.gitCache?.getStatus() ?? null;
     if (git !== null) slots['git'] = [formatFooterGitBadge(git, colors)];
 
     return slots;
@@ -512,8 +583,10 @@ export class FooterComponent implements Component {
     const state = this.state;
     return {
       model: modelDisplayName(state),
-      cwd: state.workDir,
-      gitBranch: this.gitCache.getStatus()?.branch ?? null,
+      cwd: isRemoteEnvironment(state.environment) && state.environment.cwd !== undefined
+        ? state.environment.cwd
+        : state.workDir,
+      gitBranch: this.gitCache?.getStatus()?.branch ?? null,
       permissionMode: state.permissionMode,
       planMode: state.planMode,
       contextUsage: state.contextUsage,
@@ -547,12 +620,32 @@ export class FooterComponent implements Component {
     }
   }
 
+  /**
+   * The connecting spinner ticks on the shared braille ticker — the slot state
+   * itself only changes with the environment status. The ticker is strictly
+   * bounded to the connecting status: it starts when the slot enters
+   * connecting and stops the moment the status moves on, so no always-on
+   * ticker exists. Each frame repaints through onRefresh.
+   */
+  private syncEnvironmentSpinner(environment: AppState['environment']): void {
+    const connecting =
+      environment !== undefined &&
+      environment.environmentId !== 'local' &&
+      environment.status === 'connecting';
+    if (connecting) {
+      this.environmentSpinner.start();
+    } else {
+      this.environmentSpinner.stop();
+    }
+  }
+
   dispose(): void {
-    this.gitCache.dispose();
+    this.gitCache?.dispose();
     if (this.goalTimer !== null) {
       clearInterval(this.goalTimer);
       this.goalTimer = null;
     }
+    this.environmentSpinner.dispose();
   }
 
   private goalWallClockMs(goal: AppState['goal']): number | undefined {

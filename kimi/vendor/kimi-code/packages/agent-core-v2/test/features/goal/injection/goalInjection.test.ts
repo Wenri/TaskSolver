@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ToolCall } from '#human/message';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentGoalService } from '#/features/goal/goalService';
 import { IAgentSwarmService } from '#/features/swarm/agent/swarm';
-import type { ToolCall } from '#human/llm/message';
 
 import { runWillBeginStepHooks, type StubLoop } from '../../../agent/loop/stubs';
 import {
@@ -250,6 +250,23 @@ describe('GoalInjection content', () => {
     );
     expect(sparse).toContain('Status: active');
     expect(sparse.length).toBeLessThan(full.length);
+  });
+
+  it('sends the full reminder with the edited objective on the next new turn only', async () => {
+    await goals.createGoal({ objective: 'old task' });
+    await injectDynamic(ctx, true);
+    await injectDynamic(ctx, true);
+    const sparse = lastGoalReminder(context)!;
+    expect(sparse).toContain('The full audit is in the earlier goal reminder.');
+
+    await goals.editGoalObjective({ objective: 'new task' });
+    await injectDynamic(ctx, false);
+    expect(lastGoalReminder(context)).toBe(sparse);
+
+    await injectDynamic(ctx, true);
+    const refreshed = lastGoalReminder(context)!;
+    expect(refreshed).toContain('<untrusted_objective>\nnew task\n</untrusted_objective>');
+    expect(refreshed).toContain('Blocked audit:');
   });
 
   it('refreshes the full reminder when the goal resumes after being paused', async () => {

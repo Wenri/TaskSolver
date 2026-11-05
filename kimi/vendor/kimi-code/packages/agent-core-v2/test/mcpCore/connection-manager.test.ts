@@ -30,24 +30,29 @@ import { KIMI_MCP_CLIENT_NAME } from '#/mcpCore/client-shared';
 import { McpConnectionManager, type McpConnectionManagerOptions, type McpServerEntry } from '#/mcpCore/connection-manager';
 import { McpOAuthService } from '#/mcpCore/oauth/service';
 import type { StoredMcpOAuthTokens } from '#/mcpCore/oauth/provider';
-import { FakeRuntime } from '#/runtime/fakeRuntime';
+import { FakeEnvironment } from '#/environment/fakeEnvironment';
 import { HostProcessService } from '#/os/backends/node-local/hostProcessService';
+import type { EnvironmentBinding } from '#/environment/environment';
 import { HostProcessError, HostProcessErrorCode } from '#/os/interface/hostProcess';
-import type { RuntimeBinding } from '#/runtime/runtime';
 
-const testRuntimeBinding: RuntimeBinding = { workspaceId: 'test-workspace', runtimeId: 'local' };
+const testEnvironmentBinding: EnvironmentBinding = { environmentId: 'local' };
 const testProcess = new HostProcessService();
-const testRuntime = Object.assign(
-  new FakeRuntime({ ...testRuntimeBinding, generation: 'test-generation' }, {
+const testEnvironment = Object.assign(
+  new FakeEnvironment({ ...testEnvironmentBinding, generation: 'test-generation' }, {
     capabilities: ['process'],
   }),
   { process: testProcess },
 );
-const testRuntimeResolver = {
+const testEnvironmentResolver = {
   _serviceBrand: undefined,
-  inspect: () => testRuntime,
+  inspect: () => testEnvironment,
   acquire: () => ({
-    runtime: testRuntime,
+    environment: testEnvironment,
+    track: <T extends { dispose(): void | Promise<void> }>(resource: T): T => resource,
+    dispose: () => {},
+  }),
+  acquireWhenReady: async () => ({
+    environment: testEnvironment,
     track: <T extends { dispose(): void | Promise<void> }>(resource: T): T => resource,
     dispose: () => {},
   }),
@@ -55,9 +60,8 @@ const testRuntimeResolver = {
 
 function createManager(options: McpConnectionManagerOptions = {}): McpConnectionManager {
   return new McpConnectionManager({
-    runtimeResolver: testRuntimeResolver,
-    workspaceId: testRuntimeBinding.workspaceId,
-    runtimeId: testRuntimeBinding.runtimeId,
+    environmentResolver: testEnvironmentResolver,
+    environmentId: testEnvironmentBinding.environmentId,
     stdioCwd: process.cwd(),
     ...options,
   });
@@ -378,6 +382,7 @@ describe('McpConnectionManager', () => {
     }
   }, 15000);
 
+
   it('announces the resolved custom identity as the MCP client name', async () => {
     const cm = createManager({ resolveClientName: () => 'acme-dev' });
     try {
@@ -552,6 +557,32 @@ describe('McpConnectionManager', () => {
       await cm.shutdown();
     }
   });
+
+  it('closes the previous stdio client when replaced by an HTTP server config', async () => {
+    const server: HttpServer = createHttpServer((_req, res) => {
+      res.writeHead(401).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as HttpAddress).port;
+    const cm = createManager();
+    try {
+      await cm.connectAll({ alpha: stdioConfig() });
+      const close = vi.spyOn(Client.prototype, 'close');
+
+      await cm.connect('alpha', {
+        transport: 'http',
+        url: `http://127.0.0.1:${port}/mcp`,
+        startupTimeoutMs: 5_000,
+      });
+
+      expect(close).toHaveBeenCalled();
+      expect(cm.get('alpha')).toMatchObject({ transport: 'http', status: 'failed' });
+    } finally {
+      vi.restoreAllMocks();
+      await cm.shutdown();
+      await closeServer(server);
+    }
+  }, 15000);
 
   it('serializes replacement close and tracks disabled or removed clients through shutdown', async () => {
     const cm = createManager();
@@ -1400,7 +1431,10 @@ describe('McpConnectionManager', () => {
       expect(recovered?.status).toBe('connected');
       expect(recovered?.toolCount).toBe(1);
       expect(recovered?.nextRetryAt).toBeUndefined();
-      expect(cm.resolved('remote')).toBeDefined();
+      const client = cm.resolved('remote')?.client;
+      if (client === undefined) throw new Error('expected a reconnected client');
+      const result = await client.callTool('echo', { text: 'recovered' });
+      expect(result.content).toEqual([{ type: 'text', text: 'recovered' }]);
 
       const remoteStatuses = seen.filter((s) => s.name === 'remote').map((s) => s.status);
       expect(remoteStatuses).toEqual(['pending', 'connected', 'failed', 'connected']);

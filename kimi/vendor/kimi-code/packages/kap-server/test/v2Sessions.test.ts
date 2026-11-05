@@ -8,6 +8,7 @@ import {
   ISessionIndex,
   IEventService,
   IWorkspaceAliases,
+  IWorkspaceService,
   closeSessionById,
   getLiveSessionById,
   resumeSessionById,
@@ -103,6 +104,16 @@ const SUMMARIES: SessionSummary[] = [
     updatedAt: 2_000,
     archived: true,
   },
+  {
+    id: 's-orphan',
+    workspaceId: 'wm_missing',
+    cwd: '/repo/missing',
+    title: 'Orphan',
+    lastPrompt: 'orphaned one',
+    createdAt: 4_000,
+    updatedAt: 6_000,
+    archived: true,
+  },
 ];
 
 function stubSessionIndex(summaries: SessionSummary[]): ISessionIndex {
@@ -127,6 +138,48 @@ function stubSessionIndex(summaries: SessionSummary[]): ISessionIndex {
   };
 }
 
+const workspaceStub: IWorkspaceService = {
+  _serviceBrand: undefined,
+  list: async () => [
+    {
+      id: WS_A,
+      root: '/repo/a',
+      name: 'a',
+      kind: 'managed',
+      additionalDirs: [],
+      createdAt: 1,
+      lastOpenedAt: 1,
+    },
+    {
+      id: WS_B,
+      root: '/repo/b',
+      name: 'b',
+      kind: 'managed',
+      additionalDirs: [],
+      createdAt: 1,
+      lastOpenedAt: 1,
+    },
+  ],
+  get: async (id) => (await workspaceStub.list()).find((workspace) => workspace.id === id),
+  create: async () => {
+    throw new Error('not used in these tests');
+  },
+  createOrTouch: async () => {
+    throw new Error('not used in these tests');
+  },
+  touch: async () => {
+    throw new Error('not used in these tests');
+  },
+  update: async () => {
+    throw new Error('not used in these tests');
+  },
+  setPrimary: async () => {
+    throw new Error('not used in these tests');
+  },
+  readProjectConfigDirs: async () => [],
+  delete: async () => {},
+};
+
 const gitState = {
   calls: [] as string[],
   responses: new Map<string, { branch: string; pullRequest: FsPullRequest | null }>(),
@@ -150,6 +203,7 @@ const gitStub: IGitService = {
       pullRequest: preset.pullRequest,
     };
   },
+  pullRequest: async (cwd: string) => gitState.responses.get(cwd)?.pullRequest ?? null,
   diff: async () => {
     throw new Error2(ErrorCodes.FS_GIT_UNAVAILABLE, 'not used in these tests');
   },
@@ -180,6 +234,7 @@ describe('server /api/v2/sessions', () => {
       logLevel: 'silent',
       seeds: [
         [ISessionIndex, stubSessionIndex(SUMMARIES)],
+        [IWorkspaceService, workspaceStub],
         [IGitService, gitStub],
       ],
     });
@@ -360,6 +415,21 @@ describe('server /api/v2/sessions', () => {
 
     const bogus = await getError('?meta.archived=yes');
     expect(bogus.code).toBe(40001);
+  });
+
+  it('hides sessions of missing workspaces from flat, grouped, and id projections', async () => {
+    const flat = await getData('?meta.archived=all');
+    expect(flat.items.map((item) => item.id)).toEqual(['s1', 's2', 's3', 's4']);
+    expect(flat.total).toBe(4);
+
+    const grouped = await getGroupData('?view=by_workspace&meta.archived=all');
+    expect(grouped.total).toBe(2);
+    expect(grouped.groups.some((group) => group.workspace.id === 'wm_missing')).toBe(false);
+    expect(grouped.groups.find((group) => group.workspace.id === WS_B)?.total).toBe(2);
+
+    const projected = await getData('?fields=id,archived&meta.archived=all');
+    expect(projected.items.some((item) => item.id === 's-orphan')).toBe(false);
+    expect(projected.total).toBe(4);
   });
 
   it('sorts by meta.updated_at_asc and meta.created_at_desc', async () => {
@@ -762,6 +832,7 @@ describe('server /api/v2/sessions', () => {
       logLevel: 'silent',
       seeds: [
         [ISessionIndex, stubSessionIndex(aliasSummaries)],
+        [IWorkspaceService, workspaceStub],
         [IGitService, gitStub],
         [IWorkspaceAliases, aliasStub],
       ],

@@ -9,11 +9,10 @@ import {
   APIRequestTooLargeError,
   APIStatusError,
 } from '#/llm-adapter/contract/errors';
-import { type Message } from '#/llm-adapter/contract/message';
+import { type Message } from '#human/llm/message';
 import { type StreamedMessagePart, type ToolCall } from '#human/llm/message';
-import type { FinishReason } from '#human/llm/finish-reason';
-import { fromLlmMessage } from '#/llm-adapter/contract/message';
-import type { TokenUsage } from '#human/llm/usage';
+import type { FinishReason } from '#human/llm-requester/finish-reason';
+import type { TokenUsage } from '#human/llm-requester/usage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -176,8 +175,8 @@ describe('FullCompaction', () => {
           { type: 'function', id: 'call_b', name: 'Lookup', arguments: '{}' },
         ],
       },
-      { role: 'tool', content: [{ type: 'text', text: 'a' }], toolCalls: [], toolCallId: 'call_a' },
-      { role: 'tool', content: [{ type: 'text', text: 'b' }], toolCalls: [], toolCallId: 'call_b' },
+      { role: 'tool', content: [{ type: 'text', text: 'a' }], toolCallId: 'call_a' },
+      { role: 'tool', content: [{ type: 'text', text: 'b' }], toolCallId: 'call_b' },
       textMessage('user', 'next prompt'),
     ];
 
@@ -672,7 +671,7 @@ describe('FullCompaction', () => {
         source: 'manual',
         tokens_before: expect.any(Number),
         retry_count: 1,
-        trace_id: 'trace-compact-1',
+        request_id: 'trace-compact-1',
       }),
     });
     await ctx.expectResumeMatches();
@@ -1039,7 +1038,6 @@ describe('FullCompaction', () => {
     ctx.context.append({
       role: 'user',
       content: [{ type: 'text', text: 'X'.repeat(400_000) }],
-      toolCalls: [],
     });
     const failed = ctx.once('error');
 
@@ -1085,7 +1083,7 @@ describe('FullCompaction', () => {
     await ctx.expectResumeMatches();
   });
 
-  it('cancels retry backoff with the failed compaction request trace', async () => {
+  it('cancels retry backoff without retaining the failed compaction request id', async () => {
     vi.useFakeTimers();
     const records: TelemetryRecord[] = [];
     const firstAttemptFailed = deferred<void>();
@@ -1095,7 +1093,9 @@ describe('FullCompaction', () => {
       if (attempts === 1) {
         firstAttemptFailed.resolve();
       }
-      throw new APIStatusError(429, 'rate limited', null, null, 'trace-compact-retry');
+      throw new APIStatusError(429, 'rate limited', null, null, {
+        requestId: 'trace-compact-retry',
+      });
     });
     const ctx = testAgent({ generate, telemetry: recordingTelemetry(records) });
     ctx.configure({
@@ -1109,10 +1109,7 @@ describe('FullCompaction', () => {
     await ctx.rpc.beginCompaction({});
     await firstAttemptFailed.promise;
     const fullCompaction = ctx.get(IAgentFullCompactionService);
-    for (let i = 0; i < 10 && fullCompaction.compacting?.traceId === undefined; i += 1) {
-      await Promise.resolve();
-    }
-    expect(fullCompaction.compacting?.traceId).toBe('trace-compact-retry');
+    expect(fullCompaction.compacting?.requestId).toBeUndefined();
 
     void ctx.rpc.cancelCompaction({});
     await cancelled;
@@ -1124,7 +1121,6 @@ describe('FullCompaction', () => {
       properties: {
         agent_id: 'main',
         from: 'compacting',
-        trace_id: 'trace-compact-retry',
         mode: 'agent',
         model: 'kimi-code',
         protocol: 'openai',
@@ -1185,10 +1181,12 @@ describe('FullCompaction', () => {
     await ctx.expectResumeMatches();
   });
 
-  it('attaches the failed request trace id to compaction_failed', async () => {
+  it('attaches the failed request id to compaction_failed', async () => {
     const records: TelemetryRecord[] = [];
     const generate: GenerateFn = requesterFromGenerateFn(async () => {
-      throw new APIStatusError(400, 'Bad request', null, null, 'trace-compact-fail');
+      throw new APIStatusError(400, 'Bad request', null, null, {
+        requestId: 'trace-compact-fail',
+      });
     });
     const ctx = testAgent({ generate, telemetry: recordingTelemetry(records) });
     ctx.configure({
@@ -1207,13 +1205,13 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'manual',
         error_type: 'APIStatusError',
-        trace_id: 'trace-compact-fail',
+        request_id: 'trace-compact-fail',
       }),
     });
     await ctx.expectResumeMatches();
   });
 
-  it('attributes compaction_failed to the in-flight request trace on a mid-stream failure', async () => {
+  it('attributes compaction_failed to the in-flight request id on a mid-stream failure', async () => {
     const records: TelemetryRecord[] = [];
     const generate = realKosongGenerate(() => {
       const base = mockStreamedMessage([], 'trace-mid-stream');
@@ -1232,22 +1230,22 @@ describe('FullCompaction', () => {
     });
     ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
     ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
-    ctx.get(ITelemetryService).setContext({ trace_id: 'trace-turn-1' });
+    ctx.get(ITelemetryService).setContext({ request_id: 'trace-turn-1' });
     const failed = ctx.once('error');
 
     await ctx.rpc.beginCompaction({});
     await failed;
 
     const apiError = records.find((record) => record.event === 'api_error');
-    expect(apiError?.properties?.['trace_id']).toBe('trace-mid-stream');
+    expect(apiError?.properties?.['request_id']).toBe('trace-mid-stream');
     expect(records).toContainEqual({
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        trace_id: 'trace-mid-stream',
+        request_id: 'trace-mid-stream',
       }),
     });
-    expect(ctx.get(ITelemetryService).getContext().trace_id).toBe('trace-turn-1');
+    expect(ctx.get(ITelemetryService).getContext().request_id).toBe('trace-turn-1');
     await ctx.expectResumeMatches();
   });
 
@@ -1998,9 +1996,10 @@ describe('FullCompaction', () => {
       },
     );
 
+    const turnEnded = ctx.untilTurnEnd();
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Start background compaction' }] });
     await compactionRequested.promise;
-    await ctx.untilTurnEnd();
+    await turnEnded;
 
     releaseCompaction.resolve();
     await ctx.once('compaction.completed');
@@ -2288,7 +2287,6 @@ describe('FullCompaction', () => {
       ctx.context.append({
         role: 'system',
         content: [],
-        toolCalls: [],
         tools: [
           {
             name: LARGE_MCP_TOOL,
@@ -3770,7 +3768,7 @@ type MutableKimiConfig = {
   };
 };
 
-function textResult(text: string, traceId: string | null = null): LegacyGenerateResult {
+function textResult(text: string, requestId: string | null = null): LegacyGenerateResult {
   return {
     id: 'mock-compaction-oauth-retry',
     message: {
@@ -3786,7 +3784,7 @@ function textResult(text: string, traceId: string | null = null): LegacyGenerate
     },
     finishReason: 'completed',
     rawFinishReason: 'stop',
-    traceId,
+    requestId,
   };
 }
 
@@ -3795,13 +3793,13 @@ interface ScriptedStream {
   readonly usage: TokenUsage | null;
   readonly finishReason: FinishReason | null;
   readonly rawFinishReason: string | null;
-  readonly traceId: string | null;
+  readonly requestId: string | null;
   [Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart>;
 }
 
 function mockStreamedMessage(
   parts: readonly StreamedMessagePart[],
-  traceId: string | null = null,
+  requestId: string | null = null,
   opts?: { finishReason?: FinishReason | null; rawFinishReason?: string | null },
 ): ScriptedStream {
   return {
@@ -3809,7 +3807,7 @@ function mockStreamedMessage(
     usage: null,
     finishReason: opts?.finishReason ?? null,
     rawFinishReason: opts?.rawFinishReason ?? null,
-    traceId,
+    requestId,
     async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
       for (const part of parts) {
         yield part;
@@ -3825,12 +3823,12 @@ function realKosongGenerate(
   return {
     generate: async (config, content, control) => {
       attempt += 1;
-      const streamed = script(attempt, content.messages.map(fromLlmMessage));
+      const streamed = script(attempt, content.messages);
       const emit = control.onEvent;
       emit?.({ type: 'llm.sent' });
       emit?.({
         type: 'llm.streaming.headers',
-        headers: streamed.traceId === null ? {} : { 'x-trace-id': streamed.traceId },
+        headers: streamed.requestId === null ? {} : { 'x-trace-id': streamed.requestId },
       });
       for await (const part of streamed) {
         emit?.({ type: 'llm.streaming.part', part });
@@ -3883,11 +3881,9 @@ function overflowOnlyCompactionStrategy(maxSize: number = 14): DefaultCompaction
 }
 
 function textMessage(role: 'user' | 'assistant', text: string): Message {
-  return {
-    role,
-    content: [{ type: 'text', text }],
-    toolCalls: [],
-  };
+  return role === 'assistant'
+    ? { role, content: [{ type: 'text', text }], toolCalls: [] }
+    : { role, content: [{ type: 'text', text }] };
 }
 
 function mcpTool(
@@ -4175,7 +4171,7 @@ describe('goal reminder re-injection after full compaction', () => {
 });
 
 describe('FullCompaction cache probe', () => {
-  it('reports matching request prefixes together with cache usage and timing', async () => {
+  it('reports response usage and cache hit rate without request prefix comparisons', async () => {
     const records: TelemetryRecord[] = [];
     let attempts = 0;
     const generate: GenerateFn = requesterFromGenerateFn(async () => {
@@ -4212,116 +4208,29 @@ describe('FullCompaction cache probe', () => {
       input_cache_read: 80,
       input_cache_creation: 20,
       output_tokens: 5,
-      model_match: true,
-      tools_match: true,
-      system_prompt_match: true,
-      history_prefix_match: true,
-      parent_input_tokens: 200,
+      cache_hit_rate: 80 / 120,
     });
     expect(probes[0]?.properties?.['turn_id']).toBeUndefined();
-    expect(probes[0]?.properties?.['parent_request_gap_ms']).toBeGreaterThanOrEqual(0);
+    expect(probes[0]?.properties?.['tools_match']).toBeUndefined();
+    expect(probes[0]?.properties?.['system_prompt_match']).toBeUndefined();
+    expect(probes[0]?.properties?.['history_prefix_match']).toBeUndefined();
     await ctx.expectResumeMatches();
   });
 
-  it('reports a broken history prefix when compaction pre-shrinks the last turn history', async () => {
+  it('does not count cache creation as a cache hit', async () => {
     const records: TelemetryRecord[] = [];
-    const ctx = testAgent({ telemetry: recordingTelemetry(records) });
-    ctx.configure({
-      provider: CATALOGUED_PROVIDER,
-      modelCapabilities: {
-        ...CATALOGUED_MODEL_CAPABILITIES,
-        max_context_tokens: 80_000,
-      },
-    });
-    ctx.mockNextResponse({ type: 'text', text: 'Turn response.' });
-    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Start the conversation' }] });
-    await ctx.untilTurnEnd();
-    ctx.appendExchange(1, 'old user one', `old assistant one ${'a'.repeat(200_000)}`, 14_000);
-    ctx.appendExchange(2, 'mid user two', `mid assistant two ${'b'.repeat(80_000)}`, 20_000);
-    ctx.appendExchange(3, 'recent user three', `recent assistant three ${'c'.repeat(1_000)}`, 36_000);
-    const completed = ctx.once('compaction.completed');
-
-    ctx.mockNextResponse({ type: 'text', text: 'Pre-shrunk summary.' });
-    await ctx.rpc.beginCompaction({});
-    await completed;
-
-    const probes = records.filter((record) => record.event === 'prompt_cache_probe');
-    expect(probes).toHaveLength(1);
-    expect(probes[0]?.properties).toMatchObject({
-      source: 'compaction',
-      model_match: true,
-      tools_match: true,
-      system_prompt_match: true,
-      history_prefix_match: false,
-    });
-    await ctx.expectResumeMatches();
-  });
-
-  it('reports a broken history prefix when overflow shrinking drops below the baseline message count', async () => {
-    const records: TelemetryRecord[] = [];
-    const inputs: string[][] = [];
-    let attempts = 0;
-    const generate: GenerateFn = requesterFromGenerateFn(async (_provider, _system, _tools, history) => {
-      attempts += 1;
-      inputs.push(inputHistorySnapshot(history));
-      if (attempts === 2) {
-        throw new APIContextOverflowError(400, 'Context length exceeded', 'req-cache-probe-shrink');
-      }
-      return textResult(attempts === 1 ? 'Turn response.' : 'Compacted summary.');
-    });
+    const generate: GenerateFn = requesterFromGenerateFn(async () => ({
+      ...textResult('Compacted summary.'),
+      usage: { inputOther: 0, output: 5, inputCacheRead: 0, inputCacheCreation: 100 },
+    }));
     const ctx = testAgent({ generate, telemetry: recordingTelemetry(records) });
     ctx.configure({
       provider: CATALOGUED_PROVIDER,
-      modelCapabilities: {
-        ...CATALOGUED_MODEL_CAPABILITIES,
-        max_context_tokens: 40_000,
-      },
-    });
-    ctx.appendExchange(1, 'baseline user one', 'baseline assistant one', 20);
-    ctx.appendExchange(2, 'baseline user two', 'baseline assistant two', 40);
-    ctx.appendExchange(3, 'baseline user three', 'baseline assistant three', 80);
-    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Start the conversation' }] });
-    await ctx.untilTurnEnd();
-    ctx.appendExchange(4, 'old user one', `old assistant one ${'a'.repeat(56_000)}`, 14_000);
-    ctx.appendExchange(5, 'mid user two', `mid assistant two ${'b'.repeat(16_000)}`, 20_000);
-    ctx.appendExchange(6, 'recent user three', `recent assistant three ${'c'.repeat(1_000)}`, 36_000);
-    const completed = ctx.once('compaction.completed');
-
-    await ctx.rpc.beginCompaction({});
-    await completed;
-
-    expect(attempts).toBe(3);
-    expect(inputs).toHaveLength(3);
-    expect(inputs[2]!.length).toBeLessThan(inputs[0]!.length);
-    const probes = records.filter((record) => record.event === 'prompt_cache_probe');
-    expect(probes).toHaveLength(1);
-    expect(probes[0]?.properties).toMatchObject({
-      source: 'compaction',
-      model_match: true,
-      tools_match: true,
-      system_prompt_match: true,
-      history_prefix_match: false,
-    });
-    await ctx.expectResumeMatches();
-  });
-
-  it('marks a model change without comparing unrelated request prefixes', async () => {
-    const records: TelemetryRecord[] = [];
-    const ctx = testAgent({ telemetry: recordingTelemetry(records) });
-    ctx.configure({
-      provider: CATALOGUED_PROVIDER,
       modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
     });
-    ctx.mockNextResponse({ type: 'text', text: 'Turn response.' });
-    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Start the conversation' }] });
-    await ctx.untilTurnEnd();
-    ctx.configure({
-      provider: { ...CATALOGUED_PROVIDER, model: 'other-model' },
-      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
-    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
     const completed = ctx.once('compaction.completed');
 
-    ctx.mockNextResponse({ type: 'text', text: 'Compacted summary.' });
     await ctx.rpc.beginCompaction({});
     await completed;
 
@@ -4329,59 +4238,21 @@ describe('FullCompaction cache probe', () => {
     expect(probes).toHaveLength(1);
     expect(probes[0]?.properties).toMatchObject({
       source: 'compaction',
-      model_match: false,
+      input_tokens: 100,
       input_cache_read: 0,
+      input_cache_creation: 100,
+      cache_hit_rate: 0,
     });
-    expect(probes[0]?.properties?.['tools_match']).toBeUndefined();
-    expect(probes[0]?.properties?.['system_prompt_match']).toBeUndefined();
-    expect(probes[0]?.properties?.['history_prefix_match']).toBeUndefined();
-    expect(probes[0]?.properties?.['parent_input_tokens']).toBeUndefined();
-    expect(probes[0]?.properties?.['parent_request_gap_ms']).toBeUndefined();
     await ctx.expectResumeMatches();
   });
 
-  it('omits baseline comparisons after the context prefix revision changes', async () => {
-    const records: TelemetryRecord[] = [];
-    const ctx = testAgent({ telemetry: recordingTelemetry(records) });
-    ctx.configure({
-      provider: CATALOGUED_PROVIDER,
-      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
-    });
-    ctx.mockNextResponse({ type: 'text', text: 'Turn response.' });
-    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Start the conversation' }] });
-    await ctx.untilTurnEnd();
-    ctx.context.applyCompaction({
-      summary: 'Rewrite the context prefix.',
-      compactedCount: ctx.context.get().length,
-      tokensBefore: 100,
-    });
-    const completed = ctx.once('compaction.completed');
-
-    ctx.mockNextResponse({ type: 'text', text: 'Compacted summary.' });
-    await ctx.rpc.beginCompaction({});
-    await completed;
-
-    const probes = records.filter((record) => record.event === 'prompt_cache_probe');
-    expect(probes).toHaveLength(1);
-    expect(probes[0]?.properties).toMatchObject({
-      source: 'compaction',
-      model_match: true,
-    });
-    expect(probes[0]?.properties?.['tools_match']).toBeUndefined();
-    expect(probes[0]?.properties?.['system_prompt_match']).toBeUndefined();
-    expect(probes[0]?.properties?.['history_prefix_match']).toBeUndefined();
-    expect(probes[0]?.properties?.['parent_input_tokens']).toBeUndefined();
-    expect(probes[0]?.properties?.['parent_request_gap_ms']).toBeUndefined();
-    await ctx.expectResumeMatches();
-  });
-
-  it('probes the first response after a network failure without inventing a baseline', async () => {
+  it('reports unknown usage for the first successful response after a network failure', async () => {
     const records: TelemetryRecord[] = [];
     let attempts = 0;
     const generate: GenerateFn = requesterFromGenerateFn(async () => {
       attempts += 1;
       if (attempts === 1) throw new APIConnectionError('socket hang up');
-      return textResult('Recovered compacted summary.');
+      return { ...textResult('Recovered compacted summary.'), usage: null };
     });
     const ctx = testAgent({ generate, telemetry: recordingTelemetry(records) });
     ctx.configure({
@@ -4397,14 +4268,12 @@ describe('FullCompaction cache probe', () => {
     expect(attempts).toBe(2);
     const probes = records.filter((record) => record.event === 'prompt_cache_probe');
     expect(probes).toHaveLength(1);
-    expect(probes[0]?.properties).toMatchObject({
-      source: 'compaction',
-      input_cache_read: 0,
-    });
-    expect(probes[0]?.properties?.['model_match']).toBeUndefined();
-    expect(probes[0]?.properties?.['history_prefix_match']).toBeUndefined();
-    expect(probes[0]?.properties?.['parent_input_tokens']).toBeUndefined();
-    expect(probes[0]?.properties?.['parent_request_gap_ms']).toBeUndefined();
+    expect(probes[0]?.properties).toMatchObject({ source: 'compaction' });
+    expect(probes[0]?.properties?.['input_tokens']).toBeUndefined();
+    expect(probes[0]?.properties?.['input_cache_read']).toBeUndefined();
+    expect(probes[0]?.properties?.['input_cache_creation']).toBeUndefined();
+    expect(probes[0]?.properties?.['output_tokens']).toBeUndefined();
+    expect(probes[0]?.properties?.['cache_hit_rate']).toBeUndefined();
     await ctx.expectResumeMatches();
   });
 
@@ -4441,7 +4310,7 @@ describe('FullCompaction cache probe', () => {
     expect(probes).toHaveLength(1);
     expect(probes[0]?.properties).toMatchObject({
       source: 'compaction',
-      history_prefix_match: true,
+      cache_hit_rate: 0,
     });
     await ctx.expectResumeMatches();
   });
@@ -4900,7 +4769,9 @@ describe('FullCompaction prompt-cache prefix', () => {
         messageText(message).includes('<tools_added>'),
       );
       expect(announced).toBe(toolSelect);
-      expect(lastLoopCall.history.some((message) => message.tools !== undefined)).toBe(loadSchema);
+      expect(
+        lastLoopCall.history.some((message) => message.role === 'system' && message.tools !== undefined),
+      ).toBe(loadSchema);
       expect(loopCalls).toBe((loadSchema ? 2 : 1) + (media === 'none' ? 0 : 1));
       if (media !== 'none') {
         expect(countMedia(ctx.llmCalls[0]!.history)).toBeGreaterThan(2);

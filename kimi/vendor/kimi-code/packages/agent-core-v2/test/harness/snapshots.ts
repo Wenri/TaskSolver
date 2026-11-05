@@ -1,5 +1,4 @@
-import type { Message } from '#/llm-adapter/contract/message';
-import type { Tool as LLMTool } from '#/llm-adapter/contract/message';
+import type { Message, ToolDescription as LLMTool } from '#human/llm/message';
 import { expect } from 'vitest';
 
 import { WIRE_PROTOCOL_VERSION } from '#/wire/migration/migration';
@@ -50,6 +49,13 @@ export function eventSnapshot(
 ) {
   const normalized = events.map((event) => {
     let stableEvent = event;
+    if (event.type === '[wire]' && event.event === 'tool_select.initialized') {
+      const args = event.args as { readonly tools: readonly { readonly name: string }[] };
+      stableEvent = {
+        ...event,
+        args: { ...args, tools: args.tools.map((tool) => tool.name) },
+      };
+    }
     if (event.type === '[wire]' && event.event === 'llm.tools_snapshot') {
       const args = event.args as { readonly tools: readonly { readonly name: string }[] };
       stableEvent = {
@@ -270,10 +276,9 @@ function formatMessages(messages: readonly Message[]): string[] {
   if (messages.length === 0) return ['  []'];
 
   return messages.map((message) => {
-    const role =
-      message.toolCallId === undefined ? message.role : `${message.role}[${message.toolCallId}]`;
+    const role = message.role === 'tool' ? `${message.role}[${message.toolCallId}]` : message.role;
     const parts = [formatContent(message.content)];
-    if (message.toolCalls.length > 0) {
+    if (message.role === 'assistant' && message.toolCalls.length > 0) {
       parts.push(`calls ${message.toolCalls.map((call) => formatToolCall(call)).join(', ')}`);
     }
     return `  ${role}: ${parts.join('  ')}`;
@@ -311,7 +316,7 @@ function formatText(text: string): string {
   return JSON.stringify(normalizeWallTime(text));
 }
 
-function formatToolCall(call: Message['toolCalls'][number]): string {
+function formatToolCall(call: Extract<Message, { role: 'assistant' }>['toolCalls'][number]): string {
   return `${call.id}:${call.name} ${formatToolCallArguments(call.arguments)}`;
 }
 

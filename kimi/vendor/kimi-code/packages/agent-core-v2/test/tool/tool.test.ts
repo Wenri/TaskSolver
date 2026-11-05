@@ -10,8 +10,8 @@ import { ILogService } from '#/_base/log/log';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import { userCancellationReason } from '#/_base/utils/abort';
 import { createHooks } from '#/hooks';
-import type { ToolCall } from '#human/llm/message';
-import type { TokenUsage } from '#human/llm/usage';
+import type { ToolCall } from '#human/message';
+import type { TokenUsage } from '#human/llm-requester/usage';
 import { IModelCatalog, type Model } from '#/llm-adapter/model/catalog';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -21,7 +21,8 @@ import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTok
 import { makeHookRunner } from '../features/externalHooks/runner-stub';
 import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
-import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
+import { IAgentEnvironmentService } from '#/agent/environmentBinding/agentEnvironment';
+import { IAgentEnvironmentBindingService } from '#/agent/environmentBinding/environmentBinding';
 import { ToolAccesses, type ExecutableTool } from '#/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentLoopService } from '#/agent/loop/loop';
@@ -305,6 +306,12 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
             snapshot: () => ({ state: 'idle' }),
           } as never;
         }
+        if (serviceId === IAgentEnvironmentBindingService) {
+          return {
+            _serviceBrand: undefined,
+            current: { environmentId: 'local' },
+          } as never;
+        }
         if (serviceId === IAgentPermissionModeService) {
           return {
             _serviceBrand: undefined,
@@ -489,7 +496,7 @@ function wireRealSubagentService(ctx: TestAgentContext, lifecycle: AgentLifecycl
     'agent',
     new Map<unknown, unknown>([
       [IAgentProfileService, ctx.get(IAgentProfileService)],
-      [IAgentRuntimeService, ctx.get(IAgentRuntimeService)],
+      [IAgentEnvironmentService, ctx.get(IAgentEnvironmentService)],
     ]),
     ctx.get(IAgentScopeContext).agentContext,
   );
@@ -724,17 +731,18 @@ describe('Agent tool description', () => {
   });
 
   it.each([
-    { enabled: false, primary: true, secondary: true, force: false, expected: false },
-    { enabled: true, primary: false, secondary: false, force: false, expected: false },
-    { enabled: true, primary: true, secondary: false, force: true, expected: false },
-    { enabled: true, primary: false, secondary: true, force: true, expected: true },
-  ])('describes select_tools for eligible subagent models: $enabled/$primary/$secondary/$force', ({
-    enabled, primary, secondary, force, expected,
+    { enabled: false, primary: true, secondary: true, fork: false, expected: false },
+    { enabled: true, primary: false, secondary: false, fork: false, expected: false },
+    { enabled: true, primary: true, secondary: false, fork: false, expected: false },
+    { enabled: true, primary: true, secondary: false, fork: true, expected: false },
+    { enabled: true, primary: false, secondary: true, fork: false, expected: true },
+  ])('describes select_tools for eligible subagent models: $enabled/$primary/$secondary/$fork', ({
+    enabled, primary, secondary, fork, expected,
   }) => {
     ctx = createTestAgent(
       {
         initialConfig: {
-          secondaryModel: { defaultModel: 'provider/child', force },
+          secondaryModel: { defaultModel: 'provider/child' },
           models: {
             'provider/child': {
               provider: 'test-provider',
@@ -745,7 +753,12 @@ describe('Agent tool description', () => {
           },
         },
       },
-      appService(IFlagService, stubFlag((id) => id !== TOOL_SELECT_FLAG_ID || enabled)),
+      appService(
+        IFlagService,
+        stubFlag((id) =>
+          id === TOOL_SELECT_FLAG_ID ? enabled : id === SUBAGENT_FORK_FLAG_ID ? fork : true,
+        ),
+      ),
       sessionService(ISessionAgentProfileCatalog, discoveredCatalog()),
     );
     ctx.configure({
@@ -780,10 +793,10 @@ describe('Agent tool description', () => {
     expect(agentDescription()).toContain('WebSearch');
   });
 
-  it('filters descriptions by the inherited runtime capabilities without churning the registry', async () => {
+  it('filters descriptions by the inherited environment capabilities without churning the registry', async () => {
     ctx = createTestAgent();
-    const runtime = ctx.get(IAgentRuntimeService);
-    vi.spyOn(runtime, 'isAvailable').mockImplementation((required = []) => !required.includes('fs'));
+    const environment = ctx.get(IAgentEnvironmentService);
+    vi.spyOn(environment, 'isAvailable').mockImplementation((required = []) => !required.includes('fs'));
 
     for (const name of ['Edit', 'Write', 'Glob', 'Grep']) {
       expect(agentDescription()).not.toMatch(new RegExp(`Tools:.*\\b${name}\\b`));
@@ -793,7 +806,7 @@ describe('Agent tool description', () => {
     expect(ctx.get(IAgentToolRegistryService).resolve('Edit')).toBeDefined();
     expect(ctx.get(IAgentToolRegistryService).resolve('Bash')).toBeDefined();
 
-    vi.mocked(runtime.isAvailable).mockReturnValue(true);
+    vi.mocked(environment.isAvailable).mockReturnValue(true);
     expect(agentDescription()).toMatch(/Tools:.*\bEdit\b/);
   });
 
@@ -808,8 +821,8 @@ describe('Agent tool description', () => {
     expect(ctx.get(IAgentToolRegistryService).resolve('NotifyUser') !== undefined).toBe(enabled);
   });
 
-  it('renders the tool set for each subagent type', async () => {
-    ctx = createTestAgent();
+  it.each([false, true])('renders caller model tools without a pool when fork=%s', async (fork) => {
+    ctx = createTestAgent(forkFlags(fork));
     ctx.configure({
       modelCapabilities: {
         image_in: true,
@@ -885,10 +898,10 @@ describe('Agent tool description', () => {
     expect(description).not.toContain('ReadMediaFile');
   });
 
-  it('omits ReadMediaFile when secondary models are forced to a text-only model even if the primary model has image input', async () => {
+  it.each([false, true])('omits caller-only ReadMediaFile from subagent types when fork=%s', async (fork) => {
     ctx = createTestAgent({
       initialConfig: {
-        secondaryModel: { force: true, defaultModel: 'provider/text' },
+        secondaryModel: { defaultModel: 'provider/text' },
         models: {
           'provider/text': {
             provider: 'test-provider',
@@ -897,7 +910,7 @@ describe('Agent tool description', () => {
           },
         },
       },
-    });
+    }, forkFlags(fork));
     ctx.configure({
       modelCapabilities: {
         image_in: true,
@@ -996,10 +1009,12 @@ describe('Agent tool description', () => {
 
     const tool = ctx.toolsData().find((entry) => entry.name === 'Agent');
     expect(tool).toBeDefined();
-    expect(tool!.description).toContain('Context forking');
+    expect(tool!.description).toContain('inheriting your current agent type, model, and tool set.');
     const properties = (tool!.parameters as { properties?: Record<string, unknown> } | undefined)
       ?.properties;
-    expect(properties).toHaveProperty('fork');
+    expect(properties?.['fork']).toMatchObject({
+      description: 'Start with a snapshot of your completed conversation history, inheriting your current agent type, model, and tool set.',
+    });
   });
 
   it('does not offer the default agent type to the builtin default caller', () => {
@@ -1284,7 +1299,7 @@ describe('Agent tool description', () => {
     expect(agentDescription()).not.toContain('Available models');
   });
 
-  it('renders the pool in config order with the default first and the caller alias on the primary line', () => {
+  it('renders the pool in config order with the default first and no primary choice', () => {
     ctx = createTestAgent({
       initialConfig: {
         secondaryModel: {
@@ -1303,12 +1318,9 @@ describe('Agent tool description', () => {
     expect(description).toContain('Available models');
     const defaultIndex = description.indexOf('- provider/fast [default]: fast and cheap');
     const smartIndex = description.indexOf('- provider/smart: hard tasks');
-    const primaryIndex = description.indexOf(
-      '- primary (= mock-model): your current model and thinking level\n',
-    );
     expect(defaultIndex).toBeGreaterThanOrEqual(0);
     expect(smartIndex).toBeGreaterThan(defaultIndex);
-    expect(primaryIndex).toBeGreaterThan(smartIndex);
+    expect(description).not.toContain('- primary');
   });
 
   it('renders the caller-in-pool alias as a plain entry and renders empty descriptions bare', () => {
@@ -1330,8 +1342,8 @@ describe('Agent tool description', () => {
 
     expect(description).toContain('- provider/fast [default]: fast and cheap');
     expect(description).toContain('- mock-model: the main model, great at hard things');
-    expect(description).toContain('- provider/smart\n');
-    expect(description).toContain('- primary (= mock-model): your current model and thinking level\n');
+    expect(description).toMatch(/^- provider\/smart$/m);
+    expect(description).not.toContain('- primary');
   });
 
   it('marks the default alias with [default]', () => {
@@ -1356,7 +1368,6 @@ describe('Agent tool description', () => {
     const fastIndex = description.indexOf('- provider/fast: fast and cheap');
     expect(defaultIndex).toBeGreaterThanOrEqual(0);
     expect(fastIndex).toBeGreaterThan(defaultIndex);
-    expect(description).toContain('- primary (= mock-model): your current model and thinking level\n');
   });
 
   function agentParameters(): Record<string, unknown> {
@@ -1374,12 +1385,12 @@ describe('Agent tool description', () => {
     expect(properties).toHaveProperty('prompt');
   });
 
-  it('advertises the model parameter when a pool is configured', () => {
+  it('advertises the model parameter when the pool offers more than one model', () => {
     ctx = createTestAgent({
       initialConfig: {
         secondaryModel: {
           defaultModel: 'provider/fast',
-          models: { 'provider/fast': 'fast and cheap' },
+          models: { 'provider/fast': 'fast and cheap', 'provider/smart': 'hard tasks' },
         },
         models: POOL_MODEL_ENTRIES,
       },
@@ -1406,26 +1417,16 @@ describe('Agent tool description', () => {
     expect(agentDescription()).not.toContain('Available models');
   });
 
-  it('treats a pool-less default_model as an implicit single-entry pool', () => {
+  it.each([
+    { name: 'a pool-less default_model', secondaryModel: { defaultModel: 'provider/fast' } },
+    {
+      name: 'a single-entry pool table',
+      secondaryModel: { defaultModel: 'provider/fast', models: { 'provider/fast': 'fast' } },
+    },
+  ])('hides the model parameter and the pool description for $name', ({ secondaryModel }) => {
     ctx = createTestAgent({
       initialConfig: {
-        secondaryModel: { defaultModel: 'provider/fast' },
-        models: POOL_MODEL_ENTRIES,
-      },
-    });
-
-    const properties = agentParameters()['properties'] as Record<string, unknown>;
-    expect(properties).toHaveProperty('model');
-
-    const description = agentDescription();
-    expect(description).toContain('- provider/fast [default]\n');
-    expect(description).toContain('- primary (= mock-model): your current model and thinking level\n');
-  });
-
-  it('hides the model parameter and the pool description when force is set', () => {
-    ctx = createTestAgent({
-      initialConfig: {
-        secondaryModel: { defaultModel: 'provider/fast', force: true },
+        secondaryModel,
         models: POOL_MODEL_ENTRIES,
       },
     });
@@ -1433,6 +1434,34 @@ describe('Agent tool description', () => {
     const properties = agentParameters()['properties'] as Record<string, unknown>;
     expect(properties).not.toHaveProperty('model');
     expect(agentDescription()).not.toContain('Available models');
+  });
+});
+
+describe('tool parameter schemas', () => {
+  let ctx: TestAgentContext;
+
+  afterEach(async () => {
+    await ctx.dispose();
+  });
+
+  function expectObjectParameters(): void {
+    const tools = ctx.toolsData();
+    expect(tools.length).toBeGreaterThan(0);
+    for (const tool of tools) {
+      expect(tool.parameters?.['type'], `parameters of tool "${tool.name}"`).toBe('object');
+    }
+  }
+
+  it('exposes a top-level object type for every registered tool', () => {
+    ctx = createTestAgent();
+
+    expectObjectParameters();
+  });
+
+  it('exposes a top-level object type for every registered tool with all experimental flags on', () => {
+    ctx = createTestAgent(appService(IFlagService, stubFlag(() => true)));
+
+    expectObjectParameters();
   });
 });
 
@@ -1608,7 +1637,7 @@ describe('Agent tool execution contract', () => {
   it('does not create a subagent when process disappears after tool activation', async () => {
     const lifecycle = createAgentLifecycleStub();
     const context = createAgentToolContext(lifecycle);
-    vi.spyOn(context.get(IAgentRuntimeService), 'acquire').mockImplementation(() => {
+    vi.spyOn(context.get(IAgentEnvironmentService), 'acquire').mockImplementation(() => {
       throw new Error('process capability is no longer available');
     });
 
@@ -2041,17 +2070,26 @@ describe('Agent tool execution contract', () => {
     expect(lifecycle.run).not.toHaveBeenCalled();
   });
 
-  it('accepts fork with the primary model choice', async () => {
+  it('accepts fork with its own model alias but rejects the removed primary choice', async () => {
     const lifecycle = createAgentLifecycleStub({
       createAgentIds: ['agent-child'],
       runCompletion: async () => ({ summary: 'child result' }),
     });
     const context = createAgentToolContext(lifecycle, forkFlags());
 
-    const result = await executeAgentTool(context, {
+    const rejected = await executeAgentTool(context, {
       prompt: 'Continue the analysis',
       description: 'Fork context',
       model: 'primary',
+      fork: true,
+    });
+    expect(rejected).toMatchObject({ isError: true, output: FORK_WITH_MODEL_UNAVAILABLE });
+    expect(lifecycle.fork).not.toHaveBeenCalled();
+
+    const result = await executeAgentTool(context, {
+      prompt: 'Continue the analysis',
+      description: 'Fork context',
+      model: 'mock-model',
       fork: true,
     });
 
@@ -2248,37 +2286,32 @@ describe('Agent tool execution contract', () => {
     );
   });
 
-  it('spawns on the caller model when the tool call opts into "primary"', async () => {
+  it('rejects the removed "primary" choice instead of escaping the pool', async () => {
     const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
     const context = createAgentToolContext(lifecycle, {
       initialConfig: {
         secondaryModel: {
           defaultModel: 'provider/fast',
-          models: { 'provider/fast': 'fast and cheap' },
+          models: { 'provider/fast': 'fast and cheap', 'provider/smart': 'hard tasks' },
         },
       },
     });
 
-    await executeAgentTool(context, {
+    const result = await executeAgentTool(context, {
       prompt: 'Investigate',
       description: 'Find cause',
       model: 'primary',
     });
 
-    expect(lifecycle.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        binding: expect.objectContaining({
-          model: 'mock-model',
-          thinking: 'off',
-        }),
-      }),
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain(
+      'Invalid model "primary". Available models: provider/fast, provider/smart.',
     );
+    expect(lifecycle.create).not.toHaveBeenCalled();
   });
 
-  it('binds the caller-in-pool alias without thinking, unlike "primary"', async () => {
-    const lifecycle = createAgentLifecycleStub({
-      createAgentIds: ['agent-child', 'agent-child-2'],
-    });
+  it('binds the caller-in-pool alias like any pool entry, without inheriting thinking', async () => {
+    const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
     const context = createAgentToolContext(lifecycle, {
       initialConfig: {
         secondaryModel: {
@@ -2293,22 +2326,10 @@ describe('Agent tool execution contract', () => {
       description: 'Find cause',
       model: 'mock-model',
     });
-    await executeAgentTool(context, {
-      prompt: 'Investigate',
-      description: 'Find cause',
-      model: 'primary',
-    });
 
-    expect(lifecycle.create).toHaveBeenNthCalledWith(
-      1,
+    expect(lifecycle.create).toHaveBeenCalledWith(
       expect.objectContaining({
         binding: expect.objectContaining({ model: 'mock-model', thinking: undefined }),
-      }),
-    );
-    expect(lifecycle.create).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        binding: expect.objectContaining({ model: 'mock-model', thinking: 'off' }),
       }),
     );
   });
@@ -2359,7 +2380,7 @@ describe('Agent tool execution contract', () => {
 
     expect(result.isError).toBe(true);
     expect(result.output).toContain(
-      'Invalid model "provider/typo". Available models: provider/fast, provider/smart, primary.',
+      'Invalid model "provider/typo". Available models: provider/fast, provider/smart.',
     );
     expect(lifecycle.create).not.toHaveBeenCalled();
   });
@@ -2379,34 +2400,6 @@ describe('Agent tool execution contract', () => {
           model: 'mock-model',
           thinking: 'off',
         }),
-      }),
-    );
-  });
-
-  it('binds the forced default_model and rejects any explicit choice, "primary" included', async () => {
-    const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
-    const context = createAgentToolContext(lifecycle, {
-      initialConfig: {
-        secondaryModel: { defaultModel: 'provider/fast', force: true },
-      },
-    });
-
-    const rejected = await executeAgentTool(context, {
-      prompt: 'Investigate',
-      description: 'Find cause',
-      model: 'primary',
-    });
-    expect(rejected.isError).toBe(true);
-    expect(rejected.output).toContain('[secondary_model].force is set');
-    expect(lifecycle.create).not.toHaveBeenCalled();
-
-    await executeAgentTool(context, {
-      prompt: 'Investigate',
-      description: 'Find cause',
-    });
-    expect(lifecycle.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        binding: expect.objectContaining({ model: 'provider/fast', thinking: undefined }),
       }),
     );
   });
@@ -2477,7 +2470,6 @@ describe('Agent tool execution contract', () => {
     const result = await executeAgentTool(context, {
       prompt: 'Investigate',
       description: 'Find cause',
-      model: 'primary',
     });
 
     expect(result.isError).toBe(true);
@@ -3481,7 +3473,8 @@ describe('Agent tool execution contract', () => {
     expect(result.output).toContain('next_step: The user stopped this subagent.');
   });
 
-  it('hands back the text a foreground subagent wrote before the user stopped it', async () => {
+  it('hands back foreground subagent text after user cancellation and non-abort failure', async () => {
+    const partialOutput = 'Found the loop at src/parser.ts:42; not verified yet.';
     const lifecycle = createAgentLifecycleStub({
       createAgentIds: ['agent-child'],
       runCompletion: (_agentId, _request, options) =>
@@ -3494,7 +3487,7 @@ describe('Agent tool execution contract', () => {
             { once: true },
           );
         }),
-      partialOutput: () => 'Found the loop at src/parser.ts:42; not verified yet.',
+      partialOutput: () => partialOutput,
     });
     const context = createAgentToolContext(lifecycle);
     const controller = new AbortController();
@@ -3513,11 +3506,35 @@ describe('Agent tool execution contract', () => {
     expect(result.isError).toBe(true);
     expect(result.output).toContain('status: failed');
     expect(result.output).toContain('stop_reason: cancelled');
-    expect(result.output).toContain(
-      `${PARTIAL_OUTPUT_NOTICE}\n\nFound the loop at src/parser.ts:42; not verified yet.`,
-    );
+    expect(result.output).toContain(`${PARTIAL_OUTPUT_NOTICE}\n\n${partialOutput}`);
     expect(result.output).not.toContain(NO_PARTIAL_OUTPUT);
     expect(result.output).toContain('next_step: The user stopped this subagent.');
+
+    const failedLifecycle = createAgentLifecycleStub({
+      createAgentIds: ['agent-child'],
+      runCompletion: (_agentId, _request, options) => {
+        expect(options.signal.aborted).toBe(false);
+        return Promise.reject(new Error('provider down'));
+      },
+      partialOutput: () => partialOutput,
+    });
+    const failure = await executeAgentTool(createAgentToolContext(failedLifecycle), {
+      prompt: 'Investigate',
+      description: 'Find cause',
+    });
+
+    expect(failure.isError).toBe(true);
+    expect(failure.output).toContain('status: failed');
+    expect(failure.output).toContain('stop_reason: error');
+    expect(failure.output).toContain(
+      'subagent error: The subagent was stopped before it finished. Reason: provider down',
+    );
+    expect(failure.output).toContain(`${PARTIAL_OUTPUT_NOTICE}\n\n${partialOutput}`);
+    expect(
+      failedLifecycle.publishedEvents.filter((event) => event.type === 'subagent.failed'),
+    ).toEqual([
+      expect.objectContaining({ subagentId: 'agent-child', error: 'provider down' }),
+    ]);
   });
 
   it('keeps a completed foreground subagent result free of partial-output notices', async () => {
@@ -3718,6 +3735,18 @@ describe('AgentSwarm tool description', () => {
     expect(agentSwarmDescription()).toContain('{{item}}');
   });
 
+  it('describes fork as inheriting the current type, model, and tools', () => {
+    ctx = createTestAgent(forkFlags());
+
+    expect(agentSwarmDescription()).toContain(
+      'inheriting your current agent type, model, and tool set.',
+    );
+    const properties = agentSwarmParameters()['properties'] as Record<string, unknown>;
+    expect(properties['fork']).toMatchObject({
+      description: 'Start every item-spawned subagent with a snapshot of your completed conversation history, inheriting your current agent type, model, and tool set.',
+    });
+  });
+
   it('omits the models section when no [secondary_model.models] pool is configured', () => {
     ctx = createTestAgent();
 
@@ -3738,8 +3767,9 @@ describe('AgentSwarm tool description', () => {
     const description = agentSwarmDescription();
 
     expect(description).toContain(
-      'Available models (pass via model): provider/fast [default], provider/smart, primary (your current model and thinking level).',
+      'Available models (pass via model): provider/fast [default], provider/smart.',
     );
+    expect(description).not.toContain('primary');
   });
 
   function agentSwarmParameters(): Record<string, unknown> {
@@ -3757,12 +3787,22 @@ describe('AgentSwarm tool description', () => {
     expect(properties).toHaveProperty('prompt_template');
   });
 
-  it('advertises the model parameter when a pool is configured', () => {
+  it('advertises the model parameter only when the pool offers more than one model', async () => {
+    ctx = createTestAgent({
+      initialConfig: {
+        secondaryModel: { defaultModel: 'provider/fast' },
+        models: POOL_MODEL_ENTRIES,
+      },
+    });
+    expect(agentSwarmParameters()['properties']).not.toHaveProperty('model');
+    expect(agentSwarmDescription()).not.toContain('Available models');
+    await ctx.dispose();
+
     ctx = createTestAgent({
       initialConfig: {
         secondaryModel: {
           defaultModel: 'provider/fast',
-          models: { 'provider/fast': 'fast and cheap' },
+          models: { 'provider/fast': 'fast and cheap', 'provider/smart': 'hard tasks' },
         },
         models: POOL_MODEL_ENTRIES,
       },
@@ -3921,7 +3961,7 @@ describe('AgentSwarm tool execution contract', () => {
     );
   });
 
-  it('threads the caller model into spawn task plans when the tool call opts into "primary"', async () => {
+  it('rejects the removed "primary" choice before starting any subagent', async () => {
     const runSwarm = vi.fn(
       async (
         args: SessionSwarmRunArgs,
@@ -3953,7 +3993,7 @@ describe('AgentSwarm tool execution contract', () => {
       },
     );
 
-    await executeTool(agentSwarmToolInSwarmMode(ctx), {
+    const result = await executeTool(agentSwarmToolInSwarmMode(ctx), {
       turnId: 0,
       toolCallId: 'call_swarm',
       args: {
@@ -3966,20 +4006,9 @@ describe('AgentSwarm tool execution contract', () => {
       signal,
     });
 
-    expect(runSwarm).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tasks: [
-          expect.objectContaining({
-            kind: 'spawn',
-            plan: { profileName: 'explore', model: 'mock-model', modelSource: 'primary_override', thinking: 'off', fork: false },
-          }),
-          expect.objectContaining({
-            kind: 'spawn',
-            plan: { profileName: 'explore', model: 'mock-model', modelSource: 'primary_override', thinking: 'off', fork: false },
-          }),
-        ],
-      }),
-    );
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('Invalid model "primary". Available models: provider/fast.');
+    expect(runSwarm).not.toHaveBeenCalled();
   });
 
   it('resumes mapped agents before spawning item subagents', async () => {
@@ -4871,25 +4900,27 @@ describe('Agent tools', () => {
         [wire] tools.register_user_tool    { "name": "Lookup", "description": "Look up a short test value.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": [ "query" ], "additionalProperties": false }, "agentId": "main", "time": "<time>" }
         [emit] prompt.submitted            { "time": "<time>", "agentId": "main", "promptId": "<msg-1>", "userMessageId": "<msg-1>", "status": "running", "content": [ { "type": "text", "text": "Look up moon" } ], "createdAt": "<time>" }
         [wire] turn.prompt                 { "agentId": "main", "input": [ { "type": "text", "text": "Look up moon" } ], "origin": { "kind": "user" }, "promptId": "<msg-1>", "turnId": 0, "time": "<time>" }
+        [emit] turn.prompt                 { "time": "<time>", "agentId": "main", "input": [ { "type": "text", "text": "Look up moon" } ], "origin": { "kind": "user" }, "promptId": "<msg-1>", "turnId": 0 }
         [emit] turn.started                { "time": "<time>", "agentId": "main", "turnId": 0, "promptId": "<msg-1>", "origin": { "kind": "user" }, "prompt": "Look up moon" }
-        [emit] context.spliced             { "time": "<time>", "agentId": "main", "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "id": "<msg-1>", "toolCalls": [], "origin": { "kind": "user" } } ] }
+        [emit] context.spliced             { "time": "<time>", "agentId": "main", "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "id": "<msg-1>", "origin": { "kind": "user" } } ] }
         [emit] prompt.started              { "time": "<time>", "agentId": "main", "promptId": "<msg-1>" }
-        [emit] context.spliced             { "time": "<time>", "agentId": "main", "start": 1, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "<auto-mode-enter-reminder>" } ], "toolCalls": [], "origin": { "kind": "injection", "variant": "permission_mode" } } ] }
-        [wire] context.append_message      { "agentId": "main", "message": { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "id": "<msg-1>", "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
+        [emit] context.spliced             { "time": "<time>", "agentId": "main", "start": 1, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "<auto-mode-enter-reminder>" } ], "origin": { "kind": "injection", "variant": "permission_mode" } } ] }
+        [wire] context.append_message      { "agentId": "main", "message": { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "id": "<msg-1>", "origin": { "kind": "user" } }, "time": "<time>" }
         [wire] agent.message.appended      { "message": { "message": { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ] }, "meta": { "source": "input", "promptId": "<msg-1>", "origin": { "kind": "user" }, "tracked": true, "createdAt": "<time>", "userMessageId": "<msg-1>" } }, "time": "<time>", "kind": "event" }
         [wire] context.append_message      { "agentId": "main", "message": { "role": "user", "content": [ { "type": "text", "text": "<auto-mode-enter-reminder>" } ], "toolCalls": [], "origin": { "kind": "injection", "variant": "permission_mode" } }, "time": "<time>" }
         [wire] agent.turn.started          { "turnId": 0, "queueItemId": "<msg-1>", "time": "<time>", "kind": "event" }
         [wire] plugin.session_start        { "agentId": "main", "content": null, "time": "<time>" }
         [emit] turn.step.started           { "time": "<time>", "agentId": "main", "turnId": 0, "step": 1, "stepId": "<uuid-1>" }
         [wire] context.append_loop_event   { "agentId": "main", "event": { "type": "step.begin", "uuid": "<uuid-1>", "turnId": "0", "step": 1 }, "time": "<time>" }
-        [emit] assistant.delta             { "time": "<time>", "agentId": "main", "turnId": 0, "delta": "I will look it up." }
+        [wire] tool_select.initialized     { "agentId": "main", "tools": [ "Agent", "AgentSwarm", "AskUserQuestion", "Bash", "CreateGoal", "CronCreate", "CronDelete", "CronList", "Edit", "ExitPlanMode", "FetchURL", "GetGoal", "Glob", "Grep", "Lookup", "Read", "ReadMediaFile", "select_tools", "SetGoalBudget", "Skill", "TaskList", "TaskOutput", "TaskStop", "TodoList", "UpdateGoal", "WaitFor", "Write" ], "time": "<time>" }
         [wire] llm.tools_snapshot          { "agentId": "main", "hash": "<tools-hash>", "tools": [ "Agent", "AgentSwarm", "AskUserQuestion", "Bash", "CreateGoal", "CronCreate", "CronDelete", "CronList", "Edit", "ExitPlanMode", "FetchURL", "GetGoal", "Glob", "Grep", "Lookup", "Read", "SetGoalBudget", "Skill", "TaskList", "TaskOutput", "TaskStop", "TodoList", "UpdateGoal", "WaitFor", "Write" ], "time": "<time>" }
-        [emit] tool.call.delta             { "time": "<time>", "agentId": "main", "turnId": 0, "toolCallId": "call_lookup", "name": "Lookup", "argumentsPart": "{\\"query\\":\\"moon\\"}" }
         [wire] llm.request                 { "agentId": "main", "kind": "loop", "provider": "openai", "model": "mock-model", "modelAlias": "mock-model", "thinkingEffort": "off", "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "<tools-hash>", "messageCount": 2, "turnStep": "0.1", "time": "<time>" }
-        [emit] agent.status.updated        { "time": "<time>", "agentId": "main", "usage": { "byModel": { "mock-model": { "inputOther": 118, "output": 16, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 118, "output": 16, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 118, "output": 16, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
-        [emit] agent.status.updated        { "time": "<time>", "agentId": "main", "contextTokens": 134 }
+        [emit] assistant.delta             { "time": "<time>", "agentId": "main", "turnId": 0, "delta": "I will look it up." }
+        [emit] tool.call.delta             { "time": "<time>", "agentId": "main", "turnId": 0, "toolCallId": "call_lookup", "name": "Lookup", "argumentsPart": "{\\"query\\":\\"moon\\"}" }
         [wire] usage.record                { "agentId": "main", "model": "mock-model", "usage": { "inputOther": 118, "output": 16, "inputCacheRead": 0, "inputCacheCreation": 0 }, "usageScope": "turn", "time": "<time>" }
+        [emit] agent.status.updated        { "time": "<time>", "agentId": "main", "usage": { "byModel": { "mock-model": { "inputOther": 118, "output": 16, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 118, "output": 16, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 118, "output": 16, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
         [wire] token_counting.measured     { "agentId": "main", "length": 3, "tokens": 134, "time": "<time>" }
+        [emit] agent.status.updated        { "time": "<time>", "agentId": "main", "contextTokens": 134 }
         [wire] context.append_loop_event   { "agentId": "main", "event": { "type": "content.part", "uuid": "<uuid-2>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "part": { "type": "text", "text": "I will look it up." } }, "time": "<time>" }
         [emit] tool.call.started           { "time": "<time>", "agentId": "main", "turnId": 0, "toolCallId": "call_lookup", "name": "Lookup", "args": { "query": "moon" } }
         [emit] toolCall                    { "turnId": 0, "toolCallId": "call_lookup", "args": { "query": "moon" } }
@@ -4913,8 +4944,8 @@ describe('Agent tools', () => {
         [wire] context.append_loop_event   { "agentId": "main", "event": { "type": "step.end", "uuid": "<uuid-1>", "turnId": "0", "step": 1, "finishReason": "tool_use", "usage": { "inputOther": 118, "output": 16, "inputCacheRead": 0, "inputCacheCreation": 0 }, "messageId": "mock-1", "providerFinishReason": "tool_calls", "rawFinishReason": "tool_calls" }, "time": "<time>" }
         [emit] turn.step.started           { "time": "<time>", "agentId": "main", "turnId": 0, "step": 2, "stepId": "<uuid-4>" }
         [wire] context.append_loop_event   { "agentId": "main", "event": { "type": "step.begin", "uuid": "<uuid-4>", "turnId": "0", "step": 2 }, "time": "<time>" }
-        [emit] assistant.delta             { "time": "<time>", "agentId": "main", "turnId": 0, "delta": "The lookup result is moon-result." }
         [wire] llm.request                 { "agentId": "main", "kind": "loop", "provider": "openai", "model": "mock-model", "modelAlias": "mock-model", "thinkingEffort": "off", "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "<tools-hash>", "messageCount": 4, "turnStep": "0.2", "time": "<time>" }
+        [emit] assistant.delta             { "time": "<time>", "agentId": "main", "turnId": 0, "delta": "The lookup result is moon-result." }
         [wire] usage.record                { "agentId": "main", "model": "mock-model", "usage": { "inputOther": 138, "output": 12, "inputCacheRead": 0, "inputCacheCreation": 0 }, "usageScope": "turn", "time": "<time>" }
         [emit] agent.status.updated        { "time": "<time>", "agentId": "main", "usage": { "byModel": { "mock-model": { "inputOther": 256, "output": 28, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 256, "output": 28, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 256, "output": 28, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
         [wire] token_counting.measured     { "agentId": "main", "length": 5, "tokens": 150, "time": "<time>" }
@@ -4947,22 +4978,23 @@ describe('Agent tools', () => {
         [emit] prompt.completed               { "time": "<time>", "agentId": "main", "promptId": "<msg-1>", "finishedAt": "<time>", "reason": "completed" }
         [emit] prompt.submitted               { "time": "<time>", "agentId": "main", "promptId": "<msg-2>", "userMessageId": "<msg-2>", "status": "running", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ], "createdAt": "<time>" }
         [wire] turn.prompt                    { "agentId": "main", "input": [ { "type": "text", "text": "Can you still use Lookup?" } ], "origin": { "kind": "user" }, "promptId": "<msg-2>", "turnId": 1, "time": "<time>" }
+        [emit] turn.prompt                    { "time": "<time>", "agentId": "main", "input": [ { "type": "text", "text": "Can you still use Lookup?" } ], "origin": { "kind": "user" }, "promptId": "<msg-2>", "turnId": 1 }
         [emit] turn.started                   { "time": "<time>", "agentId": "main", "turnId": 1, "promptId": "<msg-2>", "origin": { "kind": "user" }, "prompt": "Can you still use Lookup?" }
-        [emit] context.spliced                { "time": "<time>", "agentId": "main", "start": 5, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ], "id": "<msg-2>", "toolCalls": [], "origin": { "kind": "user" } } ] }
+        [emit] context.spliced                { "time": "<time>", "agentId": "main", "start": 5, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ], "id": "<msg-2>", "origin": { "kind": "user" } } ] }
         [emit] prompt.started                 { "time": "<time>", "agentId": "main", "promptId": "<msg-2>" }
-        [wire] context.append_message         { "agentId": "main", "message": { "role": "user", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ], "id": "<msg-2>", "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
+        [wire] context.append_message         { "agentId": "main", "message": { "role": "user", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ], "toolCalls": [], "id": "<msg-2>", "origin": { "kind": "user" } }, "time": "<time>" }
         [wire] agent.message.appended         { "message": { "message": { "role": "user", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ] }, "meta": { "source": "input", "promptId": "<msg-2>", "origin": { "kind": "user" }, "tracked": true, "createdAt": "<time>", "userMessageId": "<msg-2>" } }, "time": "<time>", "kind": "event" }
         [wire] agent.turn.started             { "turnId": 1, "queueItemId": "<msg-2>", "time": "<time>", "kind": "event" }
         [emit] turn.step.started              { "time": "<time>", "agentId": "main", "turnId": 1, "step": 1, "stepId": "<uuid-6>" }
         [wire] context.append_loop_event      { "agentId": "main", "event": { "type": "step.begin", "uuid": "<uuid-6>", "turnId": "1", "step": 1 }, "time": "<time>" }
-        [emit] assistant.delta                { "time": "<time>", "agentId": "main", "turnId": 1, "delta": "No lookup tool is available." }
-        [wire] llm.tools_snapshot             { "agentId": "main", "hash": "<tools-hash>", "tools": [ "Agent", "AgentSwarm", "AskUserQuestion", "Bash", "CreateGoal", "CronCreate", "CronDelete", "CronList", "Edit", "ExitPlanMode", "FetchURL", "GetGoal", "Glob", "Grep", "Read", "SetGoalBudget", "Skill", "TaskList", "TaskOutput", "TaskStop", "TodoList", "UpdateGoal", "WaitFor", "Write" ], "time": "<time>" }
+        [wire] tool_select.tools_changed      { "agentId": "main", "added": [], "removed": [ { "name": "Lookup", "description": "Look up a short test value.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": [ "query" ], "additionalProperties": false }, "source": "user", "origin": "initial" } ], "time": "<time>" }
         [wire] llm.request                    { "agentId": "main", "kind": "loop", "provider": "openai", "model": "mock-model", "modelAlias": "mock-model", "thinkingEffort": "off", "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "<tools-hash>", "messageCount": 6, "turnStep": "1.1", "time": "<time>" }
-        [emit] agent.status.updated           { "time": "<time>", "agentId": "main", "usage": { "byModel": { "mock-model": { "inputOther": 414, "output": 38, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 414, "output": 38, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 158, "output": 10, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
-        [emit] agent.status.updated           { "time": "<time>", "agentId": "main", "contextTokens": 168 }
+        [emit] assistant.delta                { "time": "<time>", "agentId": "main", "turnId": 1, "delta": "No lookup tool is available." }
         [wire] usage.record                   { "agentId": "main", "model": "mock-model", "usage": { "inputOther": 158, "output": 10, "inputCacheRead": 0, "inputCacheCreation": 0 }, "usageScope": "turn", "time": "<time>" }
-        [emit] turn.step.completed            { "time": "<time>", "agentId": "main", "turnId": 1, "step": 1, "stepId": "<uuid-6>", "usage": { "inputOther": 158, "output": 10, "inputCacheRead": 0, "inputCacheCreation": 0 }, "finishReason": "end_turn", "providerFinishReason": "completed", "rawFinishReason": "stop" }
+        [emit] agent.status.updated           { "time": "<time>", "agentId": "main", "usage": { "byModel": { "mock-model": { "inputOther": 414, "output": 38, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 414, "output": 38, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 158, "output": 10, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
         [wire] token_counting.measured        { "agentId": "main", "length": 7, "tokens": 168, "time": "<time>" }
+        [emit] agent.status.updated           { "time": "<time>", "agentId": "main", "contextTokens": 168 }
+        [emit] turn.step.completed            { "time": "<time>", "agentId": "main", "turnId": 1, "step": 1, "stepId": "<uuid-6>", "usage": { "inputOther": 158, "output": 10, "inputCacheRead": 0, "inputCacheCreation": 0 }, "finishReason": "end_turn", "providerFinishReason": "completed", "rawFinishReason": "stop" }
         [wire] context.append_loop_event      { "agentId": "main", "event": { "type": "content.part", "uuid": "<uuid-7>", "turnId": "1", "step": 1, "stepUuid": "<uuid-6>", "part": { "type": "text", "text": "No lookup tool is available." } }, "time": "<time>" }
         [wire] context.append_loop_event      { "agentId": "main", "event": { "type": "step.end", "uuid": "<uuid-6>", "turnId": "1", "step": 1, "finishReason": "end_turn", "usage": { "inputOther": 158, "output": 10, "inputCacheRead": 0, "inputCacheCreation": 0 }, "messageId": "mock-3", "providerFinishReason": "completed", "rawFinishReason": "stop" }, "time": "<time>" }
         [wire] agent.message.appended         { "message": { "message": { "role": "assistant", "content": [ { "type": "text", "text": "No lookup tool is available." } ], "toolCalls": [] }, "meta": { "model": { "provider": "agent-loop", "model": "agent-loop" }, "source": "llm", "usage": { "inputOther": 158, "output": 10, "inputCacheRead": 0, "inputCacheCreation": 0 }, "finish": { "finishReason": "completed", "rawFinishReason": "stop" }, "messageId": "mock-3" } }, "time": "<time>", "kind": "event" }
@@ -4971,7 +5003,6 @@ describe('Agent tools', () => {
         [emit] turn.ended                     { "time": "<time>", "agentId": "main", "turnId": 1, "reason": "completed" }
       `);
       expect(ctx.lastLlmInput()).toMatchInlineSnapshot(`
-        tools: Agent, AgentSwarm, AskUserQuestion, Bash, CreateGoal, CronCreate, CronDelete, CronList, Edit, ExitPlanMode, FetchURL, GetGoal, Glob, Grep, Read, SetGoalBudget, Skill, TaskList, TaskOutput, TaskStop, TodoList, UpdateGoal, WaitFor, Write
         messages:
           <last>
           assistant: text "The lookup result is moon-result."

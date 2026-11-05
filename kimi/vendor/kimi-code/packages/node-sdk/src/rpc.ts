@@ -23,7 +23,7 @@ import type {
   AddAdditionalDirInput,
   AddAdditionalDirResult,
   AgentCommandInfo,
-  AgentRuntimeBinding,
+  AgentEnvironmentBinding,
   AppMcpServerInspection,
   BackgroundTaskInfo,
   ConfigDiagnostics,
@@ -31,6 +31,7 @@ import type {
   ExportSessionInput,
   ExportSessionResult,
   CreateGoalInput,
+  EditGoalObjectiveInput,
   FileMeta,
   ForkSessionInput,
   GenerateSessionTitleInput,
@@ -38,6 +39,7 @@ import type {
   ImportCustomRegistryOptions,
   ImportCustomRegistryResult,
   GetCronTasksResult,
+  InstallPluginInput,
   GlobalMcpServerAuthStatus,
   McpManagedServerInfo,
   McpServerConfig,
@@ -62,6 +64,7 @@ import type {
   SessionUsage,
   PromptInput,
   PromptSkillActivation,
+  PromptSubmissionResult,
   RenameSessionInput,
   ResumeSessionInput,
   ResumedSessionSummary,
@@ -69,13 +72,19 @@ import type {
   RefreshProviderModelsResponse,
   SessionSummary,
   SessionSummaryPage,
+  SessionEnvironmentsInfo,
+  SessionEnvironmentState,
   SkillSummary,
   PluginCommandDef,
+  GitPullRequest,
+  GitQueryInput,
+  GitStatusSummary,
   SuggestFilesInput,
   SuggestFilesResult,
   Unsubscribe,
   UploadFileOptions,
   WorkspaceTrustInfo,
+  WorkspaceTrustInfoOptions,
 } from '#/types';
 
 const MAIN_AGENT_ID = 'main';
@@ -154,10 +163,6 @@ export interface RunCommandRpcInput extends SessionIdRpcInput {
   readonly args?: string | undefined;
 }
 
-export interface SwitchSessionRuntimeRpcInput extends SessionIdRpcInput {
-  readonly runtimeId: string;
-}
-
 export interface ReconnectMcpServerRpcInput extends SessionIdRpcInput {
   readonly name: string;
   readonly config?: McpServerConfig;
@@ -212,7 +217,17 @@ export abstract class SDKRpcClientBase {
 
   abstract listWorkspaceSkills(workDir: string): Promise<readonly SkillSummary[]>;
 
-  abstract getWorkspaceTrustInfo(workDir: string): Promise<WorkspaceTrustInfo>;
+  async getWorkspaceAdditionalDirs(_workDir: string): Promise<readonly string[]> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'Workspace additional directories are not implemented for this engine',
+    );
+  }
+
+  abstract getWorkspaceTrustInfo(
+    workDir: string,
+    options?: WorkspaceTrustInfoOptions,
+  ): Promise<WorkspaceTrustInfo>;
 
   abstract trustWorkspace(workDir: string): Promise<void>;
 
@@ -245,6 +260,10 @@ export abstract class SDKRpcClientBase {
   abstract uploadFile(data: Uint8Array, options: UploadFileOptions): Promise<FileMeta>;
 
   abstract deleteFile(fileId: string): Promise<void>;
+
+  async attachFile(_input: { sessionId: string; data: Uint8Array; options: Pick<UploadFileOptions, 'name' | 'mimeType'> }): Promise<string> {
+    throw new Error('Session attachments are unavailable on this engine.');
+  }
 
   abstract listGlobalMcpServers(options?: {
     readonly cwd?: string;
@@ -323,7 +342,7 @@ export abstract class SDKRpcClientBase {
 
   abstract prompt(input: SessionPromptRpcInput): Promise<void>;
 
-  abstract promptWithSkills(input: SessionPromptWithSkillsRpcInput): Promise<void>;
+  abstract promptWithSkills(input: SessionPromptWithSkillsRpcInput): Promise<PromptSubmissionResult>;
 
   abstract runShellCommand(input: {
     sessionId: string;
@@ -333,7 +352,7 @@ export abstract class SDKRpcClientBase {
 
   abstract cancelShellCommand(input: { sessionId: string; commandId: string }): Promise<void>;
 
-  abstract steer(input: SessionPromptRpcInput): Promise<void>;
+  abstract steer(input: SessionPromptRpcInput): Promise<PromptSubmissionResult>;
 
   abstract generateAgentsMd(input: SessionIdRpcInput): Promise<void>;
 
@@ -403,6 +422,10 @@ export abstract class SDKRpcClientBase {
     input: SuggestFilesInput,
   ): Promise<SuggestFilesResult | undefined>;
 
+  abstract getGitStatus(workDir: string, input: GitQueryInput): Promise<GitStatusSummary | null>;
+
+  abstract getGitPullRequest(workDir: string, input: GitQueryInput): Promise<GitPullRequest | null>;
+
   abstract listBackgroundTasks(
     input: SessionIdRpcInput & { activeOnly?: boolean; limit?: number },
   ): Promise<readonly BackgroundTaskInfo[]>;
@@ -426,6 +449,8 @@ export abstract class SDKRpcClientBase {
   abstract createGoal(input: SessionIdRpcInput & CreateGoalInput): Promise<GoalSnapshot>;
 
   abstract getGoal(input: SessionIdRpcInput): Promise<GoalToolResult>;
+
+  abstract editGoalObjective(input: SessionIdRpcInput & EditGoalObjectiveInput): Promise<GoalSnapshot>;
 
   abstract pauseGoal(input: SessionIdRpcInput): Promise<GoalSnapshot>;
 
@@ -451,7 +476,7 @@ export abstract class SDKRpcClientBase {
 
   abstract listPlugins(): Promise<readonly PluginSummary[]>;
 
-  abstract installPlugin(source: string): Promise<PluginSummary>;
+  abstract installPlugin(input: string | InstallPluginInput): Promise<PluginSummary>;
 
   abstract setPluginEnabled(id: string, enabled: boolean): Promise<void>;
 
@@ -471,9 +496,15 @@ export abstract class SDKRpcClientBase {
 
   abstract runCommand(input: RunCommandRpcInput): Promise<void>;
 
-  abstract getRuntime(input: SessionIdRpcInput): Promise<AgentRuntimeBinding>;
+  async resolveSessionEnvironment(options: Pick<CreateSessionOptions, 'workDir' | 'environmentId' | 'environmentCwd'>): Promise<AgentEnvironmentBinding> {
+    throw new Error(`Environment resolution is unavailable on this engine for ${options.workDir}.`);
+  }
 
-  abstract switchRuntime(input: SwitchSessionRuntimeRpcInput): Promise<AgentRuntimeBinding>;
+  abstract getEnvironment(input: SessionIdRpcInput): Promise<AgentEnvironmentBinding>;
+
+  abstract listEnvironments(input: SessionIdRpcInput): Promise<SessionEnvironmentsInfo>;
+
+  abstract getEnvironmentState(input: SessionIdRpcInput): Promise<SessionEnvironmentState>;
 
   onEvent(listener: (event: Event) => void): Unsubscribe {
     this.eventListeners.add(listener);
