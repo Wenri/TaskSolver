@@ -1040,17 +1040,11 @@ fn main() -> anyhow::Result<()> {
     // pycodex) BEFORE the tokio runtime, so CPython initializes on the bridge's own worker thread.
     codex_wirecap::start();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
-<<<<<<< d0e8972dd6e5184495502e95fef60629e2fa7176
     let result = arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
-        // Keep the CLI dispatcher off the runtime's stack while the TUI rebuilds a thread.
-        Box::pin(cli_main(arg0_paths, remote_control_disabled)).await?;
-=======
-    arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         // Finish polling the large subcommand dispatcher before polling interactive TUI events.
         if let Some(tui) = Box::pin(dispatch_cli(arg0_paths, remote_control_disabled)).await? {
             tui.await?;
         }
->>>>>>> 04bb91090109768b3e632041bb4304eacfcfdb56
         Ok(())
     });
     // Deterministic teardown of the bridge worker, mirroring start() above — otherwise it is only
