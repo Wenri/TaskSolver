@@ -1,9 +1,9 @@
 {
   "cli": {
-    "version": "1.5.2",
-    "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.2-4951595792859136/linux-x64/cli_linux_x64.tar.gz",
-    "archive_sha512": "aa876c0813572efaf85ed47983cc937414705d40490cbdb54f6e255656a4f8744ae38e457823e924fa8270b348124e0521d3cda3fec6824bb2d14b98a7a05baa",
-    "sha512": "4ea09fb9094b21525778b0c1ca8e1bf960c0e763713ad455b174fe614590677aa6e9611c0a87e7f5451856fb5b0173e052c21356186767f3b5f4ed8afeb2e70f",
-    "size": 244044176
+    "version": "1.5.3",
+    "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.3-6604829099950080/linux-x64/cli_linux_x64.tar.gz",
+    "archive_sha512": "e363e1b17daaac2589f18e6973429c039fd5a5e5c15e9c0852fa349836f3992b10fe84732bc8d8c8208e149f0304f15aba9dec696d12efeed03917492c0580eb",
+    "sha512": "9bc9162deb8c101e9242e0a013152ad0ab61c4a77948739b17e4ebd39a95b771a1b2f390f59928713d43148ac0f6921aebd24852262d23368c3ab43c5748d3fd",
+    "size": 246837648
   }
 }
