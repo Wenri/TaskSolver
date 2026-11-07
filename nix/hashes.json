@@ -1,7 +1,7 @@
 {
   "codexCargo": {
-    "drv": "/nix/store/laxrxdys3pzps9zgy4l23ddds247yka4-cargo-deps-vendor.drv",
-    "hash": "sha256-PpDKmMCYOHPZI1MixHKKOx/qllAbKX+PSwxrW9mEvxM="
+    "drv": "/nix/store/pg5lkjipcv91w04cs5p2s574x88f2rpk-cargo-deps-vendor.drv",
+    "hash": "sha256-+mYciQWSKlEOJyfspEjTfrwh/+aKYHMX2dqgr04NHOQ="
   },
   "kimiPnpm": {
     "drv": "/nix/store/g3yc3pa57kkf3nphbbjc5hr2klky1g52-tasksolver-kimi-code-pnpm-deps.drv",
@@ -13,7 +13,7 @@
     "binding": "sha256-Pk1f7Nvg+YpgF+adfKglGad/sDLF615M2+zdPi7FGdU="
   },
   "claudeAgentSdk": {
-    "tag": "v0.2.178",
-    "hash": "sha256-psg8XCDHIABcE0s5Hfqin3va+Lrolmve+6m/aL1Z2w8="
+    "tag": "v0.2.179",
+    "hash": "sha256-raF6GZ+MkT0XOOZUbQ0RhmDm+iQljM7DdQbKdO4y+dk="
   }
 }
