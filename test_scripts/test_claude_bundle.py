@@ -255,8 +255,11 @@ class ClaudePackageTests(unittest.TestCase):
                  "_cli_version.__cli_version__]))"],
                 cwd=sandbox, env=env, text=True, capture_output=True, check=True, timeout=30,
             )
+            # The SDK keeps naming the release it bundles upstream; the pin may run ahead of it.
+            sdk_cli_version: Final = cast(dict[str, object], runpy.run_path(
+                str(SDK_SOURCE / "claude_agent_sdk/_cli_version.py")))["__cli_version__"]
             self.assertEqual(json_loads(probe.stdout),
-                             [str(stage / "claude_agent_sdk"), pin["version"]])
+                             [str(stage / "claude_agent_sdk"), sdk_cli_version])
             version: Final = subprocess.run([str(bundled), "--version"], cwd=sandbox,
                                             env=env, text=True, capture_output=True,
                                             check=True, timeout=30)
