@@ -4,8 +4,8 @@
     "hash": "sha256-+mYciQWSKlEOJyfspEjTfrwh/+aKYHMX2dqgr04NHOQ="
   },
   "kimiPnpm": {
-    "drv": "/nix/store/g3yc3pa57kkf3nphbbjc5hr2klky1g52-tasksolver-kimi-code-pnpm-deps.drv",
-    "hash": "sha256-Q2fsJZd1UHBXWiSd8FA0qAYd3rvXjfThnUzuIHsOG9M="
+    "drv": "/nix/store/9vgz6nxsjgyplfvy5xpm7jhzg4gw5fbn-tasksolver-kimi-code-pnpm-deps.drv",
+    "hash": "sha256-5d4RZHY9/+GRy97A9Y6LUrfw5ESz2KCTrM4HMh0CTBE="
   },
   "rustyV8": {
     "version": "152.2.0",
