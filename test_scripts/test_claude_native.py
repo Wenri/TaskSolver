@@ -258,6 +258,28 @@ class NativeBridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.result(client)).result, "LOCAL_BRIDGE_OK")
         self.assertTrue(self.screen.alive)
         self.assertIn("SDK_ONLY", self.screen.snapshot(history=100))
+        self.assertIsNotNone(self.screen.capture_path)
+        assert self.screen.capture_path is not None
+        deadline = time.monotonic() + 5
+        turns: list[JSONObject] = []
+        while time.monotonic() < deadline:
+            events = [json_loads_object(line)
+                      for line in self.screen.capture_path.read_text(encoding="utf-8").splitlines()
+                      if line.strip()]
+            turns = [event for event in events if event.get("kind") == "claude_turn"]
+            if len(turns) >= 3:
+                break
+            await asyncio.sleep(0.05)
+        self.assertGreaterEqual(len(turns), 3)
+        texts = [turn.get("text") for turn in turns]
+        for expected_text in ("SDK_ONLY", "HUMAN_ONLY", "LOCAL_BRIDGE_OK"):
+            self.assertIn(expected_text, texts)
+        for turn in turns:
+            if turn.get("text") in ("SDK_ONLY", "HUMAN_ONLY", "LOCAL_BRIDGE_OK"):
+                usage = json_object(turn.get("usage") or {})
+                self.assertEqual(usage.get("total_tokens"), 13)
+                request = json_object(turn.get("request") or {})
+                self.assertTrue(isinstance(request.get("first_user_text"), str) and request.get("first_user_text"))
 
     async def test_human_turn_rejects_sdk_query_and_unowned_interrupt(self) -> None:
         async with attach_terminal(self.screen, connect_timeout=5) as client:

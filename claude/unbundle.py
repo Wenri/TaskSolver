@@ -634,6 +634,14 @@ _EFFECT: Final = re.compile(r"(?<![\w$])(" + IDENTIFIER + r")=function\((" + IDE
 _QUEUE_HOOK: Final = re.compile(r"function (" + IDENTIFIER + r")\(\)\{return " + IDENTIFIER + r"\(("
                                 + IDENTIFIER + r")\)\?\?" + IDENTIFIER + r"\(\)\}")
 _QUEUE_PROVIDER: Final = re.compile(r"\{queue:(" + IDENTIFIER + r"),children:" + IDENTIFIER + r"\}=")
+_RESPONSE_PARSE: Final = re.compile(
+    r"async function " + IDENTIFIER + r"\((" + IDENTIFIER + r"),(" + IDENTIFIER + r")\)\{"
+    r"let\{response:(" + IDENTIFIER + r"),requestLogID:(" + IDENTIFIER + r"),"
+    r"retryOfRequestLogID:(" + IDENTIFIER + r"),startTime:(" + IDENTIFIER + r")\}=\2,"
+    r"(" + IDENTIFIER + r")=await\(async\(\)=>\{[\s\S]{100,2500}?`"
+    r"\[\$\{\4\}\] response parsed`,\{retryOfRequestLogID:\5,url:\3\.url,status:\3\.status,"
+    r"body:\7,durationMs:Date\.now\(\)-\6\}\),\7\}"
+)
 # Members of Claude's turn, host and command queue that the mounted bridge calls.
 _BRIDGE_MEMBERS: Final = ("._engine", "._requireHost()", ".addNotification(", ".isExternalLoading",
                           ".guard.isActive", ".getCommandQueue()", "turnAttributionKey:", '.cancel("remote")')
@@ -748,6 +756,14 @@ def _patch_native_bridge(directory: Path, graph: BunGraph) -> dict[str, str]:
         raise ValueError(f"Claude source contract 'bridge members' lacks {missing}")
     mount = re.sub(r"\{(turn|session|agent|effect|queue)\}", lambda match: bound[match.group(1)], _MOUNT)
     edits.setdefault(component_module, []).append((view.start(), view.start(), mount))
+    parse_module, parse_match = _sole(_RESPONSE_PARSE, texts, "SDK response parser", "] response parsed")
+    info_var, body_var = parse_match.group(2), parse_match.group(7)
+    suffix = f",{body_var}}}"
+    if not parse_match.group(0).endswith(suffix):
+        raise ValueError("Claude source contract 'SDK response parser' has unexpected return tail")
+    edits.setdefault(parse_module, []).append(
+        (parse_match.end() - len(suffix), parse_match.end(), f",TS_LOCAL.tapResponse({info_var},{body_var})}}")
+    )
     helper = directory / "tasksolver-native-bridge.mjs"
     shutil.copyfile(ROOT / "native_bridge.mjs", helper)
     by_name = {item.name: item for item in graph.modules}
@@ -762,6 +778,7 @@ def _patch_native_bridge(directory: Path, graph: BunGraph) -> dict[str, str]:
         text = f"import * as TS_LOCAL from '{relative if relative.startswith('.') else './' + relative}';\n" + text
         _ = (directory / by_name[name].relative_path).write_text(text, encoding="utf-8")
     return {"turn_consumer": consumer_module, "turn_component": component_module,
+            "response_parse": parse_module,
             **{f"bridge_{key}": value for key, value in sorted(bound.items())}}
 
 

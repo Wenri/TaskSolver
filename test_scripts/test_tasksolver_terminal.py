@@ -118,18 +118,17 @@ class TerminalFrontendTests(unittest.TestCase):
                 second = terminal.open_terminal("agy", manager=manager)
                 claude = terminal.open_terminal("claude", manager=manager)
             self.assertEqual([call.name for call in manager.calls], ["agy", "agy-2", "claude"])
-            self.assertNotEqual(first.capture_path, second.capture_path)
-            for screen in (first, second):
+            self.assertEqual(len({first.capture_path, second.capture_path, claude.capture_path}), 3)
+            for screen in (first, second, claude):
                 self.assertIsNotNone(screen.capture_path)
                 assert screen.capture_path is not None
                 self.assertEqual(screen.capture_path.parent, manager.directory)
                 self.assertTrue(screen.capture_path.is_file())
-            self.assertIsNone(claude.capture_path)
             for call in manager.calls:
                 self.assertEqual(call.command[:6],
                                  (sys.executable, "-E", "-P", "-m", "tasksolver.terminal", "--child"))
                 self.assertNotIn("private-key", " ".join(call.command))
-            self.assertNotIn("--capture-path", manager.calls[-1].command)
+                self.assertIn("--capture-path", call.command)
 
     def test_workspace_cannot_shadow_installed_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -183,7 +182,7 @@ class TerminalFrontendTests(unittest.TestCase):
             "PYTHONHOME": "/other/python", "OPENAI_API_KEY": "private-key",
             "TASKSOLVER_TERMINAL_SCREEN": "owned-screen-token", "PATH": os.defpath,
         }
-        backends: tuple[terminal.Backend, ...] = ("agy", "codex", "kimi")
+        backends: tuple[terminal.Backend, ...] = ("agy", "codex", "claude", "kimi")
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, inherited, clear=True):
             workspace = Path(directory)
             capture = workspace / "capture.jsonl"
@@ -202,8 +201,10 @@ class TerminalFrontendTests(unittest.TestCase):
                     for flag in ("--print", "--prompt-interactive", "--dangerously-skip-permissions",
                                  "--yolo", "--auto", "exec", "-p"):
                         self.assertNotIn(flag, command)
-                    if backend == "agy":
+                    if backend in ("agy", "claude"):
                         self.assertEqual(command[1:], ["--model", "test-model"])
+                        if backend == "claude":
+                            self.assertEqual(env["WIRE_MAXCOPY"], "8388608")
                     elif backend == "codex":
                         self.assertEqual(command[1:], ["-C", str(workspace), "--no-daemon",
                                                        *NO_UPDATE_CHECK, "-m", "test-model"])
@@ -214,7 +215,7 @@ class TerminalFrontendTests(unittest.TestCase):
             self.assertEqual(dict(os.environ), inherited)
 
     def test_disabling_capture_removes_native_enable_flags(self) -> None:
-        backends: tuple[terminal.Backend, ...] = ("agy", "codex", "kimi")
+        backends: tuple[terminal.Backend, ...] = ("agy", "codex", "claude", "kimi")
         for backend in backends:
             with self.subTest(backend=backend):
                 _, env = terminal._child_command(backend, ROOT, None, None)
@@ -238,6 +239,7 @@ class TerminalFrontendTests(unittest.TestCase):
             command, env = terminal._child_command("claude", ROOT, "sonnet", None)
         self.assertEqual(command, ["/bundled/claude", "--model", "sonnet"])
         self.assertEqual(env, {"ANTHROPIC_API_KEY": "private-key",
+                               "PYTHONHOME": sys.prefix,
                                "TASKSOLVER_TERMINAL_SCREEN": "screen-token", "PWD": str(ROOT)})
 
     def test_claude_child_requires_the_bridged_bundle(self) -> None:
@@ -318,8 +320,10 @@ class TerminalFrontendTests(unittest.TestCase):
                 self.assertNotIn("--capture-path", call.command)
 
     def test_cli_capture_is_opt_in_and_names_one_file_per_captured_screen(self) -> None:
-        cases = ((["codex", "claude"], ["run.jsonl", None]),
-                 (["agy", "codex", "claude", "agy"], ["run-agy.jsonl", "run-codex.jsonl", None, "run-agy-2.jsonl"]))
+        cases = ((["claude"], ["run.jsonl"]),
+                 (["codex", "claude"], ["run-codex.jsonl", "run-claude.jsonl"]),
+                 (["agy", "codex", "claude", "agy"],
+                  ["run-agy.jsonl", "run-codex.jsonl", "run-claude.jsonl", "run-agy-2.jsonl"]))
         for backends, expected in cases:
             with self.subTest(backends=backends), tempfile.TemporaryDirectory() as directory:
                 manager = RecordingManager(Path(directory))
@@ -333,8 +337,7 @@ class TerminalFrontendTests(unittest.TestCase):
                     _ = terminal.main([*backends, "--no-web", "--capture", str(target)])
                 paths = [call.command[call.command.index("--capture-path") + 1]
                          if "--capture-path" in call.command else None for call in manager.calls]
-                self.assertEqual(paths, [None if name is None else str(target.with_name(name))
-                                         for name in expected])
+                self.assertEqual(paths, [str(target.with_name(name)) for name in expected])
 
     def test_web_cli_is_headless_and_writable_by_default(self) -> None:
         for readonly, port in ((False, 7681), (True, 7681), (False, 0), (False, None)):
@@ -527,7 +530,7 @@ class TerminalFrontendTests(unittest.TestCase):
     def test_invalid_cli_options_fail_before_opening_screens(self) -> None:
         cases = (["agy", "--no-web", "--readonly"], ["agy", "--no-web", "--no-attach"],
                  ["agy", "--no-web", "--ttyd-bin", "/ttyd"], ["agy", "--no-web", "--web-port", "0"],
-                 ["claude", "--capture", "/tmp/capture"], ["--child", "agy", "--capture", "/tmp/capture"],
+                 ["--child", "agy", "--capture", "/tmp/capture"],
                  ["agy", "--writable"], ["agy", "--no-capture"],
                  ["agy", "--web-port", "65536"], ["agy", "codex", "--web-port", "65535"], ["agy", "--capture-path", "/tmp/capture"],
                  ["--child", "agy", "codex"])

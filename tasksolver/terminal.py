@@ -42,8 +42,7 @@ def open_terminal(backend: Backend, *, manager: TerminalManager,
     """Open an interactive UI without submitting a prompt or preapproving tools.
 
     Native backends capture JSONL in the manager's directory by default; pass a
-    path to retain it elsewhere, or ``False`` to disable capture. Claude uses its
-    native session store and always has ``capture_path=None``.
+    path to retain it elsewhere, or ``False`` to disable capture.
     Claude's bridged runtime publishes ``screen.control_socket`` for attachment
     through ``pyclaude.attach_terminal(screen)``. Its default socket is private
     to the manager; ``sdk_socket`` can select another private location.
@@ -62,7 +61,7 @@ def open_terminal(backend: Backend, *, manager: TerminalManager,
 
     capture_path: Path | None = None
     temporary_capture = False
-    if backend != "claude" and capture:
+    if capture:
         if isinstance(capture, str):
             capture_path = Path(capture).expanduser().resolve()
             if any(screen.capture_path == capture_path for screen in manager.screens.values()):
@@ -139,17 +138,18 @@ def _child_command(backend: Backend, workspace: Path, model: str | None,
         env = linked_env(capture, base=base, model=model)
         argv = kimi_argv(None, persistent=True)
     else:
-        from pyclaude._env import bundled_cli
+        from pyclaude._env import bundled_cli, linked_env
         from pyclaude.client import PARENT_SESSION_ENV
 
         remove = {*PARENT_SESSION_ENV, "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
                   "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS"}
-        env = {key: value for key, value in base.items()
-               if key not in remove and not key.startswith(
-                   ("CLAUDE_AGENT_SDK_", "CLAUDE_CODE_SDK_", "CLAUDE_CODE_ENABLE_SDK_"))}
+        cleaned = {key: value for key, value in base.items()
+                   if key not in remove and not key.startswith(
+                       ("CLAUDE_AGENT_SDK_", "CLAUDE_CODE_SDK_", "CLAUDE_CODE_ENABLE_SDK_"))}
+        env = linked_env(capture, base=cleaned)
         if socket is not None:
             env["TASKSOLVER_CLAUDE_SOCKET"] = os.fspath(socket)
-        return [bundled_cli(), *(["--model", model] if model is not None else [])], env
+        argv = [bundled_cli(), *(["--model", model] if model is not None else [])]
 
     env["PYTHONHOME"] = sys.prefix
     if capture_path is None:
@@ -203,15 +203,14 @@ def _attach(manager: TerminalManager, *, ask_first: bool) -> None:
 
 
 def _serve(args: _Arguments) -> int:
-    captured = [backend for backend in args.backends if backend != "claude"]
     with TerminalManager(workspace=args.workspace, tmux_bin=args.tmux_bin) as manager:
         capture_base = Path(args.capture) if args.capture is not None else None
         for position, backend in enumerate(args.backends):
             # A page shows the live capture, so a screen with a page always has one;
             # without --capture it is a temporary file that goes with the manager.
             capture: bool | str = not args.no_web
-            if capture_base is not None and backend != "claude":
-                if len(captured) == 1:
+            if capture_base is not None:
+                if len(args.backends) == 1:
                     capture = os.fspath(capture_base)
                 else:
                     # The screen's name: agy, agy-2, ...
@@ -280,9 +279,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                               ("--no-attach", args.no_attach), ("--ttyd-bin", args.ttyd_bin is not None)):
             if given:
                 parser.error(f"{option} cannot be combined with --no-web")
-    captured = [backend for backend in args.backends if backend != "claude"]
-    if args.capture is not None and not captured and not args.child:
-        parser.error("--capture needs an agy, codex or kimi screen (Claude keeps its own session store)")
     if args.web_port is not None and not 0 <= args.web_port <= 65535:
         parser.error("--web-port must be between 0 and 65535 (0 selects an available port)")
     if args.web_port and args.web_port + len(args.backends) - 1 > 65535:

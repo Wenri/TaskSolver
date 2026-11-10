@@ -308,7 +308,7 @@ class WebScreen:
     """Serve one screen's page on 127.0.0.1: terminal, round-trip list and trip content.
 
     The capture frames read the screen's ``capture_path`` as it grows; a screen without
-    capture (Claude) says so. Typing is allowed only with ``writable=True``. The page
+    capture says so. Typing is allowed only with ``writable=True``. The page
     closes with its screen or the manager; closing it leaves the screen running.
     """
 

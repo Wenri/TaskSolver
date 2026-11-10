@@ -115,6 +115,7 @@ pixi run typecheck
 # SDKs and chat behavior
 pixi run python test_scripts/test_claude_sdk.py
 pixi run python test_scripts/test_claude_bundle.py
+pixi run python test_scripts/test_claude_decode.py
 pixi run python test_scripts/test_codex_sdk.py
 pixi run python test_scripts/test_codex_sdk_native.py
 pixi run python test_scripts/test_chat_mode.py
@@ -254,12 +255,14 @@ to `agy`, `agy-2`, etc. `TerminalManager.open(name, argv)` also runs arbitrary
 commands. The generic manager lives in `wirecap.runtime.terminal`; provider launch
 configuration stays in `tasksolver.terminal`. It creates no desktop windows.
 
-Agy, Codex and Kimi keep their linked JSONL capture, exposed as `screen.capture_path`.
+Agy, Codex, Claude and Kimi keep their linked JSONL capture, exposed as `screen.capture_path`.
 Default capture files are temporary and removed when the manager closes. Pass
 `capture="/absolute/path/run.jsonl"` to retain one, or `capture=False` to disable it.
-Claude uses its own session store and has `capture_path=None`. Its bundled runtime
+Claude's bundled runtime
 always includes the JavaScript bridge: `pyclaude.attach_terminal(screen)` connects
-the official SDK to the same native UI process through `screen.control_socket`.
+the official SDK to the same native UI process through `screen.control_socket`, and
+when capture is enabled the bridge loads `wirecap_node.node` in Bun to record
+`claude_request` and `claude_turn` events into `screen.capture_path`.
 `pyclaude.ask` and `Session` use that runtime in headless SDK processes. See
 [Claude native UI control](claude/README.md#sdk-control-of-the-native-ui).
 CLIs may contact their services during startup, so captures can include account and
@@ -280,8 +283,7 @@ is a decoded model turn (request summary, reasoning, response, usage, with the f
 event stream on demand) or an HTTP/2 exchange the capture recorded; "model turns only" hides
 the latter. The frames follow the capture as it is written. They are always there: without
 `--capture` the capture is a temporary file that is removed with the screens. The page hides
-credential headers and form bodies; the capture file itself does not. Claude has no native
-capture, and its page says so.
+credential headers and form bodies; the capture file itself does not.
 When stdin and stdout are terminals, the launcher can also
 attach the local terminal, so local and browser views run together. Because the attached
 terminal covers the printed URLs, it waits for **Enter** first. **Ctrl-b d**

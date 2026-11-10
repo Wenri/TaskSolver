@@ -229,3 +229,83 @@ test('automatic UI endpoints are private, stable across remounts, unique and cle
   assert.ok(!fs.existsSync(preserved.socket_path));
   assert.equal(fs.readFileSync(path.join(path.dirname(preserved.socket_path), 'keep'), 'utf8'), 'untouched');
 });
+
+test('tapResponse forwards streaming and non-streaming /v1/messages calls and scrubs WIRE_* env', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'tasksolver-wiretap-test-'));
+  t.after(() => fs.rmSync(directory, {recursive: true, force: true}));
+  const addonPath = path.join(directory, 'mock_wire.cjs');
+  const logPath = path.join(directory, 'calls.json');
+  fs.writeFileSync(addonPath, `
+    const fs = require('node:fs');
+    const calls = [];
+    let turn = 0;
+    module.exports = {
+      start() { calls.push(['start']); return 0; },
+      emitClaudeRequest(bytes) {
+        const id = ++turn;
+        calls.push(['req', id, Buffer.from(bytes).toString('utf8')]);
+        return id;
+      },
+      emitClaudeEvent(id, bytes) {
+        calls.push(['ev', id, JSON.parse(Buffer.from(bytes).toString('utf8'))]);
+      },
+      emitClaudeEnd(id) {
+        calls.push(['end', id]);
+      },
+      shutdown() {
+        calls.push(['shutdown']);
+        fs.writeFileSync(${JSON.stringify(logPath)}, JSON.stringify(calls));
+      },
+    };
+  `);
+  const script = `
+    import assert from 'node:assert/strict';
+    const bridge = await import(${JSON.stringify(helper.href)});
+    for (const key of ['WIRE_ENABLE', 'WIRE_NODE_ADDON', 'WIRE_CAPTURE', 'WIRE_MODULE', 'WIRE_MAXCOPY']) {
+      assert.equal(process.env[key], undefined, key);
+    }
+    const stream = {
+      async *iterator() {
+        yield {type: 'message_start', message: {model: 'claude-sonnet-4-6'}};
+        yield {type: 'message_stop'};
+      },
+    };
+    bridge.tapResponse({options: {path: '/v1/messages?beta=true', stream: true, body: {model: 's'}}}, stream);
+    const seen = [];
+    for await (const ev of stream.iterator()) seen.push(ev.type);
+    assert.deepEqual(seen, ['message_start', 'message_stop']);
+    bridge.tapResponse(
+      {options: {path: '/v1/messages', stream: false, body: Buffer.from('{"model":"m"}')}},
+      {type: 'message', id: 'msg_1'}
+    );
+    bridge.tapResponse(
+      {options: {path: '/v1/messages/count_tokens', stream: false, body: {model: 's'}}},
+      {type: 'message', id: 'ignored'}
+    );
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: {
+      ...process.env,
+      WIRE_ENABLE: '1',
+      WIRE_NODE_ADDON: addonPath,
+      WIRE_CAPTURE: '/tmp/unused.jsonl',
+      WIRE_MODULE: 'pyclaude.claude_process',
+      WIRE_MAXCOPY: '8388608',
+    },
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const calls = JSON.parse(fs.readFileSync(logPath, 'utf8'));
+  assert.deepEqual(calls, [
+    ['start'],
+    ['req', 1, '{"model":"s"}'],
+    ['ev', 1, {type: 'message_start', message: {model: 'claude-sonnet-4-6'}}],
+    ['ev', 1, {type: 'message_stop'}],
+    ['end', 1],
+    ['req', 2, '{"model":"m"}'],
+    ['ev', 2, {type: 'message', id: 'msg_1'}],
+    ['end', 2],
+    ['shutdown'],
+  ]);
+});

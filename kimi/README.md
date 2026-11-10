@@ -17,7 +17,8 @@ Kimi's linked capture. See [managed terminal screens](../README.md#managed-termi
   are gitignored. The engine is `packages/agent-core-v2`.
 - `native/` — `wirecap_node.cc` + `CMakeLists.txt`: the N-API addon that links
   `libwirecap_bridge.a` (its own copy — `CMakeLists.txt` adds `../../wirecap/native`) and exposes
-  `start`/`ready`/`emitRequest`/`emitEvent`/`emitWire`/`shutdown` to JS. Port of codex's Rust
+  `start`/`ready`/`emitRequest`/`emitEvent`/`emitWire`/`emitClaudeRequest`/`emitClaudeEvent`/`emitClaudeEnd`/`shutdown`
+  to JS (shared by Kimi Code on Node and Claude Code's Bun bridge). Port of codex's Rust
   `wirecap` shim: static-literal kinds, an atomic turn counter, ASYNC-only emits.
 - `pykimi/` — the Python wrapper: `ask()`/`KimiResponse`/`KimiCodeModel` + the in-process decode
   side `kimi_process` (the `WIRE_MODULE` the embedded interpreter loads) + the ModelRequestEvent

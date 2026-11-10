@@ -102,7 +102,8 @@ Claude's private Bun is necessary for this pin's native UI: stock Bun lacks
 The current JavaScript comes from the pinned executable.
 
 Every build installs checked JavaScript insertions that register the native
-session controls and forward real engine SDK frames before UI filtering. Each is a
+session controls, forward real engine SDK frames before UI filtering, and tap parsed
+Anthropic `/v1/messages` responses for wirecap capture. Each is a
 content contract: found by Claude's property names and string literals, capturing the
 minified names it needs, and required to match exactly once across all modules, so a
 re-minified release with renamed chunks needs no port. A contract that stops matching
@@ -110,7 +111,10 @@ fails the build, naming it; the manifest's `source_contracts` records the module
 names each build resolved. The interactive UI automatically creates
 a private socket, announces it in the terminal and emits one machine-readable
 `[tasksolver-claude-control]` JSON line to stderr. Managed screens use a socket in
-the manager's private directory, exposed as `screen.control_socket`.
+the manager's private directory, exposed as `screen.control_socket`, and enable the
+shared N-API wirecap addon (`wirecap_node.node` with `WIRE_MODULE=pyclaude.claude_process`)
+so `claude_request` and `claude_turn` events stream into `screen.capture_path` (and
+into `WebScreen`'s live round-trip frames).
 Headless SDK calls keep their stdio channel and create no UI socket.
 
 After source changes, run `pixi reinstall --locked tasksolver` in the consuming
@@ -171,7 +175,7 @@ UUID and engine identity, so a human result cannot complete the SDK query.
 Closing the SDK client leaves the UI and its running turn alive. A new client
 cannot claim the disconnected client's unfinished result.
 
-Offline checks: `test_claude_unbundle.py`, `test_claude_transport.py` and
+Offline checks: `test_claude_decode.py`, `test_claude_unbundle.py`, `test_claude_transport.py` and
 `test_claude_native.py` in `test_scripts/`; run the JavaScript lifecycle checks
 with `pixi run node --test test_scripts/test_claude_native_bridge.mjs`.
 Provider authentication and live model behavior require separate validation.

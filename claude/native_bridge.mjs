@@ -1,13 +1,38 @@
 // A local controller for the existing native session. The terminal owns permissions.
 import net from 'node:net';
 import fs from 'node:fs';
+import {createRequire} from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {isMainThread} from 'node:worker_threads';
 
 const MAX_BYTES = 16 * 1024 * 1024 + 1; // Match the transport's frame limit plus newline.
 const EXPLICIT_SOCKET_PATH = process.env.TASKSOLVER_CLAUDE_SOCKET;
 delete process.env.TASKSOLVER_CLAUDE_SOCKET;
+const wireEncoder = new TextEncoder();
+let wireAddon = null;
+if (isMainThread && process.env.WIRE_ENABLE && process.env.WIRE_ENABLE !== '0' && process.env.WIRE_NODE_ADDON) {
+  try {
+    const loaded = createRequire(import.meta.url)(process.env.WIRE_NODE_ADDON);
+    if (loaded.start() === 0) {
+      wireAddon = loaded;
+      process.once('exit', () => {
+        try { loaded.shutdown(); } catch {}
+      });
+    }
+  } catch (error) {
+    process.stderr.write(
+      `[tasksolver-wirecap] addon load failed: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+  } finally {
+    delete process.env.WIRE_ENABLE;
+    delete process.env.WIRE_NODE_ADDON;
+    delete process.env.WIRE_CAPTURE;
+    delete process.env.WIRE_MODULE;
+    delete process.env.WIRE_MAXCOPY;
+  }
+}
 let automaticSocket = null;
 const state = {
   host: null, monitor: null, active: null,
@@ -265,4 +290,51 @@ export function finish(engine, uuid) {
   state.pending.delete(uuid);
   if (state.active === uuid) state.active = null;
   fail(client, 'Native engine stopped without a result');
+}
+
+function serializeRequestBody(body) {
+  if (body instanceof Uint8Array) return body;
+  if (typeof body === 'string') return wireEncoder.encode(body);
+  if (body !== undefined) return wireEncoder.encode(JSON.stringify(body));
+  return null;
+}
+
+export function tapResponse(responseInfo, parsed) {
+  if (!wireAddon || !object(responseInfo) || !object(parsed)) return parsed;
+  try {
+    const options = responseInfo.options;
+    if (!object(options) || typeof options.path !== 'string') return parsed;
+    if (options.path.split('?')[0] !== '/v1/messages') return parsed;
+    const requestBytes = serializeRequestBody(options.body);
+    if (!requestBytes) return parsed;
+    if (options.stream && typeof parsed.iterator === 'function') {
+      const streamId = wireAddon.emitClaudeRequest(requestBytes);
+      const originalIterator = parsed.iterator;
+      let tapped = false;
+      parsed.iterator = function(...args) {
+        const inner = originalIterator.apply(this, args);
+        if (tapped) return inner;
+        tapped = true;
+        return (async function* () {
+          try {
+            for await (const event of inner) {
+              try {
+                wireAddon.emitClaudeEvent(streamId, wireEncoder.encode(JSON.stringify(event)));
+              } catch {}
+              yield event;
+            }
+          } finally {
+            try {
+              wireAddon.emitClaudeEnd(streamId);
+            } catch {}
+          }
+        })();
+      };
+    } else if (!options.stream && parsed.type === 'message') {
+      const streamId = wireAddon.emitClaudeRequest(requestBytes);
+      wireAddon.emitClaudeEvent(streamId, wireEncoder.encode(JSON.stringify(parsed)));
+      wireAddon.emitClaudeEnd(streamId);
+    }
+  } catch {}
+  return parsed;
 }

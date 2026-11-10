@@ -1,14 +1,17 @@
-// wirecap_node — N-API host for the wirecap bridge inside kimi-code (Node).
+// wirecap_node — N-API host for the wirecap bridge inside kimi-code (Node) and Claude (Bun).
 //
-// The JS side (the vendored tree's `packages/agent-core-v2/src/wiretap/wiretap.ts`
-// patch) loads this addon via createRequire($WIRE_NODE_ADDON) and calls
-// start() once at process start; the three emit entry points forward
-// UTF-8 JSON payloads to the embedded-CPython bridge (libwirecap_bridge.a)
-// exactly like codex's `codex-rs/wirecap/src/lib.rs` Rust shim:
+// The JS side (kimi-code's `packages/agent-core-v2/src/wiretap/wiretap.ts` patch
+// or Claude's `claude/native_bridge.mjs`) loads this addon via
+// createRequire($WIRE_NODE_ADDON) and calls start() once at process start; the
+// emit entry points forward UTF-8 JSON payloads to the embedded-CPython bridge
+// (libwirecap_bridge.a) like codex's `codex-rs/wirecap/src/lib.rs` Rust shim:
 //
-//   emitRequest(bytes) -> new monotonic turn id;  kind "kimi_request"
-//   emitEvent(bytes)   -> current turn id;        kind "kimi_event"
-//   emitWire(bytes)    -> current turn id;        kind "kimi_wire"
+//   emitRequest(bytes)            -> new monotonic turn id; kind "kimi_request"
+//   emitEvent(bytes)              -> current turn id;       kind "kimi_event"
+//   emitWire(bytes)               -> current turn id;       kind "kimi_wire"
+//   emitClaudeRequest(bytes)      -> new monotonic turn id; kind "claude_request"
+//   emitClaudeEvent(id, bytes)    -> null;                  kind "claude_event"
+//   emitClaudeEnd(id)             -> null;                  kind "claude_end"
 //
 // Constraints inherited from the bridge (wirecap/native/wirecap.h):
 //   - kind strings must be immortal C literals (job.kind is stored unowned);
@@ -17,7 +20,7 @@
 //   - wire_start() blocks the calling thread through CPython init + the
 //     $WIRE_MODULE import; one start/shutdown pair per process, no restart.
 //
-// Built against N-API version 8 so one .node works across Node 22/24/25.
+// Built against N-API version 8 so one .node works across Node 22/24/25 and Bun.
 
 #define NAPI_VERSION 8
 #include <node_api.h>
@@ -45,6 +48,9 @@ std::atomic<bool> g_started{false};
 const char KIND_REQUEST[] = "kimi_request";
 const char KIND_EVENT[] = "kimi_event";
 const char KIND_WIRE[] = "kimi_wire";
+const char KIND_CLAUDE_REQUEST[] = "claude_request";
+const char KIND_CLAUDE_EVENT[] = "claude_event";
+const char KIND_CLAUDE_END[] = "claude_end";
 
 bool payload_bytes(napi_env env, napi_value value, const uint8_t **data, size_t *len) {
   bool is_typedarray = false;
@@ -121,6 +127,38 @@ napi_value js_emit_wire(napi_env env, napi_callback_info info) {
   return emit_kind(env, info, KIND_WIRE, g_turn.load(std::memory_order_relaxed));
 }
 
+napi_value js_emit_claude_request(napi_env env, napi_callback_info info) {
+  const uint64_t id = g_turn.fetch_add(1, std::memory_order_relaxed) + 1;
+  emit_kind(env, info, KIND_CLAUDE_REQUEST, id);
+  napi_value out;
+  napi_create_double(env, static_cast<double>(id), &out);
+  return out;
+}
+
+napi_value js_emit_claude_event(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  double raw_id = 0;
+  const uint8_t *data = nullptr;
+  size_t len = 0;
+  if (argc >= 2 && napi_get_value_double(env, argv[0], &raw_id) == napi_ok && raw_id > 0 &&
+      payload_bytes(env, argv[1], &data, &len) && wire_ready())
+    wire_emit_async(KIND_CLAUDE_EVENT, static_cast<uint64_t>(raw_id), data, len);
+  return nullptr;
+}
+
+napi_value js_emit_claude_end(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  double raw_id = 0;
+  if (argc >= 1 && napi_get_value_double(env, argv[0], &raw_id) == napi_ok && raw_id > 0 &&
+      wire_ready())
+    wire_emit_async(KIND_CLAUDE_END, static_cast<uint64_t>(raw_id), nullptr, 0);
+  return nullptr;
+}
+
 napi_value js_shutdown(napi_env, napi_callback_info) {
   if (g_started.exchange(false)) wire_shutdown();  // drains pending jobs, joins the worker
   return nullptr;
@@ -133,6 +171,9 @@ napi_value init(napi_env env, napi_value exports) {
       {"emitRequest", nullptr, js_emit_request, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"emitEvent", nullptr, js_emit_event, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"emitWire", nullptr, js_emit_wire, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"emitClaudeRequest", nullptr, js_emit_claude_request, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"emitClaudeEvent", nullptr, js_emit_claude_event, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"emitClaudeEnd", nullptr, js_emit_claude_end, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"shutdown", nullptr, js_shutdown, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props);

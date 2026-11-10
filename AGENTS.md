@@ -287,8 +287,8 @@ Python attaches its existing TTY; never open a desktop terminal. Screens
 keep running across detach until the manager closes. Each screen carries an inherited
 `TASKSOLVER_TERMINAL_SCREEN` ownership marker for descendant cleanup; preserve it in
 child environments. Provider configuration belongs in TaskSolver, generic screen
-lifecycle in wirecap's parent-side runtime. Native capture applies to agy/Codex/Kimi;
-the ordinary Claude UI has no wirecap capture. Default captures are temporary; explicit
+lifecycle in wirecap's parent-side runtime. Native capture applies to all four
+backends (agy/Codex/Claude/Kimi). Default captures are temporary; explicit
 paths persist. `wirecap.runtime.webterm.WebTerminal` uses ttyd for optional browser
 viewing on loopback, with read-only input by default. An explicit `screen=` creates
 an independent session containing only that screen's linked window, with tmux navigation
@@ -368,12 +368,14 @@ frames without consuming the engine twice, and route results by input UUID and
 engine identity. Native dialogs own permissions. Reject unsupported inputs/controls;
 never fabricate results or let a human result finish an SDK query. Detaching a
 client leaves its turn running and reserved until completion. Source-only and
-transport checks are `test_claude_unbundle.py` and `test_claude_transport.py`;
+transport checks are `test_claude_decode.py`, `test_claude_unbundle.py` and `test_claude_transport.py`;
 `test_claude_native.py` drives the real UI against a loopback model fixture,
-including permission dialogs, and `node --test test_scripts/test_claude_native_bridge.mjs`
+including permission dialogs and `claude_turn` round-trip capture, and `node --test test_scripts/test_claude_native_bridge.mjs`
 checks the JavaScript bridge lifecycle.
 
-Agy, Codex and Kimi share the linked capture layer; Claude speaks its SDK protocol directly.
+Agy, Codex, Claude and Kimi share the linked capture layer (`claude/native_bridge.mjs` loads
+`wirecap_node.node` in Bun when `WIRE_ENABLE` is set and taps parsed `/v1/messages` responses
+into `pyclaude.claude_process`, emitting `claude_turn` events); headless Claude SDK calls also speak the SDK protocol directly.
 
 - **`wirecap/`**, the shared capture layer:
   - `wirecap/decode/` is **stdlib-import-pure**, because each CLI's embedded interpreter imports it:

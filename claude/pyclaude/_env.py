@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import importlib.util
 import os
 from pathlib import Path
 
+from wirecap.runtime.vendor import python_home, vendored
 from wirecap.types import json_loads_object
+
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# The shared N-API addon hosting the wirecap bridge (embedded CPython). Resolved
+# from the checkout's kimi build tree or the installed pykimi package.
+WIRE_NODE_ADDON = vendored(
+    _PKG_DIR, "pykimi", "vendor/wirecap_node.node", "../../kimi/native/build/wirecap_node.node"
+)
 
 # Redistributable bundles leave the runtime out (it derives from the proprietary Claude Code
 # executable); the reconstruct helper rebuilds it from the pinned official executable.
@@ -39,3 +49,19 @@ def bundled_cli() -> str:
     if manifest.get("format") != 3 or manifest.get("native_bridge") is not True:
         raise RuntimeError(f"Bundled Claude runtime is not bridged; {_REBUILD}")
     return os.fspath(binary.resolve())
+
+
+def linked_env(capture: str | os.PathLike[str],
+               module: str = "pyclaude.claude_process",
+               base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Environment that enables the wirecap addon in Claude and points it at ``capture``."""
+    env = dict(base if base is not None else os.environ)
+    env["WIRE_ENABLE"] = "1"
+    env["WIRE_MODULE"] = module
+    env["WIRE_CAPTURE"] = os.path.abspath(capture)
+    env["WIRE_NODE_ADDON"] = os.path.abspath(WIRE_NODE_ADDON)
+    env.setdefault("WIRE_MAXCOPY", "8388608")
+    home = python_home(env)
+    if home and not env.get("PYTHONHOME"):
+        env["PYTHONHOME"] = home
+    return env
