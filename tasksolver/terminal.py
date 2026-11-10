@@ -8,13 +8,16 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import select
+import signal
 import sys
 import tempfile
 import threading
 import uuid
 from collections.abc import Sequence
 from contextlib import ExitStack
-from typing import Literal
+from types import FrameType
+from typing import Literal, NoReturn
 
 from wirecap.runtime.terminal import TerminalManager as TerminalManager
 from wirecap.runtime.terminal import TerminalScreen as TerminalScreen
@@ -161,9 +164,10 @@ class _Arguments(argparse.Namespace):
     backends: list[str]
     workspace: str | None
     model: str | None
-    no_capture: bool
+    capture: str | None
     web_port: int | None
-    writable: bool
+    no_web: bool
+    readonly: bool
     no_attach: bool
     tmux_bin: str | None
     ttyd_bin: str | None
@@ -172,37 +176,120 @@ class _Arguments(argparse.Namespace):
     sdk_socket: str | None
 
 
+def _enter(manager: TerminalManager) -> bool:
+    """Wait for a line on stdin; False once the screens have ended instead."""
+    while not manager.wait(close_exited=True, timeout=0.2):
+        if select.select([0], [], [], 0)[0]:
+            if os.read(0, 4096):
+                return True
+            # Stdin has ended: there is nobody to ask, so only the screens end the launcher.
+            return not manager.wait(close_exited=True)
+    return False
+
+
+def _attach(manager: TerminalManager, *, ask_first: bool) -> None:
+    """Attach this terminal on request, as often as it is detached, until the screens end."""
+    ask = ask_first
+    while not manager.wait(close_exited=True, timeout=0):
+        if ask:
+            print("Press Enter to attach this terminal (Ctrl-b d detaches it again), "
+                  "Ctrl-C to close the screens.", flush=True)
+            if not _enter(manager):
+                return
+            if manager.wait(close_exited=True, timeout=0):
+                return
+        _ = manager.attach(close_exited=True)
+        ask = True
+
+
+def _serve(args: _Arguments) -> int:
+    captured = [backend for backend in args.backends if backend != "claude"]
+    with TerminalManager(workspace=args.workspace, tmux_bin=args.tmux_bin) as manager:
+        capture_base = Path(args.capture) if args.capture is not None else None
+        for position, backend in enumerate(args.backends):
+            # A page shows the live capture, so a screen with a page always has one;
+            # without --capture it is a temporary file that goes with the manager.
+            capture: bool | str = not args.no_web
+            if capture_base is not None and backend != "claude":
+                if len(captured) == 1:
+                    capture = os.fspath(capture_base)
+                else:
+                    # The screen's name: agy, agy-2, ...
+                    count = args.backends[:position + 1].count(backend)
+                    label = backend if count == 1 else f"{backend}-{count}"
+                    capture = os.fspath(capture_base.with_name(
+                        f"{capture_base.stem}-{label}{capture_base.suffix}"))
+            screen = open_terminal(_backend(backend), manager=manager, model=args.model,
+                                   capture=capture,
+                                   sdk_socket=args.sdk_socket if backend == "claude" else None)
+            if screen.capture_path is not None:
+                print(f"{screen.name}: capture {screen.capture_path}", flush=True)
+        if args.no_web:
+            try:
+                _attach(manager, ask_first=False)
+            except KeyboardInterrupt:
+                pass
+            return 0
+
+        from wirecap.runtime.webpage import WebScreen
+
+        with ExitStack() as viewers:
+            for index, name in enumerate(manager.screens):
+                port = args.web_port + index if args.web_port else 0
+                web = viewers.enter_context(WebScreen(
+                    manager, screen=name, port=port, writable=not args.readonly, ttyd_bin=args.ttyd_bin))
+                print(f"{name}: {web.url}", flush=True)
+            try:
+                if not args.no_attach and os.isatty(0) and os.isatty(1):
+                    # The attached terminal covers the URLs: attach only when asked to.
+                    _attach(manager, ask_first=True)
+                elif not manager.wait(close_exited=True, timeout=0):
+                    print("Press Ctrl-C to close the pages and screens.", flush=True)
+                    # Ends by itself once every agent has exited, or the tmux server has.
+                    _ = manager.wait(close_exited=True)
+            except KeyboardInterrupt:
+                pass
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("backends", nargs="+", choices=("agy", "codex", "claude", "kimi"))
     parser.add_argument("--workspace", help="Working directory for the screens (default: current directory)")
     parser.add_argument("--model", help="Model selector passed to each chosen backend")
-    parser.add_argument("--no-capture", action="store_true", help="Disable native JSONL capture")
+    parser.add_argument("--capture", metavar="PATH",
+                        help="Keep the native JSONL capture in this file (default: a temporary file "
+                             "for the web page, none with --no-web; several captured screens write "
+                             "PATH with the screen name before its suffix)")
     parser.add_argument("--web-port", type=int,
-                        help="Serve one page per screen on consecutive loopback ports (0: automatic)")
-    parser.add_argument("--writable", action="store_true", help="Allow typing in the web terminal")
-    parser.add_argument("--no-attach", action="store_true", help="Use only the web terminal (with --web-port)")
+                        help="First of the consecutive loopback ports serving one page per screen "
+                             "(default 0: available ports)")
+    parser.add_argument("--no-web", action="store_true", help="Serve no web terminal")
+    parser.add_argument("--readonly", action="store_true", help="Refuse typing in the web terminal")
+    parser.add_argument("--no-attach", action="store_true", help="Use only the web terminal")
     parser.add_argument("--tmux-bin", help="Path to the tmux executable")
-    parser.add_argument("--ttyd-bin", help="Path to ttyd (with --web-port)")
+    parser.add_argument("--ttyd-bin", help="Path to ttyd")
     parser.add_argument("--sdk-socket", help="Private Claude SDK socket path (default: manager directory)")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--capture-path", help=argparse.SUPPRESS)
     args = parser.parse_args(argv, namespace=_Arguments())
     if args.sdk_socket is not None and args.backends.count("claude") != 1:
         parser.error("--sdk-socket requires exactly one Claude screen")
-    if args.writable and args.web_port is None:
-        parser.error("--writable requires --web-port")
-    if args.no_attach and args.web_port is None:
-        parser.error("--no-attach requires --web-port")
-    if args.ttyd_bin is not None and args.web_port is None:
-        parser.error("--ttyd-bin requires --web-port")
+    if args.no_web:
+        for option, given in (("--web-port", args.web_port is not None), ("--readonly", args.readonly),
+                              ("--no-attach", args.no_attach), ("--ttyd-bin", args.ttyd_bin is not None)):
+            if given:
+                parser.error(f"{option} cannot be combined with --no-web")
+    captured = [backend for backend in args.backends if backend != "claude"]
+    if args.capture is not None and not captured and not args.child:
+        parser.error("--capture needs an agy, codex or kimi screen (Claude keeps its own session store)")
     if args.web_port is not None and not 0 <= args.web_port <= 65535:
         parser.error("--web-port must be between 0 and 65535 (0 selects an available port)")
     if args.web_port and args.web_port + len(args.backends) - 1 > 65535:
         parser.error("--web-port leaves too few ports for all screens")
     if args.child:
-        if len(args.backends) != 1 or args.web_port is not None:
-            parser.error("--child requires exactly one backend and no web terminal")
+        if len(args.backends) != 1 or args.web_port is not None or args.capture is not None:
+            parser.error("--child requires exactly one backend, no web terminal and no --capture")
         workspace = Path(args.workspace or os.getcwd()).expanduser().resolve()
         command, env = _child_command(_backend(args.backends[0]), workspace, args.model,
                                       Path(args.capture_path) if args.capture_path else None,
@@ -212,36 +299,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.capture_path is not None:
         parser.error("--capture-path is only used by the screen launcher")
 
-    with TerminalManager(workspace=args.workspace, tmux_bin=args.tmux_bin) as manager:
-        for backend in args.backends:
-            screen = open_terminal(_backend(backend), manager=manager, model=args.model,
-                                   capture=not args.no_capture,
-                                   sdk_socket=args.sdk_socket if backend == "claude" else None)
-            if screen.capture_path is not None:
-                print(f"{screen.name}: capture {screen.capture_path}", flush=True)
-        if args.web_port is None:
-            try:
-                return manager.attach()
-            except KeyboardInterrupt:
-                return 0
+    # A terminated launcher (kill, a closed terminal window) closes its screens like Ctrl-C does,
+    # instead of leaving the tmux server and the agents behind.
+    def interrupt(signum: int, frame: FrameType | None) -> NoReturn:
+        del signum, frame
+        raise KeyboardInterrupt
 
-        from wirecap.runtime.webterm import WebTerminal
-
-        with ExitStack() as viewers:
-            for index, name in enumerate(manager.screens):
-                port = args.web_port + index if args.web_port else 0
-                web = viewers.enter_context(WebTerminal(
-                    manager, screen=name, port=port, writable=args.writable, ttyd_bin=args.ttyd_bin))
-                print(f"{name}: {web.url}", flush=True)
-            try:
-                if not args.no_attach and os.isatty(0) and os.isatty(1):
-                    manager.attach()
-                    print("Web terminals remain available at the URLs above.", flush=True)
-                print("Press Ctrl-C to close viewers and screens.", flush=True)
-                threading.Event().wait()
-            except KeyboardInterrupt:
-                pass
-    return 0
+    with ExitStack() as handlers:
+        if threading.current_thread() is threading.main_thread():
+            for number in (signal.SIGTERM, signal.SIGHUP):
+                _ = handlers.callback(signal.signal, number, signal.signal(number, interrupt))
+        return _serve(args)
 
 
 if __name__ == "__main__":

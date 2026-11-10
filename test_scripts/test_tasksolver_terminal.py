@@ -42,6 +42,9 @@ class RecordingManager(TerminalManager):
         self._lock = threading.RLock()
         self.attached: list[tuple[str | None, bool]] = []
         self.on_attach: Callable[[], None] | None = None
+        self.on_wait: Callable[[], None] | None = None
+        self.waited: list[bool] = []
+        self.ended = False
         self.closed = False
         self.fail_open = False
 
@@ -62,11 +65,24 @@ class RecordingManager(TerminalManager):
         self._screens[name] = screen
         return screen
 
-    def attach(self, screen: str | None = None, read_only: bool = False) -> int:
+    def attach(self, screen: str | None = None, read_only: bool = False, *,
+               close_exited: bool = False) -> int:
+        assert close_exited, "the launcher closes a screen when its agent exits"
         self.attached.append((screen, read_only))
         if self.on_attach is not None:
             self.on_attach()
         return 7
+
+    def wait(self, *, close_exited: bool = False, interval: float = 0.2,
+             timeout: float | None = None) -> bool:
+        assert close_exited, "the launcher closes a screen when its agent exits"
+        if timeout is None:
+            # Blocks until the screens have ended.
+            self.waited.append(close_exited)
+            if self.on_wait is not None:
+                self.on_wait()
+            self.ended = True
+        return self.ended
 
     def close(self) -> None:
         self.closed = True
@@ -280,18 +296,50 @@ class TerminalFrontendTests(unittest.TestCase):
                 configuration.append((workspace, tmux_bin))
                 return manager
 
-            with patch.object(terminal, "TerminalManager", new=factory), redirect_stdout(io.StringIO()):
+            answers = [True, False]  # reattach once after the first detach, then the screens end
+
+            def enter(_manager: TerminalManager) -> bool:
+                return answers.pop(0)
+
+            output = io.StringIO()
+            with patch.object(terminal, "TerminalManager", new=factory), \
+                 patch.object(terminal, "_enter", new=enter), redirect_stdout(output):
                 result = terminal.main(["agy", "codex", "claude", "kimi", "--workspace", directory,
-                                        "--tmux-bin", "/custom/tmux", "--no-capture"])
-            self.assertEqual(result, 7)
+                                        "--tmux-bin", "/custom/tmux", "--no-web"])
+            self.assertEqual(result, 0)
             self.assertEqual(configuration, [(directory, "/custom/tmux")])
             self.assertEqual([call.name for call in manager.calls], ["agy", "codex", "claude", "kimi"])
-            self.assertEqual(manager.attached, [(None, False)])
+            # Without pages nothing is covered: attach at once, and offer it again after each detach.
+            self.assertEqual(manager.attached, [(None, False), (None, False)])
+            self.assertEqual(answers, [])
+            self.assertEqual(output.getvalue().count("Press Enter to attach this terminal"), 2)
             self.assertTrue(manager.closed)
+            for call in manager.calls:
+                self.assertNotIn("--capture-path", call.command)
 
-    def test_web_cli_is_headless_and_read_only_by_default(self) -> None:
-        for writable, port in ((False, 7681), (True, 7681), (False, 0)):
-            with self.subTest(writable=writable, port=port), tempfile.TemporaryDirectory() as directory:
+    def test_cli_capture_is_opt_in_and_names_one_file_per_captured_screen(self) -> None:
+        cases = ((["codex", "claude"], ["run.jsonl", None]),
+                 (["agy", "codex", "claude", "agy"], ["run-agy.jsonl", "run-codex.jsonl", None, "run-agy-2.jsonl"]))
+        for backends, expected in cases:
+            with self.subTest(backends=backends), tempfile.TemporaryDirectory() as directory:
+                manager = RecordingManager(Path(directory))
+
+                def factory(*, workspace: str | None = None, tmux_bin: str | None = None) -> RecordingManager:
+                    return manager
+
+                target = Path(directory).resolve() / "captures/run.jsonl"
+                with patch.object(terminal, "TerminalManager", new=factory), \
+                     patch.object(terminal, "_enter", return_value=False), redirect_stdout(io.StringIO()):
+                    _ = terminal.main([*backends, "--no-web", "--capture", str(target)])
+                paths = [call.command[call.command.index("--capture-path") + 1]
+                         if "--capture-path" in call.command else None for call in manager.calls]
+                self.assertEqual(paths, [None if name is None else str(target.with_name(name))
+                                         for name in expected])
+
+    def test_web_cli_is_headless_and_writable_by_default(self) -> None:
+        for readonly, port in ((False, 7681), (True, 7681), (False, 0), (False, None)):
+            writable = not readonly
+            with self.subTest(readonly=readonly, port=port), tempfile.TemporaryDirectory() as directory:
                 manager = RecordingManager(Path(directory))
                 views: list[WebView] = []
 
@@ -305,30 +353,58 @@ class TerminalFrontendTests(unittest.TestCase):
                     views.append(view)
                     return view
 
-                def interrupt(_event: threading.Event, timeout: float | None = None) -> NoReturn:
+                def interrupt() -> NoReturn:
                     raise KeyboardInterrupt
 
+                manager.on_wait = interrupt
                 output = io.StringIO()
-                args = ["codex", "codex", "--web-port", str(port), "--ttyd-bin", "/custom/ttyd", "--no-capture"]
-                if writable:
-                    args.append("--writable")
+                args = ["codex", "codex", "--ttyd-bin", "/custom/ttyd"]
+                if port is not None:
+                    args += ["--web-port", str(port)]
+                if readonly:
+                    args.append("--readonly")
                 with patch.object(terminal, "TerminalManager", new=manager_factory), \
-                     patch("wirecap.runtime.webterm.WebTerminal", new=web_factory), \
-                     patch.object(threading.Event, "wait", new=interrupt), \
+                     patch("wirecap.runtime.webpage.WebScreen", new=web_factory), \
                      patch.object(os, "isatty", return_value=False), \
                      patch.object(sys, "stdin", io.StringIO()), redirect_stdout(output):
                     self.assertEqual(terminal.main(args), 0)
                 self.assertEqual(manager.attached, [])
+                self.assertEqual(manager.waited, [True])
                 self.assertTrue(manager.closed)
                 self.assertEqual([view.screen for view in views], ["codex", "codex-2"])
-                self.assertEqual([view.port for view in views], [port, port + 1 if port else 0])
+                # A page shows the live capture: without --capture it is the manager's temporary file.
+                for call in manager.calls:
+                    assert call.capture_path is not None
+                    self.assertEqual(call.capture_path.parent, manager.directory)
+                self.assertEqual([view.port for view in views], [port or 0, port + 1 if port else 0])
                 for view in views:
                     self.assertEqual(view.writable, writable)
                     self.assertEqual(view.ttyd_bin, "/custom/ttyd")
                     self.assertTrue(view.closed)
                     self.assertIn(f"{view.screen}: {view.url}", output.getvalue())
 
-    def test_web_cli_attaches_only_a_complete_tty_and_keeps_serving_after_detach(self) -> None:
+    def test_web_cli_ends_when_the_screens_do(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RecordingManager(Path(directory))
+            views: list[WebView] = []
+
+            def manager_factory(*, workspace: str | None = None, tmux_bin: str | None = None) -> RecordingManager:
+                return manager
+
+            def web_factory(owner: TerminalManager, *, screen: str | None = None, port: int = 7681,
+                            writable: bool = False, ttyd_bin: str | None = None) -> WebView:
+                views.append(WebView(owner, screen=screen, port=port, writable=writable, ttyd_bin=ttyd_bin))
+                return views[-1]
+
+            with patch.object(terminal, "TerminalManager", new=manager_factory), \
+                 patch("wirecap.runtime.webpage.WebScreen", new=web_factory), \
+                 patch.object(os, "isatty", return_value=False), redirect_stdout(io.StringIO()):
+                self.assertEqual(terminal.main(["codex"]), 0)
+            self.assertEqual(manager.waited, [True])
+            self.assertTrue(manager.closed)
+            self.assertTrue(views[0].closed)
+
+    def test_web_cli_attaches_a_complete_tty_on_request_and_again_after_detach(self) -> None:
         cases = ((True, True, False), (True, True, True),
                  (True, False, False), (False, True, False))
         for stdin_tty, stdout_tty, no_attach in cases:
@@ -338,6 +414,7 @@ class TerminalFrontendTests(unittest.TestCase):
                 views: list[WebView] = []
                 output = io.StringIO()
                 should_attach = stdin_tty and stdout_tty and not no_attach
+                asked: list[int] = []
 
                 def manager_factory(*, workspace: str | None = None,
                                     tmux_bin: str | None = None) -> RecordingManager:
@@ -349,33 +426,40 @@ class TerminalFrontendTests(unittest.TestCase):
                     views.append(view)
                     return view
 
+                def enter(_manager: TerminalManager) -> bool:
+                    # The URLs are on screen, and nothing is attached, each time the user is asked.
+                    self.assertIn(f"codex: {views[0].url}", output.getvalue())
+                    self.assertEqual(len(manager.attached), len(asked))
+                    self.assertFalse(views[0].closed)
+                    asked.append(output.getvalue().count("Press Enter to attach this terminal"))
+                    return len(asked) < 3  # attach, detach, attach again, then Ctrl-C-less end
+
                 def attached() -> None:
-                    self.assertEqual(len(views), 1)
                     self.assertFalse(views[0].closed)
                     self.assertFalse(manager.closed)
 
                 def is_tty(fd: int) -> bool:
                     return stdin_tty if fd == 0 else stdout_tty if fd == 1 else False
 
-                def interrupt(_event: threading.Event, timeout: float | None = None) -> NoReturn:
-                    self.assertEqual(manager.attached, [(None, False)] if should_attach else [])
+                def interrupt() -> NoReturn:
                     self.assertFalse(manager.closed)
                     self.assertFalse(views[0].closed)
-                    self.assertIn("Press Ctrl-C to close viewers and screens.", output.getvalue())
-                    if should_attach:
-                        self.assertIn("Web terminals remain available at the URLs above.",
-                                      output.getvalue())
+                    self.assertIn("Press Ctrl-C to close the pages and screens.", output.getvalue())
                     raise KeyboardInterrupt
 
                 manager.on_attach = attached
-                args = ["codex", "--web-port", "7681", "--no-capture"]
+                manager.on_wait = interrupt
+                args = ["codex", "--web-port", "7681"]
                 if no_attach:
                     args.append("--no-attach")
                 with patch.object(terminal, "TerminalManager", new=manager_factory), \
-                     patch("wirecap.runtime.webterm.WebTerminal", new=web_factory), \
-                     patch.object(threading.Event, "wait", new=interrupt), \
+                     patch("wirecap.runtime.webpage.WebScreen", new=web_factory), \
+                     patch.object(terminal, "_enter", new=enter), \
                      patch.object(os, "isatty", new=is_tty), redirect_stdout(output):
                     self.assertEqual(terminal.main(args), 0)
+                self.assertEqual(manager.attached, [(None, False)] * 2 if should_attach else [])
+                self.assertEqual(asked, [1, 2, 3] if should_attach else [])
+                self.assertEqual(manager.waited, [] if should_attach else [True])
                 self.assertTrue(manager.closed)
                 self.assertTrue(views[0].closed)
 
@@ -398,14 +482,15 @@ class TerminalFrontendTests(unittest.TestCase):
                 def interrupt() -> NoReturn:
                     raise KeyboardInterrupt
 
-                def unexpected_wait(_event: threading.Event, timeout: float | None = None) -> NoReturn:
+                def unexpected_wait() -> NoReturn:
                     raise AssertionError("Ctrl-C during attach must stop the viewer instead of waiting")
 
                 manager.on_attach = interrupt
-                args = ["codex", "--no-capture", *(["--web-port", "7681"] if web else [])]
+                manager.on_wait = unexpected_wait
+                args = ["codex", *([] if web else ["--no-web"])]
                 with patch.object(terminal, "TerminalManager", new=manager_factory), \
-                     patch("wirecap.runtime.webterm.WebTerminal", new=web_factory), \
-                     patch.object(threading.Event, "wait", new=unexpected_wait), \
+                     patch("wirecap.runtime.webpage.WebScreen", new=web_factory), \
+                     patch.object(terminal, "_enter", return_value=True), \
                      patch.object(os, "isatty", return_value=True), redirect_stdout(io.StringIO()):
                     self.assertEqual(terminal.main(args), 0)
                 self.assertEqual(manager.attached, [(None, False)])
@@ -440,7 +525,10 @@ class TerminalFrontendTests(unittest.TestCase):
         self.assertEqual(calls[0][:2], ("/bundled/claude", ("/bundled/claude", "--model", "sonnet")))
 
     def test_invalid_cli_options_fail_before_opening_screens(self) -> None:
-        cases = (["agy", "--writable"], ["agy", "--no-attach"], ["agy", "--ttyd-bin", "/ttyd"],
+        cases = (["agy", "--no-web", "--readonly"], ["agy", "--no-web", "--no-attach"],
+                 ["agy", "--no-web", "--ttyd-bin", "/ttyd"], ["agy", "--no-web", "--web-port", "0"],
+                 ["claude", "--capture", "/tmp/capture"], ["--child", "agy", "--capture", "/tmp/capture"],
+                 ["agy", "--writable"], ["agy", "--no-capture"],
                  ["agy", "--web-port", "65536"], ["agy", "codex", "--web-port", "65535"], ["agy", "--capture-path", "/tmp/capture"],
                  ["--child", "agy", "codex"])
         for args in cases:

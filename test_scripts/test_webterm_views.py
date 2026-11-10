@@ -248,7 +248,7 @@ class WebTerminalViewTests(unittest.TestCase):
                 try:
                     os.environ["TERM"] = "xterm-256color"
                     with patch.object(frontend, "open_terminal", open_echo):
-                        status = frontend.main(["agy", "--web-port", "0", "--writable", "--no-capture"])
+                        status = frontend.main(["agy"])
                 except BaseException as error:
                     print(repr(error), file=sys.stderr, flush=True)
                     os._exit(1)
@@ -297,15 +297,26 @@ class WebTerminalViewTests(unittest.TestCase):
                     else:
                         pump_terminal()
 
+            prompt = b"Press Enter to attach this terminal"
+
+            def prompted(count: int) -> None:
+                deadline = time.monotonic() + 8
+                while output.count(prompt) < count and time.monotonic() < deadline:
+                    pump_terminal()
+                self.assertEqual(output.count(prompt), count, output.decode("utf-8", "replace"))
+
             try:
-                terminal_contains(b"AGENT_READY:")
+                # The URL stays readable: nothing attaches before the user asks for it.
+                prompted(1)
                 manager_path, agent_pid = state.read_text().splitlines()
                 ready = f"AGENT_READY:{agent_pid}".encode()
+                self.assertNotIn(b"AGENT_READY:", output)
+                os.write(master, b"\r")
                 terminal_contains(ready)
                 url_match = re.search(rb"http://127\.0\.0\.1:\d+", output)
                 assert url_match is not None, output
                 url = url_match[0].decode()
-                with connect(url.replace("http:", "ws:") + "/ws", origin=Origin(url),
+                with connect(url.replace("http:", "ws:") + "/terminal/ws", origin=Origin(url),
                              subprotocols=[Subprotocol("tty")], close_timeout=1) as connection:
                     connection.send(json.dumps({"AuthToken": "", "columns": 100, "rows": 30}))
                     receive(connection, ready)
@@ -320,9 +331,18 @@ class WebTerminalViewTests(unittest.TestCase):
                         receive(connection, reply)
                         terminal_contains(reply)
                     os.write(master, b"\x02d")
-                    terminal_contains(b"Press Ctrl-C to close viewers and screens.")
+                    prompted(2)
                     connection.send(b"0after-detach\r")
                     receive(connection, f"AGENT_REPLY:{agent_pid}:after-detach".encode())
+                    # The same terminal attaches again, to the same agent.
+                    os.write(master, b"\r")
+                    time.sleep(0.5)
+                    os.write(master, b"after-reattach\r")
+                    reply = f"AGENT_REPLY:{agent_pid}:after-reattach".encode()
+                    receive(connection, reply)
+                    terminal_contains(reply)
+                    os.write(master, b"\x02d")
+                    prompted(3)
                     os.write(master, b"\x03")
                     reap(8)
                 self.assertTrue(reaped, output.decode("utf-8", "replace"))

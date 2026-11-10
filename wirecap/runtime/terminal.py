@@ -359,14 +359,73 @@ class TerminalManager:
             return [self.tmux_bin, "-S", str(self.socket_path), "attach-session", "-E",
                     *(["-r"] if read_only else []), "-t", _SESSION]
 
-    def attach(self, screen: str | None = None, read_only: bool = False) -> int:
+    def attach(self, screen: str | None = None, read_only: bool = False, *,
+               close_exited: bool = False) -> int:
+        """Attach this terminal until detach, or until the session or the server ends.
+
+        With ``close_exited``, a screen whose command exits is closed while attached, so
+        the last one to exit ends the attachment.
+        """
         if not os.isatty(0) or not os.isatty(1):
             raise RuntimeError("attach requires the current stdin and stdout to be a terminal; use attach_argv or a web viewer")
+        argv = self.attach_argv(screen, read_only)
+        stop = threading.Event()
+        watcher = threading.Thread(target=self._watch, args=(True, 0.2, stop), daemon=True) \
+            if close_exited else None
         previous = termios.tcgetattr(0)
         try:
-            return subprocess.run(self.attach_argv(screen, read_only), env=self._env, check=False).returncode
+            if watcher is not None:
+                watcher.start()
+            return subprocess.run(argv, env=self._env, check=False).returncode
         finally:
+            stop.set()
+            if watcher is not None:
+                watcher.join()
             termios.tcsetattr(0, termios.TCSANOW, previous)
+
+    def wait(self, *, close_exited: bool = False, interval: float = 0.2,
+             timeout: float | None = None) -> bool:
+        """Block until no screen is running, the tmux server exits or the manager closes.
+
+        With ``close_exited``, each screen is closed when its command exits (or its window
+        is removed inside tmux), instead of being retained for its output. Returns False
+        when ``timeout`` seconds pass first; a timeout of 0 checks once.
+        """
+        if not 0 < interval < float("inf"):
+            raise ValueError("interval must be finite and positive")
+        if timeout is not None and not 0 <= timeout < float("inf"):
+            raise ValueError("timeout must be finite and nonnegative")
+        deadline = None if timeout is None else time.monotonic() + timeout
+        return self._watch(close_exited, interval, threading.Event(), deadline)
+
+    def _watch(self, close_exited: bool, interval: float, stop: threading.Event,
+               deadline: float | None = None) -> bool:
+        while not stop.is_set():
+            with self._lock:
+                if self._closed or self._server is None or self._server.poll() is not None:
+                    return True
+                screens = list(self._screens.values())
+            running = False
+            for screen in screens:
+                try:
+                    alive = screen.alive
+                except RuntimeError:
+                    # Its window was removed inside tmux, or the server or manager ended.
+                    alive = False
+                if alive:
+                    running = True
+                elif close_exited:
+                    try:
+                        screen.close()
+                    except RuntimeError:
+                        pass  # The manager's close stops what is left.
+            if not running:
+                return True
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return False
+            _ = stop.wait(interval if remaining is None else min(interval, remaining))
+        return False
 
     def _create_view(self, screen: str | None = None, read_only: bool = True) -> tuple[list[str], Callable[[], None]]:
         with self._lock:

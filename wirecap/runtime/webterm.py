@@ -32,7 +32,7 @@ class WebTerminal:
 
     def __init__(self, manager: TerminalManager, *, port: int = 7681,
                  writable: bool = False, ttyd_bin: str | None = None,
-                 screen: str | None = None, timeout: float = 10.0) -> None:
+                 screen: str | None = None, timeout: float = 10.0, base_path: str = "") -> None:
         if not 0 <= port <= 65535:
             raise ValueError("port must be between 0 and 65535")
         if not 0 < timeout < float("inf"):
@@ -52,11 +52,14 @@ class WebTerminal:
         self._closed = False
         self.port = port
         self.writable = writable
+        # Set when a reverse proxy serves this terminal below a path of its own page.
+        self.base_path = base_path
         try:
             selected = manager.screens[screen] if screen is not None else None
             attach, self._close_view = manager._create_view(screen=screen, read_only=not writable)
             command = [executable, "--interface", "127.0.0.1", "--port", str(port),
-                       "--check-origin", *(["--writable"] if writable else []), *attach]
+                       "--check-origin", *(["--writable"] if writable else []),
+                       *(["--base-path", base_path] if base_path else []), *attach]
             self._log = tempfile.TemporaryFile()
             env = dict(os.environ)
             env.pop("TMUX", None)
@@ -101,7 +104,7 @@ class WebTerminal:
                 connection = http.client.HTTPConnection("127.0.0.1", self.port,
                                                         timeout=min(0.2, timeout))
                 try:
-                    connection.request("GET", "/")
+                    connection.request("GET", self.base_path + "/")
                     response = connection.getresponse()
                     if response.status == 200:
                         return

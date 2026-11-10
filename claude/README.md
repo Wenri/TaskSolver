@@ -159,7 +159,7 @@ asyncio.run(main())
 ```
 
 The same screen can have a `WebTerminal` viewer. Browser input requires its
-explicit `writable=True` option. The terminal owns permission dialogs; SDK
+explicit `writable=True` option (the `tasksolver` launcher's pages pass it unless `--readonly`). The terminal owns permission dialogs; SDK
 attachment never preapproves tools.
 
 The local channel supports text queries, initialization metadata and interruption

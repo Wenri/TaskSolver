@@ -101,7 +101,7 @@ nix profile install github:Wenri/TaskSolver   # `tasksolver` and `tasksolver-pyt
 nix/update-hashes                             # after a runtime bump: refresh nix/hashes.json
 ```
 
-The default package, `launcher` ([`nix/launcher.nix`](nix/launcher.nix)), has two commands on one Python environment: `tasksolver BACKEND...`, which opens the terminal screens as `pixi run tasksolver` does, and `tasksolver-python`, that environment's interpreter, for scripts (`tasksolver-python test_scripts/text_only.py --model claude-code`). The package depends on nixpkgs' tmux, ttyd (for `--web-port`) and Node 26 (for Kimi Code) by store path, so neither command changes `PATH`. The runtimes' embedded interpreters take the launching environment as `PYTHONHOME`, the role `CONDA_PREFIX` plays under pixi. `.#tasksolver` is the Python package alone, and `.#launcher.env` the environment.
+The default package, `launcher` ([`nix/launcher.nix`](nix/launcher.nix)), has two commands on one Python environment: `tasksolver BACKEND...`, which opens the terminal screens as `pixi run tasksolver` does, and `tasksolver-python`, that environment's interpreter, for scripts (`tasksolver-python test_scripts/text_only.py --model claude-code`). The package depends on nixpkgs' tmux, ttyd (for the web pages) and Node 26 (for Kimi Code) by store path, so neither command changes `PATH`. The runtimes' embedded interpreters take the launching environment as `PYTHONHOME`, the role `CONDA_PREFIX` plays under pixi. `.#tasksolver` is the Python package alone, and `.#launcher.env` the environment.
 
 The build fetches the agy and Claude Code releases pinned in `antigravity/vendor.json` and `claude/vendor.json` and derives `libagy.so` and Claude's runtime from them on the building machine, as the editable workspace does; Codex and Kimi Code build from the vendored sources. Since agy and Claude Code are proprietary, the package is marked unfree: the flake's own `packages` allow it, and a consuming configuration sets `nixpkgs.config.allowUnfree`. In another flake, apply `overlays.deps` first. It adds what TaskSolver needs above nixpkgs: the pinned Claude Agent SDK, and LIEF 1.x and fixes for the Python 3.15 package set, which nixpkgs 26.05 does not build yet. Then apply `overlays.default`, which adds `pkgs.tasksolver`, with its commands as `pkgs.tasksolver.launcher`. `package.nix` also takes a consumer's own builds of the pinned runtimes (`agyArchive`, `claudeExecutable`, `codexBase`). The first build takes hours, since no binary cache holds the Python 3.15 set and Codex compiles from source. `nix/hashes.json` holds the hashes the pins cannot carry (the Codex crates, the Kimi Code pnpm store, the rusty_v8 assets and the SDK source), and `nix/update-hashes` recomputes them: each entry records what it was computed from, so a run recomputes only the entries whose inputs moved (`--force` recomputes all).
 
@@ -142,6 +142,7 @@ pixi run python test_scripts/test_terminal.py
 pixi run python test_scripts/test_tasksolver_terminal.py
 pixi run python test_scripts/test_webterm.py
 pixi run python test_scripts/test_webterm_views.py
+pixi run python test_scripts/test_webpage.py
 
 # Agy build metadata, native readers and configuration
 pixi run python test_scripts/test_agy_symbols.py
@@ -219,10 +220,15 @@ Pixi and the Nix package supply [tmux](https://github.com/tmux/tmux/wiki/Getting
 [ttyd](https://github.com/tsl0922/ttyd) **1.7.4 or newer**.
 TaskSolver owns a private tmux server; your existing tmux sessions are unaffected.
 Press **Ctrl-b w** to choose a screen, **Ctrl-b n/p** for next/previous, and
-**Ctrl-b d** to detach. The command above then exits and closes its screens.
+**Ctrl-b d** to detach. After a detach the launcher asks again: **Enter** attaches the same
+terminal once more, **Ctrl-C** closes the screens. The launcher also ends by itself: a screen closes when its agent
+exits, and once the last one has, or the tmux server is gone, the launcher closes what is
+left and exits. Terminating the launcher (`kill`, a closed terminal window) closes its screens
+as Ctrl-C does.
 Each backend keeps its normal login, workspace trust and tool approval UI. No prompt
-is submitted during launch. `--workspace PATH`, `--model NAME` and `--no-capture`
-configure the launch; a model name must be understood by every selected backend.
+is submitted during launch. `--workspace PATH`, `--model NAME` and `--capture PATH`
+configure the launch (`--capture` keeps the native JSONL capture in that file; several captured
+screens write `PATH` with the screen name before its suffix, e.g. `run-agy.jsonl`); a model name must be understood by every selected backend.
 Terminal backends are exactly `agy`, `codex`, `claude` and `kimi`; model names are
 forwarded unchanged, without `Agent`'s model-id alias expansion.
 
@@ -259,22 +265,32 @@ the official SDK to the same native UI process through `screen.control_socket`.
 CLIs may contact their services during startup, so captures can include account and
 configuration metadata before any prompt is sent.
 
-For browser viewing, run:
+The launcher also serves each screen as a web page and prints its URL:
 
 ```bash
-pixi run tasksolver agy codex claude kimi --web-port 7681
+pixi run tasksolver agy codex claude kimi                   # available ports
+pixi run tasksolver agy codex claude kimi --web-port 7681   # 7681, 7682, 7683, 7684
+pixi run tasksolver agy codex claude kimi --no-web          # local terminal only
 ```
 
-Each screen gets its own page: agy at port 7681, Codex at 7682, Claude at 7683 and
-Kimi at 7684. Open the printed URLs as separate browser panels or tabs. Each page
-stays on its screen; tmux navigation and its status bar are hidden there.
-`--web-port 0` assigns available ports automatically.
-When stdin and stdout are terminals, the launcher also
-attaches the local terminal, so local and browser views run together. **Ctrl-b d**
-detaches locally while keeping the screens and web pages running; **Ctrl-C** at the
-launcher then closes them. Add `--no-attach` to `--web-port` for web-only operation.
-Without a local TTY, web-only operation is automatic. The browser is read-only by default;
-`--writable` enables typing into each page's agent. No browser is opened
+Each screen gets its own page; open the printed URLs as separate browser panels or tabs.
+A page has three frames: the screen's terminal (tmux navigation and its status bar are hidden
+there), the list of captured round trips, and the content of the selected one. A round trip
+is a decoded model turn (request summary, reasoning, response, usage, with the full request and
+event stream on demand) or an HTTP/2 exchange the capture recorded; "model turns only" hides
+the latter. The frames follow the capture as it is written. They are always there: without
+`--capture` the capture is a temporary file that is removed with the screens. The page hides
+credential headers and form bodies; the capture file itself does not. Claude has no native
+capture, and its page says so.
+When stdin and stdout are terminals, the launcher can also
+attach the local terminal, so local and browser views run together. Because the attached
+terminal covers the printed URLs, it waits for **Enter** first. **Ctrl-b d**
+detaches locally while keeping the screens and web pages running, and returns to that
+prompt: **Enter** attaches again, **Ctrl-C** closes the pages and screens. With `--no-web`
+there is nothing to cover, so the terminal attaches at once. Add `--no-attach` for web-only
+operation.
+Without a local TTY, web-only operation is automatic. The page's terminal accepts typing;
+`--readonly` refuses it. No browser is opened
 automatically. To view a panel from another host, forward its port and open
 `http://127.0.0.1:7681` on your computer:
 
@@ -301,9 +317,16 @@ A screen-specific page links only that screen's tmux window, sharing its existin
 process with the local terminal. Closing a page leaves the screen running; closing
 a screen closes its viewers without affecting other pages. `WebTerminal(terminals)`
 without `screen=` provides an all-screen viewer with independent navigation.
+`WebTerminal` is the bare ttyd terminal, read-only unless `writable=True`. The launcher's
+pages are `wirecap.runtime.webpage.WebScreen(terminals, screen="codex", port=7681,
+writable=True)`: the same terminal beside the two capture frames, on one port.
+`terminals.wait(close_exited=True)` blocks until every screen's command has exited (closing
+each as it does) or the tmux server is gone; `attach(close_exited=True)` does the same while
+attached. Without `close_exited`, exited screens keep their output until `close()`.
 The manager can open new screens and viewers after the previous ones close. Closing the
 manager closes everything it owns. `port=0` selects an available port. Outside Pixi,
-install tmux and, for browser viewing, ttyd >=1.7.4 on `PATH`. Executables can be
+install tmux and, for browser viewing, ttyd >=1.7.4 on `PATH` (the launcher needs ttyd
+unless it runs with `--no-web`). Executables can be
 selected with `tmux_bin=` / `ttyd_bin=` or the CLI's `--tmux-bin` / `--ttyd-bin`.
 
 ### Chat mode

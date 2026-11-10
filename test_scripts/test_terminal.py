@@ -152,6 +152,35 @@ os.write(1, ('RECEIVED:' + json.dumps(data.decode(), ensure_ascii=False)).encode
         with self.assertRaisesRegex(RuntimeError, "exited"):
             screen.submit("too late")
 
+    def test_wait_closes_exited_screens_and_ends_with_the_last_one_or_the_server(self) -> None:
+        import threading
+
+        first = self.manager.open("first", python_command("import sys; sys.stdin.readline()"))
+        second = self.echo("second")
+        waiter = threading.Thread(target=lambda: self.manager.wait(close_exited=True, interval=0.02))
+        waiter.start()
+        self.addCleanup(waiter.join)
+        first.submit("done")
+        wait_for(lambda: list(self.manager.screens) == ["second"])
+        self.assertEqual(first.exit_status, 0)
+        self.assertTrue(waiter.is_alive())
+        # A window removed inside tmux (Ctrl-b &) counts as an exited screen.
+        self.manager._run(["kill-window", "-t", second.window_id])
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(dict(self.manager.screens), {})
+
+        third = self.echo("third")
+        self.assertRaises(ValueError, self.manager.wait, interval=0)
+        waiter = threading.Thread(target=self.manager.wait)
+        waiter.start()
+        self.addCleanup(waiter.join)
+        self.manager._run(["kill-server"], check=False)
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
+        self.assertIn("third", self.manager.screens)  # retained without close_exited
+        del third
+
     def test_validation_and_current_terminal_only_attach(self) -> None:
         screen = self.echo("same")
         with self.assertRaises(ValueError):

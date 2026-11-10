@@ -282,7 +282,7 @@ tmux server. Pixi supplies tmux and ttyd >=1.7.4 (`pixi run tasksolver BACKEND..
 package pins nixpkgs' by store path (`TMUX_BIN`, `TTYD_BIN`, and pykimi's `NODE_BIN` for Node 26,
 substituted in `package.nix`), and its launcher's `tasksolver` command opens the screens
 (`nix/launcher.nix`, the flake's default package). Other environments must provide tmux and ttyd
-on `PATH` (ttyd is only needed for browser viewing).
+on `PATH` (ttyd is only needed for browser viewing, which the CLI does unless `--no-web`).
 Python attaches its existing TTY; never open a desktop terminal. Screens
 keep running across detach until the manager closes. Each screen carries an inherited
 `TASKSOLVER_TERMINAL_SCREEN` ownership marker for descendant cleanup; preserve it in
@@ -294,12 +294,24 @@ viewing on loopback, with read-only input by default. An explicit `screen=` crea
 an independent session containing only that screen's linked window, with tmux navigation
 and status hidden; omitting it creates an all-screen grouped viewer. Closing a screen
 closes its specific viewers; closing the final screen also closes all-screen viewers.
-The manager remains reusable. Use SSH forwarding for remote viewing. The CLI's
-`--web-port` serves one page per screen on consecutive ports (0 selects available ports),
-also attaches the local TTY when available, and keeps serving after local detach until
-Ctrl-C. `--no-attach` with `--web-port` forces web-only operation. Offline checks:
-`test_terminal.py`, `test_tasksolver_terminal.py`, `test_webterm.py` and
-`test_webterm_views.py`. Run them through Pixi; they send input only to local stubs.
+The manager remains reusable. Use SSH forwarding for remote viewing. The CLI
+serves one page per screen on consecutive ports by default (`--web-port`, default 0: available
+ports; `--no-web` serves none), writable unless `--readonly`, and keeps serving until Ctrl-C. With a local TTY it attaches
+on Enter, never before (the attached terminal would cover the printed URLs; `--no-web`
+attaches at once), and asks again after each detach, so the same terminal can reattach. `--no-attach` forces
+web-only operation. A page is `wirecap.runtime.webpage.WebScreen`: one loopback port serving
+the screen's ttyd (behind `/terminal`, the WebSocket upgrade handed over unchanged so ttyd's
+origin check still applies) beside two capture frames, the round-trip list and the selected
+trip's content, read from the screen's growing capture JSONL (`*_turn` events and paired
+`h2msg` exchanges). The page refuses non-loopback `Host` names and hides credential headers and
+form bodies; keep both. The CLI therefore always captures when it serves pages: `--capture PATH`
+only makes the file persistent (one per captured screen), and `--no-web` without it captures
+nothing. The launcher's lifecycle follows its screens: `TerminalManager.wait(close_exited=True)`
+and `attach(close_exited=True)` close a screen when its command exits (library screens are
+retained until `close()` by default), and the launcher exits once no screen runs or the tmux
+server is gone; SIGTERM and SIGHUP close the screens like Ctrl-C. Offline checks:
+`test_terminal.py`, `test_tasksolver_terminal.py`, `test_webterm.py`, `test_webterm_views.py`
+and `test_webpage.py`. Run them through Pixi; they send input only to local stubs.
 
 All Claude launches use the bundled bridged runtime. `claude/build_cli.py` verifies
 and caches the pristine pin, uses the externally provided `bun_graph` on `PATH`

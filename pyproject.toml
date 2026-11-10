@@ -235,7 +235,7 @@ nodejs = ">=26,<27"
 
 [tool.pixi.tasks]
 typecheck = "basedpyright"
-# The agent runtimes' terminal screens: `pixi run tasksolver agy codex claude kimi [--web-port PORT]`,
+# The agent runtimes' terminal screens: `pixi run tasksolver agy codex claude kimi [--web-port PORT | --no-web]`,
 # as the Nix package's `tasksolver` command.
 tasksolver = "python -m tasksolver.terminal"
 # node-gyp finds python3-embed via PKG_CONFIG_PATH when compiling pymport from source.
