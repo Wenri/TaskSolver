@@ -130,7 +130,14 @@ def on_dns(stream_id: int, data: bytes) -> None:
     return None
 
 
+_smoke_seen = False
+
+
 def on_smoke(stream_id: int, data: bytes) -> None:
+    global _smoke_seen
+    if _smoke_seen:
+        return None
+    _smoke_seen = True
     print("[agy_process] smoke book fired — end-to-end pipeline OK", file=sys.stderr, flush=True)
     _rec.record("smoke", stream_id, data)
     return None

@@ -169,7 +169,11 @@ request comes from the `tls_write` book; response events and usage arrive throug
 (`toStreamResponseChunk`), which observes each decoded SSE data line. `http1sse.py` decodes
 them, and `BaseCorrelator.feed_chunk` (`wirecap/decode/`) groups them by response ID. Request
 matching distinguishes overlapping answer and session-title calls, including `flash` versus
-`flash-lite` models. agy's other connections are HTTP/2 (`h2reassemble.py`).
+`flash-lite` models. agy's other connections are HTTP/2 (`h2reassemble.py`); a
+`streamGenerateContent` request sent over HTTP/2 is reassembled and paired the same way. The
+request summary's `first_user_text` is the latest `<USER_REQUEST>` (falling back to the last
+plain user text, then the context summary's last request), and each turn lists its
+`functionCall` parts as `tool_calls`. The `smoke` book is recorded once per process.
 
 Native `app_response_packet` and `resp_chunk_packet` events contain a 16-byte `AGTX` version-1
 header with the original payload length. The Python router validates and unwraps them before

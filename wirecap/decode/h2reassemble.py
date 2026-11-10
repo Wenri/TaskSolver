@@ -65,19 +65,20 @@ class Reassembler:
             sides[direction] = _Side()
         return sides[direction]
 
-    def feed(self, conn: StreamId, direction: Direction, data: bytes) -> None:
+    def feed(self, conn: StreamId, direction: Direction, data: bytes) -> list[http1sse.Message]:
         side = self._side(conn, direction)
         if side.failed:
-            return
+            return []
         side.buf += data
         if direction == "c2s" and not side.saw_preface:
             if len(side.buf) < len(PREFACE):
-                return
+                return []
             if bytes(side.buf[:len(PREFACE)]) == PREFACE:
                 del side.buf[:len(PREFACE)]
             side.saw_preface = True
+        emitted: list[http1sse.Message] = []
         try:
-            self._parse(conn, direction, side)
+            self._parse(conn, direction, side, emitted)
         except Exception:
             # Invalid frame sequences cannot be safely reassembled. Raw bytes
             # remain recorded, and this must never interrupt capture itself.
@@ -85,8 +86,10 @@ class Reassembler:
             side.buf.clear()
             side.streams.clear()
             side.headers = None
+        return emitted
 
-    def _parse(self, conn: StreamId, direction: Direction, side: _Side) -> None:
+    def _parse(self, conn: StreamId, direction: Direction, side: _Side,
+               emitted: list[http1sse.Message]) -> None:
         b = side.buf
         while len(b) >= 9:
             length = (b[0] << 16) | (b[1] << 8) | b[2]
@@ -96,10 +99,11 @@ class Reassembler:
             sid = int.from_bytes(b[5:9], "big") & 0x7FFFFFFF
             payload = bytes(b[9:9 + length])
             del b[:9 + length]
-            self._frame(conn, direction, side, ftype, flags, sid, payload)
+            self._frame(conn, direction, side, ftype, flags, sid, payload, emitted)
 
     def _frame(self, conn: StreamId, direction: Direction, side: _Side,
-               ftype: int, flags: int, sid: int, payload: bytes) -> None:
+               ftype: int, flags: int, sid: int, payload: bytes,
+               emitted: list[http1sse.Message]) -> None:
         pending: _HeaderBlock | None = side.headers
         if pending is not None and (ftype != FRAME_CONTINUATION or sid != pending["sid"]):
             raise ValueError("expected CONTINUATION for the unfinished header block")
@@ -130,7 +134,7 @@ class Reassembler:
             st = side.streams.setdefault(sid, {"headers": [], "data": bytearray()})
             st["data"] += _unpad(payload, flags)
             if flags & FLAG_END_STREAM:
-                self._emit(conn, direction, sid, st)
+                emitted.append(self._emit(conn, direction, sid, st))
                 side.streams.pop(sid, None)
             return
         if not flags & FLAG_END_HEADERS:
@@ -152,10 +156,11 @@ class Reassembler:
         st = side.streams.setdefault(sid, {"headers": [], "data": bytearray()})
         st["headers"].extend(headers)
         if pending["end_stream"]:
-            self._emit(conn, direction, sid, st)
+            emitted.append(self._emit(conn, direction, sid, st))
             side.streams.pop(sid, None)
 
-    def _emit(self, conn: StreamId, direction: Direction, sid: int, st: _Stream) -> None:
+    def _emit(self, conn: StreamId, direction: Direction, sid: int,
+              st: _Stream) -> http1sse.Message:
         headers: dict[str, str] = {}
         for k, v in st["headers"]:
             k = k.decode() if isinstance(k, bytes) else k
@@ -174,6 +179,14 @@ class Reassembler:
         if headers.get("content-type", "").startswith("application/grpc"):
             msg["grpc_frames"] = _grpc_lengths(body)
         self.rec.event(msg)
+        if direction == "c2s":
+            start_line = f"{headers.get(':method', '')} {headers.get(':path', '')} HTTP/2"
+        else:
+            start_line = f"HTTP/2 {headers.get(':status', '')}"
+        msg_headers = dict(headers)
+        if ":authority" in headers and "host" not in msg_headers:
+            msg_headers["host"] = headers[":authority"]
+        return http1sse.Message(start_line, msg_headers, body)
 
 
 def _unpad(payload: bytes, flags: int) -> bytes:

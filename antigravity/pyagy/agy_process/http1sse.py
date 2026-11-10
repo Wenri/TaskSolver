@@ -12,8 +12,17 @@ shared ``TurnBuilder`` interface the correlator drives.
 Stdlib-only (imported by agy's embedded interpreter).
 """
 from collections.abc import Sequence
+import re
 
-from wirecap.types import Event, JSONObject, StreamId, json_array, json_loads_object, json_object
+from wirecap.types import (
+    Event,
+    JSONObject,
+    JSONValue,
+    StreamId,
+    json_array,
+    json_loads_object,
+    json_object,
+)
 
 from wirecap.decode.http1sse import (   # re-exported framing (keeps this module's public surface)
     Message as Message, StreamDecoder as StreamDecoder, classify as classify, dechunk as dechunk,
@@ -44,6 +53,23 @@ def assemble_text(events: Sequence[JSONObject], thoughts: bool = False) -> str:
                 if isinstance(text, str) and bool(part.get("thought")) == thoughts:
                     out.append(text)
     return "".join(out)
+
+
+def extract_tool_calls(events: Sequence[JSONObject]) -> list[JSONObject]:
+    """Extract ``candidates[].content.parts[].functionCall`` across streamed events."""
+    calls: list[JSONObject] = []
+    for e in events:
+        for cand in _candidates(e):
+            content = json_object(cand.get("content") or {})
+            for value in json_array(content.get("parts") or []):
+                fc = json_object(json_object(value).get("functionCall") or {})
+                if fc:
+                    calls.append({
+                        "id": fc.get("id"),
+                        "name": fc.get("name"),
+                        "arguments": fc.get("args"),
+                    })
+    return calls
 
 
 def extract_usage(events: Sequence[JSONObject]) -> JSONObject:
@@ -87,6 +113,50 @@ def model_version(events: Sequence[JSONObject]) -> str | None:
     return None
 
 
+_USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
+_SYSTEM_MESSAGE_RE = re.compile(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", re.S)
+_SUMMARY_REQUESTS_RE = re.compile(r"# User Requests\n(.*?)(?:\n# |\Z)", re.S)
+
+
+def _extract_user_text(contents: Sequence[JSONValue]) -> str:
+    """Extract the latest user prompt from ``request.contents``."""
+    user_requests: list[str] = []
+    summary_requests: list[str] = []
+    user_texts: list[str] = []
+    any_texts: list[str] = []
+    for ct in contents:
+        obj = json_object(ct)
+        role = obj.get("role")
+        for p in json_array(obj.get("parts") or []):
+            text = json_object(p).get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            any_texts.append(text)
+            for match in _USER_REQUEST_RE.finditer(text):
+                inner = match.group(1).strip()
+                if inner:
+                    user_requests.append(inner)
+            if "<CONTEXT_SUMMARY>" in text:
+                sec = _SUMMARY_REQUESTS_RE.search(text)
+                if sec:
+                    items = re.split(r"(?:^|\n)\d+\.\s+", sec.group(1))
+                    if len(items) > 1 and items[-1].strip():
+                        summary_requests.append(items[-1].strip())
+            if role in (None, "user"):
+                cleaned = _SYSTEM_MESSAGE_RE.sub("", text).strip()
+                if cleaned and not cleaned.startswith(
+                    ("The following is a <SYSTEM_MESSAGE>", "<CONTEXT_SUMMARY>")
+                ):
+                    user_texts.append(cleaned)
+    if user_requests:
+        return user_requests[-1]
+    if user_texts:
+        return user_texts[-1]
+    if summary_requests:
+        return summary_requests[-1]
+    return any_texts[0] if any_texts else ""
+
+
 def summarize_request(req_json: JSONObject) -> JSONObject:
     """Compact summary of a streamGenerateContent request body (already json.loads'd)."""
     req = json_object(req_json.get("request") or {})
@@ -96,9 +166,7 @@ def summarize_request(req_json: JSONObject) -> JSONObject:
     tools = [json_object(fd).get("name") for t in json_array(req.get("tools") or [])
              for fd in json_array(json_object(t).get("functionDeclarations") or [])]
     contents = json_array(req.get("contents") or [])
-    user_text = next((text for ct in contents
-                      for p in json_array(json_object(ct).get("parts") or [])
-                      if isinstance(text := json_object(p).get("text"), str)), "")
+    user_text = _extract_user_text(contents)
     return {
         "model": req_json.get("model"),
         "requestType": req_json.get("requestType"),
@@ -135,6 +203,7 @@ def build_turn_from_events(events: Sequence[JSONObject], resp_t: float | None,
         "resp_stream": resp_stream,
         "text": assemble_text(events),
         "reasoning": assemble_text(events, thoughts=True),
+        "tool_calls": extract_tool_calls(events),
         "model": model_version(events),   # served model id, straight from the response
         "usage": extract_usage(events),
         "finish_reason": finish_reason(events),

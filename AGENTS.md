@@ -303,8 +303,12 @@ web-only operation. A page is `wirecap.runtime.webpage.WebScreen`: one loopback 
 the screen's ttyd (behind `/terminal`, the WebSocket upgrade handed over unchanged so ttyd's
 origin check still applies) beside two capture frames, the round-trip list and the selected
 trip's content, read from the screen's growing capture JSONL (`*_turn` events and paired
-`h2msg` exchanges). The page refuses non-loopback `Host` names and hides credential headers and
-form bodies; keep both. The CLI therefore always captures when it serves pages: `--capture PATH`
+`h2msg` exchanges; only lines naming one are parsed). The list opens on "model turns only". A
+`genai_turn` without a request summary takes the oldest pending `streamGenerateContent` `h2msg`
+(its `body_head` gives the project, `requestId` and first text; agent requests show as
+`[step N]`), and a turn with no answer text lists its tool calls. The page refuses non-loopback
+`Host` names and hides credential headers and form bodies; keep both. A client that disconnects
+mid-response is dropped quietly. The CLI therefore always captures when it serves pages: `--capture PATH`
 only makes the file persistent (one per captured screen), and `--no-web` without it captures
 nothing. The launcher's lifecycle follows its screens: `TerminalManager.wait(close_exited=True)`
 and `attach(close_exited=True)` close a screen when its command exits (library screens are
@@ -382,7 +386,11 @@ into `pyclaude.claude_process`, emitting `claude_turn` events); headless Claude 
     the JSONL `Recorder`, HTTP/1.1+SSE framing, `BaseCorrelator`, HTTP/2 reassembly, the
     `TurnBuilder`/`Usage` contract and `mp_child`. agy's `TurnBuilder` keys responses by
     `responseId` and matches the request model to the served `modelVersion`, because agy streams
-    its session-title call alongside the answer. Never import `wirecap.runtime` or `tasksolver`
+    its session-title call alongside the answer. `Reassembler.feed` returns each completed
+    HTTP/2 message (`:authority` as `host`), which `BaseCorrelator` handles like an HTTP/1.1
+    one, so an HTTP/2 `streamGenerateContent` request pairs with its `resp_chunk` stream. agy's
+    request summary names the latest `<USER_REQUEST>`, not the first text part, and its turns
+    carry `tool_calls` (`functionCall` parts). Never import `wirecap.runtime` or `tasksolver`
     here; the `python3 -S` probes in `test_scripts/` enforce it.
   - `wirecap/runtime/` is parent-side: `WirePopen`/`WireProcess`, the PTY flavours, git-workspace
     scoping and the vendored-artifact resolver. Process launch serializes descriptor inheritance

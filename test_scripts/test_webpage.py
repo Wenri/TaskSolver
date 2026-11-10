@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import shutil
+import socket
 import sys
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 from websockets.exceptions import WebSocketException
@@ -168,6 +171,56 @@ class WebScreenTests(unittest.TestCase):
         self.assertEqual(self.get(other, "/")[0], 200)
         with self.assertRaises(KeyError):
             _ = WebScreen(self.manager, screen="echo", port=0)
+
+    def test_genai_turn_pairs_h2_request_and_summarizes_tool_calls(self) -> None:
+        page = self.page("agy", capture=True)
+        path = self.manager.screens["agy"].capture_path
+        assert path is not None
+        req_head = (b'{"project":"aicode-consumers", "requestId":"agent/c/1/u/42", '
+                    b'"request":{"contents":[{"role":"user", "parts":[{"text":"Fix the parser"}]}]}}')
+        with path.open("a") as stream:
+            _ = stream.write(json.dumps({"kind": "smoke", "t": 0.5, "stream": 1, "len": 0}) + "\n")
+            _ = stream.write(json.dumps({
+                "kind": "h2msg", "conn": 9, "dir": "c2s", "h2sid": 27,
+                "headers": {":method": "POST", ":authority": "daily-cloudcode-pa.googleapis.com",
+                            ":path": "/v1internal:streamGenerateContent?alt=sse"},
+                "body_len": 1200, "body_head": req_head.hex(), "t": 10.0,
+            }) + "\n")
+            _ = stream.write(json.dumps({
+                "kind": "genai_turn", "t": 11.0, "model": "gemini-4-argon",
+                "text": "", "reasoning": "thinking...", "finish_reason": "STOP",
+                "usage": {"total_tokens": 500},
+                "events": [{"response": {"candidates": [{"content": {"parts": [
+                    {"functionCall": {"id": "c1", "name": "read_file",
+                                      "args": {"Path": "/repo/wirecap/runtime/webpage.py"}}},
+                ]}}]}}],
+            }) + "\n")
+        listing = json_loads_object(self.get(page, "/capture/trips?since=0")[1])
+        self.assertEqual(listing["trips"], [{
+            "index": 0, "kind": "genai_turn", "rev": 1, "t": 11.0,
+            "title": "gemini-4-argon", "tokens": 500,
+            "up": "[step 42] Fix the parser",
+            "down": "tool: read_file(webpage.py)",
+        }])
+        detail = json_loads_object(self.get(page, "/capture/trip/0")[1])
+        self.assertEqual(detail["host"], "daily-cloudcode-pa.googleapis.com")
+        self.assertEqual(detail["req_t"], 10.0)
+        self.assertEqual(json_object(detail["request"])["requestId"], "agent/c/1/u/42")
+        self.assertEqual(json_array(detail["tool_calls"]), [{
+            "id": "c1", "name": "read_file",
+            "arguments": {"Path": "/repo/wirecap/runtime/webpage.py"},
+        }])
+
+    def test_client_disconnect_is_ignored_cleanly(self) -> None:
+        page = self.page("echo", capture=True)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with socket.create_connection(("127.0.0.1", page.port), timeout=5) as sock:
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                sock.close()
+            self.assertEqual(self.get(page, "/capture/trips")[0], 200)
+        self.assertNotIn("BrokenPipeError", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
 
 
 if __name__ == "__main__":

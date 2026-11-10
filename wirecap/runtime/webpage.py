@@ -18,7 +18,7 @@ from types import TracebackType
 from typing import Self, cast, override
 from urllib.parse import parse_qs, urlsplit
 
-from ..types import JSONObject, JSONValue, json_loads
+from ..types import JSONObject, JSONValue, json_array, json_loads, json_object
 from .terminal import TerminalManager
 from .webterm import WebTerminal
 
@@ -29,10 +29,113 @@ _LOCAL_HOST = re.compile(r"(127\.0\.0\.1|localhost|\[::1\])(:\d+)?", re.IGNORECA
 # Headers that describe one connection, not the proxied response.
 _HOP_HEADERS = frozenset(("connection", "keep-alive", "transfer-encoding", "content-length",
                           "upgrade", "proxy-connection", "te", "trailer"))
+_DISCONNECTED = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+_H2_PROJECT_RE = re.compile(r'"project"\s*:\s*"([^"]+)"')
+_H2_REQ_ID_RE = re.compile(r'"requestId"\s*:\s*"([^"]+)"')
+_H2_TEXT_RE = re.compile(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)')
 
 
 def _text(value: JSONValue, limit: int) -> str | None:
     return " ".join(value.split())[:limit] if isinstance(value, str) and value.strip() else None
+
+
+def _is_genai_h2(headers: JSONObject) -> bool:
+    path = headers.get(":path")
+    return isinstance(path, str) and (":streamGenerateContent" in path or ":generateContent" in path)
+
+
+def _genai_h2_request(event: JSONObject) -> JSONObject:
+    """Synthesize a request summary from a captured ``streamGenerateContent`` ``h2msg``."""
+    head_hex = event.get("body_head")
+    head = ""
+    if isinstance(head_hex, str) and head_hex:
+        try:
+            head = bytes.fromhex(head_hex).decode("utf-8", "replace")
+        except ValueError:
+            pass
+    req: JSONObject = {"body_len": event.get("body_len")}
+    if m := _H2_PROJECT_RE.search(head):
+        req["project"] = m.group(1)
+    req_id = ""
+    if m := _H2_REQ_ID_RE.search(head):
+        req_id = m.group(1)
+        req["requestId"] = req_id
+    user_text = ""
+    if m := _H2_TEXT_RE.search(head):
+        user_text = m.group(1).replace("\\n", " ").replace('\\"', '"').strip()
+    if req_id.startswith("agent/"):
+        step = req_id.rsplit("/", 1)[-1]
+        prefix = f"[step {step}] " if step.isdigit() else "[agent] "
+        user_text = prefix + user_text if user_text else prefix.strip()
+    elif req_id.startswith("agent_monitoring/"):
+        user_text = f"[agent_monitoring] {user_text}" if user_text else "[agent_monitoring]"
+    if user_text:
+        req["first_user_text"] = user_text
+    return req
+
+
+def _turn_tool_calls(event: JSONObject) -> list[JSONObject]:
+    """Return a turn's ``tool_calls``, extracting ``functionCall`` parts from ``genai_turn`` events if needed."""
+    existing = event.get("tool_calls")
+    if isinstance(existing, list) and existing:
+        return [json_object(item) for item in existing if isinstance(item, dict)]
+    if event.get("kind") != "genai_turn":
+        return []
+    calls: list[JSONObject] = []
+    for ev in json_array(event.get("events") or []):
+        ev_obj = json_object(ev)
+        resp = json_object(ev_obj.get("response", ev_obj))
+        for cand in json_array(resp.get("candidates") or []):
+            content = json_object(json_object(cand).get("content") or {})
+            for part in json_array(content.get("parts") or []):
+                fc = json_object(json_object(part).get("functionCall") or {})
+                if fc:
+                    calls.append({
+                        "id": fc.get("id"),
+                        "name": fc.get("name"),
+                        "arguments": fc.get("args"),
+                    })
+    return calls
+
+
+def _tool_summary(calls: list[JSONObject]) -> str | None:
+    if not calls:
+        return None
+    items: list[str] = []
+    for call in calls:
+        name = str(call.get("name") or "tool")
+        args = json_object(call.get("arguments") or {})
+        detail: str | None = None
+        for key in ("Path", "path", "file_path"):
+            val = args.get(key)
+            if isinstance(val, str) and val:
+                detail = os.path.basename(val.rstrip("/")) or val
+                break
+        if detail is None:
+            for key in ("toolSummary", "CommandLine", "command", "Action", "query"):
+                val = args.get(key)
+                if isinstance(val, str) and val.strip():
+                    detail = _text(val, 36)
+                    break
+        items.append(f"{name}({detail})" if detail else name)
+    return _text("tool: " + ", ".join(items), 160)
+
+
+def _scan_trip_lines(data: bytes, limit: int) -> list[tuple[int, int]]:
+    """Find ``(start, end)`` byte spans of lines containing ``_turn"`` or ``"h2msg"``."""
+    spans: set[tuple[int, int]] = set()
+    for token in (b'_turn"', b'"h2msg"'):
+        pos = 0
+        while True:
+            idx = data.find(token, pos, limit)
+            if idx < 0:
+                break
+            nl = data.rfind(b"\n", pos, idx)
+            ls = pos if nl < 0 else nl + 1
+            le = data.find(b"\n", idx, limit) + 1
+            spans.add((ls, le))
+            pos = le
+    return sorted(spans)
 
 
 # Shown as "(hidden)": the page is for reading traffic, not for copying credentials out of it.
@@ -80,6 +183,7 @@ class _Trips:
         self._revision = 0
         self._trips: list[_Trip] = []
         self._open: dict[tuple[JSONValue, JSONValue], _Trip] = {}
+        self._pending_genai_h2: list[tuple[JSONObject, tuple[int, int]]] = []
 
     def _touch(self, trip: _Trip, line: tuple[int, int], **fields: JSONValue) -> None:
         self._revision += 1
@@ -96,16 +200,28 @@ class _Trips:
         if isinstance(kind, str) and kind.endswith("_turn"):
             usage = event.get("usage")
             request = event.get("request")
+            trip = self._new(kind)
+            if kind == "genai_turn" and self._pending_genai_h2:
+                req_h2, req_line = self._pending_genai_h2.pop(0)
+                trip.lines.append(req_line)
+                if not isinstance(request, dict):
+                    request = _genai_h2_request(req_h2)
+            calls = _turn_tool_calls(event)
             self._touch(
-                self._new(kind), line, t=event.get("t"), title=event.get("model"),
+                trip, line, t=event.get("t"), title=event.get("model"),
                 tokens=usage.get("total_tokens") if isinstance(usage, dict) else None,
                 up=_text(request.get("first_user_text"), 160) if isinstance(request, dict) else None,
-                down=_text(event.get("text"), 160) or (
+                down=_text(event.get("text"), 160) or _tool_summary(calls) or (
                     "(reasoning only)" if _text(event.get("reasoning"), 1) else
                     _text(event.get("finish_reason"), 40) or "(no text)"))
         elif kind == "h2msg":
             headers = event.get("headers")
             if not isinstance(headers, dict):
+                return
+            if event.get("dir") == "c2s" and _is_genai_h2(headers):
+                self._pending_genai_h2.append((event, line))
+                if len(self._pending_genai_h2) > 32:
+                    self._pending_genai_h2 = self._pending_genai_h2[-32:]
                 return
             key = (event.get("conn"), event.get("h2sid"))
             size = f"{event.get('body_len') or 0} bytes"
@@ -130,16 +246,17 @@ class _Trips:
             return
         # Only complete lines: the recorder may be in the middle of the last one.
         end = data.rfind(b"\n") + 1
+        if end <= 0:
+            return
         position = self._offset
         self._offset += end
-        for line in data[:end].splitlines(keepends=True):
-            start, position = position, position + len(line)
+        for ls, le in _scan_trip_lines(data, end):
             try:
-                event = json_loads(line)
+                event = json_loads(data[ls:le])
             except ValueError:
                 continue
             if isinstance(event, dict):
-                self._add(event, (start, len(line)))
+                self._add(event, (position + ls, le - ls))
 
     def since(self, revision: int) -> tuple[int, list[JSONObject]]:
         with self._lock:
@@ -164,7 +281,25 @@ class _Trips:
             except (OSError, ValueError):
                 return None
         if trip.summary["kind"] != "http":
-            return events[0] if events else None
+            turns = [e for e in events if str(e.get("kind") or "").endswith("_turn")]
+            if not turns:
+                return events[0] if events else None
+            turn = dict(turns[-1])
+            if not turn.get("tool_calls"):
+                calls = _turn_tool_calls(turn)
+                if calls:
+                    turn["tool_calls"] = cast(JSONValue, calls)
+            if turn.get("request") is None:
+                h2_reqs = [e for e in events if e.get("kind") == "h2msg"]
+                if h2_reqs:
+                    req_h2 = h2_reqs[0]
+                    headers = json_object(req_h2.get("headers") or {})
+                    if turn.get("req_t") is None:
+                        turn["req_t"] = req_h2.get("t")
+                    if turn.get("host") is None:
+                        turn["host"] = headers.get(":authority")
+                    turn["request"] = _genai_h2_request(req_h2)
+            return turn
         content: JSONObject = {"kind": "http"}
         for event in events:
             side = _http_side(event)
@@ -197,14 +332,24 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         del format, args
 
+    @override
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except _DISCONNECTED:
+            self.close_connection = True
+
     def _send(self, status: int, content_type: str, body: bytes) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        _ = self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            _ = self.wfile.write(body)
+        except _DISCONNECTED:
+            self.close_connection = True
 
     def _json(self, value: JSONValue, status: int = 200) -> None:
         self._send(status, "application/json", json.dumps(value, ensure_ascii=False).encode())
@@ -255,13 +400,16 @@ class _Handler(BaseHTTPRequestHandler):
             return
         finally:
             connection.close()
-        self.send_response(response.status)
-        for name, value in response.getheaders():
-            if name.lower() not in _HOP_HEADERS and name.lower() not in ("server", "date"):
-                self.send_header(name, value)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        _ = self.wfile.write(body)
+        try:
+            self.send_response(response.status)
+            for name, value in response.getheaders():
+                if name.lower() not in _HOP_HEADERS and name.lower() not in ("server", "date"):
+                    self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            _ = self.wfile.write(body)
+        except _DISCONNECTED:
+            self.close_connection = True
 
     def _tunnel(self, port: int) -> None:
         """Hand a WebSocket upgrade to ttyd unchanged (it checks the Origin against the Host)."""
@@ -430,8 +578,8 @@ _PAGE = r"""<!doctype html>
 <div id="side">
   <section>
     <h2>Round trips <span id="status"></span>
-      <label><input type="checkbox" id="turns"> model turns only</label></h2>
-    <div class="scroll"><ul id="trips"></ul><div class="empty" id="empty">Waiting for the first round trip.</div></div>
+      <label><input type="checkbox" id="turns" checked> model turns only</label></h2>
+    <div class="scroll"><ul id="trips" class="turns"></ul><div class="empty" id="empty">Waiting for the first round trip.</div></div>
   </section>
   <section>
     <h2>Content <span id="which"></span></h2>
@@ -445,8 +593,17 @@ const list = document.getElementById("trips"), empty = document.getElementById("
 const status = document.getElementById("status"), content = document.getElementById("content");
 const which = document.getElementById("which");
 const items = new Map(), turnsOnly = document.getElementById("turns");
-let revision = 0, last = -1, selected = -1;
-turnsOnly.addEventListener("change", () => list.classList.toggle("turns", turnsOnly.checked));
+let revision = 0, lastTurn = -1, lastAll = -1, selected = -1;
+turnsOnly.addEventListener("change", () => {
+  list.classList.toggle("turns", turnsOnly.checked);
+  const target = turnsOnly.checked ? lastTurn : lastAll;
+  empty.hidden = target >= 0;
+  if (turnsOnly.checked && items.get(selected)?.classList.contains("http") && lastTurn >= 0) {
+    select(lastTurn);
+  } else if (selected < 0 && target >= 0) {
+    select(target);
+  }
+});
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -504,7 +661,8 @@ async function load(index) {
   const parts = [facts];
   const shown = new Set(["kind", "model", "t", "req_t", "host", "finish_reason", "usage",
                          "method", "path", "status"]);
-  for (const [key, title] of [["request", "Request"], ["reasoning", "Reasoning"], ["text", "Response"],
+  for (const [key, title] of [["request", "Request"], ["reasoning", "Reasoning"],
+                              ["tool_calls", "Tool calls"], ["text", "Response"],
                               ["response", "Response"]]) {
     shown.add(key);
     const value = trip[key];
@@ -536,14 +694,17 @@ async function poll() {
     } else {
       status.textContent = data.capture;
       status.title = data.capture;
-      const following = selected === last;
+      const prevTarget = turnsOnly.checked ? lastTurn : lastAll;
+      const following = selected === prevTarget;
       for (const trip of data.trips) {
         show(trip);
-        last = Math.max(last, trip.index);
+        lastAll = Math.max(lastAll, trip.index);
+        if (trip.kind !== "http") lastTurn = Math.max(lastTurn, trip.index);
       }
       revision = data.rev;
-      if (items.size) empty.hidden = true;
-      if (following && last !== selected) select(last);
+      const target = turnsOnly.checked ? lastTurn : lastAll;
+      empty.hidden = target >= 0;
+      if (following && target >= 0 && target !== selected) select(target);
       else if (data.trips.some(trip => trip.index === selected)) load(selected);
     }
   } catch (error) {

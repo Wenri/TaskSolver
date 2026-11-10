@@ -37,7 +37,7 @@ class Message:
 
     @property
     def is_request(self) -> bool:
-        return not self.start_line.startswith("HTTP/1.1")
+        return not self.start_line.startswith(("HTTP/1.1", "HTTP/2"))
 
     @property
     def method(self) -> str | None:

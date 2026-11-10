@@ -279,12 +279,68 @@ def test_correlator_overlapping_streams() -> None:
 
 
 def test_thought_parts_are_reasoning() -> None:
-    print("[response] thought parts go to reasoning, not the answer")
+    print("[response] thought parts go to reasoning and functionCall parts to tool_calls")
     events: list[JSONObject] = [{"response": {"candidates": [{"content": {"parts": [
-        {"text": "**Assessing** the pair", "thought": True}, {"text": "Score: 0.8"}]}}]}}]
+        {"text": "**Assessing** the pair", "thought": True},
+        {"functionCall": {"id": "call_1", "name": "read_file", "args": {"Path": "/tmp/a.py"}}},
+        {"text": "Score: 0.8"}]}}]}}]
     turn = h.build_turn_from_events(events, 1.0, None, None)
     check(turn["text"] == "Score: 0.8", "thoughts: the answer holds only answer parts")
     check(turn["reasoning"] == "**Assessing** the pair", "thoughts: reasoning holds the thought parts")
+    check(turn["tool_calls"] == [{"id": "call_1", "name": "read_file", "arguments": {"Path": "/tmp/a.py"}}],
+          "tool_calls: functionCall extracted")
+
+
+def test_correlator_h2_request_and_resp_chunk() -> None:
+    print("[correlator] HTTP/2 c2s streamGenerateContent pairs with resp_chunk SSE")
+    import hpack
+    from wirecap.decode.h2reassemble import PREFACE, Reassembler
+
+    class FakeRec:
+        def __init__(self) -> None:
+            self.events: list[Event] = []
+
+        def event(self, obj: Mapping[str, object]) -> None:
+            self.events.append(dict(obj))
+
+    def h2_frame(kind: int, flags: int, sid: int, payload: bytes) -> bytes:
+        return len(payload).to_bytes(3, "big") + bytes((kind, flags)) + sid.to_bytes(4, "big") + payload
+
+    req_body = json.dumps({
+        "project": "aicode-consumers",
+        "requestId": "agent/conv/1/uuid/42",
+        "model": "gemini-4-argon",
+        "request": {
+            "contents": [
+                {"role": "user", "parts": [{"text": "<CONTEXT_SUMMARY>\nold\n</CONTEXT_SUMMARY>"}]},
+                {"role": "user", "parts": [{"text": "<USER_REQUEST>\ninspect trace\n</USER_REQUEST>"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "read_file", "args": {}}}]},
+                {"role": "user", "parts": [{"functionResponse": {"name": "read_file", "response": {}}}]},
+            ],
+        },
+    }).encode()
+    hdrs = hpack.Encoder().encode({
+        ":method": "POST",
+        ":authority": "daily-cloudcode-pa.googleapis.com",
+        ":path": "/v1internal:streamGenerateContent?alt=sse",
+        "content-type": "application/json",
+    })
+    rec = FakeRec()
+    reasm = Reassembler(rec)
+    corr = capture.BaseCorrelator(rec, h.GenaiTurnBuilder(), reassembler=reasm)
+    wire = PREFACE + h2_frame(1, 0x04, 1, hdrs) + h2_frame(0, 0x01, 1, req_body)
+    corr.feed("c2s", 0xABCD, wire, t=100.0)
+    corr.feed_chunk(_chunk("R1", "gemini-4-argon", text="done", finish="STOP", total=50), t=100.5)
+    turns = [e for e in rec.events if e.get("kind") == "genai_turn"]
+    check(len(turns) == 1, "h2+sse: one genai_turn emitted")
+    if turns:
+        turn = turns[0]
+        req_summary = cast(Mapping[str, object], turn.get("request") or {})
+        check(turn.get("req_stream") == 0xABCD, "h2+sse: req_stream attached from h2 conn")
+        check(turn.get("host") == "daily-cloudcode-pa.googleapis.com", "h2+sse: :authority mapped to host")
+        check(req_summary.get("requestId") == "agent/conv/1/uuid/42", "h2+sse: request summary paired")
+        check(req_summary.get("first_user_text") == "inspect trace",
+              "h2+sse: latest <USER_REQUEST> extracted across tool turns")
 
 
 def test_client_answer_is_primary_turn() -> None:
@@ -318,6 +374,7 @@ def main() -> None:
     test_correlator_resp_chunk()
     test_correlator_overlapping_streams()
     test_thought_parts_are_reasoning()
+    test_correlator_h2_request_and_resp_chunk()
     test_client_answer_is_primary_turn()
     test_import_purity()
     print()

@@ -279,9 +279,9 @@ pixi run tasksolver agy codex claude kimi --no-web          # local terminal onl
 Each screen gets its own page; open the printed URLs as separate browser panels or tabs.
 A page has three frames: the screen's terminal (tmux navigation and its status bar are hidden
 there), the list of captured round trips, and the content of the selected one. A round trip
-is a decoded model turn (request summary, reasoning, response, usage, with the full request and
-event stream on demand) or an HTTP/2 exchange the capture recorded; "model turns only" hides
-the latter. The frames follow the capture as it is written. They are always there: without
+is a decoded model turn (request summary, reasoning, tool calls, response, usage, with the full
+request and event stream on demand) or an HTTP/2 exchange the capture recorded; "model turns
+only", on by default, hides the latter. A turn that only calls tools is listed by those calls. The frames follow the capture as it is written. They are always there: without
 `--capture` the capture is a temporary file that is removed with the screens. The page hides
 credential headers and form bodies; the capture file itself does not.
 When stdin and stdout are terminals, the launcher can also

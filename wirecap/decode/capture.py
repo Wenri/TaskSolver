@@ -67,7 +67,8 @@ class BaseCorrelator:
             self._pre.pop(key, None)
         if kind == "h2":
             if self.h2 is not None:
-                self.h2.feed(stream_id, direction, data)
+                for msg in self.h2.feed(stream_id, direction, data):
+                    self._handle_message(stream_id, t, msg)
             return
         self._feed_http1(direction, stream_id, data, t)
 
@@ -76,11 +77,14 @@ class BaseCorrelator:
         if dec is None:
             dec = self._dec[(direction, stream_id)] = http1sse.StreamDecoder()
         for msg in dec.feed(data):
-            if msg.is_request and self._builder.is_request(msg):
-                self._flush_unkeyed()
-                self._remember(t, msg.headers.get("host"), stream_id, msg)
-            elif not msg.is_request and msg.is_event_stream:
-                self._emit_message(stream_id, t, msg)
+            self._handle_message(stream_id, t, msg)
+
+    def _handle_message(self, stream_id: StreamId, t: float, msg: http1sse.Message) -> None:
+        if msg.is_request and self._builder.is_request(msg):
+            self._flush_unkeyed()
+            self._remember(t, msg.headers.get("host"), stream_id, msg)
+        elif not msg.is_request and msg.is_event_stream:
+            self._emit_message(stream_id, t, msg)
 
     # --- pre-parsed path (patched-CLI capture) -------------------------------
     def feed_request(self, req_repr: http1sse.Message | JSONObject | None, t: float,
