@@ -7,11 +7,11 @@
 # (tracked independently), and Kimi Code (CLI and node SDK in one tag). Each run picks one mode:
 #
 #   prerelease  a runtime is outdated: `tools/runtimes.py adopt` replays TaskSolver's patches onto
-#               the new release; build, offline tests, the redistributable conda bundle (no agy or
-#               Claude Code), patch bump, tag, push and a GitHub pre-release of the latest code.
+#               the new release; build, offline tests, patch bump, the redistributable conda bundle
+#               (no agy or Claude Code), tag, push and a GitHub pre-release of the latest code.
 #   release     a manual run with `release` checked: the same, published as a full release.
 #   validate    a push with nothing to adopt: build and offline tests only.
-#   none        a scheduled run with nothing to adopt.
+#   none        a scheduled or manual run with nothing to adopt.
 #
 # Runtimes adopt independently. One whose adoption fails (a patch conflict upstream moved more
 # than its hooks, a failed agy conversion) is shelved onto `runtime-updates/run-<id>-<runtime>` with

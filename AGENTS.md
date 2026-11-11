@@ -89,12 +89,12 @@ first. Conflicted files keep their markers and are named; codex's `Cargo.lock` t
 copy, which the unlocked build completes. `docs` keeps the README pin table and pycodex's
 `client_version` in step with the pins. `.github/workflows/runtime-updates.yml` runs twice a day,
 on code pushes to `main` and on demand: adopt, `pixi install --locked`, `nix/update-hashes` when an
-input of `nix/hashes.json` changed since the commit that last wrote it, the offline tests, `pixi publish` checked by
-`tools/check_bundle.py`, then `bump`, an atomic push of the commit and tag, and a GitHub release
-with `notes`. An adoption publishes a pre-release of the latest code; a push with nothing to adopt
-only builds and tests; a full release is a manual dispatch with `release`. Runtimes adopt
-independently: a runtime whose adoption fails is shelved (`runtimes.py shelve`) onto its own
-branch `runtime-updates/run-<id>-<runtime>` with an issue titled by `runtimes.py title`
+input of `nix/hashes.json` changed since the commit that last wrote it, the offline tests, `bump`,
+`pixi publish` checked by `tools/check_bundle.py`, an atomic push of the commit and tag, and a
+GitHub release with `notes`. An adoption publishes a pre-release of the latest code; a push with
+nothing to adopt only builds and tests; a full release is a manual dispatch with `release`.
+Runtimes adopt independently: a runtime whose adoption fails is shelved (`runtimes.py shelve`) onto
+its own branch `runtime-updates/run-<id>-<runtime>` with an issue titled by `runtimes.py title`
 (`tools/hand_over.sh`), and the run goes on with the others; a build or test failure hands the
 remaining adoptions over together on `runtime-updates/run-<id>`. While an issue is open,
 `check --held` holds only its runtimes at the versions it names; a newer release of a held runtime
