@@ -30,7 +30,7 @@ name = "tasksolver"
 version = "0.1.9"
 description = "Provider-agnostic VLM query flow with API, Claude Agent SDK, Codex SDK, linked CLI, and local HuggingFace backends."
 readme = "README.md"
-requires-python = ">=3.15"
+requires-python = ">=3.14"
 # Core deps are the ones imported unconditionally (Agent + common/event/keychain)
 # plus API clients and runtime dependencies for the SDK sources bundled here.
 # The consuming environment owns resolution within these compatibility bounds.

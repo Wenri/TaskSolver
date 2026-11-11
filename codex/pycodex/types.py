@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from os import PathLike
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING
+from typing_extensions import TypedDict
 
 from wirecap.runtime.mcp import MCPServers
 from wirecap.types import JSONObject

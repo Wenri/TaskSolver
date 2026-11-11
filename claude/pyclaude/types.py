@@ -2,7 +2,8 @@
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from os import PathLike
-from typing import Protocol, TypedDict, runtime_checkable
+from typing import Protocol, runtime_checkable
+from typing_extensions import TypedDict
 
 from wirecap.types import JSONObject
 

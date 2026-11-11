@@ -46,13 +46,14 @@ pixi run -e cuda python test_scripts/vision_language.py # QwenModel needs torch 
 
 Run the relevant offline tests in `test_scripts/` after changes; they need no credentials. A skip is
 not a pass, and offline fixtures are not authenticated provider validation. Native capture artifacts
-must match the consumer's Python minor version (3.15).
+must match the consumer's Python minor version (3.14 or 3.15).
 
 **Python typing.** All first-party Python, including build tools, examples and tests, is checked
 by BasedPyright in strict mode. Inferred and explicit `Any` are errors; do not add type-ignore
 suppression. Use typed protocol boundaries for untyped dependencies, and keep the consumed API
 stubs in `typings/` aligned with their pinned versions. Runtime packages ship `py.typed`; the
-source-only third-party stubs stay out of the wheel. The package requires Python >=3.15.
+source-only third-party stubs stay out of the wheel. The package requires Python >=3.14 (its own
+workspace pins 3.15).
 
 **pixi-build.** `tasksolver` is a linux-64 conda package built by `pixi-build-python` without
 isolation, so `[build-system].requires` and the native tools must also be in

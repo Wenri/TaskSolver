@@ -35,7 +35,7 @@ dependencies:
 
 ## Install
 
-TaskSolver requires Python 3.15 and uses [pixi](https://pixi.sh) for its managed environment:
+TaskSolver requires Python >=3.14 (this workspace pins 3.15) and uses [pixi](https://pixi.sh) for its managed environment:
 
 ```bash
 pixi install                                              # build + install the default env
