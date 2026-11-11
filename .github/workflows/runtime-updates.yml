@@ -20,10 +20,10 @@
 # adoptions over together on `runtime-updates/run-<id>`. While an issue is open, scheduled and
 # push runs hold its runtimes at the versions it names and still adopt the others; a newer upstream
 # release of a held runtime is tried again. Runs queue one at a time, and each builds main as it is
-# when it starts: the run ahead may have released since it was queued. When main gains code during
-# a build, the release is not pushed (it was not tested on that code); a new run is dispatched
-# instead. A failure of the adoption step itself (the script, not an adoption) holds nothing, so
-# each scheduled run repeats it until the script is fixed.
+# when it starts and adopts what is outdated there: the run ahead may have released since it was
+# queued. When main gains code during a build, the release is not pushed (it was not tested on
+# that code); that push's run adopts on it. A failure of the adoption step itself (the script,
+# not an adoption) holds nothing, so each scheduled run repeats it until the script is fixed.
 # The commits and tags this workflow pushes with GITHUB_TOKEN start no new runs. It keeps
 # nix/hashes.json current but does not build the Nix package: the downstream Nix configuration
 # that pins TaskSolver builds and tests it.
@@ -68,6 +68,11 @@ concurrency:
   group: runtime-updates
   cancel-in-progress: false
 
+defaults:
+  run:
+    # With pipefail, which GitHub's default shell lacks: `check | tee` fails when the check does.
+    shell: bash
+
 env:
   PIXI_VERSION: v0.83.0
   # Everything an adoption or a release may change; anything else staged stops the release.
@@ -89,7 +94,6 @@ jobs:
       issues: read
     outputs:
       runtimes: ${{ steps.check.outputs.runtimes }}
-      targets: ${{ steps.check.outputs.targets }}
       mode: ${{ steps.check.outputs.mode }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -128,25 +132,21 @@ jobs:
           else mode=none
           fi
           echo "::notice::Mode $mode${targets:+, adopting $targets}"
-          { echo "runtimes=$runtimes"; echo "targets=$targets"; echo "mode=$mode"; } >> "$GITHUB_OUTPUT"
+          { echo "runtimes=$runtimes"; echo "mode=$mode"; } >> "$GITHUB_OUTPUT"
 
   release:
     name: Adopt, build and publish
     needs: check
-    if: needs.check.outputs.mode != 'none'
+    # main only: dispatched on another branch, the release would push that branch to main.
+    if: needs.check.outputs.mode != 'none' && github.ref == 'refs/heads/main'
     runs-on: ${{ fromJSON(vars.RUNTIME_RUNNER || '"ubuntu-24.04"') }}
     timeout-minutes: 360
     permissions:
       contents: write
       issues: write
       id-token: write
-      actions: write
-    defaults:
-      run:
-        shell: bash
     env:
       RUNTIMES: ${{ needs.check.outputs.runtimes }}
-      TARGETS: ${{ needs.check.outputs.targets }}
       MODE: ${{ needs.check.outputs.mode }}
       GH_TOKEN: ${{ github.token }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -201,6 +201,14 @@ jobs:
       - name: Adopt upstream releases
         id: adopt
         run: |
+          if [ -n "$RUNTIMES" ]; then
+            # main or upstream may have moved since the check job, whose outputs a re-run of this
+            # job keeps: adopt what is outdated in this checkout.
+            # shellcheck disable=SC2086  # a space-separated list
+            python3 tools/runtimes.py check $RUNTIMES --github-output "$RUNNER_TEMP/check.out"
+            RUNTIMES=$(sed -n 's/^runtimes=//p' "$RUNNER_TEMP/check.out")
+            TARGETS=$(sed -n 's/^targets=//p' "$RUNNER_TEMP/check.out")
+          fi
           adopted=()
           for runtime in $RUNTIMES; do
             status=0
@@ -248,10 +256,19 @@ jobs:
           fi
 
       - name: Offline tests
+        timeout-minutes: 30   # a hang fails here; the job's own timeout would hand nothing over
         run: |
-          # Every suite runs; the failures are listed together at the end.
+          # Every suite runs. tests.log holds the running suite, then the end of each failed one.
           failed=()
-          pixi run typecheck 2>&1 | tee "$RUNNER_TEMP/tests.log" || failed+=(typecheck)
+          suite() {   # suite NAME COMMAND...
+            echo "::group::$1"
+            if ! "${@:2}" 2>&1 | tee "$RUNNER_TEMP/tests.log"; then
+              failed+=("$1")
+              { echo "FAILED: $1"; tail -n 30 "$RUNNER_TEMP/tests.log"; } >> "$RUNNER_TEMP/failed"
+            fi
+            echo "::endgroup::"
+          }
+          suite typecheck pixi run typecheck
           for test in \
               test_runtimes test_reconstruct test_claude_sdk test_claude_bundle test_claude_unbundle \
               test_claude_transport test_codex_sdk test_codex_sdk_native test_chat_mode test_codex_argv \
@@ -261,16 +278,13 @@ jobs:
               test_webterm test_webterm_views test_webpage test_agy_symbols test_agy_stubs test_appresponse test_config \
               test_system_messages test_agy_system_message_queue test_agy_system_message_api \
               test_claude_native; do
-            echo "::group::$test"
-            pixi run python "test_scripts/$test.py" 2>&1 | tee -a "$RUNNER_TEMP/tests.log" || failed+=("$test")
-            echo "::endgroup::"
+            suite "$test" pixi run python "test_scripts/$test.py"
           done
           # The native UI and bridge checks prove that a Claude release's source contracts still
           # hold at run time, against a loopback model.
-          pixi run node --test test_scripts/test_claude_native_bridge.mjs 2>&1 | tee -a "$RUNNER_TEMP/tests.log" ||
-            failed+=(test_claude_native_bridge)
+          suite test_claude_native_bridge pixi run node --test test_scripts/test_claude_native_bridge.mjs
           if [ "${#failed[@]}" -gt 0 ]; then
-            echo "FAILED: ${failed[*]}" | tee -a "$RUNNER_TEMP/tests.log"
+            mv "$RUNNER_TEMP/failed" "$RUNNER_TEMP/tests.log"
             echo "::error::Failed: ${failed[*]}"
             exit 1
           fi
@@ -278,7 +292,9 @@ jobs:
       - name: Raise the version
         id: version
         if: steps.adopt.outputs.mode != 'validate'
-        run: echo "version=$(python3 tools/runtimes.py bump)" >> "$GITHUB_OUTPUT"
+        run: |
+          python3 tools/runtimes.py bump 2>&1 | tee "$RUNNER_TEMP/bump.log"
+          echo "version=$(tail -n 1 "$RUNNER_TEMP/bump.log")" >> "$GITHUB_OUTPUT"
 
       - name: Build the redistributable bundle
         if: steps.adopt.outputs.mode != 'validate'
@@ -299,6 +315,7 @@ jobs:
           RUNTIMES: ${{ steps.adopt.outputs.runtimes }}
           TARGETS: ${{ steps.adopt.outputs.targets }}
         run: |
+          exec > >(tee "$RUNNER_TEMP/push.log") 2>&1
           # shellcheck disable=SC2086  # RUNTIMES is a space-separated list
           python3 tools/runtimes.py notes $RUNTIMES > "$RUNNER_TEMP/notes.md"
           git add -A
@@ -320,8 +337,9 @@ jobs:
           fi
           git tag -a "v$version" -m "TaskSolver $version"
           if ! git push --atomic origin HEAD:main "v$version"; then
-            # main moved during the build. Docs, Nix and CI commits don't change what was tested,
-            # so rebase onto those and retry; anything else fails the release.
+            # main moved during the build. Docs, Nix and CI commits (the push trigger's
+            # paths-ignore) don't change what was tested, so rebase onto those and retry. Code
+            # fails the release: that push's run adopts on it.
             git fetch origin main
             moved=$(git diff --name-only HEAD~1 origin/main | while read -r path; do
               case "$path" in
@@ -332,7 +350,7 @@ jobs:
             if [ -n "$moved" ]; then
               echo "::error::main gained code changes during the build; not releasing untested code:"
               echo "$moved"
-              echo "retry=true" >> "$GITHUB_OUTPUT"
+              echo "superseded=true" >> "$GITHUB_OUTPUT"
               exit 1
             fi
             git rebase origin/main
@@ -358,16 +376,8 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: pixi upload prefix --channel "$CHANNEL" --generate-attestation dist/tasksolver-"$VERSION"-*.conda
 
-      - name: Retry on the moved main
-        if: failure() && steps.publish.outputs.retry == 'true'
-        env:
-          TARGETS: ${{ steps.adopt.outputs.targets }}
-        run: |
-          echo "::notice::main gained code changes during the build; a new run adopts $TARGETS on them"
-          gh workflow run runtime-updates.yml --ref main
-
       - name: Hand a failed build or test over
-        if: failure() && steps.adopt.outputs.runtimes != '' && steps.publish.conclusion != 'success' && steps.publish.outputs.retry != 'true'
+        if: failure() && steps.adopt.outputs.runtimes != '' && steps.publish.conclusion != 'success' && steps.publish.outputs.superseded != 'true'
         env:
           TARGETS: ${{ steps.adopt.outputs.targets }}
         run: |
@@ -379,5 +389,6 @@ jobs:
             fi
           done
           git commit -qm "Adopt $TARGETS (needs hand work, run $GITHUB_RUN_ID)" || true
+          # The newest log is the failed step's: each step from the build to the push writes one.
           log=$(find "$RUNNER_TEMP" -maxdepth 1 -name '*.log' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
           tools/hand_over.sh HEAD "$branch" "$TARGETS" "${log:-/dev/null}"

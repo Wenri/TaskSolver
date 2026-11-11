@@ -102,8 +102,11 @@ is tried again. To retry the same versions after a fix, close the issue and dele
 before pushing the fix to `main`: the push's run reads the open issues when it checks. A network
 or upstream-service failure exits 75 and is retried by the next run without a hand-over. Runs
 queue one at a time, so both jobs check out `main`'s tip (`ref: ${{ github.ref }}`), not the
-commit that triggered the run: the run ahead may have released since. When `main` gains code
-during a build, the release is not pushed and a new run is dispatched instead.
+commit that triggered the run, and the release job checks again what is outdated there: the run
+ahead may have released since, and a re-run of that job keeps the check job's outputs. When
+`main` gains code during a build, the release is not pushed; that push's run adopts on it. The
+hand-over quotes the newest log in `$RUNNER_TEMP`, so every step from the build to the push must
+write one. Dispatched on another branch, only the check job runs.
 A vendored tree may declare hooks (`Tree.hooks`; Kimi's emit sites): when upstream moves or
 rewrites the code around them, the conflicted file takes the new release's copy with the hooks
 re-inserted, provided each anchor matches once, and `test_kimi_capture.py` proves them at run

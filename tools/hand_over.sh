@@ -12,7 +12,7 @@ title=$(python3 tools/runtimes.py title "$targets")
     echo
     echo "Last lines of \`$(basename "$log")\`:"
     echo '```'
-    tail -n 80 "$log"
+    tail -n 80 "$log" | cut -c -500    # an issue body holds 65536 characters
     echo '```'
 } > "$RUNNER_TEMP/issue.md"
 number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
