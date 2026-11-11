@@ -19,10 +19,11 @@
 # service: exit 75) is skipped until the next run. A build or test failure hands the remaining
 # adoptions over together on `runtime-updates/run-<id>`. While an issue is open, scheduled and
 # push runs hold its runtimes at the versions it names and still adopt the others; a newer upstream
-# release of a held runtime is tried again. When main gains code during a build, the release is not
-# pushed (it was not tested on that code); a new run is dispatched instead. A failure of the
-# adoption step itself (the script, not an adoption) holds nothing, so each scheduled run repeats it
-# until the script is fixed.
+# release of a held runtime is tried again. Runs queue one at a time, and each builds main as it is
+# when it starts: the run ahead may have released since it was queued. When main gains code during
+# a build, the release is not pushed (it was not tested on that code); a new run is dispatched
+# instead. A failure of the adoption step itself (the script, not an adoption) holds nothing, so
+# each scheduled run repeats it until the script is fixed.
 # The commits and tags this workflow pushes with GITHUB_TOKEN start no new runs. It keeps
 # nix/hashes.json current but does not build the Nix package: the downstream Nix configuration
 # that pins TaskSolver builds and tests it.
@@ -92,6 +93,9 @@ jobs:
       mode: ${{ steps.check.outputs.mode }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # The tip: a queued run's triggering commit is stale once the run ahead has released.
+          ref: ${{ github.ref }}
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
@@ -165,6 +169,7 @@ jobs:
 
       - uses: actions/checkout@v7.0.1
         with:
+          ref: ${{ github.ref }}
           fetch-depth: 0
 
       - name: Put the large build trees on the scratch disk

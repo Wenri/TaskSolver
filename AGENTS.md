@@ -100,8 +100,10 @@ remaining adoptions over together on `runtime-updates/run-<id>`. While an issue 
 `check --held` holds only its runtimes at the versions it names; a newer release of a held runtime
 is tried again. To retry the same versions after a fix, close the issue and delete its branch
 before pushing the fix to `main`: the push's run reads the open issues when it checks. A network
-or upstream-service failure exits 75 and is retried by the next run without a hand-over. When
-`main` gains code during a build, the release is not pushed and a new run is dispatched instead.
+or upstream-service failure exits 75 and is retried by the next run without a hand-over. Runs
+queue one at a time, so both jobs check out `main`'s tip (`ref: ${{ github.ref }}`), not the
+commit that triggered the run: the run ahead may have released since. When `main` gains code
+during a build, the release is not pushed and a new run is dispatched instead.
 A vendored tree may declare hooks (`Tree.hooks`; Kimi's emit sites): when upstream moves or
 rewrites the code around them, the conflicted file takes the new release's copy with the hooks
 re-inserted, provided each anchor matches once, and `test_kimi_capture.py` proves them at run
