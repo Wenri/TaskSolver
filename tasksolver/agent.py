@@ -53,7 +53,7 @@ class Agent(object):
             vision_model: string identifier to the vision model used.
             chat: run an agent-runtime backend (claude-code, codex, agy) as a plain chat call —
                 no MCP servers or injected context, thinking off or lowest, and no tools except
-                agy's view_file for its image files (see ``tasksolver.cli_backend``). The HTTP
+                agy's read_file for its image files (see ``tasksolver.cli_backend``). The HTTP
                 backends are chat calls already; kimi-code has no chat mode.
             backend_options: extra keyword arguments for a CLI backend's constructor (e.g.
                 ``effort``, ``thinking``, ``system_prompt``, ``timeout``).

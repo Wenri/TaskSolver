@@ -237,7 +237,7 @@ backend a chat-completion equivalent, e.g. a subscription login as a judge: no M
 memory or project instructions; thinking off or lowest (Claude: disabled, `effort="low"`; Codex:
 `effort="none"`; agy: `--effort low`). Claude and Codex take the Question as ordered inline
 text/image parts (`prepare_payload(inline=True)`) and get no tools; agy cannot take inline images,
-so it gets PNG files and `view_file`. Using any other tool, or opening a file it was not given,
+so it gets PNG files and `read_file`. Using any other tool, or opening a file it was not given,
 raises `ChatModeViolation` (`_chat_violations`). `backend_options={...}` passes constructor
 overrides (`effort`, `thinking`, `system_prompt`, `timeout`, ...). kimi-code raises on `chat=True`.
 
@@ -251,8 +251,10 @@ overrides (`effort`, `thinking`, `system_prompt`, `timeout`, ...). kimi-code rai
   `system_prompt`) base instructions, `CODEX_EXEC_SERVER_URL=none` (no execution environment, so no
   shell/apply_patch/view_image), each `$CODEX_HOME/config.toml` MCP server disabled, images as
   `ImageInput` data URLs, capture off.
-- **agy** (`pyagy.model.CHAT_AGENT_MD`): a workspace agent with only `view_file`, run with
-  `trust=False` and without `SSH_*`; see `antigravity/README.md`. Needs agy >= 1.2.11.
+- **agy** (`pyagy.model.CHAT_AGENT_MD`): a workspace agent with only `read_file`, run with
+  `trust=False` and without `SSH_*`; see `antigravity/README.md`. The reader's name and its path
+  argument belong to the agy release (`CHAT_TOOLS`, `CHAT_PATH_ARG`): `view_file(AbsolutePath)` up
+  to agy 1.2.x, `read_file(Path)` since 1.5. Checked with agy 1.5.5.
 
 Re-check against real requests after CLI upgrades: these switches are CLI behaviour, not SDK
 contract. Tests: `test_scripts/test_chat_mode.py`.

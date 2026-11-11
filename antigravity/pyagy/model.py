@@ -13,12 +13,13 @@ from wirecap.types import JSONObject, json_array, json_object, Question
     parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 
 ``chat=True`` runs each call as the workspace agent :data:`CHAT_AGENT`: its only tools are
-``view_file`` (to open the image files, which agy cannot take inline) and the harness's
+``read_file`` (to open the image files, which agy cannot take inline) and the harness's
 ``manage_task``; it gets none of agy's default prompt sections, skills, rules, plugins, subagents
 or MCP servers, reasoning ``--effort low`` unless ``effort`` says otherwise, and the workspace is
 not added to agy's global ``trustedWorkspaces``. A turn that calls any other tool, or opens a file
-it was not given, raises ``ChatModeViolation``. Needs agy >= 1.2.11 (earlier releases ignore
-workspace agents in ``--print`` runs).
+it was not given, raises ``ChatModeViolation``. Written for agy 1.5, whose file reader is
+``read_file`` (``view_file`` up to agy 1.2.x; releases before 1.2.11 ignore workspace agents in
+``--print`` runs).
 """
 import os
 from collections.abc import Mapping, Sequence
@@ -35,16 +36,19 @@ from .client import AgyResponse, AskOptions, Session, SessionOptions, ask_many a
 CHAT_AGENT: Final = "tasksolver-chat"
 #: chat mode's default system prompt (the agent definition's body)
 CHAT_PROMPT: Final = ("Answer the user's request directly. When the request lists image files, open "
-                      "each one with the view_file tool before answering; call no other tool.")
+                      "each one with the read_file tool before answering; call no other tool.")
 #: ``excludeDefaultComponents`` drops agy's default prompt sections and built-in tools,
 #: ``inheritCustomizations: false`` the user's skills, rules, plugins, subagents and MCP servers.
-#: Checked with agy 1.2.11: the model is offered view_file and manage_task only, and the
-#: prompt shrinks from ~8.7k to ~1.2k tokens.
+#: Checked with agy 1.5.5: the model is offered read_file and manage_task only (13 tools by
+#: default), and the first request shrinks from ~14.4k to ~0.7k input tokens. Up to agy 1.2.x the
+#: reader was view_file (1.2.11: view_file and manage_task, ~8.7k to ~1.2k tokens). agy 1.5.5 still
+#: resolves ``view_file`` in ``tools`` to read_file, so a definition that lists both names fails
+#: (agy's error: tool name conflict: multiple tools resolved with name "read_file").
 CHAT_AGENT_MD: Final = """---
 name: {name}
-description: Answers questions about local image files; opens each listed image with view_file and uses no other tool.
+description: Answers questions about local image files; opens each listed image with read_file and uses no other tool.
 tools:
-  - view_file
+  - read_file
 excludeDefaultComponents: true
 inheritCustomizations: false
 mainAgent: true
@@ -56,8 +60,10 @@ commandExecutionPolicy: off
 
 {prompt}
 """
-#: the only tool a chat turn may call
-CHAT_TOOLS: Final = ("view_file",)
+#: the only tool a chat turn may call: agy's file reader (agy 1.2.x: view_file) ...
+CHAT_TOOLS: Final = ("read_file",)
+#: ... and the argument that names the file it opens (agy 1.2.x: AbsolutePath)
+CHAT_PATH_ARG: Final = "Path"
 #: agy skips its keyring login when these are set (as they are in some tool shells); an agy
 #: child always runs on this machine, so chat mode drops them (``None`` = unset)
 CHAT_ENV: Final = {"SSH_CLIENT": None, "SSH_CONNECTION": None, "SSH_TTY": None}
@@ -68,10 +74,10 @@ class AgyModel(CLIBackendModel[AgyResponse]):
     command_label = "agy --print"
     generic_model_aliases = ("agy",)
     no_output_hint = "Ensure agy is logged in (~/.gemini/antigravity-cli/) and reachable."
-    # agy's file tool is view_file (it has no Read tool): naming the wrong tool sent agents
-    # searching for the files with run_command
+    # agy's file tool is read_file (view_file up to agy 1.2.x; it has no Read tool): naming the
+    # wrong tool sent agents searching for the files with run_command
     vision_preamble = ("The visual inputs are saved as local image files. Open each one with the "
-                       "view_file tool when answering.")
+                       "read_file tool when answering.")
     # AgyProcess is already a multiprocessing.Process (start() forks agy and returns), so parallel
     # sampling needs no threads: ask_many start()s all n and services them in one event loop
     # (n_choices == 1 is the plain one-shot).
@@ -159,7 +165,7 @@ class AgyModel(CLIBackendModel[AgyResponse]):
         return super().ask(payload, n_choices=n_choices)
 
     def _chat_violations(self, r: AgyResponse) -> list[str]:
-        """Calls other than view_file, and view_file on a file this call did not hand over."""
+        """Calls other than read_file, and read_file on a file this call did not hand over."""
         used: list[str] = []
         for turn in r.turns:
             events = turn.get("events")
@@ -175,7 +181,7 @@ class AgyModel(CLIBackendModel[AgyResponse]):
                             continue
                         call = json_object(call)
                         name = call.get("name")
-                        path = json_object(call.get("args") or {}).get("AbsolutePath")
+                        path = json_object(call.get("args") or {}).get(CHAT_PATH_ARG)
                         if name not in CHAT_TOOLS:
                             used.append(str(name))
                         elif not isinstance(path, str) or not path or os.path.realpath(path) not in self._chat_paths:

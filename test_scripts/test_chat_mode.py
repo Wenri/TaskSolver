@@ -4,7 +4,7 @@
 Run with ``python test_scripts/test_chat_mode.py``. Chat mode (``chat=True`` on the Claude and
 Codex SDK backends and on agy) must turn an agent runtime into a plain chat call: no MCP servers
 or injected context, thinking off or lowest, no tools (Claude, Codex: inline images) or only
-agy's view_file on the files it was given, and a hard failure otherwise. The live checks of the
+agy's read_file on the files it was given, and a hard failure otherwise. The live checks of the
 resulting requests are not repeated here.
 """
 
@@ -362,9 +362,11 @@ class AgyChat(unittest.TestCase):
 
     def test_agent_definition_and_call_kwargs(self) -> None:
         md = Path(self.ws.name, ".agents", "agents", CHAT_AGENT, "agent.md").read_text()
-        for line in ("tools:\n  - view_file\n", "excludeDefaultComponents: true",
+        for line in ("tools:\n  - read_file\n", "excludeDefaultComponents: true",
                      "inheritCustomizations: false", "commandExecutionPolicy: off"):
             self.assertIn(line, md)
+        # agy 1.5 resolves its earlier name for the reader to read_file too: naming both is an error
+        self.assertNotIn("view_file", md)
         kw = self.model._call_kwargs(empty_payload())
         self.assertEqual(kw.get("extra_flags"), ["--agent", CHAT_AGENT, "--effort", "low"])
         env = kw.get("extra_env")
@@ -375,15 +377,15 @@ class AgyChat(unittest.TestCase):
         with self.assertRaises(ValueError):
             AgyModel(task=TASK, chat=True, workspace=self.ws.name, mcp_servers={"x": {"command": "x"}})
 
-    def test_images_stay_files_named_for_view_file(self) -> None:
+    def test_images_stay_files_named_for_read_file(self) -> None:
         p = self.model.prepare_payload(Question([image(), "q"]), workspace=self.ws.name,
                                        inline=self.model._inline_images())
         assert "image_paths" in p
         (path,) = p["image_paths"]
         self.assertTrue(os.path.isfile(path))
-        self.assertIn("view_file", p["prompt"])
+        self.assertIn("read_file", p["prompt"])
 
-    def test_only_view_file_on_given_images(self) -> None:
+    def test_only_read_file_on_given_images(self) -> None:
         allowed = os.path.join(self.ws.name, "a.png")
         self.model._chat_paths = {os.path.realpath(allowed)}
 
@@ -393,11 +395,16 @@ class AgyChat(unittest.TestCase):
                 workspace=self.ws.name, linked=True,
                 turns=[{"events": [{"response": {"candidates": [{"content": {"parts": parts}}]}}]}])
 
-        self.assertEqual(self.model._chat_violations(reply(("view_file", {"AbsolutePath": allowed}))), [])
+        self.assertEqual(self.model._chat_violations(reply(("read_file", {"Path": allowed}))), [])
         self.assertEqual(self.model._chat_violations(reply(("run_command", {"CommandLine": "ls"}))),
                          ["run_command"])
-        self.assertEqual(self.model._chat_violations(reply(("view_file", {"AbsolutePath": "/etc/hosts"}))),
-                         ["view_file(/etc/hosts)"])
+        self.assertEqual(self.model._chat_violations(reply(("read_file", {"Path": "/etc/hosts"}))),
+                         ["read_file(/etc/hosts)"])
+        # the reader's name and path argument of agy 1.2.x are no longer part of the contract
+        self.assertEqual(self.model._chat_violations(reply(("view_file", {"AbsolutePath": allowed}))),
+                         ["view_file"])
+        self.assertEqual(self.model._chat_violations(reply(("read_file", {"AbsolutePath": allowed}))),
+                         ["read_file(None)"])
 
     def test_extra_env_none_unsets(self) -> None:
         with patch.dict(os.environ, {"SSH_CLIENT": "1.2.3.4 5 22"}):

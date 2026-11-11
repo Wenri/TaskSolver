@@ -365,7 +365,7 @@ parsed, raw, meta, payload = model.run_once(Question(["What is 2+2?"]))
 ```
 
 Images reach agy as PNG files (inside the workspace when one is set), named by absolute path; the
-prompt tells the agent to open them with `view_file`. Smoke test:
+prompt tells the agent to open them with `read_file`. Smoke test:
 `pixi run python test_scripts/example_agy_backend.py`. Use `pyagy.Session` for multi-turn work.
 
 ### Chat mode (`AgyModel(chat=True)`)
@@ -376,7 +376,7 @@ writes `<workspace>/.agents/agents/tasksolver-chat/agent.md` and runs each call 
 
 ```yaml
 tools:
-  - view_file                  # the only tool: opens the image files
+  - read_file                  # the only tool: opens the image files
 excludeDefaultComponents: true # no default prompt sections or built-in tools
 inheritCustomizations: false   # none of the user's skills, rules, plugins, subagents, MCP servers
 mainAgent: true
@@ -385,9 +385,19 @@ model: inherit                 # the --model flag decides
 commandExecutionPolicy: off
 ```
 
-Needs agy >= 1.2.11 (earlier releases ignore workspace agents under `--print`). Using any other
-tool, or opening a file it was not handed, raises `ChatModeViolation`; the harness still offers
-`manage_task`, and agy still makes its own small session-title call.
+Using any other tool, or opening a file it was not handed, raises `ChatModeViolation`; the harness
+still offers `manage_task`, and agy still makes its own small session-title call. Checked with agy
+1.5.5: the model is offered `read_file` and `manage_task` (13 tools without the agent), and the
+first request has ~0.7k input tokens in place of ~14.4k.
+
+The reader's name belongs to the agy release. Up to agy 1.2.x it was `view_file`, with the file in
+`AbsolutePath`; agy 1.5 renamed it `read_file`, with the file in `Path`, and a turn checked against
+the earlier name fails as `agy --print used read_file in chat mode`. agy 1.5.5 still resolves
+`view_file` in `tools` to `read_file`, so a definition that lists both names does not start
+(`tool name conflict: multiple tools resolved with name "read_file"`). After an agy upgrade, read
+the offered tools and the call's arguments from a capture and update `CHAT_AGENT_MD`, `CHAT_TOOLS`
+and `CHAT_PATH_ARG` in `pyagy/model.py` together. Releases before 1.2.11 ignore workspace agents
+under `--print`.
 
 ## Risks / limitations
 
