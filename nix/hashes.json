@@ -1,7 +1,7 @@
 {
   "codexCargo": {
-    "drv": "/nix/store/pg5lkjipcv91w04cs5p2s574x88f2rpk-cargo-deps-vendor.drv",
-    "hash": "sha256-+mYciQWSKlEOJyfspEjTfrwh/+aKYHMX2dqgr04NHOQ="
+    "drv": "/nix/store/c2lgddyznf3b930535d6fsvz4g326siy-cargo-deps-vendor.drv",
+    "hash": "sha256-vX2DN858dTBacajbIgvT3OQQvE8RqE3qqFB9a2jsJdo="
   },
   "kimiPnpm": {
     "drv": "/nix/store/9vgz6nxsjgyplfvy5xpm7jhzg4gw5fbn-tasksolver-kimi-code-pnpm-deps.drv",
