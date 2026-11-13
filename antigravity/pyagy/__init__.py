@@ -43,10 +43,21 @@ if TYPE_CHECKING:
     from .config import (detect_config_path as detect_config_path, remove_mcp_config as remove_mcp_config,
                          remove_mcp_servers as remove_mcp_servers, write_mcp_config as write_mcp_config,
                          write_mcp_servers as write_mcp_servers)
-    from .conversations import (ConversationInfo as ConversationInfo,
+    from .auth import (AuthStatus as AuthStatus, auth_status as auth_status,
+                       enable_dedicated_auth as enable_dedicated_auth,
+                       list_auth_stores as list_auth_stores,
+                       login as login, logout as logout,
+                       use_shared_auth as use_shared_auth)
+    from .conversations import (ACCOUNT_ENV as ACCOUNT_ENV,
+                                APP_DATA_DIR_ENV as APP_DATA_DIR_ENV,
+                                ConversationInfo as ConversationInfo,
+                                DEDICATED_AUTH_MARKER as DEDICATED_AUTH_MARKER,
                                 DEFAULT_APP_DATA_DIR as DEFAULT_APP_DATA_DIR,
                                 GLOBAL_APP_DATA_DIR as GLOBAL_APP_DATA_DIR,
+                                ISOLATED_AUTH_ENV as ISOLATED_AUTH_ENV,
+                                account_app_data_dir as account_app_data_dir,
                                 ensure_git_workspace as ensure_git_workspace,
+                                is_isolated_auth as is_isolated_auth,
                                 latest_conversation_id as latest_conversation_id,
                                 list_conversations as list_conversations,
                                 prepare_app_data_dir as prepare_app_data_dir,
@@ -67,9 +78,15 @@ _LAZY = {
     "ToolSpec": ".client",
     "ContextResource": ".client",
     "RewriteRule": ".client",
-    # native conversation store (read-only readers + trust/scope write helpers; stdlib-pure)
+    # native conversation store + dedicated auth (stdlib-pure)
+    "ACCOUNT_ENV": ".conversations",
+    "APP_DATA_DIR_ENV": ".conversations",
+    "DEDICATED_AUTH_MARKER": ".conversations",
     "DEFAULT_APP_DATA_DIR": ".conversations",
     "GLOBAL_APP_DATA_DIR": ".conversations",
+    "ISOLATED_AUTH_ENV": ".conversations",
+    "account_app_data_dir": ".conversations",
+    "is_isolated_auth": ".conversations",
     "list_conversations": ".conversations",
     "latest_conversation_id": ".conversations",
     "read_transcript": ".conversations",
@@ -78,6 +95,13 @@ _LAZY = {
     "prepare_app_data_dir": ".conversations",
     "prepare_scoped_home": ".conversations",
     "seed_onboarding": ".conversations",
+    "AuthStatus": ".auth",
+    "auth_status": ".auth",
+    "enable_dedicated_auth": ".auth",
+    "list_auth_stores": ".auth",
+    "login": ".auth",
+    "logout": ".auth",
+    "use_shared_auth": ".auth",
     # TaskSolver backend + lower-level drivers
     "AgyModel": ".model",
     "ensure_git_workspace": ".conversations",
@@ -96,7 +120,7 @@ _LAZY = {
     "by_kind": ".agy_process.books",
     "sync_capable": ".agy_process.books",
 }
-__all__ = ['Session', 'ask', 'ask_many', 'resume', 'continue_latest', 'AgyResponse', 'Usage', 'ToolSpec', 'ContextResource', 'RewriteRule', 'DEFAULT_APP_DATA_DIR', 'GLOBAL_APP_DATA_DIR', 'list_conversations', 'latest_conversation_id', 'read_transcript', 'ConversationInfo', 'trust_workspace', 'prepare_app_data_dir', 'prepare_scoped_home', 'seed_onboarding', 'AgyModel', 'ensure_git_workspace', 'strip_ansi', 'write_mcp_config', 'remove_mcp_config', 'write_mcp_servers', 'remove_mcp_servers', 'detect_config_path', 'BOOKS', 'DERIVED_KINDS', 'by_mech', 'enabled_books', 'by_kind', 'sync_capable']
+__all__ = ['Session', 'ask', 'ask_many', 'resume', 'continue_latest', 'AgyResponse', 'Usage', 'ToolSpec', 'ContextResource', 'RewriteRule', 'ACCOUNT_ENV', 'APP_DATA_DIR_ENV', 'DEDICATED_AUTH_MARKER', 'DEFAULT_APP_DATA_DIR', 'GLOBAL_APP_DATA_DIR', 'ISOLATED_AUTH_ENV', 'account_app_data_dir', 'is_isolated_auth', 'list_conversations', 'latest_conversation_id', 'read_transcript', 'ConversationInfo', 'trust_workspace', 'prepare_app_data_dir', 'prepare_scoped_home', 'seed_onboarding', 'AuthStatus', 'auth_status', 'enable_dedicated_auth', 'list_auth_stores', 'login', 'logout', 'use_shared_auth', 'AgyModel', 'ensure_git_workspace', 'strip_ansi', 'write_mcp_config', 'remove_mcp_config', 'write_mcp_servers', 'remove_mcp_servers', 'detect_config_path', 'BOOKS', 'DERIVED_KINDS', 'by_mech', 'enabled_books', 'by_kind', 'sync_capable']
 
 
 def __getattr__(name: str) -> object:

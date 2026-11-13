@@ -60,6 +60,8 @@ class ClientOptions(TypedDict, total=False):
     funcmap: str | None
     data_dir: str | None
     app_data_dir: str | None
+    account: str | None
+    isolated_auth: bool | None
     trust: bool
     extra_flags: Sequence[str] | None
     system_messages: Iterable[object] | str | None
@@ -483,7 +485,8 @@ def _temporary_mcp_servers(servers: MCPServers) -> Callable[[], None]:
 def _inject_config(tools: Sequence[ToolSpec | ToolInput] | None,
                    context: Sequence[ContextResource | ContextInput] | None,
                    mcp_servers: MCPServers | None = None, data_dir: str | None = None,
-                   app_data_dir: str | None = None) -> Callable[[], None]:
+                   app_data_dir: str | None = None, account: str | None = None,
+                   isolated_auth: bool | None = None) -> Callable[[], None]:
     """Provision agy's MCP config for one run/session. Returns a cleanup callable.
 
     ``tools``/``context`` register TaskSolver's own spec-backed server under a
@@ -502,7 +505,9 @@ def _inject_config(tools: Sequence[ToolSpec | ToolInput] | None,
     """
     path = None
     if data_dir and (tools or context or mcp_servers):
-        _conv.prepare_scoped_home(data_dir, app_data_dir=app_data_dir, link_global_config=False)
+        _conv.prepare_scoped_home(
+            data_dir, app_data_dir=app_data_dir, link_global_config=False,
+            isolated_auth=isolated_auth, account=account)
         path = os.path.join(os.path.abspath(data_dir), ".gemini", "config", "mcp_config.json")
     with _MCP_LOCK, ExitStack() as cleanup:
         if tools or context:
@@ -625,6 +630,7 @@ def ask(prompt: str, *, model: str | None = None, workspace: str | None = None,
         stack: bool = False, arg_probe: bool = False, funcmap: str | None = None,
         conversation_id: str | None = None, continue_latest: bool = False,
         data_dir: str | None = None, app_data_dir: str | None = None,
+        account: str | None = None, isolated_auth: bool | None = None,
         trust: bool = True, extra_flags: Sequence[str] | None = None,
         system_messages: Iterable[object] | str | None = ()) -> AgyResponse:
     """Run one ``agy --print`` turn and return a decoded :class:`AgyResponse`.
@@ -665,7 +671,8 @@ def ask(prompt: str, *, model: str | None = None, workspace: str | None = None,
     overlays = _shim_overlays(rewrite, stack, arg_probe, extra_env)
     overlays["AGY_PROC_LOG"] = os.path.join(workspace, "pyagy-shim.log")  # shim logs off the PTY
 
-    cleanup = _inject_config(tools, context, mcp_servers, data_dir, app_data_dir)
+    cleanup = _inject_config(tools, context, mcp_servers, data_dir, app_data_dir,
+                             account=account, isolated_auth=isolated_auth)
     q = _new_channel()                              # caller owns the result queue (stock-mp style)
     p = None
     channel = None
@@ -679,7 +686,8 @@ def ask(prompt: str, *, model: str | None = None, workspace: str | None = None,
                        agy_bin=agy_bin, workdir=workspace, capture=cap_path or os.devnull,
                        args=(q, _STREAM_KINDS, timeout + 60),  # max_wait > timeout → death-based done
                        conversation_id=conversation_id, continue_latest=continue_latest,
-                       data_dir=data_dir, app_data_dir=app_data_dir, trust=trust,
+                       data_dir=data_dir, app_data_dir=app_data_dir,
+                       account=account, isolated_auth=isolated_auth, trust=trust,
                        extra_env=overlays, extra_flags=extra_flags)
         p.start()
         q._writer.close()                           # parent reads only; reader now EOFs on agy death
@@ -717,6 +725,7 @@ def ask_many(prompt: str, n: int, *, model: str | None = None, workspace: str | 
         stack: bool = False, arg_probe: bool = False, funcmap: str | None = None,
         conversation_id: str | None = None, continue_latest: bool = False,
         data_dir: str | None = None, app_data_dir: str | None = None,
+        account: str | None = None, isolated_auth: bool | None = None,
         trust: bool = True, extra_flags: Sequence[str] | None = None,
         system_messages: Iterable[object] | str | None = ()) -> list[AgyResponse]:
     """Run ``n`` independent ``agy --print`` turns of the same ``prompt`` concurrently and
@@ -732,14 +741,16 @@ def ask_many(prompt: str, n: int, *, model: str | None = None, workspace: str | 
                     skip_permissions=skip_permissions, agy_bin=agy_bin, extra_env=extra_env,
                     stack=stack, arg_probe=arg_probe, funcmap=funcmap,
                     conversation_id=conversation_id, continue_latest=continue_latest,
-                    data_dir=data_dir, app_data_dir=app_data_dir, trust=trust,
+                    data_dir=data_dir, app_data_dir=app_data_dir,
+                    account=account, isolated_auth=isolated_auth, trust=trust,
                     extra_flags=extra_flags, system_messages=messages)]
     workspace = ensure_git_workspace(workspace)
     overlays = _shim_overlays(rewrite, stack, arg_probe, extra_env)
     overlays["AGY_PROC_LOG"] = os.path.join(workspace, "pyagy-shim.log")
     cap_paths = [_prepare_capture(capture, workspace, "pyagy-capture.jsonl", i)
                  for i in range(n)]
-    cleanup = _inject_config(tools, context, mcp_servers, data_dir, app_data_dir)  # one shared MCP config for all n
+    cleanup = _inject_config(tools, context, mcp_servers, data_dir, app_data_dir,
+                             account=account, isolated_auth=isolated_auth)  # one shared MCP config for all n
     queues = [_new_channel() for _ in range(n)]   # one caller-owned result queue per proc
     procs: list[AgyProcess] = []
     channels: list[SystemMessageChannel] = []
@@ -756,7 +767,8 @@ def ask_many(prompt: str, n: int, *, model: str | None = None, workspace: str | 
                             agy_bin=agy_bin, workdir=workspace, capture=cap_paths[i] or os.devnull,
                             args=(queues[i], _STREAM_KINDS, timeout + 60),  # > timeout → death-based
                             conversation_id=conversation_id, continue_latest=continue_latest,
-                            data_dir=data_dir, app_data_dir=app_data_dir, trust=trust,
+                            data_dir=data_dir, app_data_dir=app_data_dir,
+                            account=account, isolated_auth=isolated_auth, trust=trust,
                             extra_env=process_env, extra_flags=extra_flags))
         for p, q in zip(procs, queues):
             p.start()                            # non-blocking fork; serial → no fork-in-thread
@@ -823,7 +835,8 @@ class Session(_WireSession[AgyResponse, AgyProcess]):
                  stack: bool = False, arg_probe: bool = False, funcmap: str | None = None,
                  conversation_id: str | None = None, continue_latest: bool = False,
                  skip_permissions: bool = False, data_dir: str | None = None,
-                 app_data_dir: str | None = None, trust: bool = True,
+                 app_data_dir: str | None = None, account: str | None = None,
+                 isolated_auth: bool | None = None, trust: bool = True,
                  extra_flags: Sequence[str] | None = None, capture_tail: bool = False,
                  system_messages: Iterable[object] | str | None = (),
                  enable_system_messages: bool = True) -> None:
@@ -851,6 +864,8 @@ class Session(_WireSession[AgyResponse, AgyProcess]):
         self.skip_permissions = skip_permissions
         self._data_dir = data_dir                    # scope the conversation store to a repo
         self._app_data_dir = app_data_dir            # store subdir under ~/.gemini (default: pyagy)
+        self._account = account                      # named pyagy account profile
+        self._isolated_auth = isolated_auth          # dedicated file-backed auth vs shared global login
         self._trust = trust                          # pre-trust the workspace (no folder prompt)
         self._home: _conv.PathInput | None = None                            # resolved scoped home (None = global store)
         self._id = conversation_id                   # resume this id; else captured after turn 1
@@ -873,7 +888,8 @@ class Session(_WireSession[AgyResponse, AgyProcess]):
         self._overlays = _shim_overlays(self.rewrite, self.stack, self.arg_probe, self.extra_env)
         self._overlays["AGY_PROC_LOG"] = os.path.join(self.workspace, "pyagy-session.log")
         self._cleanup = _inject_config(self._tools, self._context,
-                                       self._mcp_servers, self._data_dir, self._app_data_dir)
+                                       self._mcp_servers, self._data_dir, self._app_data_dir,
+                                       account=self._account, isolated_auth=self._isolated_auth)
         if self._messages is not None:
             self._overlays.update(self._messages.start())
 
@@ -885,6 +901,7 @@ class Session(_WireSession[AgyResponse, AgyProcess]):
                           conversation_id=self._id,
                           continue_latest=self.continue_latest,
                           data_dir=self._data_dir, app_data_dir=self._app_data_dir,
+                          account=self._account, isolated_auth=self._isolated_auth,
                           trust=self._trust,
                           extra_env=self._overlays, extra_flags=self.extra_flags)
 

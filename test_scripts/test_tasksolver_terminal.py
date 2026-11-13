@@ -284,10 +284,27 @@ class TerminalFrontendTests(unittest.TestCase):
             socket = Path(directory) / "sdk.sock"
             with self.assertRaisesRegex(ValueError, "Claude backend"):
                 terminal.open_terminal("codex", manager=manager, sdk_socket=socket)
+            with self.assertRaisesRegex(ValueError, "agy backend"):
+                terminal.open_terminal("codex", manager=manager, agy_account="alt")
             socket.symlink_to(Path(directory) / "absent")
             with self.assertRaises(FileExistsError):
                 terminal.open_terminal("claude", manager=manager, sdk_socket=socket)
             self.assertEqual(manager.calls, [])
+
+    def test_agy_account_and_isolated_auth_flags_forward_to_child(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = RecordingManager(root)
+            terminal.open_terminal("agy", manager=manager, agy_account="alt", agy_isolated_auth=True)
+            self.assertIn("--agy-account", manager.calls[0].command)
+            self.assertIn("alt", manager.calls[0].command)
+            self.assertIn("--agy-isolated-auth", manager.calls[0].command)
+            with patch.dict(os.environ, {"HOME": directory, "PATH": os.defpath}, clear=True):
+                command, env = terminal._child_command(
+                    "agy", root, "gemini-3.8-flash-low", None,
+                    agy_account="alt", agy_isolated_auth=True)
+            self.assertEqual(command[1:], ["--app_data_dir=pyagy-alt", "--model", "gemini-3.8-flash-low"])
+            self.assertEqual(env.get("WSL_INTEROP"), "pyagy-isolated")
 
     def test_cli_attaches_existing_terminal_and_closes_manager(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

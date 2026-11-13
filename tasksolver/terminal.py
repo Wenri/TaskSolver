@@ -38,7 +38,10 @@ def open_terminal(backend: Backend, *, manager: TerminalManager,
                   workspace: str | os.PathLike[str] | None = None,
                   model: str | None = None,
                   capture: bool | str = True,
-                  sdk_socket: str | os.PathLike[str] | None = None) -> TerminalScreen:
+                  sdk_socket: str | os.PathLike[str] | None = None,
+                  agy_app_data_dir: str | None = None,
+                  agy_account: str | None = None,
+                  agy_isolated_auth: bool | None = None) -> TerminalScreen:
     """Open an interactive UI without submitting a prompt or preapproving tools.
 
     Native backends capture JSONL in the manager's directory by default; pass a
@@ -48,6 +51,9 @@ def open_terminal(backend: Backend, *, manager: TerminalManager,
     to the manager; ``sdk_socket`` can select another private location.
     """
     backend = _backend(backend)
+    if backend != "agy" and (agy_app_data_dir is not None or agy_account is not None
+                              or agy_isolated_auth is not None):
+        raise ValueError("agy_app_data_dir/agy_account/agy_isolated_auth require the agy backend")
     if backend == "claude" and sdk_socket is None:
         sdk_socket = manager.directory / f"claude-{uuid.uuid4().hex}.sock"
     socket = _claude_control_path(backend, sdk_socket)
@@ -83,6 +89,14 @@ def open_terminal(backend: Backend, *, manager: TerminalManager,
         command += ["--capture-path", os.fspath(capture_path)]
     if socket is not None:
         command += ["--sdk-socket", os.fspath(socket)]
+    if agy_app_data_dir is not None:
+        command += ["--agy-app-data-dir", agy_app_data_dir]
+    if agy_account is not None:
+        command += ["--agy-account", agy_account]
+    if agy_isolated_auth is True:
+        command.append("--agy-isolated-auth")
+    elif agy_isolated_auth is False:
+        command.append("--agy-shared-auth")
     try:
         with manager._lock:
             if socket is not None and any(
@@ -111,8 +125,14 @@ def _claude_control_path(backend: Backend,
 
 def _child_command(backend: Backend, workspace: Path, model: str | None,
                    capture_path: Path | None, *,
-                   sdk_socket: str | os.PathLike[str] | None = None) -> tuple[list[str], dict[str, str]]:
+                   sdk_socket: str | os.PathLike[str] | None = None,
+                   agy_app_data_dir: str | None = None,
+                   agy_account: str | None = None,
+                   agy_isolated_auth: bool | None = None) -> tuple[list[str], dict[str, str]]:
     socket = _claude_control_path(backend, sdk_socket)
+    if backend != "agy" and (agy_app_data_dir is not None or agy_account is not None
+                              or agy_isolated_auth is not None):
+        raise ValueError("agy_app_data_dir/agy_account/agy_isolated_auth require the agy backend")
     # A terminal screen is independent of any multiprocessing capture worker
     # or linked CLI that launched the parent Python.
     base = {key: value for key, value in os.environ.items()
@@ -122,11 +142,31 @@ def _child_command(backend: Backend, workspace: Path, model: str | None,
     capture = capture_path if capture_path is not None else Path(os.devnull)
 
     if backend == "agy":
+        from pyagy import conversations as _agy_conv
         from pyagy._env import _vendored, linked_argv, linked_env
 
-        env = linked_env(capture, base=base)
-        argv = linked_argv(_vendored("vendor/agy", "../vendor/agy"),
-                           ["--model", model] if model is not None else [], env=env)
+        agy_extra_env: dict[str, str | None] = {}
+        agy_args: list[str] = []
+        explicit_store = (
+            agy_app_data_dir is not None
+            or agy_account is not None
+            or agy_isolated_auth is not None
+            or bool(base.get(_agy_conv.APP_DATA_DIR_ENV))
+            or bool(base.get(_agy_conv.ACCOUNT_ENV))
+        )
+        if explicit_store:
+            adir = _agy_conv.resolve_app_data_dir(agy_app_data_dir, account=agy_account)
+            _agy_conv.prepare_app_data_dir(
+                adir, isolated_auth=agy_isolated_auth, account=agy_account)
+            if _agy_conv.is_isolated_auth(
+                    adir, isolated_auth=agy_isolated_auth, account=agy_account):
+                agy_extra_env.update(_agy_conv.ISOLATED_KEYRING_ENV)
+            if adir != _agy_conv.GLOBAL_APP_DATA_DIR:
+                agy_args.append(f"--app_data_dir={adir}")
+        if model is not None:
+            agy_args += ["--model", model]
+        env = linked_env(capture, base=base, extra_env=agy_extra_env or None)
+        argv = linked_argv(_vendored("vendor/agy", "../vendor/agy"), agy_args, env=env)
     elif backend == "codex":
         from pycodex._env import codex_argv, linked_env
 
@@ -174,6 +214,9 @@ class _Arguments(argparse.Namespace):
     child: bool
     capture_path: str | None
     sdk_socket: str | None
+    agy_app_data_dir: str | None
+    agy_account: str | None
+    agy_isolated_auth: bool | None
 
 
 def _enter(manager: TerminalManager) -> bool:
@@ -218,9 +261,16 @@ def _serve(args: _Arguments) -> int:
                     label = backend if count == 1 else f"{backend}-{count}"
                     capture = os.fspath(capture_base.with_name(
                         f"{capture_base.stem}-{label}{capture_base.suffix}"))
-            screen = open_terminal(_backend(backend), manager=manager, model=args.model,
-                                   capture=capture,
-                                   sdk_socket=args.sdk_socket if backend == "claude" else None)
+            screen = open_terminal(
+                _backend(backend),
+                manager=manager,
+                model=args.model,
+                capture=capture,
+                sdk_socket=args.sdk_socket if backend == "claude" else None,
+                agy_app_data_dir=args.agy_app_data_dir if backend == "agy" else None,
+                agy_account=args.agy_account if backend == "agy" else None,
+                agy_isolated_auth=args.agy_isolated_auth if backend == "agy" else None,
+            )
             if screen.capture_path is not None:
                 print(f"{screen.name}: capture {screen.capture_path}", flush=True)
         if args.no_web:
@@ -269,11 +319,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--tmux-bin", help="Path to the tmux executable")
     parser.add_argument("--ttyd-bin", help="Path to ttyd")
     parser.add_argument("--sdk-socket", help="Private Claude SDK socket path (default: manager directory)")
+    agy_store = parser.add_mutually_exclusive_group()
+    agy_store.add_argument("--agy-account", help="Named pyagy account profile for agy screens (e.g. 'alt')")
+    agy_store.add_argument("--agy-app-data-dir", help="Store subdirectory under ~/.gemini for agy screens")
+    agy_auth = parser.add_mutually_exclusive_group()
+    agy_auth.add_argument("--agy-isolated-auth", dest="agy_isolated_auth", action="store_true", default=None,
+                          help="Use isolated file-backed auth for agy screens (default store: pyagy)")
+    agy_auth.add_argument("--agy-shared-auth", dest="agy_isolated_auth", action="store_false",
+                          help="Share global ~/.gemini/antigravity-cli login for agy screens")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--capture-path", help=argparse.SUPPRESS)
     args = parser.parse_args(argv, namespace=_Arguments())
     if args.sdk_socket is not None and args.backends.count("claude") != 1:
         parser.error("--sdk-socket requires exactly one Claude screen")
+    if ((args.agy_account is not None or args.agy_app_data_dir is not None
+         or args.agy_isolated_auth is not None) and "agy" not in args.backends):
+        parser.error("--agy-account/--agy-app-data-dir/--agy-isolated-auth/--agy-shared-auth require an agy screen")
     if args.no_web:
         for option, given in (("--web-port", args.web_port is not None), ("--readonly", args.readonly),
                               ("--no-attach", args.no_attach), ("--ttyd-bin", args.ttyd_bin is not None)):
@@ -289,7 +350,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         workspace = Path(args.workspace or os.getcwd()).expanduser().resolve()
         command, env = _child_command(_backend(args.backends[0]), workspace, args.model,
                                       Path(args.capture_path) if args.capture_path else None,
-                                      sdk_socket=args.sdk_socket)
+                                      sdk_socket=args.sdk_socket,
+                                      agy_app_data_dir=args.agy_app_data_dir,
+                                      agy_account=args.agy_account,
+                                      agy_isolated_auth=args.agy_isolated_auth)
         os.chdir(workspace)
         os.execvpe(command[0], command, env)
     if args.capture_path is not None:

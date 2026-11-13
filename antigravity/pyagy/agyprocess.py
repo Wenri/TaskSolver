@@ -76,7 +76,8 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
                  persistent: bool = False, conversation_id: str | None = None,
                  continue_latest: bool = False, workdir: str | None = None,
                  capture: str | None = None, data_dir: str | None = None,
-                 app_data_dir: str | None = None, trust: bool = True,
+                 app_data_dir: str | None = None, account: str | None = None,
+                 isolated_auth: bool | None = None, trust: bool = True,
                  extra_env: Mapping[str, str | None] | None = None, echo: bool = False,
                  daemon: bool | None = None) -> None:
         super().__init__(target=target, name=name, args=args, kwargs=kwargs, daemon=daemon)
@@ -92,6 +93,8 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
         self._conversation_id = conversation_id  # resume id; else captured after first turn
         self._data_dir = data_dir      # scope the conversation store to a project repo
         self._app_data_dir = app_data_dir  # subdirectory under ~/.gemini (default: pyagy)
+        self._account = account        # named pyagy account profile (e.g. 'alt' -> pyagy-alt)
+        self._isolated_auth = isolated_auth  # dedicated file-backed auth vs shared global login
         self._trust = trust            # pre-trust the workspace (no folder-trust prompt)
         self._extra_env = extra_env    # caller overlays layered onto linked_env (shim knobs)
         self._echo = echo              # mirror agy's PTY output to our stdout (debug)

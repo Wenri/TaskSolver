@@ -449,6 +449,108 @@ class AgyChat(unittest.TestCase):
         custom = AgyModel(task=TASK, chat=True, workspace=self.ws.name, app_data_dir="custom- judge".replace(" ", ""))
         self.assertEqual(custom._call_kwargs(empty_payload()).get("app_data_dir"), "custom-judge")
 
+    def test_dedicated_auth_and_account_switching_never_touch_global_store(self) -> None:
+        from pyagy import auth as agy_auth
+        from pyagy import conversations as agy_conv
+        from pyagy._pty import PtyPopen
+        from pyagy.agyprocess import AgyProcess
+
+        fake_agy = os.path.join(self.ws.name, "fake-agy-auth")
+        Path(fake_agy).write_text(
+            "#!/bin/sh\n"
+            "if [ \"$AGY_CLI_CDE_AUTH_ACTION\" = \"check\" ]; then\n"
+            "  if [ -f \"$HOME/.gemini/jetski-standalone-oauth-token\" ]; then\n"
+            "    echo \"Already authenticated as alt@example.com.\"\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  exit 1\n"
+            "fi\n"
+            "if [ \"$AGY_CLI_CDE_AUTH_ACTION\" = \"login\" ]; then\n"
+            "  [ \"$AGY_CDE_ENTERPRISE_AUTH\" = \"false\" ] || exit 3\n"
+            "  printf '{\"auth_method\":\"consumer\"}' > \"$HOME/.gemini/jetski-standalone-oauth-token\"\n"
+            "  echo \"Successfully authenticated as alt@example.com.\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 2\n"
+        )
+        os.chmod(fake_agy, 0o755)
+
+        with tempfile.TemporaryDirectory() as fake_home, patch.dict(
+                os.environ, {"HOME": fake_home}, clear=False):
+            for key in ("PYAGY_APP_DATA_DIR", "PYAGY_ACCOUNT", "PYAGY_ISOLATED_AUTH", "WSL_INTEROP"):
+                os.environ.pop(key, None)
+
+            global_store = Path(fake_home, ".gemini", "antigravity-cli")
+            (global_store / "cache").mkdir(parents=True)
+            global_token = global_store / "antigravity-oauth-token"
+            global_token.write_text("global-primary-token")
+            (global_store / "installation_id").write_text("global-install")
+            (global_store / "cache" / "default_project_id.txt").write_text("global-proj")
+            (global_store / "cache" / "projects.json").write_text('{"p": 1}')
+
+            # Initially shared: symlinks point into global_store and WSL_INTEROP is unset
+            pyagy_root = Path(agy_conv.prepare_app_data_dir("pyagy"))
+            self.assertTrue((pyagy_root / "antigravity-oauth-token").is_symlink())
+            self.assertFalse(agy_conv.is_isolated_auth("pyagy"))
+
+            # Switching to dedicated auth unlinks symlinks without deleting global files
+            rc = agy_auth.login("pyagy", switch=True, oob=True, agy_bin=fake_agy)
+            self.assertEqual(rc, 0)
+            self.assertEqual(global_token.read_text(), "global-primary-token")
+            self.assertEqual((global_store / "cache" / "default_project_id.txt").read_text(), "global-proj")
+            self.assertFalse((pyagy_root / "antigravity-oauth-token").is_symlink())
+            self.assertEqual((pyagy_root / "antigravity-oauth-token").read_text(), '{"auth_method":"consumer"}')
+            self.assertTrue((pyagy_root / agy_conv.DEDICATED_AUTH_MARKER).is_file())
+            self.assertFalse((pyagy_root / "cache" / "default_project_id.txt").exists())
+
+            st = agy_auth.auth_status("pyagy", verify=True, agy_bin=fake_agy)
+            self.assertEqual(st.mode, "dedicated")
+            self.assertTrue(st.authenticated)
+            self.assertEqual(st.email, "alt@example.com")
+
+            # Incomplete GCP enterprise token (missing user_tier/project_id) is reported unauthenticated
+            (pyagy_root / "antigravity-oauth-token").write_text('{"auth_method":"gcp"}')
+            st_gcp = agy_auth.auth_status("pyagy", verify=True, agy_bin=fake_agy)
+            self.assertEqual((st_gcp.mode, st_gcp.authenticated), ("dedicated", False))
+
+            # Launch automatically sets WSL_INTEROP=pyagy-isolated for dedicated stores
+            popen = PtyPopen.__new__(PtyPopen)
+            proc = AgyProcess(prompt="hi", agy_bin=fake_agy, workdir=self.ws.name,
+                              extra_env={"LD_PRELOAD": ""})
+            argv, env, _ = popen._resolve_launch(proc)
+            self.assertEqual(argv[:3], [fake_agy, "--app_data_dir=pyagy", "--print"])
+            self.assertEqual(env.get("WSL_INTEROP"), "pyagy-isolated")
+
+            # Logout clears pyagy's token while keeping .dedicated_auth (no fallback to global)
+            agy_auth.logout("pyagy")
+            self.assertFalse((pyagy_root / "antigravity-oauth-token").exists())
+            self.assertTrue(agy_conv.is_isolated_auth("pyagy"))
+            st_out = agy_auth.auth_status("pyagy", verify=True, agy_bin=fake_agy)
+            self.assertEqual((st_out.mode, st_out.authenticated), ("dedicated", False))
+            self.assertEqual(global_token.read_text(), "global-primary-token")
+
+            # Named account profile maps to pyagy-<name> and isolates automatically
+            popen_acc = PtyPopen.__new__(PtyPopen)
+            proc_acc = AgyProcess(prompt="hi", agy_bin=fake_agy, workdir=self.ws.name,
+                                  account="second", extra_env={"LD_PRELOAD": ""})
+            argv_acc, env_acc, _ = popen_acc._resolve_launch(proc_acc)
+            self.assertEqual(argv_acc[:3], [fake_agy, "--app_data_dir=pyagy-second", "--print"])
+            self.assertEqual(env_acc.get("WSL_INTEROP"), "pyagy-isolated")
+
+            # Restoring shared auth re-links global credentials cleanly
+            agy_auth.use_shared_auth("pyagy")
+            self.assertFalse(agy_conv.is_isolated_auth("pyagy"))
+            self.assertTrue((pyagy_root / "antigravity-oauth-token").is_symlink())
+
+            # Refuses to modify global interactive store
+            with self.assertRaises(ValueError):
+                agy_auth.enable_dedicated_auth("antigravity-cli")
+
+        acc_model = AgyModel(task=TASK, chat=True, workspace=self.ws.name,
+                             account="alt", isolated_auth=True)
+        kw = acc_model._call_kwargs(empty_payload())
+        self.assertEqual((kw.get("account"), kw.get("isolated_auth")), ("alt", True))
+
 
 class VendoredArtifacts(unittest.TestCase):
     def test_sibling_artifact_through_a_symlinked_package(self) -> None:

@@ -40,6 +40,8 @@ class _AgyLaunch(Protocol):
     _capture: str | None
     _data_dir: str | None
     _app_data_dir: str | None
+    _account: str | None
+    _isolated_auth: bool | None
     _trust: bool
     _extra_env: Mapping[str, str | None] | None
 
@@ -71,15 +73,20 @@ class PtyPopen(WirePtyPopen[BaseProcess]):
         self._workspace = workdir                            # resolved workspace (AgyProcess.workspace)
         capture = process._capture or os.path.join(workdir, "agy-capture.jsonl")
         self._capture_path = capture        # for AgyProcess.conversation_id (conversation_id event)
+        account = getattr(process, "_account", None)
+        isolated_auth = getattr(process, "_isolated_auth", None)
         self._app_data_dir = _conv.resolve_app_data_dir(
-            getattr(process, "_app_data_dir", None), home=process._data_dir)
+            getattr(process, "_app_data_dir", None), home=process._data_dir, account=account)
         self._home, env_ovr = _conv.scope_for_run(
             workdir, process._data_dir,
             trust=process._trust,
-            app_data_dir=self._app_data_dir)     # dedicated/scoped store + workspace trust
-        # caller overlays (native diagnostics) + scoped-HOME override. The boot pipe fd is added by
-        # the base (WirePopen._launch) — the worker channel it owns.
-        extra = {**(process._extra_env or {}), **env_ovr}
+            app_data_dir=self._app_data_dir,
+            isolated_auth=isolated_auth,
+            account=account)                     # dedicated/scoped store + workspace trust
+        # store/auth isolation defaults + caller overlays; a scoped HOME always wins.
+        extra: dict[str, str | None] = {**env_ovr, **(process._extra_env or {})}
+        if "HOME" in env_ovr:
+            extra["HOME"] = env_ovr["HOME"]
         env = linked_env(capture=capture, extra_env=extra)
         agy_args = list(process._agy_args or ["--print", "agy-mp"])
         if (self._app_data_dir != _conv.GLOBAL_APP_DATA_DIR

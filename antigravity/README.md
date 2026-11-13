@@ -332,6 +332,22 @@ sugar. Both carry a `conversation_id` that `pyagy.resume(cid)`, `pyagy.continue_
 `pyagy.list_conversations()` and `pyagy.read_transcript(cid)` work with, as do
 `AgyProcess(conversation_id=)` and `AgyModel(multi_turn=True)`.
 
+- **Dedicated login and account switching:** upstream `agy` stores a single global OAuth token in the
+  OS D-Bus Secret Service keyring (`service="antigravity", user="gemini"` via `/run/user/<uid>/bus`) on
+  desktop sessions and falls back to `<app_data_dir>/antigravity-oauth-token` only when `SSH_*`,
+  container, or `WSL_INTEROP` detectors bypass the keyring (deleting that fallback file again whenever
+  desktop keyring access succeeds). To sign `pyagy` / `TaskSolver` into a separate Google account without
+  touching `~/.gemini/antigravity-cli/` or the OS keyring, run
+  `pixi run python -m pyagy.auth switch --oob` (consumer Antigravity OAuth via
+  `AGY_CDE_ENTERPRISE_AUTH=false`; pass `--enterprise` for GCP Cloud Code enterprise OAuth, omit `--oob`
+  for local browser redirect, or pass `--account <name>` / `PYAGY_ACCOUNT=<name>` to manage multiple
+  named stores under `~/.gemini/pyagy-<name>/`). Dedicated stores mark `.dedicated_auth`, unlink shared
+  auth/project/onboarding symlinks, and set `WSL_INTEROP=pyagy-isolated` so credentials live solely in
+  `<store>/antigravity-oauth-token` (`0600`). Inspect or manage stores with
+  `python -m pyagy.auth status`, `list --verify`, `login`, `logout`, or `shared` (returns a store to
+  sharing `~/.gemini/antigravity-cli/`). Programmatic callers can also pass `account=` and
+  `isolated_auth=` to `ask()`, `Session`, `AgyProcess`, `AgyModel`, or `PYAGY_ISOLATED_AUTH=1`, and
+  managed terminals accept `python -m tasksolver.terminal agy --agy-account <name> --agy-isolated-auth`.
 - **Ids** come from the `file_open` book, which reads the uuid out of the store path agy opens;
   without that event the newest `*.db` by mtime wins.
 - **Workspace trust** is on by default: agy refuses to start interactively in an untrusted

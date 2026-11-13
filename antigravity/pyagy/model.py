@@ -73,7 +73,8 @@ class AgyModel(CLIBackendModel[AgyResponse]):
     backend_label = "agy"
     command_label = "agy --print"
     generic_model_aliases = ("agy",)
-    no_output_hint = "Ensure agy is logged in (~/.gemini/antigravity-cli/) and reachable."
+    no_output_hint = ("Ensure agy is logged in (~/.gemini/antigravity-cli/ or `python -m pyagy.auth login`) "
+                      "and reachable.")
     # agy's file tool is read_file (view_file up to agy 1.2.x; it has no Read tool): naming the
     # wrong tool sent agents searching for the files with run_command
     vision_preamble = ("The visual inputs are saved as local image files. Open each one with the "
@@ -88,7 +89,8 @@ class AgyModel(CLIBackendModel[AgyResponse]):
                  skip_permissions: bool = False, timeout: float = 300,
                  conversation_id: str | None = None, continue_latest: bool = False,
                  multi_turn: bool = False, data_dir: str | None = None,
-                 app_data_dir: str | None = None,
+                 app_data_dir: str | None = None, account: str | None = None,
+                 isolated_auth: bool | None = None,
                  print_timeout: float | None = None, mcp_servers: MCPServers | None = None,
                  chat: bool = False, effort: str | None = None, system_prompt: str | None = None,
                  extra_flags: Sequence[str] | None = None,
@@ -127,6 +129,8 @@ class AgyModel(CLIBackendModel[AgyResponse]):
         self.multi_turn = bool(multi_turn or conversation_id or continue_latest)
         self.data_dir = data_dir              # scope the conversation store to a project repo
         self.app_data_dir = app_data_dir      # store subdir under ~/.gemini (default: pyagy)
+        self.account = account                # named pyagy account profile (e.g. 'alt' -> pyagy-alt)
+        self.isolated_auth = isolated_auth    # dedicated file-backed auth vs shared global login
 
     def _sample(self, payload: CLIPayload, n_choices: int) -> list[AgyResponse]:
         return self._client_ask_many(string_prompt(payload), n_choices, **self._call_kwargs(payload))
@@ -153,6 +157,10 @@ class AgyModel(CLIBackendModel[AgyResponse]):
         }
         if self.app_data_dir is not None:
             kw["app_data_dir"] = self.app_data_dir
+        if self.account is not None:
+            kw["account"] = self.account
+        if self.isolated_auth is not None:
+            kw["isolated_auth"] = self.isolated_auth
         if flags:
             kw["extra_flags"] = flags
         if env:
@@ -221,6 +229,10 @@ class AgyModel(CLIBackendModel[AgyResponse]):
                   "data_dir": self.data_dir, "mcp_servers": self.mcp_servers}
         if self.app_data_dir is not None:
             kw["app_data_dir"] = self.app_data_dir
+        if self.account is not None:
+            kw["account"] = self.account
+        if self.isolated_auth is not None:
+            kw["isolated_auth"] = self.isolated_auth
         if self.conversation_id:
             kw["conversation_id"] = self.conversation_id
         elif self.continue_latest:

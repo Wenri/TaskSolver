@@ -231,7 +231,9 @@ is submitted during launch. `--workspace PATH`, `--model NAME` and `--capture PA
 configure the launch (`--capture` keeps the native JSONL capture in that file; several captured
 screens write `PATH` with the screen name before its suffix, e.g. `run-agy.jsonl`); a model name must be understood by every selected backend.
 Terminal backends are exactly `agy`, `codex`, `claude` and `kimi`; model names are
-forwarded unchanged, without `Agent`'s model-id alias expansion.
+forwarded unchanged, without `Agent`'s model-id alias expansion. For `agy` screens,
+`--agy-app-data-dir`, `--agy-account`, and `--agy-isolated-auth` select the conversation
+store and optional keyring-isolated Google account (`~/.gemini/pyagy/` by default).
 
 For application-controlled lifetimes, use the shared manager directly:
 
@@ -430,6 +432,8 @@ cleanup — don't run parallel sessions that way.
 for the main agent or a specific subagent's next model invocation. It does not wake an idle
 agent or replace the provider's system prompt. See [system notifications](antigravity/README.md#system-notifications)
 for capture, delivery status, and examples.
+
+By default, `pyagy` stores programmatic conversations under `~/.gemini/pyagy/` (`--app_data_dir=pyagy`) while sharing `~/.gemini/config/` and login with `~/.gemini/antigravity-cli/`. To run `TaskSolver` / `pyagy` under a dedicated Google account (e.g. separate experiment quota) without touching `~/.gemini/antigravity-cli/` or the OS D-Bus Secret Service keyring, use `python -m pyagy.auth switch --oob` (or `--account <name>` for additional profiles under `~/.gemini/pyagy-<name>/`); see [Sessions](antigravity/README.md#sessions).
 
 ## License
 
