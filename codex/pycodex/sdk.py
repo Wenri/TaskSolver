@@ -201,7 +201,7 @@ class SDKSession:
             launch_args_override=(sys.executable, "-m", "pycodex.sdk_process",
                                   binary, *flags, "app-server", "--listen", "stdio://"),
             client_name="tasksolver", client_title="TaskSolver Codex SDK",
-            client_version="0.167.2")
+            client_version="0.169.0")
         self._client = _sdk_client(config)
 
     def _start(self) -> None:

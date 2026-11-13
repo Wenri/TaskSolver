@@ -6,8 +6,10 @@ import {
 
 import { headersToRecord, parseRetryAfterMs } from '#/llm/protocol/kit/http';
 import {
+  isTransientHttpStatus,
   toLlmStatusErrorMessage,
   toLlmStreamErrorMessage,
+  isUnreachableConnection,
   toLlmTransportErrorMessage,
 } from '#/llm/protocol/rules/status';
 import type { LlmRemoteErrorMessage } from '#/llm/response';
@@ -231,7 +233,7 @@ export function decodeError(error: unknown, source?: 'stream'): LlmRemoteErrorMe
     return { kind: 'timeout', message: error.message, retryable: true };
   }
   if (error instanceof RawAnthropicSDKConnectionError) {
-    return { kind: 'connection', message: error.message, retryable: true };
+    return { kind: 'connection', message: error.message, retryable: !isUnreachableConnection(error) };
   }
   if (error instanceof RawAnthropicSDKAPIError) {
     const body = error.error as
@@ -263,13 +265,28 @@ export function decodeError(error: unknown, source?: 'stream'): LlmRemoteErrorMe
       return { kind: 'context_overflow', message, statusCode, retryable: false, ...statusInfo };
     }
     if (statusCode !== undefined) {
-      return toLlmStatusErrorMessage({ statusCode, message, ...statusInfo });
+      return toLlmStatusErrorMessage({
+        statusCode,
+        message,
+        retryable: isTransientHttpStatus(statusCode),
+        ...statusInfo,
+      });
     }
     if (body !== undefined) {
-      return toLlmStreamErrorMessage({ businessCode: error.status, message, ...statusInfo });
+      return toLlmStreamErrorMessage({
+        businessCode: error.status,
+        message,
+        retryable: error.status === undefined || isTransientHttpStatus(error.status),
+        ...statusInfo,
+      });
     }
     if (source === 'stream') {
-      return toLlmStreamErrorMessage({ businessCode: error.status, message: '', ...statusInfo });
+      return toLlmStreamErrorMessage({
+        businessCode: error.status,
+        message: '',
+        retryable: error.status === undefined || isTransientHttpStatus(error.status),
+        ...statusInfo,
+      });
     }
   }
   if (error instanceof Error) {

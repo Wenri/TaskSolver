@@ -21,7 +21,7 @@ import type {
   ThinkingDeltaEvent,
   ToolCallDeltaEvent,
   ToolCallStartedEvent,
-  ToolProgressEvent,
+  ToolUpdatedEvent,
   ToolResultEvent,
   TurnEndedEvent,
   TurnStartedEvent,
@@ -73,6 +73,7 @@ import { errorReportHintLine } from '../constant/feedback';
 import { formatStepDebugTiming } from '#/utils/usage/debug-timing';
 import { isTurnPromptEvent, isTurnSteerEvent, isUserSteerOrigin } from '../utils/steer-delivery';
 import { nextTranscriptId } from '../utils/transcript-id';
+import { isToolCallId } from '../utils/turn-timeline';
 import type { BtwPanelController } from './btw-panel';
 import { isPluginMcpToolName, PluginUpdateNotifier } from './plugin-update-notifier';
 import type { StreamingUIController } from './streaming-ui';
@@ -194,6 +195,7 @@ export class SessionEventHandler {
   private queuedGoalPromotionInFlight = false;
   private queuedGoalPromotionTimer: ReturnType<typeof setTimeout> | undefined;
   private stepRetryAttemptTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly toolStatuses = new Map<string, string>();
 
   resetRuntimeState(): void {
     this.backgroundTasks.clear();
@@ -201,6 +203,7 @@ export class SessionEventHandler {
     this.backgroundTaskTerminalEntries.clear();
     this.subAgentEventHandler.resetRuntimeState();
     this.notifications.reset();
+    this.toolStatuses.clear();
     this.seenSkillActivationIds.clear();
     this.renderedPluginCommandActivationIds.clear();
     this.renderedMcpServerStatusKeys.clear();
@@ -243,8 +246,8 @@ export class SessionEventHandler {
     host.sessionEventUnsubscribe = session.onEvent((event) => {
       if (host.aborted) return;
       if (event.sessionId !== sessionId) return;
-      if (event.type === 'tool.progress') {
-        mcpOAuthOpener.handleToolProgress(event);
+      if (event.type === 'tool.updated') {
+        mcpOAuthOpener.handleToolUpdated(event);
       }
       this.handleEvent(event, sendQueued);
     });
@@ -316,7 +319,7 @@ export class SessionEventHandler {
       case 'turn.step.interrupted': this.handleStepInterrupted(event); break;
       case 'turn.step.completed': this.handleStepCompleted(event); break;
       case 'turn.step.retrying': this.handleStepRetrying(event); break;
-      case 'tool.progress': this.handleToolProgress(event); break;
+      case 'tool.updated': this.handleToolUpdated(event); break;
       case 'shell.output': this.host.handleShellOutput(event); break;
       case 'shell.started': this.host.handleShellStarted(event); break;
       case 'assistant.delta': this.handleAssistantDelta(event); break;
@@ -368,6 +371,7 @@ export class SessionEventHandler {
   // ---------------------------------------------------------------------------
 
   private handleTurnBegin(event: TurnStartedEvent): void {
+    this.host.streamingUI.timeline.turnStarted();
     this.host.acknowledgeSteerTurnStarted?.(event.promptId);
     this.host.handleTurnStarted?.(event);
     this.currentTurnHasAssistantText = false;
@@ -422,6 +426,7 @@ export class SessionEventHandler {
   }
 
   private handleTurnEnd(event: TurnEndedEvent, sendQueued: (item: QueuedMessage) => void): void {
+    this.host.streamingUI.timeline.turnEnded(event.reason === 'completed' ? 'completed' : 'stopped');
     this.host.handleTurnEnded?.(event);
     this.host.streamingUI.flushNow();
     this.clearStepRetry();
@@ -464,6 +469,7 @@ export class SessionEventHandler {
   }
 
   private handleStepBegin(event: TurnStepStartedEvent): void {
+    this.host.streamingUI.timeline.abandonUnstarted();
     this.host.streamingUI.flushNow();
     this.host.streamingUI.setStep(event.step);
     this.host.streamingUI.resetToolUi();
@@ -480,6 +486,7 @@ export class SessionEventHandler {
   }
 
   private handleStepCompleted(event: TurnStepCompletedEvent): void {
+    this.host.streamingUI.timeline.abandonUnstarted();
     this.host.streamingUI.flushNow();
     this.clearStepRetry();
     this.host.recordSessionActivity();
@@ -511,6 +518,7 @@ export class SessionEventHandler {
   }
 
   private handleStepRetrying(event: TurnStepRetryingEvent): void {
+    this.host.streamingUI.timeline.abandonUnstarted();
     // The failure may arrive mid-stream, after thinking/assistant deltas have
     // parked the pane in `thinking`/`composing` — drive it back to waiting so
     // the retry label and detail actually render during the backoff.
@@ -578,6 +586,7 @@ export class SessionEventHandler {
   }
 
   private handleStepInterrupted(event: TurnStepInterruptedEvent): void {
+    this.host.streamingUI.timeline.abandonUnstarted();
     this.host.streamingUI.flushNow();
     this.clearStepRetry();
     this.host.streamingUI.resetToolUi();
@@ -611,6 +620,7 @@ export class SessionEventHandler {
     // text), leaving a blank, spinner-less gap until the first real text/tool
     // token arrives. Keep the moon up until actual thinking text shows up.
     if (event.delta.trim().length === 0 && !streamingUI.hasThinkingDraft()) return;
+    streamingUI.timeline.thinkingDelta(event.delta);
     streamingUI.appendThinkingDelta(event.delta);
     this.host.patchLivePane({ mode: 'idle' });
     if (state.appState.streamingPhase !== 'thinking') {
@@ -621,6 +631,7 @@ export class SessionEventHandler {
 
   private handleAssistantDelta(event: AssistantDeltaEvent): void {
     const { state, streamingUI } = this.host;
+    streamingUI.timeline.textDelta();
     if (streamingUI.hasThinkingDraft()) {
       streamingUI.flushThinkingToTranscript('idle');
     }
@@ -643,6 +654,7 @@ export class SessionEventHandler {
   }
 
   private handleHookResult(event: HookResultEvent): void {
+    this.host.streamingUI.timeline.outputEnded();
     this.host.streamingUI.flushNow();
     if (this.host.streamingUI.hasThinkingDraft()) {
       this.host.streamingUI.flushThinkingToTranscript('idle');
@@ -669,6 +681,7 @@ export class SessionEventHandler {
 
   private handleToolCall(event: ToolCallStartedEvent): void {
     const { streamingUI } = this.host;
+    if (isToolCallId(event.toolCallId)) streamingUI.timeline.callStarted(event.toolCallId, event.name);
     this.host.surveyController.notifyToolCallStarted(event.toolCallId, event.name);
     streamingUI.flushNow();
     const { turnId, step } = streamingUI.getTurnContext();
@@ -693,8 +706,9 @@ export class SessionEventHandler {
   }
 
   private handleToolCallDelta(event: ToolCallDeltaEvent): void {
-    if (event.toolCallId.length === 0) return;
+    if (!isToolCallId(event.toolCallId)) return;
     const { state, streamingUI } = this.host;
+    streamingUI.timeline.callDelta(event.toolCallId, event.name);
     streamingUI.accumulateToolCallDelta(event.toolCallId, event.name, event.argumentsPart);
     const preview = streamingUI.getStreamingToolCallPreview(event.toolCallId);
     if (
@@ -717,27 +731,28 @@ export class SessionEventHandler {
     streamingUI.scheduleFlush();
   }
 
-  private handleToolProgress(event: ToolProgressEvent): void {
+  private handleToolUpdated(event: ToolUpdatedEvent): void {
     // Input queued before the wait began would otherwise sit until the wait
     // returns; steering it now ends the wait so the model reads it first.
-    if (this.host.streamingUI.markWaitForRunning(event.toolCallId)) {
+    if (event.fields['wait'] !== undefined && this.host.streamingUI.markWaitForRunning(event.toolCallId)) {
       this.host.steerQueuedMessagesIntoRunningTurn();
     }
-    const text = event.update.text;
-    if (text === undefined || text.length === 0) return;
     const tc = this.host.streamingUI.getToolComponent(event.toolCallId);
     if (tc === undefined) return;
-    if (event.update.kind === 'status') {
-      tc.appendProgress(text, { replace: event.update.replace === true });
+    if (event.output !== undefined) {
+      if (event.output.text.length > 0) tc.appendLiveOutput(event.output.text);
       return;
     }
-    if (event.update.kind === 'stdout' || event.update.kind === 'stderr') {
-      tc.appendLiveOutput(text);
-    }
+    const status = event.fields['status'];
+    if (typeof status !== 'string' || status.length === 0 || this.toolStatuses.get(event.toolCallId) === status) return;
+    this.toolStatuses.set(event.toolCallId, status);
+    tc.appendProgress(status, { replace: event.fields['statusReplace'] === true });
   }
 
   private handleToolResult(event: ToolResultEvent): void {
     const { streamingUI } = this.host;
+    if (isToolCallId(event.toolCallId)) streamingUI.timeline.callResult(event.toolCallId);
+    this.toolStatuses.delete(event.toolCallId);
     this.host.surveyController.notifyToolCallEnded(event.toolCallId);
     streamingUI.flushNow();
     this.clearStepRetry();
@@ -864,7 +879,7 @@ export class SessionEventHandler {
     } else if (change.kind === 'lifecycle') {
       this.pendingModelBlockedFallback = undefined;
     }
-    const marker = buildGoalMarker(change, state.toolOutputExpanded, change.actor);
+    const marker = buildGoalMarker(change, state.transcriptContainer.toolOutputExpanded, change.actor);
     if (marker !== null) {
       state.transcriptContainer.addChild(marker);
       state.ui.requestRender();
@@ -876,7 +891,7 @@ export class SessionEventHandler {
     if (change === undefined) return;
     this.pendingModelBlockedFallback = undefined;
     const { state } = this.host;
-    const marker = buildGoalMarker(change, state.toolOutputExpanded, 'model');
+    const marker = buildGoalMarker(change, state.transcriptContainer.toolOutputExpanded, 'model');
     if (marker !== null) {
       state.transcriptContainer.addChild(marker);
       state.ui.requestRender();
@@ -1136,7 +1151,7 @@ export class SessionEventHandler {
     if (idx >= 0) {
       // In-place replacement is picked up by the container's ref-checked
       // render cache; a tree-wide invalidate is unnecessary (and costly).
-      children[idx] = status;
+      this.host.state.transcriptContainer.replaceChild(spinner, status);
     } else {
       state.transcriptContainer.addChild(status);
     }

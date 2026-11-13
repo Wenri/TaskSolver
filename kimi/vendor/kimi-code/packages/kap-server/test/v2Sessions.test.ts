@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,6 +6,7 @@ import { join } from 'node:path';
 import {
   Error2,
   ErrorCodes,
+  IEnvironmentService,
   ISessionIndex,
   IEventService,
   IWorkspaceAliases,
@@ -21,6 +23,9 @@ import {
   type FsPullRequest,
   IGitService,
 } from '@moonshot-ai/agent-core-v2/app/git/git';
+import { FakeEnvironment } from '@moonshot-ai/agent-core-v2/environment/fakeEnvironment';
+import { HostFileSystem } from '@moonshot-ai/agent-core-v2/os/backends/node-local/hostFsService';
+import { HostProcessService } from '@moonshot-ai/agent-core-v2/os/backends/node-local/hostProcessService';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type RunningServer, startServer } from '../src/start';
@@ -225,7 +230,7 @@ describe('server /api/v2/sessions', () => {
     gitState.responses = new Map();
   });
 
-  async function bootSeeded(): Promise<void> {
+  async function bootSeeded(summaries: SessionSummary[] = SUMMARIES): Promise<void> {
     server = await startServer({
       hostIdentity: TEST_HOST_IDENTITY,
       host: '127.0.0.1',
@@ -233,7 +238,7 @@ describe('server /api/v2/sessions', () => {
       homeDir: home,
       logLevel: 'silent',
       seeds: [
-        [ISessionIndex, stubSessionIndex(SUMMARIES)],
+        [ISessionIndex, stubSessionIndex(summaries)],
         [IWorkspaceService, workspaceStub],
         [IGitService, gitStub],
       ],
@@ -632,6 +637,157 @@ describe('server /api/v2/sessions', () => {
     await getData('?include=git');
     expect(gitState.calls.toSorted()).toEqual(['/repo/a', '/repo/b']);
   });
+
+  it('routes session git by environment even when local and remote cwds collide', async () => {
+    const remoteRepo = await mkdtemp(join(tmpdir(), 'kimi-v2-session-git-remote-'));
+    const remoteSummary: SessionSummary = {
+      id: 'remote-git',
+      workspaceId: WS_A,
+      cwd: '/repo/remote-local',
+      environmentId: 'dev-box',
+      environmentCwd: remoteRepo,
+      createdAt: 6_000,
+      updatedAt: 6_000,
+      archived: false,
+    };
+    const localShadow: SessionSummary = {
+      id: 'local-shadow',
+      workspaceId: WS_A,
+      cwd: remoteRepo,
+      createdAt: 5_500,
+      updatedAt: 5_500,
+      archived: false,
+    };
+    try {
+      execFileSync('git', ['init'], { cwd: remoteRepo, stdio: ['ignore', 'pipe', 'pipe'] });
+      const remoteBranch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], {
+        cwd: remoteRepo,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+      gitState.responses.set(remoteRepo, { branch: 'local-shadow', pullRequest: null });
+      await (server as RunningServer).close();
+      await bootSeeded([...SUMMARIES, localShadow, remoteSummary]);
+      const registration = (server as RunningServer).core.accessor.get(IEnvironmentService).register(
+        Object.assign(
+          new FakeEnvironment(
+            { environmentId: 'dev-box', generation: 'remote-generation' },
+            { capabilities: ['fs', 'process'] },
+          ),
+          { fs: new HostFileSystem(), process: new HostProcessService() },
+        ),
+      );
+      try {
+        const page = await getData('?include=git');
+        const byId = new Map(page.items.map((item) => [item.id, item]));
+        expect(byId.get('remote-git')?.git?.branch).toBe(remoteBranch);
+        expect(byId.get('local-shadow')?.git?.branch).toBe('local-shadow');
+        expect(gitState.calls.filter((cwd) => cwd === remoteRepo)).toHaveLength(1);
+
+        await getData('?include=git');
+        expect(gitState.calls.filter((cwd) => cwd === remoteRepo)).toHaveLength(1);
+      } finally {
+        await registration.remove();
+      }
+    } finally {
+      await rm(remoteRepo, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it('does not cache remote git while its environment is not ready', async () => {
+    const remoteRepo = await mkdtemp(join(tmpdir(), 'kimi-v2-session-git-pending-'));
+    const remoteSummary: SessionSummary = {
+      id: 'remote-pending',
+      workspaceId: WS_A,
+      cwd: '/repo/remote-local',
+      environmentId: 'dev-box',
+      environmentCwd: remoteRepo,
+      createdAt: 6_000,
+      updatedAt: 6_000,
+      archived: false,
+    };
+    try {
+      execFileSync('git', ['init'], { cwd: remoteRepo, stdio: ['ignore', 'pipe', 'pipe'] });
+      const remoteBranch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], {
+        cwd: remoteRepo,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+      await (server as RunningServer).close();
+      await bootSeeded([...SUMMARIES, remoteSummary]);
+      const environment = new FakeEnvironment(
+        { environmentId: 'dev-box', generation: 'remote-generation' },
+        { capabilities: ['fs', 'process'], status: 'connecting' },
+      );
+      const registration = (server as RunningServer).core.accessor.get(IEnvironmentService).register(
+        Object.assign(environment, { fs: new HostFileSystem(), process: new HostProcessService() }),
+      );
+      try {
+        const pending = await getData('?include=git');
+        expect(pending.items.find((item) => item.id === 'remote-pending')?.git).toEqual({
+          branch: null,
+          pull_request: null,
+        });
+
+        environment.setStatus('ready');
+        const ready = await getData('?include=git');
+        expect(ready.items.find((item) => item.id === 'remote-pending')?.git?.branch).toBe(remoteBranch);
+      } finally {
+        await registration.remove();
+      }
+    } finally {
+      await rm(remoteRepo, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it('times out a stalled remote git lookup without starting a second one', async () => {
+    const remoteSummary: SessionSummary = {
+      id: 'remote-stalled',
+      workspaceId: WS_A,
+      cwd: '/repo/remote-local',
+      environmentId: 'dev-box',
+      environmentCwd: '/remote/stalled',
+      createdAt: 6_000,
+      updatedAt: 6_000,
+      archived: false,
+    };
+    let spawns = 0;
+    let release: (() => void) | undefined;
+    const released = new Promise<never>((_resolve, reject) => {
+      release = () => reject(new Error('released'));
+    });
+    released.catch(() => {});
+    const stalledProcess = {
+      spawn: () => {
+        spawns += 1;
+        return released;
+      },
+    } as unknown as HostProcessService;
+    await (server as RunningServer).close();
+    await bootSeeded([...SUMMARIES, remoteSummary]);
+    const registration = (server as RunningServer).core.accessor.get(IEnvironmentService).register(
+      Object.assign(
+        new FakeEnvironment(
+          { environmentId: 'dev-box', generation: 'remote-generation' },
+          { capabilities: ['fs', 'process'] },
+        ),
+        { fs: new HostFileSystem(), process: stalledProcess },
+      ),
+    );
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const page = await getData('?include=git');
+        expect(page.items.find((item) => item.id === 'remote-stalled')?.git).toEqual({
+          branch: null,
+          pull_request: null,
+        });
+      }
+      expect(spawns).toBe(1);
+    } finally {
+      release?.();
+      await registration.remove();
+    }
+  }, 20000);
 
   it('degrades non-git cwds to null fields without failing the request', async () => {
     await (server as RunningServer).close();
@@ -1063,7 +1219,7 @@ describe('server /api/v2/sessions batch archive/restore', () => {
     expect(await indexArchived(cold.id)).toBe(true);
   });
 
-  it('restores a cold session without materializing it and publishes no archived event', async () => {
+  it('restores a cold session without materializing it and publishes a restored event', async () => {
     const created = await createSession();
     await closeSessionById(core(), created.id);
     await postBatch('/api/v2/sessions:archive', { ids: [created.id] });
@@ -1071,8 +1227,14 @@ describe('server /api/v2/sessions batch archive/restore', () => {
 
     const { events, dispose } = collectEvents();
     const before = await readStateJson(created.workspace_id, created.id);
+    const archivedWhenAnnounced: Promise<boolean | undefined>[] = [];
+    const announced = core().get(IEventService).subscribe((event) => {
+      if (event.type === 'event.session.restored') archivedWhenAnnounced.push(indexArchived(created.id));
+    });
 
     const body = await postBatch('/api/v2/sessions:restore', { ids: [created.id] });
+    announced.dispose();
+    expect(await Promise.all(archivedWhenAnnounced)).toEqual([false]);
     expect(body.code).toBe(0);
     expect(body.data?.results).toEqual([{ id: created.id, ok: true }]);
 
@@ -1086,6 +1248,16 @@ describe('server /api/v2/sessions batch archive/restore', () => {
     expect(await indexArchived(created.id)).toBe(false);
     expect(await listedIds()).toEqual([created.id]);
     expect(events.filter((event) => event.type === 'event.session.archived')).toEqual([]);
+    expect(
+      events
+        .filter((event) => event.type === 'event.session.restored')
+        .map((event) => (event as { readonly payload?: unknown }).payload),
+    ).toEqual([{ sessionId: created.id, workspaceId: created.workspace_id }]);
+
+    const { events: again, dispose: disposeAgain } = collectEvents();
+    await postBatch('/api/v2/sessions:restore', { ids: [created.id] });
+    expect(again.filter((event) => event.type === 'event.session.restored')).toEqual([]);
+    disposeAgain();
     dispose();
   });
 
@@ -1093,13 +1265,26 @@ describe('server /api/v2/sessions batch archive/restore', () => {
     const created = await createSession();
     await postBatch('/api/v2/sessions:archive', { ids: [created.id] });
     expect(await resumeSessionById(core(), created.id)).toBeDefined();
+    const { events, dispose } = collectEvents();
+    const archivedWhenAnnounced: Promise<boolean | undefined>[] = [];
+    const announced = core().get(IEventService).subscribe((event) => {
+      if (event.type === 'event.session.restored') archivedWhenAnnounced.push(indexArchived(created.id));
+    });
 
     const body = await postBatch('/api/v2/sessions:restore', { ids: [created.id] });
+    announced.dispose();
+    expect(await Promise.all(archivedWhenAnnounced)).toEqual([false]);
     expect(body.code).toBe(0);
     expect(body.data?.results).toEqual([{ id: created.id, ok: true }]);
 
     expect(getLiveSessionById(core(), created.id)).toBeDefined();
     expect(await indexArchived(created.id)).toBe(false);
+    expect(
+      events
+        .filter((event) => event.type === 'event.session.restored')
+        .map((event) => (event as { readonly payload?: unknown }).payload),
+    ).toEqual([{ sessionId: created.id, workspaceId: created.workspace_id }]);
+    dispose();
   });
 
   it('validates the batch body: empty, missing, over the unique cap, duplicates', async () => {

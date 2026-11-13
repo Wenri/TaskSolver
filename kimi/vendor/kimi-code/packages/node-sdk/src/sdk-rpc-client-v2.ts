@@ -143,6 +143,10 @@ import {
   isWorkDirKey,
   workspaceRootKey,
 } from '@moonshot-ai/agent-core-v2/_base/utils/workdir-slug';
+import { ContextClear } from '@moonshot-ai/agent-core-v2/agent/contextMemory/contextEvents';
+import { IEventDispatcher } from '@moonshot-ai/agent-core-v2/state/eventDispatcher';
+import { historyEntryFromContext } from '@moonshot-ai/agent-core-v2/agent/loop/history';
+import { agentTaskInfo } from '@moonshot-ai/agent-core-v2/agent/task/handler';
 import { McpConnectionManager } from '@moonshot-ai/agent-core-v2/mcpCore/connection-manager';
 import { ITowerRateLimitService } from '@moonshot-ai/agent-core-v2/features/tower/towerRateLimit';
 import { readTowerStatusSummary } from '@moonshot-ai/agent-core-v2/features/tower/tools/status/statusReader';
@@ -164,7 +168,6 @@ import {
   reloadOnStale,
   agentContextOf,
   IAgentChangeNotifierService,
-  IAgentContextMemoryService,
   IAgentConversationUndoService,
   IAgentCronService,
   IAgentFullCompactionService,
@@ -177,12 +180,12 @@ import {
   IAgentPermissionModeService,
   IAgentPermissionRulesService,
   IAgentPluginCommandService,
-  IAgentProfileService,
   IAgentReminderService,
   IAgentSkillService,
   IAgentSwarmService,
   IAgentTaskService,
   ISessionTokenCountingService,
+  IAgentToolExecutorService,
   IAgentToolPolicyService,
   IAgentToolRegistryService,
   type HostUiCapability,
@@ -783,7 +786,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const parsed = fsSuggestRequestSchema.safeParse({
       query: input.query,
       limit: input.limit ?? 50,
-      follow_gitignore: true,
+      follow_gitignore: input.followGitignore ?? true,
       show_hidden: false,
     });
     if (!parsed.success) {
@@ -1192,12 +1195,16 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     action: () => Promise<T>,
   ): Promise<T> {
     if (this.liveSession(sessionId) !== undefined) return action();
-    const handle = await resumeSessionById(this.engineAccessor, sessionId);
-    if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(sessionId);
     try {
-      return await action();
-    } finally {
-      await closeSessionById(this.engineAccessor, sessionId);
+      const handle = await resumeSessionById(this.engineAccessor, sessionId);
+      if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(sessionId);
+      try {
+        return await action();
+      } finally {
+        await closeSessionById(this.engineAccessor, sessionId);
+      }
+    } catch (error) {
+      throw restateEngineError(error);
     }
   }
 
@@ -1365,7 +1372,8 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
             'sub',
             replay.replayTurnLimit,
           );
-        } catch {
+        } catch (error) {
+          if (isError2(error) && error.code === ErrorCodes.WIRE_VERSION_TOO_LOW) throw error;
           // Best-effort, same as v1: a subagent whose restore fails is left
           // out of the map (v1 logs a warning and continues with the rest).
         }
@@ -1410,7 +1418,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       facade.getTasks({ activeOnly: false }),
       earlyWireFold?.then((early) => early ?? foldWire()) ?? foldWire(),
     ]);
-    const profile = agent.accessor.get(IAgentProfileService).data();
+    const profile = agent.accessor.get(IAgentLoopService).data();
     const toolPolicy = agent.accessor.get(IAgentToolPolicyService);
     const tools = agent.accessor.get(IAgentToolRegistryService).list().map((tool) => ({
       name: tool.name,
@@ -1773,22 +1781,29 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     // session scope is materialized. Unlike v1, the v2 engine has no caller
     // `mcpServers` channel on create/resume (caller
     // servers are an ACP-side concern to be designed separately).
-    return this.runSessionAccess(input.id, async () => {
-      // The main agent's fold depends only on the persisted wire, never on
-      // the restore outcome, so it starts as soon as the wire path is known
-      // and overlaps the engine's materialization.
-      const mainWireFold = this.startMainWireFold(input.id, input.replayTurnLimit);
-      const handle = await resumeSessionById(this.engineAccessor, input.id, {
-        additionalDirs: input.additionalDirs,
+    let wasLive = false;
+    try {
+      return await this.runSessionAccess(input.id, async () => {
+        wasLive = this.liveSession(input.id) !== undefined;
+        // The main agent's fold depends only on the persisted wire, never on
+        // the restore outcome, so it starts as soon as the wire path is known
+        // and overlaps the engine's materialization.
+        const mainWireFold = this.startMainWireFold(input.id, input.replayTurnLimit);
+        const handle = await resumeSessionById(this.engineAccessor, input.id, {
+          additionalDirs: input.additionalDirs,
+        });
+        if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
+        this.wireSession(handle);
+        return this.resumedSessionSummary(handle, {
+          includeSubagents: input.includeSubagents,
+          replayTurnLimit: input.replayTurnLimit,
+          mainWireFold,
+        });
       });
-      if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
-      this.wireSession(handle);
-      return this.resumedSessionSummary(handle, {
-        includeSubagents: input.includeSubagents,
-        replayTurnLimit: input.replayTurnLimit,
-        mainWireFold,
-      });
-    });
+    } catch (error) {
+      if (!wasLive) await closeSessionById(this.engineAccessor, input.id).catch(() => {});
+      throw restateEngineError(error);
+    }
   }
 
   /**
@@ -2069,10 +2084,11 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     if (agent === undefined) {
       throw new KimiError(ErrorCodes.AGENT_NOT_FOUND, 'Main agent was not found');
     }
-    const profile = agent.accessor.get(IAgentProfileService);
+    const profile = agent.accessor.get(IAgentLoopService);
+    const loop = agent.accessor.get(IAgentLoopService);
     if (binding !== undefined || profile.data().profileName === undefined) {
       try {
-        await profile.bind({
+        await loop.bindProfile({
           profile: DEFAULT_AGENT_PROFILE_NAME,
           model: binding?.model,
           thinking: binding?.thinking,
@@ -2125,7 +2141,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * Through the agent scope (`IAgentProfileService.setThinking`) — no klient
+   * Through the agent scope (`IAgentLoopService.setThinking`) — no klient
    * facade exists. Same registry-driven strictness as v1's
    * `setThinkingEffort`: an unlisted effort on a strict-thinking model
    * rejects with `model.config_invalid` and the same message on both
@@ -2133,7 +2149,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   override async setThinking(input: SetSessionThinkingRpcInput): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
-    agent.accessor.get(IAgentProfileService).setThinking(input.effort);
+    agent.accessor.get(IAgentLoopService).setThinking(input.effort);
   }
 
   override async setPermission(input: SetSessionPermissionRpcInput): Promise<void> {
@@ -2256,7 +2272,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       facade.getPlan(),
       facade.getUsage(),
     ]);
-    const profile = agent.accessor.get(IAgentProfileService).data();
+    const profile = agent.accessor.get(IAgentLoopService).data();
     const capability = profile.modelCapabilities;
     const maxContextTokens = capability.max_input_tokens ?? capability.max_context_tokens;
     const contextTokens = context.tokenCount;
@@ -2353,21 +2369,29 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * Through the agent scope (`IAgentContextMemoryService.clear`) — no klient
+   * Through the agent scope (`IAgentLoopService.replaceHistory`) — no klient
    * facade exists. v1's `context.clear` has no busy check and does not touch
-   * queued or running prompts; the memory-service clear matches that exactly
+   * queued or running prompts; the Loop clear matches that exactly
    * (the prompt service's own `clear` would additionally abort prompts).
    */
   override async clearContext(input: SessionIdRpcInput): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
-    agent.accessor.get(IAgentContextMemoryService).clear();
+    const loop = agent.accessor.get(IAgentLoopService);
+    if (loop.history().length === 0) return;
+    const accepted = loop.replaceHistory([], 'clear', () => {
+      void agent.accessor.get(IEventDispatcher).dispatch(new ContextClear({ agentId: agentContextOf(agent).agentId }));
+      agent.accessor.get(ISessionTokenCountingService).rebase(agentContextOf(agent), {
+        length: 0,
+        tokens: 0,
+        measured: true,
+      });
+    });
+    if (!accepted) throw new KimiError(ErrorCodes.INTERNAL, 'Loop rejected cleared history');
   }
 
   /**
-   * No v2 engine capability exists for import-context (nothing under
-   * agent-core-v2 builds this message), so the SDK composes v1's exact
-   * behavior over v2 primitives: the same busy rejection
-   * (`turn.agent_busy`), the byte-identical import message and validations
+   * The SDK composes v1's exact behavior over Loop primitives: the same busy
+   * rejection (`turn.agent_busy`), the byte-identical import message and validations
    * (`src/v2/import-context.ts`), the same overflow gate, then the same wire
    * `context.append_message` Op v1 persists. Known gap: v1 also adopts the
    * post-import estimate as its reported token count, while v2's reported
@@ -2386,7 +2410,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       );
     }
     const message = buildImportContextMessage(input.content, input.source);
-    const capability = agent.accessor.get(IAgentProfileService).data().modelCapabilities;
+    const capability = agent.accessor.get(IAgentLoopService).data().modelCapabilities;
     const currentTokenCount = agent.accessor
       .get(ISessionTokenCountingService)
       .get(agentContextOf(agent)).size;
@@ -2395,11 +2419,13 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       currentTokenCount,
       capability.max_input_tokens ?? capability.max_context_tokens,
     );
-    agent.accessor.get(IAgentContextMemoryService).append(message);
+    const loop = agent.accessor.get(IAgentLoopService);
+    loop.remind(historyEntryFromContext(message));
+    loop.flushReminders();
   }
 
   /**
-   * Facade (`agentPromptService.submit`). The launch result (`{turn_id}`, or
+   * Facade (`agentLoopService.submit`). The launch result (`{turn_id}`, or
    * `undefined` when the prompt queued behind a running turn) is dropped —
    * v1's RPC returns void. The pre-provider surface matches v1: the metadata
    * update (title/lastPrompt) runs through the same shared helpers before the
@@ -2437,7 +2463,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * Facade (`agentPromptService.submitSteer`). Matches v1 on both paths: mid-turn
+   * Facade (`agentLoopService.notify`). Matches v1 on both paths: mid-turn
    * steers join the running turn, and an idle-session steer degrades to
    * launching a fresh turn (the enqueue launches it directly) while
    * title/lastPrompt are updated like a prompt's.
@@ -2492,7 +2518,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const agent = await this.agentScope(input.sessionId);
     await agent.accessor
       .get(IAgentSkillService)
-      .activate({ name: input.name, args: input.args });
+      .activate({ name: input.name, path: input.path, args: input.args });
   }
 
   /**
@@ -2544,7 +2570,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   override async getSessionWarnings(input: SessionIdRpcInput) {
     const agent = await this.agentScope(input.sessionId);
-    let warning = agent.accessor.get(IAgentProfileService).getAgentsMdWarning();
+    let warning = agent.accessor.get(IAgentLoopService).getAgentsMdWarning();
     if (warning === undefined) {
       const session = this.requireLiveSession(input.sessionId);
       const prepared = await prepareSystemPromptContext(
@@ -2632,7 +2658,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       active: agent.accessor.get(IAgentTowerService).isActive,
       cwd: agent.accessor.get(ISessionContext).cwd,
       agentId: MAIN_AGENT_ID,
-      tasks: agent.accessor.get(IAgentTaskService),
+      toolExecutor: agent.accessor.get(IAgentToolExecutorService),
       concurrency: () => agent.accessor.get(ITowerRateLimitService).snapshot(),
     });
   }
@@ -2759,7 +2785,10 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     input: SessionIdRpcInput & { taskId: string; reason?: string },
   ): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
-    await agent.accessor.get(IAgentTaskService).stop(input.taskId, input.reason);
+    const reason = input.reason?.trim();
+    await agent.accessor.get(IAgentToolExecutorService).handler(input.taskId)?.stop(
+      reason === '' ? undefined : reason,
+    );
   }
 
   /**
@@ -2772,9 +2801,10 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     input: SessionIdRpcInput & { taskId: string },
   ): Promise<BackgroundTaskInfo | undefined> {
     const agent = await this.agentScope(input.sessionId);
-    return agent.accessor.get(IAgentTaskService).detach(input.taskId) as
-      | BackgroundTaskInfo
-      | undefined;
+    const handler = agent.accessor.get(IAgentToolExecutorService).handler(input.taskId);
+    if (handler?.snapshot().fields.task === undefined) return undefined;
+    handler.detach();
+    return agentTaskInfo(handler) as BackgroundTaskInfo;
   }
 
   /**
@@ -2850,7 +2880,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const allWaiters: Promise<unknown>[] = [];
     while (Date.now() < deadline) {
       const batch: Promise<unknown>[] = [];
-      const suppressions: Promise<void>[] = [];
       let activeCount = 0;
       const agentLifecycle = session.accessor.get(IAgentLifecycleService);
       for (const agent of agentLifecycle.list()) {
@@ -2861,7 +2890,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
           activeCount++;
           if (seen.has(task.taskId)) continue;
           seen.add(task.taskId);
-          suppressions.push(tasks.suppressTerminalNotification(task.taskId));
           // A configured ceiling above the ~24.8-day timer ceiling overflows
           // a raw `setTimeout` into an immediate resolve — clamp here (the
           // engine's `wait` clamps too; this keeps the caller side correct
@@ -2873,7 +2901,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
           allWaiters.push(waiter);
         }
       }
-      if (suppressions.length > 0) await Promise.all(suppressions);
       if (activeCount === 0 || batch.length === 0) break;
       await Promise.all(batch);
     }

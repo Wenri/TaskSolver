@@ -1,7 +1,8 @@
 import {
+  IAgentFullCompactionService,
   IAgentGoalService,
   IAgentPermissionModeService,
-  IAgentProfileService,
+  IAgentLoopService,
   IAgentStateService,
   IAgentSwarmService,
   IAgentTodoService,
@@ -20,10 +21,11 @@ import type {
 import { readLegacyStatus } from '../../../services/legacyStatus/legacyStatus';
 
 export function readAgentState(handle: IAgentScopeHandle, running: boolean): AgentState {
-  const profile = optionalService(handle, IAgentProfileService);
+  const profile = optionalService(handle, IAgentLoopService);
   const model = profile?.getModel() ?? '';
   return {
     status: running ? 'running' : 'idle',
+    compacting: (optionalService(handle, IAgentFullCompactionService)?.compacting ?? null) !== null,
     model: text(model),
     thinking: model === '' ? undefined : text(profile?.getEffectiveThinkingLevel()),
     permission_mode: optionalService(handle, IAgentPermissionModeService)?.mode,

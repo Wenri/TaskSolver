@@ -62,11 +62,17 @@ export const sessionSchema = z.object({
 
 export type Session = z.infer<typeof sessionSchema>;
 
+export const creationOnlyProfileSchema = z
+  .never({ error: 'choose the agent profile with agent_config.profile when creating the session' })
+  .optional();
+
 export const sessionCreateSchema = z
   .object({
     title: z.string().min(1).optional(),
-    metadata: sessionMetadataSchema.optional(),
-    agent_config: sessionAgentConfigPartialSchema.optional(),
+    metadata: sessionMetadataSchema.partial().optional(),
+    agent_config: sessionAgentConfigPartialSchema
+      .extend({ profile: z.string().min(1).optional() })
+      .optional(),
     workspace_id: workspaceIdSchema.optional(),
     environment_id: z.string().min(1).optional(),
     environment_cwd: z.string().min(1).optional(),
@@ -77,6 +83,13 @@ export const sessionCreateSchema = z
         code: 'custom',
         message: 'environment_cwd requires environment_id',
         path: ['environment_cwd'],
+      });
+    }
+    if (value.agent_config?.tower_mode === true) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'tower_mode cannot be enabled while creating a session; enable it through the session profile afterwards',
+        path: ['agent_config', 'tower_mode'],
       });
     }
   });

@@ -189,10 +189,12 @@ class PermissionUpdate:
             if self.mode is not None:
                 result["mode"] = self.mode
 
-        elif self.type in ["addDirectories", "removeDirectories"]:
+        elif (
+            self.type in ["addDirectories", "removeDirectories"]
+            and self.directories is not None
+        ):
             # Directory variants require directories
-            if self.directories is not None:
-                result["directories"] = self.directories
+            result["directories"] = self.directories
 
         return result
 
@@ -2476,8 +2478,8 @@ class ClaudeAgentOptions:
     Without ``sandbox``, the value is passed as-is to the ``--settings`` CLI
     flag. When ``sandbox`` is also set, the settings are merged with the sandbox
     settings and passed as one JSON string: an inline string is parsed
-    directly, and a path is read from disk (a missing file is logged and only
-    the sandbox settings are passed).
+    directly, and a path is read from disk, relative to ``cwd`` when ``cwd`` is
+    set. Settings that cannot be loaded raise ``CLIConnectionError``.
 
     These are loaded into the "flag settings" layer, which has the highest
     priority among user-controlled settings.
@@ -2497,11 +2499,13 @@ class ClaudeAgentOptions:
     The transport sets ``CLAUDE_CODE_ENTRYPOINT`` (overridable here) and
     ``CLAUDE_AGENT_SDK_VERSION`` (not overridable), plus ``PWD`` when ``cwd``
     is set, ``CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`` when
-    ``enable_file_checkpointing`` is set, and W3C trace context from an active
-    OpenTelemetry span.
+    ``enable_file_checkpointing`` is set, W3C trace context from an active
+    OpenTelemetry span, and ``CLAUDE_AGENT_SDK_DERIVED_CLIENT_APP`` (not
+    overridable; see ``client_app``).
 
     SDK consumers can identify their app/library in the User-Agent header by
-    setting ``CLAUDE_AGENT_SDK_CLIENT_APP`` (e.g. ``"my-app/1.0.0"``).
+    setting ``CLAUDE_AGENT_SDK_CLIENT_APP`` (e.g. ``"my-app/1.0.0"``). The
+    ``client_app`` option sets this variable for you and wins over a value here.
     """
 
     extra_args: dict[str, str | None] = field(default_factory=dict)
@@ -2671,7 +2675,8 @@ class ClaudeAgentOptions:
     - ``"local"`` — Local settings (``.claude/settings.local.json``).
 
     When ``None``, all sources are loaded (matches CLI defaults). Pass ``[]``
-    to disable filesystem settings (SDK isolation mode). Must include
+    to disable filesystem settings (SDK isolation mode), for example when
+    ``cwd`` may be untrusted: project settings can run hooks. Must include
     ``"project"`` to load CLAUDE.md files.
     """
 
@@ -2803,6 +2808,22 @@ class ClaudeAgentOptions:
     pace tool use and wrap up before the limit. Sent as
     ``output_config.task_budget`` with the ``task-budgets-2026-03-13`` beta
     header.
+    """
+
+    client_app: str | None = None
+    """Your app/library identifier (e.g. ``"my-app/1.0.0"``), sent on requests
+    to the API. Sets ``CLAUDE_AGENT_SDK_CLIENT_APP`` for the Claude Code
+    subprocess. The value must be valid in an HTTP header: a character above
+    U+00FF stops every request.
+
+    When neither this nor ``CLAUDE_AGENT_SDK_CLIENT_APP`` is set, sessions signed
+    in with a Claude subscription send the name and version of the installed
+    distribution behind ``python -m <package>``, if it depends on this SDK. API
+    key, Bedrock, Vertex and Foundry sessions do not, and neither does a session
+    with telemetry turned off. Pass an empty string to send no identifier. No
+    released Claude Code qualifies yet: nothing is derived for a version that does
+    not keep the value from shell commands, hooks and MCP and LSP servers, or for
+    a CLI other than the bundled one, whose version is unknown until it starts.
     """
 
 

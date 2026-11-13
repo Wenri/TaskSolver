@@ -143,7 +143,6 @@ kimi
 | `KIMI_CODE_PASSWORD` | 为 `kimi web` 本地服务设置并列鉴权密码；绑到非本机地址时建议设置，见 [安全注意](../guides/web.md#安全注意) | 任意非空字符串；未设置时仅 token 有效 |
 | `KIMI_CODE_SESSION_IDLE_RECLAIM_MS` | `kimi web` 会话空闲多久（毫秒）后从内存卸载；之后访问会自动恢复（默认 `1800000`；`0` 表示不卸载） | 非负整数；非法值会立即失败 |
 | `KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT` | 会话关闭时是否保留后台任务，优先级高于 `config.toml`。默认会在退出时停止后台任务 | 真值：`1`/`true`/`yes`/`on`；假值：`0`/`false`/`no`/`off` |
-| `KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS` | 同时运行的后台任务及 Tower worker/reviewer 数量上限；覆盖 `[task]` 与 legacy `[background]` 的 `max_running_tasks`；均未配置时 Tower 默认上限为 256 | 正整数；非法值被忽略 |
 | `KIMI_CODE_BACKGROUND_BASH_TASK_TIMEOUT_S` | 后台 `Bash` 任务的默认超时（秒），也用于前台命令转入后台后的重新计时，优先级高于 `[task] bash_task_timeout_s`；`0` 表示无超时 | 非负整数；非法值被忽略 |
 | `KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE` | `kimi -p` 主轮次结束后仍有后台任务待处理时的行为，优先级高于 `[task] print_background_mode` | `exit`、`drain` 或 `steer`；非法值被忽略 |
 | `KIMI_CODE_BACKGROUND_PRINT_WAIT_CEILING_S` | print 模式 drain/steer 等待的时长上限（秒），优先级高于 `[task] print_wait_ceiling_s` | 正整数；非法值被忽略 |
@@ -190,6 +189,8 @@ kimi
 | `KIMI_MODEL_THINKING_KEEP` | 保留思考透传；`kimi` 以 `thinking.keep` 发送，`anthropic` 以 `clear_thinking_20251015` 编辑发送；覆盖 `[thinking] keep` | API 接受的值，如 `all`；传入关值（`false`/`0`/`no`/`off`/`none`/`null`）可禁用 |
 | `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS` | `openai` / `openai-responses` / `anthropic` 协议的 LLM 请求等待响应头（首字节）的最长时间（毫秒），替代 HTTP 客户端默认的 300 秒响应头超时——长时间非流式 thinking 可调大；未设置保持默认；SDK 自身的总请求超时（默认 10 分钟）仍对单次尝试生效；`google-genai` 不支持（其 SDK 没有 dispatcher 配置项）；SOCKS 代理下不生效（请求仍走代理） | 正整数，不超过 2147483647；非法值会使请求失败 |
 | `KIMI_CODE_NO_AUTO_UPDATE` | 完全禁用更新预检：不检查、不后台安装、不提示。同时兼容旧名 `KIMI_CLI_NO_AUTO_UPDATE` | 真值：`1`/`true`/`yes`/`on` |
+| `KIMI_CODE_CLIPBOARD_OSC52` | 复制时同时交给终端（OSC 52），远程连接下复制不生效时可以试试。tmux 中还需设置 `set -g set-clipboard on` | `1` 表示启用 |
+| `KIMI_CODE_TUI_ANIMATION_FPS` | 终端界面中进行中标题扫光的帧率 | `1` 到 `60` 的整数；非法值被忽略，并在启动时提示 |
 | `KIMI_DISABLE_CRON` | 禁用定时任务工具（`CronCreate` 拒绝新计划，已有任务不触发） | `1` 表示禁用 |
 
 `KIMI_CODE_INFINITE_RETRY`、`KIMI_CODE_IDENTITY_*` 和 `KIMI_CODE_BUILTIN_PRODUCT_SKILLS` 这几个变量由 `agent-core-v2` 引擎读取。

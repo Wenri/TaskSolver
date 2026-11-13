@@ -162,7 +162,7 @@ export type Message = SystemMessage | UserMessage | AssistantMessage | ToolMessa
 export function isVacuousContentPart(part: ContentPart): boolean {
   switch (part.type) {
     case 'text':
-      return part.text.trim().length === 0;
+      return part.meta?.['thought_signature_b64'] === undefined && part.text.trim().length === 0;
     case 'think':
       return part.encrypted === undefined && part.hidden !== true && part.think.trim().length === 0;
     case 'image_url':
@@ -244,6 +244,12 @@ function samePartIdentity(target: ContentPartBase, source: ContentPartBase): boo
 
 export function mergeInPlace(target: StreamedMessagePart, source: StreamedMessagePart): boolean {
   if (target.type === 'text' && source.type === 'text') {
+    if (
+      target.meta?.['thought_signature_b64'] !== undefined ||
+      source.meta?.['thought_signature_b64'] !== undefined
+    ) {
+      return false;
+    }
     if (!samePartIdentity(target, source)) return false;
     target.text += source.text;
     target.contentType ??= source.contentType;
@@ -284,8 +290,7 @@ export function salvageInterruptedMessage(message: AssistantMessage): AssistantM
 }
 
 export interface MessageAccumulator {
-  push(part: StreamedMessagePart): void;
-  hasToolCall(): boolean;
+  push(part: StreamedMessagePart): { part: StreamedMessagePart; block: number | undefined };
   toolCallEnd(index?: number | string): ToolCall | undefined;
   finish(): AssistantMessage;
 }
@@ -294,7 +299,14 @@ export function createMessageAccumulator(): MessageAccumulator {
   const message: AssistantMessage = { role: 'assistant', content: [], toolCalls: [] };
   const toolCallIndexMap = new Map<number | string, number>();
   let pending: StreamedMessagePart | null = null;
+  let pendingBlock: number | undefined;
   let deferredThink: ThinkPart | null = null;
+  const open = (part: StreamedMessagePart) => {
+    const opened = structuredClone(part);
+    pending = opened;
+    pendingBlock = isContentPart(opened) ? message.content.length : undefined;
+    return { part: opened, block: pendingBlock };
+  };
   const flush = () => {
     if (pending !== null) {
       if (isContentPart(pending)) {
@@ -336,25 +348,20 @@ export function createMessageAccumulator(): MessageAccumulator {
                 ? part.argumentsPart
                 : target.arguments + part.argumentsPart;
           }
-          return;
+          return { part, block: undefined };
         }
       }
       if (part.type === 'text') deferredThink = null;
-      if (pending === null) {
-        pending = structuredClone(part);
-        return;
-      }
+      if (pending === null) return open(part);
       if (pending.type === 'text' && part.type === 'think' && isVacuousContentPart(part)) {
         deferredThink = structuredClone(part);
-        return;
+        return { part: deferredThink, block: undefined };
       }
       if (!mergeInPlace(pending, part)) {
         flush();
-        pending = structuredClone(part);
+        return open(part);
       }
-    },
-    hasToolCall() {
-      return message.toolCalls.length > 0 || (pending !== null && isToolCall(pending));
+      return { part: pending, block: pendingBlock };
     },
     toolCallEnd(index) {
       if (
@@ -365,7 +372,7 @@ export function createMessageAccumulator(): MessageAccumulator {
         return undefined;
       }
       flush();
-      return message.toolCalls[message.toolCalls.length - 1];
+      return message.toolCalls.at(-1);
     },
     finish(): AssistantMessage {
       flush();

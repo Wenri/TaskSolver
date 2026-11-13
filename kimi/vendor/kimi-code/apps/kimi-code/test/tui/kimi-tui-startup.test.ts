@@ -123,6 +123,7 @@ function makeStartupInput(
       editorCommand: null,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: true },
+      transcript: { toolCallDensity: 'compact', thinking: 'grouped' },
       statusLine: { items: null, command: null },
       ...tuiConfig,
     },
@@ -495,6 +496,7 @@ describe('KimiTUI startup', () => {
 
     // Dock = 6 chrome containers + footer wrap, below the transcript viewport.
     expect(driver.state.dockContainer?.children).toHaveLength(7);
+    expect(driver.state.activityContainer.render(80).map((line) => line.trim())).toEqual(['']);
   });
 
   it('shows a session-less notice on v2 startup', async () => {
@@ -998,6 +1000,7 @@ describe('KimiTUI startup', () => {
     expect(suggestFiles).toHaveBeenCalledWith(driver.state.appState.workDir, {
       query: 'app',
       sessionId: session.id,
+      followGitignore: false,
     });
     expect(result?.items[0]).toMatchObject({ value: '@src/app.ts' });
   });
@@ -3980,6 +3983,29 @@ function uiContainsFooter(driver: StartupDriver): boolean {
   };
   return visit(driver.state.ui);
 }
+
+describe('animation frame interval wiring', () => {
+  it('runs animation frames at the startup frame rate, and every 120 ms without one', () => {
+    vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const frameGaps = (animationFrameRate?: number): number[] => {
+      const { ui } = makeDriver(makeHarness(), { ...makeStartupInput(), animationFrameRate }).state;
+      const times: number[] = [];
+      const step = (time: number): void => {
+        times.push(time);
+        if (times.length < 4) ui.requestAnimationFrame(step);
+      };
+      ui.requestAnimationFrame(step);
+      vi.advanceTimersByTime(1_000);
+      return times.slice(1).map((time, index) => time - (times[index] ?? 0));
+    };
+
+    expect(frameGaps()).toEqual([120, 120, 120]);
+    expect(frameGaps(20)).toEqual([50, 50, 50]);
+  });
+});
 
 describe('survey telemetry gate wiring', () => {
   function surveyGateTelemetryDisabled(input: KimiTUIStartupInput): boolean {
