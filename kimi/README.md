@@ -31,11 +31,12 @@ A new self-contained emitter `packages/agent-core-v2/src/wiretap/wiretap.ts` (lo
 from `$WIRE_NODE_ADDON` when `WIRE_ENABLE` is set; self-initializing on first import; emits are
 no-op-safe) plus **three one-line emit sites**:
 
-- `agent/loop/requester.ts` (`AgentLoopRequester`, `agent/llmRequester/llmRequesterService.ts`
-  before 2.5.0) — after `recordRequest(logInput)` in `generateModel`'s `onAttempt` →
-  `kimi_request` per attempt (the full normalized systemPrompt + tools + messages); inside the
-  `for await (… generateModel(…))` loop, before its `switch (event.type)` → `kimi_event` per
-  `ModelRequestEvent` (`part`/`usage`/`finish`/`timing`).
+- `agent/loop/requester.ts` (`AgentLoopRequestFactory.generateCoreRequest`, `AgentLoopRequester` in
+  2.5.x, `agent/llmRequester/llmRequesterService.ts` before 2.5.0) — after
+  `this.observer.recordAttempt(observation, attemptRequest, recoveryLedger)` in `onAttempt` →
+  `kimi_request` per attempt (the full normalized systemPrompt + tools + messages via
+  `wiretapEmitAttempt`); after `this.observer.reportEvent(...)` in `onEvent` → `kimi_event` per
+  `LlmRunEvent` (`part`/`usage`/`timing`/`finish` via `wiretapEmitRunEvent`).
 - `wire/wireService.ts` `appendRecordLow()` → `kimi_wire` (every appended wire-journal record
   + its agent scope; reading/restoring the journal does not emit records).
 

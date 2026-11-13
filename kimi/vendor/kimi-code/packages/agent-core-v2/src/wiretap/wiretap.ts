@@ -43,6 +43,10 @@ function encode(payload: unknown): Uint8Array | undefined {
   }
 }
 
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
 export function wiretapEmitRequest(payload: unknown): void {
   if (addon === undefined) return;
   const data = encode(payload);
@@ -61,6 +65,64 @@ export function wiretapEmitEvent(payload: unknown): void {
     addon.emitEvent(data);
   } catch {
   }
+}
+
+export function wiretapEmitAttempt(resolved: unknown, attemptRequest: unknown): void {
+  if (addon === undefined) return;
+  const res = recordOf(resolved);
+  const req = recordOf(attemptRequest);
+  const model = recordOf(res?.['model']);
+  const params = recordOf(res?.['params']);
+  const reqModel = recordOf(req?.['model']);
+  const profile = recordOf(req?.['profile']);
+  const content = recordOf(req?.['content']);
+  const maxTokens =
+    typeof params?.['maxCompletionTokens'] === 'number'
+      ? params['maxCompletionTokens']
+      : typeof reqModel?.['maxOutputTokens'] === 'number'
+        ? reqModel['maxOutputTokens']
+        : undefined;
+  wiretapEmitRequest({
+    protocol: model?.['protocol'],
+    providerType: model?.['providerType'],
+    modelName: model?.['name'],
+    modelAlias: res?.['modelAlias'],
+    thinkingEffort: res?.['thinkingEffort'],
+    maxTokens,
+    systemPrompt: profile?.['systemPrompt'] ?? res?.['systemPrompt'],
+    tools: profile?.['tools'] ?? res?.['tools'] ?? [],
+    messages: content?.['messages'] ?? res?.['messages'] ?? [],
+    fields: res?.['logFields'],
+  });
+}
+
+export function wiretapEmitRunEvent(event: unknown, model?: string): void {
+  if (addon === undefined) return;
+  const ev = recordOf(event);
+  const type = ev?.['type'];
+  if (type === 'llm.streaming.part') {
+    wiretapEmitEvent({ type: 'part', part: ev?.['part'] });
+    return;
+  }
+  if (type !== 'llm.ended') return;
+  const outcome = recordOf(ev?.['outcome']);
+  if (outcome?.['type'] !== 'done') return;
+  if (outcome['usage'] !== undefined) {
+    wiretapEmitEvent({ type: 'usage', usage: outcome['usage'], model });
+  }
+  const timing = recordOf(outcome['timing']);
+  if (timing !== undefined) {
+    wiretapEmitEvent({ type: 'timing', ...timing });
+  }
+  const finish = recordOf(outcome['finish']);
+  wiretapEmitEvent({
+    type: 'finish',
+    message: outcome['message'],
+    providerFinishReason: finish?.['finishReason'] ?? undefined,
+    rawFinishReason: finish?.['rawFinishReason'] ?? undefined,
+    id: outcome['messageId'],
+    requestId: outcome['requestId'],
+  });
 }
 
 export function wiretapEmitWireRecord(record: unknown, scope?: string): void {

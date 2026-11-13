@@ -108,6 +108,14 @@ class Tree:
 # (agent/llmRequester/llmRequesterService.ts before 2.5.0), and the wire journal.
 _KIMI_HOOKS: Final = (
     (
+        Hook(r"import \{ errorFromLlmOutcome \} from '#/llm-adapter/model/generate';",
+             "import { wiretapEmitAttempt, wiretapEmitRunEvent } from '#/wiretap/wiretap';"),
+        Hook(r"(?P<indent>\s*)this\.observer\.recordAttempt\(observation, (?P<attempt>\w+), recoveryLedger\);",
+             "{indent}wiretapEmitAttempt(resolved, {attempt});"),
+        Hook(r"(?P<indent>\s*)this\.observer\.reportEvent\(observation, (?P<event>\w+), recoveryLedger, [^)]+\);",
+             "{indent}wiretapEmitRunEvent({event}, resolved.model.name);"),
+    ),
+    (
         Hook(r"import \{ createHash \} from 'node:crypto';",
              "import { wiretapEmitEvent, wiretapEmitRequest } from '#/wiretap/wiretap';"),
         Hook(r"(?P<indent>\s*)(?:const )?recorded = this\.recordRequest\((?P<input>\w+)\);",

@@ -81,7 +81,7 @@ BOOKS: list[Book] = [
      "mode": 'async', "kind": 'fh_process', "mech": 'fullcgo', "retcap": 0},
     {"id": 'core_planstep', "symbol": 'google3/third_party/oneharness/internal/core/core.createPlannerResponseStep',
      "mode": 'async', "kind": 'core_planstep', "mech": 'fullcgo', "retcap": 0},
-    {"id": 'traj_appendstep', "symbol": 'google3/third_party/oneharness/internal/core/integration/integration.(*ToolContextTrajectory).AppendStep',
+    {"id": 'traj_appendstep', "symbol": 'google3/third_party/oneharness/internal/core/integration/integration.(*iapiStrippingTrajectory).AppendStep',
      "mode": 'async', "kind": 'traj_appendstep', "mech": 'fullcgo', "retcap": 0},
     {"id": 'traj_addstep', "symbol": 'google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep',
      "mode": 'async', "kind": 'traj_addstep', "mech": 'fullcgo', "retcap": 0},

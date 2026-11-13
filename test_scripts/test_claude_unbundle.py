@@ -37,6 +37,11 @@ KNOWN_NATIVES: Final[dict[str, dict[str, int]]] = {
         "mi_free": 0x31D9640, "bun_string_to_wtf": 0x33EFB40,
         "latin1_clone": 0x3447630, "bundled_source_clone_call": 0x6DCFE65,
     },
+    "604d29a6869409106b6a1110bdadcc8b72e8654a5a865d23258f938a696e348e": {  # Claude Code 2.1.323
+        "module_bytecode_generator": 0x8166DD0, "cached_bytecode_destructor": 0x2FEB3E0,
+        "mi_free": 0x2BE3870, "bun_string_to_wtf": 0x2DC4A80,
+        "latin1_clone": 0x2E10000, "bundled_source_clone_call": 0x6F8E21B,
+    },
 }
 
 from claude.build_cli import CLIPin, _load_pin, matches

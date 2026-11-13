@@ -83,7 +83,7 @@ env:
   # github:Wenri/patchnar 0.22.0, whose bun_graph unbundles Claude Code: --extract, --clean (the
   # runtime without its payload, either of Bun's layouts) and --natives (the private Bun entry
   # points the split runtime calls).
-  PATCHNAR_REF: 489cfe3852316855530f74022e451f79f4638f56
+  PATCHNAR_REF: 3fba16bc5313e0d37aa37ea340e3cdd996dbae99
 
 jobs:
   check:

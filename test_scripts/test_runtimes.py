@@ -365,6 +365,40 @@ class HookTests(unittest.TestCase):
             self.assertEqual(conflicts, ["src/new.ts"])
             self.assertIn("<<<<<<<", (fixture.checkout / "vendor/up/src/new.ts").read_text())
 
+    def test_kimi_2_6_requester_hooks_place_attempt_and_run_event_emits(self) -> None:
+        source = (
+            "import { errorFromLlmOutcome } from '#/llm-adapter/model/generate';\n"
+            "export class AgentLoopRequestFactory {\n"
+            "  async generateCoreRequest(): Promise<void> {\n"
+            "    await resolved.request.generate({}, {\n"
+            "      onAttempt: (attemptRequest) => {\n"
+            "        this.observer.recordAttempt(observation, attemptRequest, recoveryLedger);\n"
+            "      },\n"
+            "      onEvent: (event) => {\n"
+            "        this.observer.reportEvent(observation, event, recoveryLedger, this.infiniteRetryEnabled);\n"
+            "      },\n"
+            "    });\n"
+            "  }\n"
+            "}\n"
+        )
+        hooked = runtimes.apply_hooks(runtimes._KIMI_HOOKS[0], source)
+        self.assertIsNotNone(hooked)
+        assert hooked is not None
+        lines = hooked.splitlines()
+        self.assertEqual(
+            lines[lines.index("import { errorFromLlmOutcome } from '#/llm-adapter/model/generate';") + 1],
+            "import { wiretapEmitAttempt, wiretapEmitRunEvent } from '#/wiretap/wiretap';",
+        )
+        self.assertEqual(
+            lines[lines.index("        this.observer.recordAttempt(observation, attemptRequest, recoveryLedger);") + 1],
+            "        wiretapEmitAttempt(resolved, attemptRequest);",
+        )
+        self.assertEqual(
+            lines[lines.index("        this.observer.reportEvent(observation, event, recoveryLedger, this.infiniteRetryEnabled);") + 1],
+            "        wiretapEmitRunEvent(event, resolved.model.name);",
+        )
+        self.assertIsNone(runtimes.apply_hooks(runtimes._KIMI_HOOKS[0], hooked))
+
 
 class ShelveTests(unittest.TestCase):
     def test_shelve_commits_the_attempt_and_restores_the_runtime(self) -> None:
