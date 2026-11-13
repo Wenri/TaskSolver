@@ -240,6 +240,32 @@ def patch_static_books(elf_path: str, rows: Sequence[BookTarget], metadata: Patc
     return len(rows)
 
 
+def relocate_section_headers(data: bytes) -> bytes:
+    """Append a mid-file section header table at EOF before LIEF shifts trailing PT_LOADs.
+
+    Upstream agy's BOLT layout places Elf64_Shdr[] in an unmapped gap before the final
+    .dynsym/.interp PT_LOAD. When LIEF shifts that PT_LOAD forward to grow program headers,
+    it can overwrite the tail of an unmoved mid-file section header table (including
+    .shstrtab). Copying the table to 8-byte-aligned EOF leaves every PT_LOAD byte untouched.
+    """
+    ELF(data)
+    (e_shoff,) = struct.unpack_from("<Q", data, 40)
+    e_shentsize, e_shnum = struct.unpack_from("<HH", data, 58)
+    table_size = e_shentsize * e_shnum
+    if e_shoff == 0 or table_size == 0:
+        return data
+    if e_shoff + table_size > len(data):
+        raise SystemExit("section header table extends past end of agy binary")
+    if e_shoff + table_size == len(data):
+        return data
+    aligned = (len(data) + 7) & ~7
+    out = bytearray(data)
+    out.extend(b"\0" * (aligned - len(data)))
+    out.extend(data[e_shoff:e_shoff + table_size])
+    struct.pack_into("<Q", out, 40, aligned)
+    return bytes(out)
+
+
 def convert(in_path: str, out_path: str, symbols_path: str) -> None:
     funcmap_path = os.path.join(os.path.dirname(symbols_path), "funcmap.tsv.gz")
     paths = (in_path, out_path, symbols_path, funcmap_path)
@@ -249,7 +275,7 @@ def convert(in_path: str, out_path: str, symbols_path: str) -> None:
     rows_active = active_rows(rows)
     targets = book_targets(rows)
 
-    data = open(in_path, "rb").read()
+    data = relocate_section_headers(open(in_path, "rb").read())
     bin_ = _elf_parser.parse(data)
     if bin_ is None:
         raise SystemExit(f"lief failed to parse {in_path}")

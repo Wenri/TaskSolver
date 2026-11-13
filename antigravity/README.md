@@ -20,6 +20,7 @@ browser viewing and the same linked capture. See [managed terminal screens](../R
 | Go makes syscalls directly, bypassing libc (except the cgo DNS resolver) | `LD_PRELOAD` sees no traffic, so books patch Go functions; `getaddrinfo` interposition can still redirect connections. |
 | TLS is BoringCrypto, statically linked | Nothing to preload; the `crypto/tls.(*Conn).Write` book sees plaintext. |
 | Stripped, but the pclntab is intact and `pcHeader.textStart == 0` | Names are recoverable, but `debug/gosym` mis-resolves; we locate `moduledata` through the relocation addressing the pclntab and prologue-verify every booked address. |
+| BOLT places `Elf64_Shdr[]` in an unmapped gap before the final `.dynsym`/`.interp` `PT_LOAD` | When LIEF shifts that trailing `PT_LOAD` forward, it can overwrite the tail of an unmoved mid-file section header table; `make_libagy.py` appends the table at aligned EOF before LIEF parses the image. |
 
 Everything is pinned to the BuildID of the agy release in [`vendor.json`](vendor.json)
 (`symbols/symbols.json` records it at build time); the shim installs no books on any other build.
@@ -393,7 +394,7 @@ commandExecutionPolicy: off
 
 Using any other tool, or opening a file it was not handed, raises `ChatModeViolation`; the harness
 still offers `manage_task`, and agy still makes its own small session-title call. Checked with agy
-1.5.5: the model is offered `read_file` and `manage_task` (13 tools without the agent), and the
+1.5.8: the model is offered `read_file` and `manage_task` (13 tools without the agent), and the
 first request has ~0.7k input tokens in place of ~14.4k.
 
 The reader's name belongs to the agy release. Up to agy 1.2.x it was `view_file`, with the file in

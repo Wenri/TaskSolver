@@ -254,7 +254,10 @@ overrides (`effort`, `thinking`, `system_prompt`, `timeout`, ...). kimi-code rai
 - **agy** (`pyagy.model.CHAT_AGENT_MD`): a workspace agent with only `read_file`, run with
   `trust=False` and without `SSH_*`; see `antigravity/README.md`. The reader's name and its path
   argument belong to the agy release (`CHAT_TOOLS`, `CHAT_PATH_ARG`): `view_file(AbsolutePath)` up
-  to agy 1.2.x, `read_file(Path)` since 1.5. Checked with agy 1.5.5.
+  to agy 1.2.x, `read_file(Path)` since 1.5. Checked with agy 1.5.8. Programmatic `pyagy` and
+  `AgyModel` launches default to `--app_data_dir=pyagy` (`~/.gemini/pyagy/`), isolating conversation
+  history and workspace trust from the interactive CLI's `~/.gemini/antigravity-cli/` while sharing
+  `~/.gemini/config/` and login (`PYAGY_APP_DATA_DIR` or `app_data_dir=` overrides).
 
 Re-check against real requests after CLI upgrades: these switches are CLI behaviour, not SDK
 contract. Tests: `test_scripts/test_chat_mode.py`.
@@ -327,7 +330,7 @@ and `test_webpage.py`. Run them through Pixi; they send input only to local stub
 
 All Claude launches use the bundled bridged runtime. `claude/build_cli.py` verifies
 and caches the pristine pin, uses the externally provided `bun_graph` on `PATH`
-(patchnar's, 489cfe38 or later for `--clean`, `--no-bytecode` and `--natives`; the workflow pins it as
+(patchnar's, 3fba16bc or later for `--clean`, `--no-bytecode` and `--natives`; the workflow pins it as
 `PATCHNAR_REF`),
 and installs a split runtime under the SDK's `_bundled/`:
 `bun` with `.bun` removed, a native `claude` launcher, `source/`, `assets/`,

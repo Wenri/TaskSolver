@@ -727,6 +727,49 @@ class MakeLibagyTests(unittest.TestCase):
         with mock.patch.object(make_libagy, "assemble_book_jump", side_effect=fail_later):
             self.assert_rejected_without_writes(patch_image(), "fixture assembler failure", RuntimeError)
 
+    def test_relocate_section_headers_moves_mid_file_table_to_aligned_eof(self) -> None:
+        sectionless = ELFReaderTests.image()
+        self.assertIs(make_libagy.relocate_section_headers(sectionless), sectionless)
+
+        shstrtab = b"\0.shstrtab\0"
+        shdr_undef = bytes(64)
+        shdr_str = struct.pack("<IIQQQQIIQQ", 1, 3, 0, 0, 128, len(shstrtab), 0, 0, 1, 0)
+        table = shdr_undef + shdr_str
+
+        # Already at EOF: returned untouched.
+        at_eof = bytearray(sectionless)
+        at_eof[128:128 + len(shstrtab)] = shstrtab
+        eof_shoff = len(at_eof)
+        at_eof.extend(table)
+        struct.pack_into("<Q", at_eof, 40, eof_shoff)
+        struct.pack_into("<HHH", at_eof, 58, 64, 2, 1)
+        at_eof_bytes = bytes(at_eof)
+        self.assertIs(make_libagy.relocate_section_headers(at_eof_bytes), at_eof_bytes)
+
+        # Mid-file section header table before trailing segment bytes (BOLT layout).
+        mid = bytearray(sectionless.ljust(515, b"\x5a"))
+        mid[128:128 + len(shstrtab)] = shstrtab
+        mid[192:192 + len(table)] = table
+        struct.pack_into("<Q", mid, 40, 192)
+        struct.pack_into("<HHH", mid, 58, 64, 2, 1)
+        relocated = make_libagy.relocate_section_headers(bytes(mid))
+        self.assertEqual(len(relocated), 520 + len(table))
+        self.assertEqual(struct.unpack_from("<Q", relocated, 40)[0], 520)
+        self.assertEqual(relocated[:40], bytes(mid[:40]))
+        self.assertEqual(relocated[48:515], bytes(mid[48:515]))
+        self.assertEqual(relocated[515:520], b"\0" * 5)
+        self.assertEqual(relocated[520:], table)
+        sec = ELF(relocated).sec(".shstrtab")
+        self.assertIsNotNone(sec)
+        assert sec is not None
+        self.assertEqual(sec["sh_size"], len(shstrtab))
+
+        # Truncated section header table is rejected.
+        truncated = bytearray(mid)
+        struct.pack_into("<Q", truncated, 40, len(truncated) - 64)
+        with self.assertRaisesRegex(SystemExit, "section header table extends past end"):
+            make_libagy.relocate_section_headers(bytes(truncated))
+
 
 if __name__ == "__main__":
     unittest.main()
