@@ -55,7 +55,8 @@ def case_store_read() -> None:
 
 def case_ask_resume() -> None:
     # The core proof: resume a stored conversation in one-shot --print mode (deterministic
-    # process exit; the reliable path). Hard-assert id capture + id continuity; soft-note recall.
+    # process exit; the reliable path). Hard-assert id capture + id continuity + global isolation.
+    global_before = C.latest_conversation_id(app_data_dir=C.GLOBAL_APP_DATA_DIR)
     r1 = pyagy.ask(f"Remember this: the secret code word is {WORD}. Reply with only: OK",
                    timeout=120)
     cid = r1.conversation_id
@@ -65,8 +66,10 @@ def case_ask_resume() -> None:
         return
     r2 = pyagy.ask("What is the secret code word? Reply with only that word.",
                    conversation_id=cid, timeout=120)
-    id_ok = r2.conversation_id == cid                    # resume kept the same conversation
-    print(f"  {'ok  ' if id_ok else 'FAIL'} ask-resume: cid={cid} continuity={id_ok}")
+    global_after = C.latest_conversation_id(app_data_dir=C.GLOBAL_APP_DATA_DIR)
+    id_ok = r2.conversation_id == cid and global_before == global_after and cid != global_after
+    print(f"  {'ok  ' if id_ok else 'FAIL'} ask-resume: cid={cid} continuity={r2.conversation_id == cid} "
+          f"global_isolated={global_before == global_after}")
     if not id_ok:
         _fail.append("ask_resume")
     if _recalled(r2.text):
@@ -231,8 +234,8 @@ def case_trust() -> None:
 if __name__ == "__main__":
     print("[pyagy session] agy native conversation store (vendor/agy)")
     print(f"  store: {C.store_root()}")
-    case_store_read()
     case_ask_resume()
+    case_store_read()
     case_continue_latest()
     case_session_resume()
     case_agymodel_resume()

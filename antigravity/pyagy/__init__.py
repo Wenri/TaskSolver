@@ -44,9 +44,12 @@ if TYPE_CHECKING:
                          remove_mcp_servers as remove_mcp_servers, write_mcp_config as write_mcp_config,
                          write_mcp_servers as write_mcp_servers)
     from .conversations import (ConversationInfo as ConversationInfo,
+                                DEFAULT_APP_DATA_DIR as DEFAULT_APP_DATA_DIR,
+                                GLOBAL_APP_DATA_DIR as GLOBAL_APP_DATA_DIR,
                                 ensure_git_workspace as ensure_git_workspace,
                                 latest_conversation_id as latest_conversation_id,
                                 list_conversations as list_conversations,
+                                prepare_app_data_dir as prepare_app_data_dir,
                                 prepare_scoped_home as prepare_scoped_home,
                                 read_transcript as read_transcript,
                                 seed_onboarding as seed_onboarding, trust_workspace as trust_workspace)
@@ -65,11 +68,14 @@ _LAZY = {
     "ContextResource": ".client",
     "RewriteRule": ".client",
     # native conversation store (read-only readers + trust/scope write helpers; stdlib-pure)
+    "DEFAULT_APP_DATA_DIR": ".conversations",
+    "GLOBAL_APP_DATA_DIR": ".conversations",
     "list_conversations": ".conversations",
     "latest_conversation_id": ".conversations",
     "read_transcript": ".conversations",
     "ConversationInfo": ".conversations",
     "trust_workspace": ".conversations",
+    "prepare_app_data_dir": ".conversations",
     "prepare_scoped_home": ".conversations",
     "seed_onboarding": ".conversations",
     # TaskSolver backend + lower-level drivers
@@ -90,7 +96,7 @@ _LAZY = {
     "by_kind": ".agy_process.books",
     "sync_capable": ".agy_process.books",
 }
-__all__ = ['Session', 'ask', 'ask_many', 'resume', 'continue_latest', 'AgyResponse', 'Usage', 'ToolSpec', 'ContextResource', 'RewriteRule', 'list_conversations', 'latest_conversation_id', 'read_transcript', 'ConversationInfo', 'trust_workspace', 'prepare_scoped_home', 'seed_onboarding', 'AgyModel', 'ensure_git_workspace', 'strip_ansi', 'write_mcp_config', 'remove_mcp_config', 'write_mcp_servers', 'remove_mcp_servers', 'detect_config_path', 'BOOKS', 'DERIVED_KINDS', 'by_mech', 'enabled_books', 'by_kind', 'sync_capable']
+__all__ = ['Session', 'ask', 'ask_many', 'resume', 'continue_latest', 'AgyResponse', 'Usage', 'ToolSpec', 'ContextResource', 'RewriteRule', 'DEFAULT_APP_DATA_DIR', 'GLOBAL_APP_DATA_DIR', 'list_conversations', 'latest_conversation_id', 'read_transcript', 'ConversationInfo', 'trust_workspace', 'prepare_app_data_dir', 'prepare_scoped_home', 'seed_onboarding', 'AgyModel', 'ensure_git_workspace', 'strip_ansi', 'write_mcp_config', 'remove_mcp_config', 'write_mcp_servers', 'remove_mcp_servers', 'detect_config_path', 'BOOKS', 'DERIVED_KINDS', 'by_mech', 'enabled_books', 'by_kind', 'sync_capable']
 
 
 def __getattr__(name: str) -> object:

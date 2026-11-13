@@ -413,6 +413,42 @@ class AgyChat(unittest.TestCase):
         self.assertNotIn("SSH_CLIENT", env)
         self.assertEqual(env["X_KEEP"], "1")
 
+    def test_pty_launch_defaults_to_dedicated_pyagy_app_data_dir(self) -> None:
+        from pyagy._pty import PtyPopen
+        from pyagy.agyprocess import AgyProcess
+
+        fake_agy = os.path.join(self.ws.name, "fake-agy")
+        Path(fake_agy).write_text("#!/bin/sh\n")
+        with tempfile.TemporaryDirectory() as fake_home, patch.dict(
+                os.environ, {"HOME": fake_home}, clear=False):
+            os.environ.pop("PYAGY_APP_DATA_DIR", None)
+            popen = PtyPopen.__new__(PtyPopen)
+            proc = AgyProcess(prompt="hi", agy_bin=fake_agy, workdir=self.ws.name,
+                              extra_env={"LD_PRELOAD": ""})
+            argv, env, _ = popen._resolve_launch(proc)
+            self.assertEqual(argv[:3], [fake_agy, "--app_data_dir=pyagy", "--print"])
+            self.assertEqual(env.get("HOME"), fake_home)
+            self.assertTrue(os.path.isdir(os.path.join(fake_home, ".gemini", "pyagy")))
+
+            # Global store opt-in omits --app_data_dir
+            popen_global = PtyPopen.__new__(PtyPopen)
+            proc_global = AgyProcess(prompt="hi", agy_bin=fake_agy, workdir=self.ws.name,
+                                     app_data_dir="antigravity-cli", extra_env={"LD_PRELOAD": ""})
+            argv_global, _, _ = popen_global._resolve_launch(proc_global)
+            self.assertEqual(argv_global[:2], [fake_agy, "--print"])
+
+            # Scoped data_dir overrides HOME and omits --app_data_dir unless explicitly requested
+            scoped = os.path.join(fake_home, "repo-scope")
+            popen_scoped = PtyPopen.__new__(PtyPopen)
+            proc_scoped = AgyProcess(prompt="hi", agy_bin=fake_agy, workdir=self.ws.name,
+                                     data_dir=scoped, extra_env={"LD_PRELOAD": ""})
+            argv_scoped, env_scoped, _ = popen_scoped._resolve_launch(proc_scoped)
+            self.assertEqual(argv_scoped[:2], [fake_agy, "--print"])
+            self.assertEqual(env_scoped.get("HOME"), scoped)
+
+        custom = AgyModel(task=TASK, chat=True, workspace=self.ws.name, app_data_dir="custom- judge".replace(" ", ""))
+        self.assertEqual(custom._call_kwargs(empty_payload()).get("app_data_dir"), "custom-judge")
+
 
 class VendoredArtifacts(unittest.TestCase):
     def test_sibling_artifact_through_a_symlinked_package(self) -> None:

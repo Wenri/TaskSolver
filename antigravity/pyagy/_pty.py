@@ -39,6 +39,7 @@ class _AgyLaunch(Protocol):
     _workdir: str | None
     _capture: str | None
     _data_dir: str | None
+    _app_data_dir: str | None
     _trust: bool
     _extra_env: Mapping[str, str | None] | None
 
@@ -70,14 +71,20 @@ class PtyPopen(WirePtyPopen[BaseProcess]):
         self._workspace = workdir                            # resolved workspace (AgyProcess.workspace)
         capture = process._capture or os.path.join(workdir, "agy-capture.jsonl")
         self._capture_path = capture        # for AgyProcess.conversation_id (conversation_id event)
+        self._app_data_dir = _conv.resolve_app_data_dir(
+            getattr(process, "_app_data_dir", None), home=process._data_dir)
         self._home, env_ovr = _conv.scope_for_run(
             workdir, process._data_dir,
-            trust=process._trust)     # repo-scoped store + workspace trust
+            trust=process._trust,
+            app_data_dir=self._app_data_dir)     # dedicated/scoped store + workspace trust
         # caller overlays (native diagnostics) + scoped-HOME override. The boot pipe fd is added by
         # the base (WirePopen._launch) — the worker channel it owns.
         extra = {**(process._extra_env or {}), **env_ovr}
         env = linked_env(capture=capture, extra_env=extra)
-        agy_args = process._agy_args or ["--print", "agy-mp"]
+        agy_args = list(process._agy_args or ["--print", "agy-mp"])
+        if (self._app_data_dir != _conv.GLOBAL_APP_DATA_DIR
+                and not any(a == "--app_data_dir" or a.startswith("--app_data_dir=") for a in agy_args)):
+            agy_args = [f"--app_data_dir={self._app_data_dir}", *agy_args]
         # An explicit empty LD_PRELOAD in extra_env opts out of instrumentation (e.g. baseline
         # auth probes).
         if env.pop("LD_PRELOAD", None) == "":
@@ -94,7 +101,7 @@ class PtyPopen(WirePtyPopen[BaseProcess]):
         to recover this run's conversation id)."""
         self._qpos = 0                  # terminal-query scan position
         self._trust_answered = False
-        self._snap = _conv.snapshot(home=self._home)   # pre-launch store snapshot → conversation_id
+        self._snap = _conv.snapshot(app_data_dir=self._app_data_dir, home=self._home)   # pre-launch store snapshot → conversation_id
         super()._spawn_child(argv, workdir, env, process_obj)
 
     def _answer(self) -> None:

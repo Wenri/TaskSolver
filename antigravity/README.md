@@ -319,7 +319,13 @@ observations and outgoing model requests. All run with `pixi run python test_scr
 
 ## Sessions
 
-agy persists each conversation under `~/.gemini/antigravity-cli/` and resumes it on a new launch.
+By default, `pyagy` and `TaskSolver` pass `--app_data_dir=pyagy`, persisting programmatic
+conversations under `~/.gemini/pyagy/` instead of the interactive CLI's `~/.gemini/antigravity-cli/`
+(`app_data_dir="antigravity-cli"` or `PYAGY_APP_DATA_DIR=...` overrides it). Keeping `$HOME` and
+`~/.gemini` unchanged means `~/.gemini/config/` (MCP servers, skills, rules, plugins) and OS keyring
+login are shared natively; `prepare_app_data_dir()` symlinks `antigravity-oauth-token` and
+`installation_id` and syncs global `settings.json` preferences while keeping `trustedWorkspaces`
+local to `~/.gemini/pyagy/settings.json`.
 `Session` is the first-class object (on `wirecap.runtime.session.WireSession`); `ask()` is one-shot
 sugar. Both carry a `conversation_id` that `pyagy.resume(cid)`, `pyagy.continue_latest()`,
 `pyagy.list_conversations()` and `pyagy.read_transcript(cid)` work with, as do
@@ -328,11 +334,11 @@ sugar. Both carry a `conversation_id` that `pyagy.resume(cid)`, `pyagy.continue_
 - **Ids** come from the `file_open` book, which reads the uuid out of the store path agy opens;
   without that event the newest `*.db` by mtime wins.
 - **Workspace trust** is on by default: agy refuses to start interactively in an untrusted
-  workspace and has no flag for it, so each launch adds its workspace to `settings.json →
-  trustedWorkspaces`. `trust=False` opts out, `skip_permissions=True` uses the blunt flag.
-- **`data_dir=`** scopes the store to a project. agy hardcodes `$HOME/.gemini`, so this overrides
-  HOME and links the real login token in, leaving the global store untouched. Git-ignore the
-  scoped `.gemini/`.
+  workspace and has no flag for it, so each launch adds its workspace to the target store's
+  `settings.json → trustedWorkspaces`. `trust=False` opts out, `skip_permissions=True` uses the blunt flag.
+- **`data_dir=`** scopes the entire `.gemini` tree to a project. agy hardcodes `$HOME/.gemini`, so
+  this overrides `HOME` and links the real login token and global config in, leaving `~/.gemini`
+  untouched. Git-ignore the scoped `.gemini/`.
 
 ## `AgyProcess`: the single agy launcher
 

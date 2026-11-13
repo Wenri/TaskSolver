@@ -196,6 +196,88 @@ def test_scoped_home() -> None:
               "later default call is a no-op on the real dir")
 
 
+def test_app_data_dir_isolation() -> None:
+    print("[offline] dedicated ~/.gemini/pyagy history + shared global auth/settings")
+    with tempfile.TemporaryDirectory() as fake_home:
+        old_home = os.environ.get("HOME")
+        old_env_dir = os.environ.pop(conversations.APP_DATA_DIR_ENV, None)
+        os.environ["HOME"] = fake_home
+        try:
+            global_app = os.path.join(fake_home, ".gemini", "antigravity-cli")
+            os.makedirs(os.path.join(global_app, "cache"), exist_ok=True)
+            with open(os.path.join(global_app, "antigravity-oauth-token"), "w") as f:
+                f.write("tok")
+            with open(os.path.join(global_app, "installation_id"), "w") as f:
+                f.write("inst-1")
+            with open(os.path.join(global_app, "cache", "default_project_id.txt"), "w") as f:
+                f.write("proj-1")
+            global_settings = {
+                "allowNonWorkspaceAccess": True,
+                "colorScheme": "dark",
+                "model": "gemini-3.8-flash-low",
+                "toolPermission": "always-proceed",
+                "useG1Credits": True,
+                "trustedWorkspaces": ["/interactive/only"],
+            }
+            with open(os.path.join(global_app, "settings.json"), "w") as f:
+                json.dump(global_settings, f, indent=2)
+
+            check(conversations.store_root() == os.path.join(fake_home, ".gemini", "pyagy"),
+                  "global default store_root is ~/.gemini/pyagy")
+            scoped_td = os.path.join(fake_home, "scoped")
+            check(conversations.store_root(home=scoped_td)
+                  == os.path.join(scoped_td, ".gemini", "antigravity-cli"),
+                  "scoped home default store_root is <home>/.gemini/antigravity-cli")
+
+            pyagy_root = conversations.prepare_app_data_dir()
+            check(os.path.islink(os.path.join(pyagy_root, "antigravity-oauth-token")),
+                  "oauth token symlinked")
+            check(os.path.islink(os.path.join(pyagy_root, "installation_id")),
+                  "installation_id symlinked")
+            check(os.path.islink(os.path.join(pyagy_root, "cache", "default_project_id.txt")),
+                  "default_project_id.txt symlinked")
+            check(os.path.isfile(os.path.join(pyagy_root, "cache", "onboarding.json")),
+                  "onboarding seeded in pyagy store")
+
+            ws = os.path.join(fake_home, "throwaway-ws")
+            check(conversations.trust_workspace(ws), "trust_workspace writes to pyagy store")
+            pyagy_doc = json_load_object(open(os.path.join(pyagy_root, "settings.json")))
+            global_doc = json_load_object(open(os.path.join(global_app, "settings.json")))
+            check(pyagy_doc.get("allowNonWorkspaceAccess") is True
+                  and pyagy_doc.get("useG1Credits") is True
+                  and pyagy_doc.get("toolPermission") == "always-proceed"
+                  and pyagy_doc.get("model") == "gemini-3.8-flash-low",
+                  "global preferences synced into pyagy settings.json")
+            check(pyagy_doc.get("trustedWorkspaces") == [ws],
+                  "pyagy trustedWorkspaces has only local workspace")
+            check(global_doc.get("trustedWorkspaces") == ["/interactive/only"],
+                  "global trustedWorkspaces untouched")
+
+            # Live re-sync picks up global model change while preserving pyagy trustedWorkspaces
+            global_settings["model"] = "gemini-3.1-pro-low"
+            with open(os.path.join(global_app, "settings.json"), "w") as f:
+                json.dump(global_settings, f, indent=2)
+            conversations.prepare_app_data_dir()
+            pyagy_doc2 = json_load_object(open(os.path.join(pyagy_root, "settings.json")))
+            check(pyagy_doc2.get("model") == "gemini-3.1-pro-low"
+                  and pyagy_doc2.get("trustedWorkspaces") == [ws],
+                  "re-sync updates global keys and preserves local trustedWorkspaces")
+
+            for bad in ("/abs/path", "../escape", "."):
+                try:
+                    conversations.prepare_app_data_dir(bad)
+                    check(False, f"invalid app_data_dir rejected: {bad}")
+                except ValueError:
+                    check(True, f"invalid app_data_dir rejected: {bad}")
+        finally:
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+            if old_env_dir is not None:
+                os.environ[conversations.APP_DATA_DIR_ENV] = old_env_dir
+
+
 def main() -> None:
     test_normalize()
     test_env_wrapped()
@@ -206,6 +288,7 @@ def main() -> None:
     test_generic_writer_merge()
     test_pyagy_write_remove()
     test_scoped_home()
+    test_app_data_dir_isolation()
     print()
     if _failures:
         print(f"FAILED: {len(_failures)} check(s): {_failures}")

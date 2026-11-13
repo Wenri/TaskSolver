@@ -75,7 +75,8 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
                  skip_permissions: bool = False, extra_flags: Sequence[str] | None = None,
                  persistent: bool = False, conversation_id: str | None = None,
                  continue_latest: bool = False, workdir: str | None = None,
-                 capture: str | None = None, data_dir: str | None = None, trust: bool = True,
+                 capture: str | None = None, data_dir: str | None = None,
+                 app_data_dir: str | None = None, trust: bool = True,
                  extra_env: Mapping[str, str | None] | None = None, echo: bool = False,
                  daemon: bool | None = None) -> None:
         super().__init__(target=target, name=name, args=args, kwargs=kwargs, daemon=daemon)
@@ -90,6 +91,7 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
         self._persistent = persistent  # long-lived interactive agy (drive via .ask()/.send())
         self._conversation_id = conversation_id  # resume id; else captured after first turn
         self._data_dir = data_dir      # scope the conversation store to a project repo
+        self._app_data_dir = app_data_dir  # subdirectory under ~/.gemini (default: pyagy)
         self._trust = trust            # pre-trust the workspace (no folder-trust prompt)
         self._extra_env = extra_env    # caller overlays layered onto linked_env (shim knobs)
         self._echo = echo              # mirror agy's PTY output to our stdout (debug)
@@ -107,6 +109,7 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
             self._conversation_id = _conv.capture_conversation_id(
                 self._popen._snap,
                 capture_path=self._popen._capture_path,
+                app_data_dir=self._popen._app_data_dir,
                 home=self._popen._home)
         return self._conversation_id
 
@@ -116,5 +119,10 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
 
     @property
     def home(self) -> _conv.PathInput | None:
-        """The scoped HOME for this run (data_dir scoping), or None for the global store."""
+        """The scoped HOME for this run (data_dir scoping), or None for the global ~/.gemini root."""
         return self._popen._home if self._popen is not None else None
+
+    @property
+    def app_data_dir(self) -> str | None:
+        """The resolved ``app_data_dir`` name under ``.gemini/`` for this run."""
+        return self._popen._app_data_dir if self._popen is not None else self._app_data_dir

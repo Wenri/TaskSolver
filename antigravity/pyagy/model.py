@@ -88,6 +88,7 @@ class AgyModel(CLIBackendModel[AgyResponse]):
                  skip_permissions: bool = False, timeout: float = 300,
                  conversation_id: str | None = None, continue_latest: bool = False,
                  multi_turn: bool = False, data_dir: str | None = None,
+                 app_data_dir: str | None = None,
                  print_timeout: float | None = None, mcp_servers: MCPServers | None = None,
                  chat: bool = False, effort: str | None = None, system_prompt: str | None = None,
                  extra_flags: Sequence[str] | None = None,
@@ -125,6 +126,7 @@ class AgyModel(CLIBackendModel[AgyResponse]):
         self.continue_latest = continue_latest
         self.multi_turn = bool(multi_turn or conversation_id or continue_latest)
         self.data_dir = data_dir              # scope the conversation store to a project repo
+        self.app_data_dir = app_data_dir      # store subdir under ~/.gemini (default: pyagy)
 
     def _sample(self, payload: CLIPayload, n_choices: int) -> list[AgyResponse]:
         return self._client_ask_many(string_prompt(payload), n_choices, **self._call_kwargs(payload))
@@ -149,6 +151,8 @@ class AgyModel(CLIBackendModel[AgyResponse]):
             "data_dir": self.data_dir,
             "mcp_servers": self.mcp_servers,
         }
+        if self.app_data_dir is not None:
+            kw["app_data_dir"] = self.app_data_dir
         if flags:
             kw["extra_flags"] = flags
         if env:
@@ -215,6 +219,8 @@ class AgyModel(CLIBackendModel[AgyResponse]):
         kw: SessionOptions = {"model": self.model, "workspace": self.workspace,
                   "skip_permissions": self.skip_permissions, "timeout": self.timeout,
                   "data_dir": self.data_dir, "mcp_servers": self.mcp_servers}
+        if self.app_data_dir is not None:
+            kw["app_data_dir"] = self.app_data_dir
         if self.conversation_id:
             kw["conversation_id"] = self.conversation_id
         elif self.continue_latest:
