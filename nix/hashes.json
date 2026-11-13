@@ -4,7 +4,7 @@
     "hash": "sha256-c8gP4UiC6xQnnc5L2G++qhxheG64BNwqrhMtiVfX/xc="
   },
   "kimiPnpm": {
-    "drv": "/nix/store/ys7l3d19236dqjccjfkprh4dkg1smh8w-tasksolver-kimi-code-pnpm-deps.drv",
+    "drv": "/nix/store/cv2dg4rwn6fkbp6fayb1nhzz6vl3s8l3-tasksolver-kimi-code-pnpm-deps.drv",
     "hash": "sha256-5d4RZHY9/+GRy97A9Y6LUrfw5ESz2KCTrM4HMh0CTBE="
   },
   "rustyV8": {
@@ -13,7 +13,7 @@
     "binding": "sha256-Pk1f7Nvg+YpgF+adfKglGad/sDLF615M2+zdPi7FGdU="
   },
   "claudeAgentSdk": {
-    "tag": "v0.2.181",
-    "hash": "sha256-s64IokScC/YmiFmuGqDGyxnZTIcMFkZ7/OxVz14sFKw="
+    "tag": "v0.2.182",
+    "hash": "sha256-zYoeEo+WES4NpX0ZbIKnN00Sf1gxyl5UhuTFwqi83OM="
   }
 }

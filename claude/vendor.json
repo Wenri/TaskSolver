@@ -1,13 +1,13 @@
 {
   "sdk": {
     "repository": "https://github.com/anthropics/claude-agent-sdk-python.git",
-    "tag": "v0.2.181",
-    "commit": "22b8eb9c19adfa78759b79e22bd664a57843bb06"
+    "tag": "v0.2.182",
+    "commit": "32e96114c1a5fea0fa794ce48ff04f96553d871f"
   },
   "cli": {
-    "version": "2.1.323",
-    "url": "https://downloads.claude.ai/claude-code-releases/2.1.323/linux-x64/claude",
-    "sha256": "604d29a6869409106b6a1110bdadcc8b72e8654a5a865d23258f938a696e348e",
-    "size": 362435088
+    "version": "2.1.325",
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.325/linux-x64/claude",
+    "sha256": "0dc4f4a9a165fc60746d7ae8489712e5fc352f1e7ad4eb22e7141bd0812eb0cf",
+    "size": 365842960
   }
 }
