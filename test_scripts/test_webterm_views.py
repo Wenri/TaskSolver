@@ -227,9 +227,15 @@ class WebTerminalViewTests(unittest.TestCase):
             state = Path(directory) / "screen-state"
 
             def open_echo(_backend: frontend.Backend, *, manager: TerminalManager,
+                          name: str | None = None,
+                          workspace: str | os.PathLike[str] | None = None,
                           model: str | None = None, capture: bool | str = True,
-                          sdk_socket: str | os.PathLike[str] | None = None) -> TerminalScreen:
-                del model, capture, sdk_socket
+                          sdk_socket: str | os.PathLike[str] | None = None,
+                          agy_app_data_dir: str | None = None,
+                          agy_account: str | None = None,
+                          agy_isolated_auth: bool | None = None) -> TerminalScreen:
+                del name, workspace, model, capture, sdk_socket
+                del agy_app_data_dir, agy_account, agy_isolated_auth
                 screen = manager.open("echo", [
                     sys.executable, "-u", "-c",
                     "import os,sys\npid = str(os.getpid())\n"
