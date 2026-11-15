@@ -60,9 +60,11 @@ the bundle and addon.
 ## Build + run
 Built by **`pixi install`** (setup.py's `_build_kimi`; the addon compiles its own copy of the wirecap bridge):
 
-1. the CLI bundle — `pnpm install --frozen-lockfile` then `tsdown` (invoked as
-   `npx -y pnpm@<pin> …`, honoring the vendored `packageManager` field; conda-forge has no pnpm
-   10). A stub `vis-web-asset.ts` is written so the vite/tailwind prebuild is skipped (breaks only
+1. the CLI bundle — `pnpm install --frozen-lockfile --config.confirm-modules-purge=false` then
+   `tsdown` (invoked as `npx -y pnpm@<pin> …`, honoring the vendored `packageManager` field;
+   conda-forge has no pnpm 10, and `setup.py` passes `--store-dir=<checkout>/.pixi/pnpm-store`
+   under `CONDA_BUILD=1` so fresh build `HOME` directories reuse cached tarballs). A stub
+   `vis-web-asset.ts` is written so the vite/tailwind prebuild is skipped (breaks only
    `kimi vis`); invoking tsdown directly (not `pnpm run build`) also skips the darwin/win32
    native-asset copy and the dist-web check. This emits
    `vendor/kimi-code/apps/kimi-code/dist/main.mjs`. A second tsdown invocation with

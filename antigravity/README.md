@@ -378,8 +378,10 @@ The queue's POSIX semaphores need a working `sem_open`. Tests: `test_scripts/tes
 ## Using agy as a TaskSolver backend (`pyagy`)
 
 `AgyModel` gives agy TaskSolver's adapter surface (like `ClaudeCodeModel`) over `pyagy.ask`: it
-runs `agy --print` in a throwaway git workspace and parses the reply. No API key; agy uses its own
-login in `~/.gemini/antigravity-cli/`.
+runs `agy --print` in a throwaway git workspace and parses the reply. No API key: `AgyModel`
+defaults to `--app_data_dir=pyagy` (`~/.gemini/pyagy/`), sharing login from
+`~/.gemini/antigravity-cli/` or using a dedicated file-backed account configured with
+`python -m pyagy.auth` (`account=` / `isolated_auth=`).
 
 ```python
 from pyagy import AgyModel

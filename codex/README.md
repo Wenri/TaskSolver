@@ -72,11 +72,12 @@ Omit `--locked` when dependency changes require an updated lockfile. Do not
 install a separate `openai-codex` or `openai-codex-cli-bin` distribution into
 the same environment; TaskSolver supplies both SDK source and runtime.
 
-Cargo's source cache defaults to `$HOME/.cargo` when `CARGO_HOME` is unset. Fresh Pixi
-build directories have a new `HOME`, so crates, including V8, may download again
-while compiled artifacts in `vendor/codex-rs/target` are reused. The project does not
-set `CARGO_HOME`; a persistent value in the build environment could retain that
-source cache. Build time depends on which downloads and compilation steps are needed.
+Cargo's source cache defaults to `$HOME/.cargo` when `CARGO_HOME` is unset. Fresh conda
+build work directories receive a temporary `HOME`, so `setup.py` defaults `CARGO_HOME`
+to `<checkout>/.pixi/cargo-home` when `CONDA_BUILD=1` (an explicit `CARGO_HOME` takes
+precedence), retaining downloaded crate sources (including V8) alongside compiled
+artifacts in `vendor/codex-rs/target`. Build time depends on which downloads and
+compilation steps are needed.
 
 ## Official Python SDK
 

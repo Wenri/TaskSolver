@@ -26,6 +26,9 @@ pixi run pymport-test
 # Restore agy and Claude Code into an env whose redistributable bundle omits them
 pixi run reconstruct [--agy [PATH]] [--claude [PATH]] [--target ENV]
 
+# Dedicated agy Google login / named account profile (keeps ~/.gemini/antigravity-cli untouched)
+pixi run python -m pyagy.auth status            # or switch --oob [--account NAME], list, shared
+
 # Upstream runtimes: pinned vs latest, then adopt one (agy | codex | claude | kimi)
 python3 tools/runtimes.py check
 python3 tools/runtimes.py adopt agy [--version X.Y.Z]
@@ -33,10 +36,13 @@ python3 tools/runtimes.py adopt agy [--version X.Y.Z]
 # Offline SDK/packaging tests: no credentials or model calls
 pixi run python test_scripts/test_claude_sdk.py
 pixi run python test_scripts/test_claude_bundle.py
+pixi run python test_scripts/test_claude_unbundle.py
+pixi run node --test test_scripts/test_claude_native_bridge.mjs
 pixi run python test_scripts/test_reconstruct.py     # bundle modes and the reconstruct helper
 pixi run python test_scripts/test_runtimes.py        # the runtime updater (local git fixtures)
 pixi run python test_scripts/test_codex_sdk.py
 pixi run python test_scripts/test_codex_sdk_native.py
+pixi run python test_scripts/test_kimi_capture.py
 pixi run python test_scripts/test_chat_mode.py        # chat mode, image files, vendored paths
 
 # Live provider examples (credentials required)
@@ -63,7 +69,8 @@ isolation, so `[build-system].requires` and the native tools must also be in
 otherwise only warn. A fresh build work dir has its own `HOME`. During conda builds,
 `_build_codex` defaults `CARGO_HOME` to the checkout's `.pixi/cargo-home`, preserving
 dependency sources (including the V8 crate) alongside the compiled artifacts in
-`codex/vendor/codex-rs/target`. An explicit `CARGO_HOME` takes precedence.
+`codex/vendor/codex-rs/target` (an explicit `CARGO_HOME` takes precedence), and `_build_kimi`
+passes `--store-dir=.pixi/pnpm-store` and `--config.confirm-modules-purge=false` to pnpm.
 
 **Redistributable bundles.** agy and Claude Code are built from proprietary upstream executables.
 A non-editable conda build (`pixi publish`, a conda source dependency; `redistributable_bundle`
@@ -257,7 +264,12 @@ overrides (`effort`, `thinking`, `system_prompt`, `timeout`, ...). kimi-code rai
   to agy 1.2.x, `read_file(Path)` since 1.5. Checked with agy 1.5.8. Programmatic `pyagy` and
   `AgyModel` launches default to `--app_data_dir=pyagy` (`~/.gemini/pyagy/`), isolating conversation
   history and workspace trust from the interactive CLI's `~/.gemini/antigravity-cli/` while sharing
-  `~/.gemini/config/` and login (`PYAGY_APP_DATA_DIR` or `app_data_dir=` overrides).
+  `~/.gemini/config/` and login (`PYAGY_APP_DATA_DIR` or `app_data_dir=` overrides). Dedicated
+  file-backed logins (`pyagy.auth`: `status`, `list`, `switch`, `login`, `logout`, `shared`;
+  `account=` / `PYAGY_ACCOUNT` for `~/.gemini/pyagy-<name>/`, `isolated_auth=` /
+  `PYAGY_ISOLATED_AUTH`) mark `.dedicated_auth`, unlink shared auth/project/onboarding symlinks,
+  and set `WSL_INTEROP=pyagy-isolated` so credentials stay in `<store>/antigravity-oauth-token`
+  without touching `~/.gemini/antigravity-cli/` or the OS D-Bus Secret Service keyring.
 
 Re-check against real requests after CLI upgrades: these switches are CLI behaviour, not SDK
 contract. Tests: `test_scripts/test_chat_mode.py`.
@@ -298,7 +310,11 @@ Python attaches its existing TTY; never open a desktop terminal. Screens
 keep running across detach until the manager closes. Each screen carries an inherited
 `TASKSOLVER_TERMINAL_SCREEN` ownership marker for descendant cleanup; preserve it in
 child environments. Provider configuration belongs in TaskSolver, generic screen
-lifecycle in wirecap's parent-side runtime. Native capture applies to all four
+lifecycle in wirecap's parent-side runtime. Interactive `agy` screens keep
+`~/.gemini/antigravity-cli/` unless `agy_app_data_dir=`/`--agy-app-data-dir`,
+`agy_account=`/`--agy-account`, `agy_isolated_auth=` (`--agy-isolated-auth` / `--agy-shared-auth`),
+or `PYAGY_APP_DATA_DIR`/`PYAGY_ACCOUNT` selects a store (defaulting to `pyagy`).
+Native capture applies to all four
 backends (agy/Codex/Claude/Kimi). Default captures are temporary; explicit
 paths persist. `wirecap.runtime.webterm.WebTerminal` uses ttyd for optional browser
 viewing on loopback, with read-only input by default. An explicit `screen=` creates
@@ -410,7 +426,8 @@ into `pyclaude.claude_process`, emitting `claude_turn` events); headless Claude 
     including failed startup. PTY result/death readiness must drain buffered output before closing.
   - `wirecap/native/` is the C ABI bridge (`libwirecap_bridge.a`) that embeds CPython on a 16 MB-stack
     worker thread, linked into the agy host, the codex binary (from the standalone
-    `wirecap/native/build`; `WIRECAP_BRIDGE_DIR` overrides) and the kimi addon. They build with
+    `wirecap/native/build`; `WIRECAP_BRIDGE_DIR` overrides) and the Claude/Kimi N-API addons
+    (`claude/native/wirecap_node`, `kimi/native`). They build with
     GCC LTO (`TASKSOLVER_LTO`, default on); the archive holds fat LTO objects because codex's Rust
     link cannot read GCC bytecode. Repeated starts share one worker; shutdown drains accepted
     events, joins once and prevents restart. Event-kind strings must live for the process lifetime.
@@ -439,7 +456,9 @@ into `pyclaude.claude_process`, emitting `claude_turn` events); headless Claude 
     prologues, spills and the planner-response getter, and pwntools assembles book/PLT jumps with
     the conda toolchain. Keep these build-only
     requirements in `[build-system].requires`, pixi host dependencies and workspace dependencies.
-    Source tools stay out of the wheel and embedded runtime's stdlib-only modules. Conversions
+    Source tools stay out of the wheel and embedded runtime's stdlib-only modules. `make_libagy.py`
+    relocates mid-file BOLT `Elf64_Shdr[]` tables to aligned EOF before LIEF parses the image so
+    shifting the trailing `PT_LOAD` never overwrites section headers. Conversions
     always start from cached raw agy (`build/antigravity-*.raw`, keyed by the archive SHA512).
     `antigravity/vendor.json` pins the archive and the extracted binary (configure verifies both
     and reports a new binary's sha512/size); `shim-symbols` refreshes the outputs, and

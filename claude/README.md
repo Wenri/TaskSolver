@@ -25,8 +25,9 @@ a missing bundle is an error rather than a fallback to a global CLI.
 
 `pixi install` builds the runtime automatically, using
 [`bun_graph`](https://github.com/Wenri/patchnar/blob/main/src/bun_graph.cc) from
-`PATH`. Provide that executable in the build environment: patchnar's, new enough
-for `--natives`, which reports the private Bun entry points the runtime calls. [`vendor.json`](vendor.json)
+`PATH`. Provide that executable in the build environment: patchnar's (`3fba16bc` or
+newer), supporting `--clean`, `--no-bytecode` and `--natives`, which reports the
+private Bun entry points the runtime calls. [`vendor.json`](vendor.json)
 pins a Claude Code release that is the one the SDK bundles or newer, since `tools/runtimes.py`
 follows Claude Code's own releases; [`build_cli.py`](build_cli.py) checks that, verifies the download's size
 and SHA256, checks the SDK's CLI version, then stages the complete runtime under
@@ -301,15 +302,24 @@ Run these checks from the TaskSolver checkout:
 ```bash
 pixi run python test_scripts/test_claude_sdk.py
 pixi run python test_scripts/test_claude_bundle.py
+pixi run python test_scripts/test_claude_decode.py
+pixi run python test_scripts/test_claude_unbundle.py
+pixi run python test_scripts/test_claude_transport.py
+pixi run python test_scripts/test_claude_native.py
+pixi run node --test test_scripts/test_claude_native_bridge.mjs
 pixi run python test_scripts/test_chat_mode.py
 ```
 
 The SDK suite uses synthetic messages and the vendored SDK with a local protocol
 stub. It covers aliases, images, parsing and metadata, session resume after errors
 or cancellation, MCP permissions, concurrency, deadlines and subprocess cleanup.
-The bundle suite checks download verification with synthetic bytes, package contents, and
-the built executable's `--version` outside the checkout. These checks make no
-authenticated provider calls; the package check skips if the runtime is unbuilt.
+The bundle and unbundle suites check download verification with synthetic bytes,
+`bun_graph` native signatures and source contracts, JSC sidecar cache hits and
+invalidation, package contents, and the built executable's `--version` outside the
+checkout. The transport, native UI, and Node bridge suites exercise control-socket
+routing, permission dialogs, and `claude_turn` round-trip capture against local
+loopback fixtures. These checks make no authenticated provider calls; package
+checks skip if the runtime is unbuilt.
 
 Official references: [Python SDK](https://code.claude.com/docs/en/agent-sdk/python),
 [authentication](https://code.claude.com/docs/en/authentication),

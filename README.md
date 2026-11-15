@@ -21,7 +21,7 @@ One `Agent`, many backends — selected by the `vision_model` id. Provider adapt
 | Gemini | `gemini-3-pro`, `gemini-3-flash`, `gemini-2.0-flash` | Google GenAI SDK |
 | Local HuggingFace | `qwen`, `intern`, `minicpm`, `phi`, `llama` | in-process via `transformers` (needs the `local` extra) |
 
-The agy/codex/kimi-code native artifacts embed CPython (the shim's interpreter, codex's libpython, the `wirecap_node` addon's libpython): a consuming environment must run the **same Python minor version** as the env they were built in (this repo pins 3.15) — a version-mismatched consumer is an unsupported configuration.
+The agy/codex/claude/kimi-code native capture artifacts embed CPython (the shim's interpreter, codex's libpython, the `wirecap_node` addon's libpython): a consuming environment must run the **same Python minor version** as the env they were built in (3.14 or 3.15; this repo pins 3.15) — a version-mismatched consumer is an unsupported configuration.
 
 The agent runtime sources and binaries are pinned separately from TaskSolver's Python
 dependencies:
@@ -112,13 +112,18 @@ From the TaskSolver checkout, these checks run without provider credentials or m
 ```bash
 pixi run typecheck
 
-# SDKs and chat behavior
+# SDKs, unbundled Claude runtime and chat behavior
 pixi run python test_scripts/test_claude_sdk.py
 pixi run python test_scripts/test_claude_bundle.py
 pixi run python test_scripts/test_claude_decode.py
+pixi run python test_scripts/test_claude_unbundle.py
+pixi run python test_scripts/test_claude_transport.py
+pixi run python test_scripts/test_claude_native.py
+pixi run node --test test_scripts/test_claude_native_bridge.mjs
 pixi run python test_scripts/test_codex_sdk.py
 pixi run python test_scripts/test_codex_sdk_native.py
 pixi run python test_scripts/test_chat_mode.py
+pixi run python test_scripts/test_mcp_serializers.py
 pixi run python test_scripts/test_reconstruct.py   # redistributable bundles and the reconstruct helper
 pixi run python test_scripts/test_runtimes.py      # the runtime updater, against local git fixtures
 
@@ -131,6 +136,7 @@ pixi run python test_scripts/test_kimi_decode.py
 pixi run python test_scripts/test_kimi_process.py
 pixi run python test_scripts/test_kimi_session.py
 pixi run python test_scripts/test_kimi_bundle.py
+pixi run python test_scripts/test_kimi_capture.py
 
 # Shared process, native bridge and framing
 pixi run python test_scripts/test_wire_session.py
@@ -232,8 +238,10 @@ configure the launch (`--capture` keeps the native JSONL capture in that file; s
 screens write `PATH` with the screen name before its suffix, e.g. `run-agy.jsonl`); a model name must be understood by every selected backend.
 Terminal backends are exactly `agy`, `codex`, `claude` and `kimi`; model names are
 forwarded unchanged, without `Agent`'s model-id alias expansion. For `agy` screens,
-`--agy-app-data-dir`, `--agy-account`, and `--agy-isolated-auth` select the conversation
-store and optional keyring-isolated Google account (`~/.gemini/pyagy/` by default).
+`--agy-app-data-dir`, `--agy-account`, and `--agy-isolated-auth` / `--agy-shared-auth`
+select a dedicated conversation store and optional keyring-isolated Google account
+(defaulting that store to `~/.gemini/pyagy/`; without them, interactive `agy` screens
+keep `~/.gemini/antigravity-cli/`).
 
 For application-controlled lifetimes, use the shared manager directly:
 
