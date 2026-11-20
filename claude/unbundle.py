@@ -449,6 +449,7 @@ def _prepare_code(directory: Path, output: Path, graph: BunGraph) -> dict[str, d
     names = {str(directory / module.relative_path): module.name for module in graph.modules}
     # Match whole path literals so an asset named x cannot rewrite JS named x.js.
     pattern = re.compile(re.escape(str(directory) + "/") + r'''[^"'`\\\x00-\x1f]*''')
+    template = re.compile(r"`" + re.escape(str(directory) + "/root/") + r"\$\{(" + IDENTIFIER + r")\}`")
     modules: dict[str, dict[str, str | int]] = {}
     expected = {module.relative_path for module in graph.modules}
     for path in directory.rglob("*"):
@@ -464,6 +465,7 @@ def _prepare_code(directory: Path, output: Path, graph: BunGraph) -> dict[str, d
         if module.loader == 1:
             text = path.read_text(encoding="utf-8")
             text = pattern.sub(lambda match: names.get(match.group(), match.group()), text)
+            text = template.sub(r"`/$bunfs/root/${\1}`", text)
             if str(directory) in text:
                 raise ValueError(f"Unrecognized extracted path in {module.name}")
             _ = destination.write_text(text, encoding="utf-8")
@@ -558,6 +560,15 @@ def _install_loader(directory: Path, graph: BunGraph) -> dict[str, str]:
     # /$bunfs/ names for the resolver; every other literal must name a relocatable file.
     requires = "".join(rf"|(?<![\w$.]){re.escape(alias)}\(" for alias in sorted(_require_aliases(texts)))
     importing = re.compile(r"(?:from|import|import\(|\.require\(" + requires + r")$")
+    addon_loader = re.compile(
+        r"function (" + IDENTIFIER + r")\((?P<arg>" + IDENTIFIER + r")\)\{"
+        r"return " + IDENTIFIER + r"\(" + IDENTIFIER + r"\(`/\$bunfs/root/\$\{(?P=arg)\}`\),"
+    )
+    addon_template = re.compile(r"`/\$bunfs/root/\$\{(" + IDENTIFIER + r")\}`")
+    any_template = re.compile(r"`/\$bunfs/[^`\n]*`")
+    has_root_addons = any(item.loader == 10 and posixpath.dirname(item.relative_path) == "root"
+                          for item in graph.modules)
+    addon_contracts: dict[str, str] = {}
     for name, text in texts.items():
         module = by_name[name]
 
@@ -575,7 +586,25 @@ def _install_loader(directory: Path, graph: BunGraph) -> dict[str, str]:
                                         posixpath.dirname(module.relative_path))
             return f"Bun.fileURLToPath(new URL({json.dumps('./' + relative)},import.meta.url))"
 
-        texts[name] = pattern.sub(relocate, text)
+        text = pattern.sub(relocate, text)
+        if "`/$bunfs/" in text:
+            loader_matches = list(addon_loader.finditer(text))
+            if (not has_root_addons or "process.dlopen(" not in text
+                    or len(loader_matches) != 1 or addon_contracts):
+                raise ValueError(f"Unsupported template JavaScript path in {module.name}")
+            addons_dir = posixpath.relpath("../modules/root", posixpath.dirname(module.relative_path))
+            text, replaced = addon_template.subn(
+                lambda match: (f"`${{Bun.fileURLToPath(new URL({json.dumps('./' + addons_dir)},"
+                               f"import.meta.url))}}/${{{match.group(1)}}}`"),
+                text,
+            )
+            if replaced != 1 or any_template.search(text):
+                raise ValueError(f"Unsupported template JavaScript path in {module.name}")
+            addon_contracts = {
+                "native_addon_module": name,
+                "native_addon_loader": _exported(text, loader_matches[0].group(1), "native addon loader"),
+            }
+        texts[name] = text
     # The native package classifier keys Claude's packaged-runtime paths off the compiled
     # executable; the split runtime is that same package.
     classifier, match = _sole(_CLASSIFIER, texts, "native-package classifier", "Bun.isStandaloneExecutable")
@@ -621,7 +650,7 @@ def _install_loader(directory: Path, graph: BunGraph) -> dict[str, str]:
                                     posixpath.dirname(worker.removeprefix(PREFIX)))
         _ = path.write_text(f"import {json.dumps(relative)};\n"
                             f"await import({json.dumps('./' + original.name)});\n", encoding="utf-8")
-    return {"native_package_classifier": classifier, "deep_link_registration": deep_link}
+    return {"native_package_classifier": classifier, "deep_link_registration": deep_link, **addon_contracts}
 
 
 _CONSUMER: Final = re.compile(r"async function " + IDENTIFIER + r"\((\{engine:[^{}]*\})\)\{")
@@ -644,7 +673,7 @@ _RESPONSE_PARSE: Final = re.compile(
 )
 # Members of Claude's turn, host and command queue that the mounted bridge calls.
 _BRIDGE_MEMBERS: Final = ("._engine", "._requireHost()", ".addNotification(", ".isExternalLoading",
-                          ".guard.isActive", ".getCommandQueue()", "turnAttributionKey:", '.cancel("remote")')
+                          ".guard.isActive", ".getCommandQueue()", "turnAttributionKey:", '.cancel("remote"')
 _MOUNT: Final = (
     "let tsQueue={queue}();{effect}(()=>TS_LOCAL.attach({engine:{turn}._engine,get sessionId(){return {session}.id},"
     "enqueue:(frame)=>tsQueue.enqueue({value:frame.message.content,mode:\"prompt\","
@@ -703,15 +732,16 @@ def _patch_native_bridge(directory: Path, graph: BunGraph) -> dict[str, str]:
                       text, consumer, "turn input enqueue")
     release = _within(r"(" + IDENTIFIER + r")=await " + re.escape(feed) + r"\.readLock\.acquire\(\)",
                       text, consumer, "turn read lock").group(1)
-    loop = _within(r"let (" + IDENTIFIER + r");try\{" + re.escape(names["onRead"]) + r"\?\.\(\);while\(!0\)\{let\{value:("
-                   + IDENTIFIER + r"),done:(" + IDENTIFIER + r")\}=await " + re.escape(engine) + r"\.next\(\);if\(\3\)break;",
+    loop = _within(r"let (" + IDENTIFIER + r")((?:," + IDENTIFIER + r"=" + IDENTIFIER + r")?);try\{"
+                   + re.escape(names["onRead"]) + r"\?\.\(\);while\(!0\)\{let\{value:("
+                   + IDENTIFIER + r"),done:(" + IDENTIFIER + r")\}=await " + re.escape(engine) + r"\.next\(\);if\(\4\)break;",
                    text, consumer, "turn event loop")
-    result, frame, done = loop.group(1), loop.group(2), loop.group(3)
+    result, extra, frame, done = loop.group(1), loop.group(2), loop.group(3), loop.group(4)
     final = _within(re.escape(f"}}finally{{{release}()}}return {result}}}"), text, consumer, "turn release")
     edits[consumer_module] = [
         (enqueue.end() - 3, enqueue.end() - 3, f",uuid:TS_LOCAL.userUuid({engine},{user}?.uuid)"),
         (loop.start(), loop.end(),
-         f"let {result};try{{TS_LOCAL.begin({engine},{user}?.uuid);{names['onRead']}?.();while(!0){{"
+         f"let {result}{extra};try{{TS_LOCAL.begin({engine},{user}?.uuid);{names['onRead']}?.();while(!0){{"
          f"let{{value:{frame},done:{done}}}=await {engine}.next();if({done})break;"
          f"TS_LOCAL.emit({engine},{user}?.uuid,{frame});"),
         (final.start() + len("}finally{"), final.start() + len("}finally{"),

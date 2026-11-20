@@ -381,7 +381,7 @@ class HookTests(unittest.TestCase):
             "  }\n"
             "}\n"
         )
-        hooked = runtimes.apply_hooks(runtimes._KIMI_HOOKS[0], source)
+        hooked = runtimes.apply_hooks(runtimes._KIMI_HOOKS[1], source)
         self.assertIsNotNone(hooked)
         assert hooked is not None
         lines = hooked.splitlines()
@@ -396,6 +396,40 @@ class HookTests(unittest.TestCase):
         self.assertEqual(
             lines[lines.index("        this.observer.reportEvent(observation, event, recoveryLedger, this.infiniteRetryEnabled);") + 1],
             "        wiretapEmitRunEvent(event, resolved.model.name);",
+        )
+        self.assertIsNone(runtimes.apply_hooks(runtimes._KIMI_HOOKS[1], hooked))
+
+    def test_kimi_2_7_loop_service_hooks_place_attempt_and_run_event_emits(self) -> None:
+        source = (
+            "import { AgentLoopRequestObserver } from './requestObservation';\n"
+            "export class AgentLoopService {\n"
+            "  private async generateCoreRequest(): Promise<void> {\n"
+            "    await resolved.request.generate({}, {\n"
+            "      onAttempt: (attemptRequest, { appliedRecoveries }) => {\n"
+            "        this.observer.recordAttempt(observation, attemptRequest, appliedRecoveries);\n"
+            "      },\n"
+            "      onEvent: (event) => {\n"
+            "        this.observer.reportEvent(observation, event, this.infiniteRetryEnabled);\n"
+            "      },\n"
+            "    });\n"
+            "  }\n"
+            "}\n"
+        )
+        hooked = runtimes.apply_hooks(runtimes._KIMI_HOOKS[0], source)
+        self.assertIsNotNone(hooked)
+        assert hooked is not None
+        lines = hooked.splitlines()
+        self.assertEqual(
+            lines[lines.index("import { AgentLoopRequestObserver } from './requestObservation';") + 1],
+            "import { wiretapEmitAttempt, wiretapEmitRunEvent } from '#/wiretap/wiretap';",
+        )
+        self.assertEqual(
+            lines[lines.index("        this.observer.recordAttempt(observation, attemptRequest, appliedRecoveries);") + 1],
+            "        wiretapEmitAttempt(resolved, attemptRequest);",
+        )
+        self.assertEqual(
+            lines[lines.index("        this.observer.reportEvent(observation, event, this.infiniteRetryEnabled);") + 1],
+            "        wiretapEmitRunEvent(event, resolved.model.spec.name);",
         )
         self.assertIsNone(runtimes.apply_hooks(runtimes._KIMI_HOOKS[0], hooked))
 

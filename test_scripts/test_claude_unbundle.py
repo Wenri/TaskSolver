@@ -42,10 +42,15 @@ KNOWN_NATIVES: Final[dict[str, dict[str, int]]] = {
         "mi_free": 0x2BE3870, "bun_string_to_wtf": 0x2DC4A80,
         "latin1_clone": 0x2E10000, "bundled_source_clone_call": 0x6F8E21B,
     },
+    "30e2724e2aecb1bf5dc9f3130901afb71c5fa229051c190a6d7ad9aff6378d6d": {  # Claude Code 2.1.329
+        "module_bytecode_generator": 0x8241900, "cached_bytecode_destructor": 0x37C4ED0,
+        "mi_free": 0x3368440, "bun_string_to_wtf": 0x3576120,
+        "latin1_clone": 0x35CA650, "bundled_source_clone_call": 0x714583B,
+    },
 }
 
 from claude.build_cli import CLIPin, _load_pin, matches
-from claude.unbundle import _read_graph, unbundle
+from claude.unbundle import _install_loader, _prepare_code, _read_graph, unbundle
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from elftools.elf.elffile import ELFFile
 from pyclaude.client import PARENT_SESSION_ENV
@@ -271,6 +276,49 @@ class GraphEditTests(unittest.TestCase):
                 unbundle(output, binary=self.source, bun_graph=sys.executable, pin=pin_for(self.fixture.data))
             self.assertFalse(output.exists())
 
+    def test_native_addon_template_path_relocates_only_for_dlopen_loader(self) -> None:
+        fixture = graph_fixture((
+            ModuleFixture("/$bunfs/root/cli", b'function isPkg(){return typeof Bun<"u"&&Bun.isStandaloneExecutable===!0}\n'
+                                              b'function reg(){if(cfg().disableDeepLinkRegistration==="disable")return;}\n'),
+            ModuleFixture("/$bunfs/root/addon.js",
+                          b'function loadAddon(e){return run(read(`/$bunfs/root/${e}`),[tmp()])}\n'
+                          b'function openFd(m,p){return process.dlopen(m,p)}\n'
+                          b'export{loadAddon as exportedLoader};\n'),
+            ModuleFixture("/$bunfs/root/clipboard-napi.node", b"\x7fELF", 10, 0),
+        ))
+        self.source.write_bytes(fixture.data)
+        graph = _read_graph(self.source)
+        extracted = self.directory / "extracted"
+        (extracted / "root").mkdir(parents=True)
+        (extracted / "root/cli").write_text(
+            'function isPkg(){return typeof Bun<"u"&&Bun.isStandaloneExecutable===!0}\n'
+            'function reg(){if(cfg().disableDeepLinkRegistration==="disable")return;}\n'
+        )
+        (extracted / "root/addon.js").write_text(
+            f"function loadAddon(e){{return run(read(`{extracted}/root/${{e}}`),[tmp()])}}\n"
+            "function openFd(m,p){return process.dlopen(m,p)}\n"
+            "export{loadAddon as exportedLoader};\n"
+        )
+        (extracted / "root/clipboard-napi.node").write_bytes(b"\x7fELF")
+        output = self.directory / "prepared"
+        _ = _prepare_code(extracted, output, graph)
+        contracts = _install_loader(output / "source", graph)
+        self.assertEqual(contracts["native_addon_module"], "/$bunfs/root/addon.js")
+        self.assertEqual(contracts["native_addon_loader"], "exportedLoader")
+        relocated = (output / "source/root/addon.js").read_text()
+        self.assertNotIn("/$bunfs/", relocated)
+        self.assertIn('Bun.fileURLToPath(new URL("./../../modules/root",import.meta.url))', relocated)
+
+        # Without process.dlopen, a template /$bunfs/ path fails closed.
+        (output / "source/root/addon.js").write_text("export const p = `/$bunfs/root/${name}`;\n")
+        with self.assertRaisesRegex(ValueError, "Unsupported template JavaScript path"):
+            _ = _install_loader(output / "source", graph)
+
+        # Non-root extracted template paths fail closed in _prepare_code.
+        (extracted / "root/addon.js").write_text(f"export const p = `{extracted}/other/${{e}}`;\n")
+        with self.assertRaisesRegex(ValueError, "Unrecognized extracted path"):
+            _ = _prepare_code(extracted, self.directory / "bad-prepared", graph)
+
 
 class PinnedRuntimeTests(unittest.TestCase):
     @classmethod
@@ -462,6 +510,22 @@ class PinnedRuntimeTests(unittest.TestCase):
         self.assertGreater(texts, 0)
         self.assertEqual(len(records), assets)
         self.assertEqual(sum(record["loader"] == 13 for record in records), texts)
+        manifest = json_loads_object((self.package / "manifest.json").read_text())
+        contracts = json_object(manifest["source_contracts"])
+        unnamed_check = ""
+        if "native_addon_module" in contracts:
+            addon_module = contracts["native_addon_module"]
+            addon_loader = contracts["native_addon_loader"]
+            assert isinstance(addon_module, str) and isinstance(addon_loader, str)
+            addon_text = (self.source / addon_module.removeprefix("/$bunfs/")).read_text(encoding="utf-8")
+            self.assertNotIn("`/$bunfs/", addon_text)
+            unnamed_check = (
+                f'const addonHost=await import({json.dumps(addon_module)});\n'
+                f'const unnamedClipboard=addonHost[{json.dumps(addon_loader)}]("clipboard-napi.node");\n'
+                'if(typeof unnamedClipboard.getLinuxClipboardText!=="function"||\n'
+                '   typeof unnamedClipboard.setLinuxClipboardText!=="function")'
+                'throw Error("unnamed native addon exports");\n'
+            )
         script = self.directory / "all-assets.mjs"
         script.write_text(
             f'import {json.dumps((self.source / "tasksolver-resolver.mjs").as_uri())};\n'
@@ -477,6 +541,7 @@ class PinnedRuntimeTests(unittest.TestCase):
             'const clipboard=import.meta.require("/$bunfs/root/clipboard-napi.node");\n'
             'if(typeof clipboard.getLinuxClipboardText!=="function"||\n'
             '   typeof clipboard.setLinuxClipboardText!=="function")throw Error("native addon exports");\n'
+            + unnamed_check +
             f'console.log("{assets} assets, {texts} text modules");\n'
         )
         result = subprocess.run([str(self.bun), str(script)], cwd=self.directory,

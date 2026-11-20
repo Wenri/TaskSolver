@@ -67,6 +67,15 @@ export function wiretapEmitEvent(payload: unknown): void {
   }
 }
 
+function modelNameOf(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  const obj = recordOf(value);
+  const model = recordOf(obj?.['model']) ?? obj;
+  if (typeof model?.['name'] === 'string') return model['name'];
+  const spec = recordOf(model?.['spec']);
+  return typeof spec?.['name'] === 'string' ? spec['name'] : undefined;
+}
+
 export function wiretapEmitAttempt(resolved: unknown, attemptRequest: unknown): void {
   if (addon === undefined) return;
   const res = recordOf(resolved);
@@ -85,7 +94,7 @@ export function wiretapEmitAttempt(resolved: unknown, attemptRequest: unknown): 
   wiretapEmitRequest({
     protocol: model?.['protocol'],
     providerType: model?.['providerType'],
-    modelName: model?.['name'],
+    modelName: modelNameOf(model) ?? modelNameOf(reqModel),
     modelAlias: res?.['modelAlias'],
     thinkingEffort: res?.['thinkingEffort'],
     maxTokens,
@@ -96,7 +105,7 @@ export function wiretapEmitAttempt(resolved: unknown, attemptRequest: unknown): 
   });
 }
 
-export function wiretapEmitRunEvent(event: unknown, model?: string): void {
+export function wiretapEmitRunEvent(event: unknown, modelOrResolved?: unknown): void {
   if (addon === undefined) return;
   const ev = recordOf(event);
   const type = ev?.['type'];
@@ -108,7 +117,7 @@ export function wiretapEmitRunEvent(event: unknown, model?: string): void {
   const outcome = recordOf(ev?.['outcome']);
   if (outcome?.['type'] !== 'done') return;
   if (outcome['usage'] !== undefined) {
-    wiretapEmitEvent({ type: 'usage', usage: outcome['usage'], model });
+    wiretapEmitEvent({ type: 'usage', usage: outcome['usage'], model: modelNameOf(modelOrResolved) });
   }
   const timing = recordOf(outcome['timing']);
   if (timing !== undefined) {

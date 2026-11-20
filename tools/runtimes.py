@@ -104,9 +104,18 @@ class Tree:
     hooks: tuple[tuple[Hook, ...], ...] = ()
 
 
-# Kimi Code's emit sites (kimi/README.md): the request path, agent/loop/requester.ts
-# (agent/llmRequester/llmRequesterService.ts before 2.5.0), and the wire journal.
+# Kimi Code's emit sites (kimi/README.md): the request path, agent/loop/loopService.ts
+# (agent/loop/requester.ts in 2.5.0–2.6.x, agent/llmRequester/llmRequesterService.ts before 2.5.0),
+# and the wire journal.
 _KIMI_HOOKS: Final = (
+    (
+        Hook(r"import \{ AgentLoopRequestObserver \} from '\./requestObservation';",
+             "import { wiretapEmitAttempt, wiretapEmitRunEvent } from '#/wiretap/wiretap';"),
+        Hook(r"(?P<indent>\s*)this\.observer\.recordAttempt\(observation, (?P<attempt>\w+), appliedRecoveries\);",
+             "{indent}wiretapEmitAttempt(resolved, {attempt});"),
+        Hook(r"(?P<indent>\s*)this\.observer\.reportEvent\(observation, (?P<event>\w+), this\.infiniteRetryEnabled\);",
+             "{indent}wiretapEmitRunEvent({event}, resolved.model.spec.name);"),
+    ),
     (
         Hook(r"import \{ errorFromLlmOutcome \} from '#/llm-adapter/model/generate';",
              "import { wiretapEmitAttempt, wiretapEmitRunEvent } from '#/wiretap/wiretap';"),
