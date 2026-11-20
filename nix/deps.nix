@@ -191,6 +191,9 @@ in
         rich = skipTestPaths [ "tests/test_inspect.py" ] (skipTests [ "test_attrs_broken" ] pyprev.rich);
         uvloop = skipTests [ "test_socket_sync_remove" ] pyprev.uvloop;
         distutils = skipTests [ "test_get_host_platform" ] pyprev.distutils;
+        # 3.15.2 dropped the outer quotes around a non-string cmd in
+        # subprocess.CalledProcessError.__str__.
+        pytest-subprocess = skipTests [ "test_check_call" ] pyprev.pytest-subprocess;
         scikit-build-core = skipTests [ "test_abi3_wheel" ] pyprev.scikit-build-core;
         yarl = skipTests [ "test_pickle" ] pyprev.yarl;
         # Its bytecode-to-AST verifier fails across the sample suite: 3.15
