@@ -152,7 +152,10 @@ class BuildPyNative(build_py):
         pnpm = ["npx", "-y", pin]
         app = os.path.join(vendor, "apps", "kimi-code")
         # A build has no TTY, so pnpm must relink node_modules without asking (it aborts instead).
-        install = [*pnpm, "install", "--frozen-lockfile", "--config.confirm-modules-purge=false"]
+        # Scope install to @moonshot-ai/kimi-code's workspace closure: apps/desktop (added in 2.7)
+        # has mutual @moonshot-ai/app-client ↔ app-composer symlinks that trip pixi-build's walk.
+        install = [*pnpm, "install", "--frozen-lockfile", "--filter=@moonshot-ai/kimi-code...",
+                   "--config.confirm-modules-purge=false"]
         if env.get("CONDA_BUILD") == "1":
             # rattler-build points HOME at each build's own work dir, which would move pnpm's
             # default store ($HOME/.local/share/pnpm) and relink node_modules on every build.

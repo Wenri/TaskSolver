@@ -60,7 +60,7 @@ the bundle and addon.
 ## Build + run
 Built by **`pixi install`** (setup.py's `_build_kimi`; the addon compiles its own copy of the wirecap bridge):
 
-1. the CLI bundle — `pnpm install --frozen-lockfile --config.confirm-modules-purge=false` then
+1. the CLI bundle — `pnpm install --frozen-lockfile --filter=@moonshot-ai/kimi-code... --config.confirm-modules-purge=false` then
    `tsdown` (invoked as `npx -y pnpm@<pin> …`, honoring the vendored `packageManager` field;
    conda-forge has no pnpm 10, and `setup.py` passes `--store-dir=<checkout>/.pixi/pnpm-store`
    under `CONDA_BUILD=1` so fresh build `HOME` directories reuse cached tarballs). A stub

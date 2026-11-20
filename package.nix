@@ -310,11 +310,13 @@ let
     dontUseNinjaCheck = true;
 
     pnpmRoot = kimiRoot;
+    pnpmWorkspaces = [ "@moonshot-ai/kimi-code..." ];
     pnpmDeps = fetchPnpmDeps {
       pname = "tasksolver-kimi-code";
       inherit pnpm;
       inherit ((lib.importJSON "${subtree kimiRoot}/apps/kimi-code/package.json")) version;
       src = subtree kimiRoot;
+      pnpmWorkspaces = [ "@moonshot-ai/kimi-code..." ];
       fetcherVersion = 3;
       hash = hashes.kimiPnpm.hash;
     };
