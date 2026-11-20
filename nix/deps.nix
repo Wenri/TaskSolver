@@ -60,10 +60,14 @@ in
           pyprev.jsonschema
         ];
         # These suites spawn a stand-in CLI through /usr/bin/env, which the
-        # build sandbox lacks, and read the child's state with ps.
+        # build sandbox lacks, read the child's state with ps, or replace
+        # PYTHONPATH with the source tree alone (dropping Nix's site paths).
         postPatch = (old.postPatch or "") + ''
           substituteInPlace tests/test_close_cancellation.py tests/test_run_end_subprocess.py \
             --replace-fail '#!/usr/bin/env python3' '#!${pyprev.python.interpreter}'
+          substituteInPlace tests/test_client_app.py \
+            --replace-fail 'str(Path(_client_app.__file__).parents[2])' \
+            'os.pathsep.join([str(Path(_client_app.__file__).parents[2]), os.environ.get("PYTHONPATH", "")])'
         '';
         nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ final.procps ];
       });
