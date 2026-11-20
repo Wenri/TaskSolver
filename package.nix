@@ -329,6 +329,9 @@ let
 
     preBuild = ''
       export HOME=$TMPDIR
+      # Restore pnpmConfigHook's store settings after moving HOME.
+      pnpm config set store-dir "$STORE_PATH"
+      pnpm config set package-import-method clone-or-copy
       # Where antigravity/CMakeLists.txt caches the download it verified.
       mkdir -p antigravity/build
       tar -xzf ${agyArchive'} -C antigravity/build antigravity
