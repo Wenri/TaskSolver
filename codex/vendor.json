@@ -1,7 +1,7 @@
 {
   "upstream": {
     "repository": "https://github.com/openai/codex.git",
-    "tag": "rust-v0.170.0",
-    "commit": "29eb79e9866b3262a777fdf8195c1b9e63684c91"
+    "tag": "rust-v0.171.0",
+    "commit": "ccf9be8cc458bd6b8336fe84d68d8893f2691a5e"
   }
 }

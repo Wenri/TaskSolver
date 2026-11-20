@@ -1,11 +1,11 @@
 {
   "codexCargo": {
-    "drv": "/nix/store/418w8kq3ynnqmm140h0myag3qdvxwiqy-cargo-deps-vendor.drv",
-    "hash": "sha256-WtWbdriLkq2xijkBxdFOWWVMXFX3idWQzf5jeBrWR1w="
+    "drv": "/nix/store/gn1p0dmxvgkww0bypfc1yz0cj0ir0yfy-cargo-deps-vendor.drv",
+    "hash": "sha256-F4t9v9Y0x4dYm2e1KkODsRI4UGgRLfHD+kmTBJRP0l8="
   },
   "kimiPnpm": {
-    "drv": "/nix/store/8qc6964ck2wx4sj2kr024w38y4l7mm4n-tasksolver-kimi-code-pnpm-deps.drv",
-    "hash": "sha256-bLEfwVHjoXC8SXI0LdVWuKIZyDKvORe/l83K9PZX/rU="
+    "drv": "/nix/store/xlmamzdfx9frydg317xds9lfzh7mz1pp-tasksolver-kimi-code-pnpm-deps.drv",
+    "hash": "sha256-VIPvuJGqHb3tIZwFG24dW+ZFAjUnb4vEZMdHPGpFH+E="
   },
   "rustyV8": {
     "version": "152.2.0",

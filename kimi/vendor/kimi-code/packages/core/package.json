@@ -1,6 +1,6 @@
 {
   "name": "@moonshot-ai/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Loop, llm, and tool runtime without DI or adapters.",
   "license": "MIT",
@@ -45,7 +45,8 @@
     "ajv-formats": "^3.0.1",
     "openai": "^6.34.0",
     "radashi": "^12.9.1",
-    "undici": "^7.27.1"
+    "undici": "^7.27.1",
+    "uuid": "14.0.1"
   },
   "devDependencies": {
     "pino": "^9.5.0"
