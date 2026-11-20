@@ -330,8 +330,9 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
           }, promptMetadataTextFromContentParts(parts, clientMetadata));
           const status = resolved.prompt.snapshot();
           const entry = {
-            message: { role: 'user' as const, content: parts },
-            meta: {
+            role: 'user' as const,
+            content: parts,
+            attributes: {
               promptId: attempt.id,
               origin: { kind: 'user', attachments: promptAttachments, clientMetadata } as PromptOrigin,
             },
@@ -456,14 +457,14 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
     {
       method: 'POST',
       path: '/sessions/{session_id}/prompts/{tail}',
-      success: { data: z.union([promptAbortResponseSchema, promptSteerResultSchema]) },
+      success: { data: promptAbortResponseSchema },
       errors: {
         [ErrorCode.VALIDATION_FAILED]: {},
         [ErrorCode.SESSION_NOT_FOUND]: {},
         [ErrorCode.PROMPT_NOT_FOUND]: {},
         [ErrorCode.WIRE_VERSION_TOO_LOW]: {},
       },
-      description: 'Abort a running prompt or steer a queued prompt',
+      description: 'Abort a prompt by prompt_id',
       tags: ['prompts'],
       operationId: 'promptAction',
     },
@@ -503,9 +504,8 @@ type PromptActionExtra = {
 
 type PromptActionCtx = PromptActionExtra & { readonly id: string; readonly body: unknown };
 
-const promptActions: ActionTable<'abort' | 'steer', PromptActionExtra> = {
+const promptActions: ActionTable<'abort', PromptActionExtra> = {
   abort: { handle: abortPromptAction },
-  steer: { handle: steerPromptAction },
 };
 
 async function abortPromptAction(ctx: PromptActionCtx): Promise<void> {
@@ -513,12 +513,6 @@ async function abortPromptAction(ctx: PromptActionCtx): Promise<void> {
   resolved.prompt.cancel({ promptId: id });
   requestLog(req)?.info({ session_id, prompt_id: id }, 'prompt aborted');
   reply.send(okEnvelope({ aborted: true }, req.id));
-}
-
-async function steerPromptAction(ctx: PromptActionCtx): Promise<void> {
-  const { resolved, req, reply, id } = ctx;
-  await resolved.prompt.steer([id]);
-  reply.send(okEnvelope({ steered: true, prompt_ids: [id] }, req.id));
 }
 
 function projectPromptList(loop: IAgentLoopService) {
@@ -530,15 +524,16 @@ function projectPromptList(loop: IAgentLoopService) {
   return {
     active: active === undefined ? null : projectPromptSnapshot(active),
     queued: snapshot.queue
-      .map((item) =>
-        projectPromptSnapshot({
-          id: item.meta?.promptId ?? '',
-          userMessageId: item.meta?.userMessageId ?? '',
-          createdAt: item.meta?.createdAt ?? '',
+      .map((item) => {
+        const { attributes: _attributes, ...coreMessage } = item;
+        return projectPromptSnapshot({
+          id: item.attributes?.promptId ?? '',
+          userMessageId: item.attributes?.userMessageId ?? '',
+          createdAt: item.attributes?.createdAt ?? '',
           state: 'pending',
-          message: { ...item.message, origin: item.meta?.origin as PromptOrigin | undefined },
-        }),
-      ),
+          message: { ...coreMessage, origin: item.attributes?.origin as PromptOrigin | undefined },
+        });
+      }),
   };
 }
 

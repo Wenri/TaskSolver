@@ -240,7 +240,7 @@ function controlQuestions(ctx: TestAgentContext) {
 describe('AgentTaskService — event emission', () => {
   afterEach(async () => {
     vi.useRealTimers();
-    for (const ctx of contexts.splice(0).reverse()) await ctx.dispose();
+    for (const ctx of contexts.splice(0).toReversed()) await ctx.dispose();
   });
 
   it('emits process task changes and persists only detached tasks', async () => {
@@ -389,7 +389,7 @@ describe('AgentTaskService — event emission', () => {
 
 describe('AgentTaskService — notification delivery', () => {
   afterEach(async () => {
-    for (const ctx of contexts.splice(0).reverse()) await ctx.dispose();
+    for (const ctx of contexts.splice(0).toReversed()) await ctx.dispose();
   });
 
   it('delivers completed agent task notifications through an auto-launched turn', async () => {
@@ -557,11 +557,41 @@ describe('AgentTaskService — notification delivery', () => {
     expect(await ctx.get(IAgentTaskService).readOutput(task.handler.taskId)).toContain('persisted partial output');
   });
 
+  it('starts an occupied loop when no recovery work is pending and rejects new prompts', async () => {
+    const info = { ...agentInfo(), terminalNotificationSuppressed: true };
+    const records = taskHistoryRecords([info]);
+    const ctx = track(createTestAgent(
+      taskServices(),
+      sessionService(ISessionRunGate, {
+        _serviceBrand: undefined,
+        begin: () => {
+          throw sessionOccupiedError('test-session');
+        },
+        tryAcquire: () => undefined,
+        acquire: () => {
+          throw sessionOccupiedError('test-session');
+        },
+      }),
+      { persistence: new InMemoryWireRecordPersistence(records) },
+    ));
+    const loop = ctx.get(IAgentLoopService);
+    const createCompletion = vi.spyOn(ctx.get(IAgentTaskOutputService), 'createCompletion');
+    await loop.start();
+    expect(createCompletion).not.toHaveBeenCalled();
+    expect(ctx.llmCalls).toEqual([]);
+    expect(taskNotifications(ctx, info.taskId)).toEqual([]);
+    expect((await ctx.persistedWireRecords()).filter((record) => record.type === 'turn.prompt')).toEqual([]);
+    await expect(loop.submit({
+      input: [{ type: 'text', text: 'continue' }],
+      promptId: 'occupied-prompt',
+    })).rejects.toMatchObject({ code: ErrorCodes.SESSION_OCCUPIED });
+    expect((await ctx.persistedWireRecords()).filter((record) => record.type === 'turn.prompt')).toEqual([]);
+  });
+
   it('restores terminal agent task notifications once after a prompt-only crash and session lock retry', async () => {
     const info = agentInfo();
     const notificationId = `task:${info.taskId}:${info.status}`;
     const crashCtx = track(createTestAgent(taskServices()));
-    crashCtx.mockNextResponse({ type: 'text', text: 'restored agent ack' });
     await restoreTaskHistory(crashCtx, [info], 'main', [{
       type: 'turn.prompt',
       agentId: 'main',
@@ -574,6 +604,7 @@ describe('AgentTaskService — notification delivery', () => {
       input: [{ type: 'text', text: 'notification prompt' }],
     } as unknown as WireRecord]);
     await crashCtx.get(IAgentLoopService).settled();
+    expect(crashCtx.llmCalls).toEqual([]);
     expect(taskNotifications(crashCtx, info.taskId)).toHaveLength(1);
     expect(JSON.stringify(taskNotifications(crashCtx, info.taskId))).toContain('<notification');
 
@@ -593,6 +624,10 @@ describe('AgentTaskService — notification delivery', () => {
       sessionService(ISessionRunGate, {
         _serviceBrand: undefined,
         begin,
+        tryAcquire: () => {
+          if (occupied) return undefined;
+          return { sessionId: 'test-session', release };
+        },
         acquire: () => {
           begin();
           return { sessionId: 'test-session', release };
@@ -602,11 +637,10 @@ describe('AgentTaskService — notification delivery', () => {
     ));
     const loop = ctx.get(IAgentLoopService);
     const createCompletion = vi.spyOn(ctx.get(IAgentTaskOutputService), 'createCompletion');
-    ctx.mockNextResponse({ type: 'text', text: 'restored agent ack' });
 
     await expect(ctx.restorePersisted()).rejects.toMatchObject({ code: ErrorCodes.SESSION_OCCUPIED });
     expect((loop as unknown as { loop?: unknown }).loop).toBeUndefined();
-    expect(createCompletion).not.toHaveBeenCalled();
+    expect(createCompletion).toHaveBeenCalledTimes(1);
     expect(release).not.toHaveBeenCalled();
     expect(taskNotifications(ctx, info.taskId)).toEqual([]);
     expect(ctx.llmCalls).toEqual([]);
@@ -618,14 +652,22 @@ describe('AgentTaskService — notification delivery', () => {
     await loop.start();
     await loop.settled();
 
-    expect(createCompletion).toHaveBeenCalledTimes(1);
+    expect(createCompletion).toHaveBeenCalledTimes(2);
     expect(release).toHaveBeenCalledTimes(1);
     expect(release.mock.invocationCallOrder[0]).toBeGreaterThan(createCompletion.mock.invocationCallOrder[0]!);
+    expect(ctx.llmCalls).toEqual([]);
     expect(taskNotifications(ctx, info.taskId)).toHaveLength(1);
     expect(JSON.stringify(taskNotifications(ctx, info.taskId))).toContain('<notification');
     expect((await ctx.persistedWireRecords()).filter((record) =>
       record.type === 'turn.prompt' &&
       (record['origin'] as { kind?: string } | undefined)?.kind === 'task'
+    )).toHaveLength(1);
+    expect((await ctx.persistedWireRecords()).filter((record) =>
+      record.type === 'turn.ended' && record['stopReason'] === 'prompt_only'
+    )).toHaveLength(1);
+    expect((await ctx.persistedWireRecords()).filter((record) =>
+      record.type === 'context.append_message' &&
+      ((record['message'] as { origin?: { kind?: string } } | undefined)?.origin?.kind === 'task')
     )).toHaveLength(1);
   });
 
@@ -640,9 +682,9 @@ describe('AgentTaskService — notification delivery', () => {
       'output.log',
     );
     await ctx.get(IAgentTaskOutputService).appendTaskOutput('bash-done0000', 'restored shell output');
-    ctx.mockNextResponse({ type: 'text', text: 'restored process ack' });
     await restoreTaskHistory(ctx, [processInfo()]);
     await ctx.get(IAgentLoopService).settled();
+    expect(ctx.llmCalls).toEqual([]);
     const text = JSON.stringify(taskNotifications(ctx, 'bash-done0000'));
     expect(taskNotifications(ctx, 'bash-done0000')).toHaveLength(1);
     expect(text).toContain('Background process completed');
@@ -654,9 +696,9 @@ describe('AgentTaskService — notification delivery', () => {
   it('references persisted output without inlining a restored process output tail', async () => {
     const ctx = track(createTestAgent(taskServices()));
     await ctx.get(IAgentTaskOutputService).appendTaskOutput('bash-done0000', 'secret full output');
-    ctx.mockNextResponse({ type: 'text', text: 'restored output ack' });
     await restoreTaskHistory(ctx, [processInfo()]);
     await ctx.get(IAgentLoopService).settled();
+    expect(ctx.llmCalls).toEqual([]);
     const text = JSON.stringify(taskNotifications(ctx, 'bash-done0000'));
     expect(text).toContain('output-file');
     expect(text).not.toContain('secret full output');
@@ -711,8 +753,9 @@ describe('AgentTaskService — notification delivery', () => {
     try {
       ctx.appendTurnExchange('kept prompt', 'kept answer');
       const active = submitPromptTurn(loop, {
-        message: { role: 'user', content: [{ type: 'text', text: 'remove me' }] },
-        meta: { origin: { kind: 'user' } },
+        role: 'user',
+        content: [{ type: 'text', text: 'remove me' }],
+        attributes: { origin: { kind: 'user' } },
       }).turn;
       await started;
       task.resolve('done');
@@ -740,11 +783,11 @@ describe('AgentTaskService — notification delivery', () => {
   it('does not double-notify newly lost restored agent tasks', async () => {
     const ctx = track(createTestAgent(taskServices()));
     const running = agentInfo({ status: 'running', endedAt: null });
-    ctx.mockNextResponse({ type: 'text', text: 'lost task acknowledged' });
     await restoreTaskHistory(ctx, [running]);
     await drain(ctx, running.taskId);
     await ctx.restore(await ctx.persistedWireRecords());
     await drain(ctx, running.taskId);
+    expect(ctx.llmCalls).toEqual([]);
     expect((await ctx.persistedWireRecords()).filter((record) => record.type === 'task.terminated')).toEqual([]);
   });
 
@@ -763,6 +806,7 @@ describe('AgentTaskService — notification delivery', () => {
       },
     } as unknown as WireRecord];
     await restoreTaskHistory(ctx, [info], 'main', preceding);
+    await ctx.get(IAgentLoopService).settled();
     await restoreTaskHistory(ctx, [info], 'main', preceding);
     expect(taskNotifications(ctx, info.taskId)).toHaveLength(1);
   });
@@ -788,9 +832,9 @@ describe('AgentTaskService — notification delivery', () => {
   it('restores a lost notification without synthesizing task termination', async () => {
     const ctx = track(createTestAgent(taskServices()));
     const running = agentInfo({ status: 'running', endedAt: null });
-    ctx.mockNextResponse({ type: 'text', text: 'lost task acknowledged' });
     await restoreTaskHistory(ctx, [running]);
     await drain(ctx, running.taskId);
+    expect(ctx.llmCalls).toEqual([]);
     expect((await ctx.persistedWireRecords()).filter((record) => record.type === 'task.terminated')).toEqual([]);
   });
 
@@ -840,7 +884,7 @@ describe('AgentTaskService — agent recovery notification bodies', () => {
       'call-agent',
       emptyOutputSnapshot(),
     );
-    const text = entry.message.content.map((part) => part.type === 'text' ? part.text : '').join('');
+    const text = entry.content.map((part) => part.type === 'text' ? part.text : '').join('');
     expect(text).toContain('agent_id="agent-7"');
     expect(text).toMatch(/Agent\(resume="agent-7"/);
     expect(text).toMatch(/agent_id.*NOT source_id|source_id.*NOT agent_id/);
@@ -852,7 +896,7 @@ describe('AgentTaskService — agent recovery notification bodies', () => {
       'call-agent',
       emptyOutputSnapshot(),
     );
-    const text = entry.message.content.map((part) => part.type === 'text' ? part.text : '').join('');
+    const text = entry.content.map((part) => part.type === 'text' ? part.text : '').join('');
     expect(text).toContain('agent_id="agent-8"');
     expect(text).not.toMatch(/Agent\(resume="agent-8"/);
   });
@@ -860,7 +904,7 @@ describe('AgentTaskService — agent recovery notification bodies', () => {
   it('process task body never mentions resume', () => {
     const info = processInfo({ status: 'failed', exitCode: 1 });
     const entry = createTaskCompletionEntry(info, 'call-process', emptyOutputSnapshot());
-    const text = entry.message.content.map((part) => part.type === 'text' ? part.text : '').join('');
+    const text = entry.content.map((part) => part.type === 'text' ? part.text : '').join('');
     expect(text).not.toContain('agent_id=');
     expect(text).not.toMatch(/Agent\(resume=/);
     expect(text).toContain(`source_id="${info.taskId}"`);

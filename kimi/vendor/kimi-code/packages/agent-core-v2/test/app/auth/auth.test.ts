@@ -1866,8 +1866,31 @@ describe('AuthSummaryService', () => {
     });
   });
 
-  it('ensureReady accepts provider api keys', async () => {
+  it('ensureReady accepts provider api keys and ambient AWS credentials', async () => {
+    providers['bedrock-main'] = { type: 'bedrock', env: { AWS_REGION: 'us-east-1' } };
+    models['bedrock'] = {
+      provider: 'bedrock-main',
+      model: 'global.moonshotai.kimi-k3.1',
+      maxContextSize: 128000,
+    };
     await expect(createSummary().ensureReady('openai')).resolves.toBeUndefined();
+    await expect(createSummary().ensureReady('bedrock')).resolves.toBeUndefined();
+    expect(getCachedAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('ensureReady accepts Vertex AI ADC without an API key', async () => {
+    providers['vertex-main'] = {
+      type: 'vertexai',
+      env: { GOOGLE_CLOUD_PROJECT: 'test-project', GOOGLE_CLOUD_LOCATION: 'global' },
+    };
+    models['vertex'] = {
+      provider: 'vertex-main',
+      model: 'gemini-test',
+      protocol: 'google-genai',
+      maxContextSize: 128000,
+    };
+
+    await expect(createSummary().ensureReady('vertex')).resolves.toBeUndefined();
     expect(getCachedAccessToken).not.toHaveBeenCalled();
   });
 

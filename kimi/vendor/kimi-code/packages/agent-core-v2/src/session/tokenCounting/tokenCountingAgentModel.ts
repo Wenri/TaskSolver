@@ -15,9 +15,9 @@ import {
   type TokenCountingState,
 } from '#/agent/tokenCounting/tokenCountingOps';
 import { AgentStatusUpdated } from '#/agent/usage/usageEvents';
-import type { ContentPart, Message, ToolMessage } from '#human/llm/message';
+import type { ContentPart, Message, ToolMessage } from '@moonshot-ai/core/llm/message';
 import { estimateTokensForMessages } from '#/llm-adapter/contract/tokens';
-import { grandTotal, type TokenUsage } from '#human/llm-requester/usage';
+import { grandTotal, type TokenUsage } from '@moonshot-ai/core/llm/usage';
 import { AgentModel, defineAgentModel, type AgentModelContext } from '#/state/agentModel';
 
 import type { TokenCountingRebaseInput } from './sessionTokenCounting';
@@ -225,15 +225,15 @@ function matchesToolMessage(
   toolName: string | undefined,
 ): boolean {
   if (left.toolCallId !== right.toolCallId) return false;
-  const rightIsError = right.isError === true;
-  const rightNote = nonEmptyText(right.note);
-  const rightDurationMs = right.durationMs;
+  const rightIsError = (right.isError ?? right.attributes?.isError) === true;
+  const rightNote = nonEmptyText(right.note ?? right.attributes?.note);
+  const rightDurationMs = right.durationMs ?? right.attributes?.durationMs;
   const leftContext = left as ContextMessage;
-  const leftExplicitIsError = leftContext.isError;
+  const leftExplicitIsError = leftContext.isError ?? left.attributes?.isError;
   if (leftExplicitIsError !== undefined && leftExplicitIsError !== rightIsError) {
     return false;
   }
-  const leftExplicitNote = nonEmptyText(leftContext.note);
+  const leftExplicitNote = nonEmptyText(leftContext.note ?? left.attributes?.note);
   if (leftExplicitNote !== undefined && leftExplicitNote !== rightNote) {
     return false;
   }

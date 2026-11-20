@@ -7,15 +7,14 @@ import { OrderedHookSlot } from '#/hooks';
 import { IEventBus } from '#/app/event/eventBus';
 import type { Event2, Event2Class } from '#/app/event/event2';
 import { IFlagService } from '#/app/flag/flag';
-import type { ModelCapability } from '#/llm-adapter/contract/capability';
-import type { Message, ToolCall, ToolDescription as Tool } from '#human/llm/message';
-import type { LlmRequest } from '#human/llm/request';
+import type { LlmRequest, ModelCapability } from '@moonshot-ai/core/llm/request';
+import { fromLlmModelSpec, type ModelCapability as LegacyModelCapability } from '#/llm-adapter/contract/capability';
+import type { Message, ToolCall, ToolDescription as Tool } from '@moonshot-ai/core/llm/message';
 import { IAgentMcpService } from '#/agent/mcp/mcp';
 import { ContextSpliced } from '#/agent/contextMemory/contextEvents';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { contextFromHistoryEntry } from '#/agent/loop/history';
 import { AgentSpaceImpl } from '#/agent/agentContext/agentSpace';
-import type { HistoryMessage } from '#human/agent/turn';
 import { IAgentReminderService } from '#/features/reminder/reminderService';
 import { createReminderHarness } from '../../features/reminder/stubs';
 import {
@@ -28,7 +27,7 @@ import {
 } from '#/agent/loop/loop';
 import { createToolSelectResolver } from '#/agent/loop/toolSelectPolicy';
 import { TurnStarted } from '#/agent/loop/turnEvents';
-import { StubEffectiveProfileReader } from '../loop/stubs';
+import { StubEffectiveProfileReader, stubToolExecutor, stubWire } from '../loop/stubs';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
@@ -56,7 +55,7 @@ import {
   toolSelectKey,
 } from '#/agent/toolSelect/toolSelectOps';
 import { SelectToolsTool } from '#/agent/tools/select-tools/selectToolsTool';
-import { kimiOpenAIProtocol } from '#human/llm/builtin/provider/kimi/protocol';
+import { kimiOpenAIProtocol } from '@moonshot-ai/core/llm/builtin/provider/kimi/protocol';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IWireService } from '#/wire/wire';
 import { IEventDispatcher } from '#/state/eventDispatcher';
@@ -64,7 +63,6 @@ import { ISessionMcpHandle } from '#/session/mcp/sessionMcpHandle';
 import { registerLogServices } from '../../_base/log/stubs';
 import { recordingTelemetry } from '../../app/telemetry/stubs';
 import { registerStateServices } from '../../state/stubs';
-import { stubToolExecutor, stubWire } from '../loop/stubs';
 import { registerToolResultTruncationServices } from '../toolResultTruncation/stubs';
 
 function toolsOf(message: Message | undefined) {
@@ -117,7 +115,6 @@ function makeCapabilities(overrides: {
     audio_in: false,
     thinking: false,
     tool_use: overrides.tool_use ?? false,
-    max_context_tokens: 128_000,
     dynamically_loaded_tools: overrides.dynamically_loaded_tools,
   };
 }
@@ -234,8 +231,12 @@ class FakeLoopService extends StubEffectiveProfileReader implements IAgentLoopSe
     return [];
   }
 
-  override getModelCapabilities(): ModelCapability {
-    return capabilities;
+  override getModelCapabilities(): LegacyModelCapability {
+    return fromLlmModelSpec({ provider: 'stub', name: 'stub', capability: capabilities });
+  }
+
+  bindingSnapshot(): ReturnType<IAgentLoopService['bindingSnapshot']> {
+    return { thinkingLevel: 'off', systemPrompt: '' };
   }
 
   async setProfile(): Promise<void> {}
@@ -256,11 +257,11 @@ class FakeLoopService extends StubEffectiveProfileReader implements IAgentLoopSe
     return 0;
   }
 
-  replaceHistory(_entries: readonly HistoryMessage[]): boolean {
+  replaceHistory(_entries: readonly Message[]): boolean {
     return true;
   }
 
-  async initializeHistory(_entries: readonly HistoryMessage[]): Promise<void> {}
+  async initializeHistory(_entries: readonly Message[]): Promise<void> {}
 
   readonly hooks: IAgentLoopService['hooks'] = {
     onWillBeginStep: new OrderedHookSlot<BeforeStepContext>(),
@@ -281,6 +282,8 @@ class FakeLoopService extends StubEffectiveProfileReader implements IAgentLoopSe
   }
 
   detachTool(): void {}
+
+  suppressTaskNotifications(): void {}
 
   registerToolBatchStarting(): IDisposable {
     return toDisposable(() => {});
@@ -330,7 +333,7 @@ class FakeLoopService extends StubEffectiveProfileReader implements IAgentLoopSe
     return toDisposable(() => {});
   }
 
-  async settled(): Promise<void> {}
+  async settled(): Promise<undefined> {}
 
   async retry(): Promise<never> {
     throw new Error('unused in this suite');
@@ -351,16 +354,16 @@ class FakeContextMemory extends FakeLoopService {
     return this.messages;
   }
 
-  override replaceHistory(entries: readonly HistoryMessage[], _reason?: string): boolean {
+  override replaceHistory(entries: readonly Message[], _reason?: string): boolean {
     this.messages.splice(0, this.messages.length, ...entries.map((entry) => contextFromHistoryEntry(entry)));
     return true;
   }
 
-  override async initializeHistory(entries: readonly HistoryMessage[]): Promise<void> {
+  override async initializeHistory(entries: readonly Message[]): Promise<void> {
     this.replaceHistory(entries);
   }
 
-  override remind(...entries: readonly HistoryMessage[]): void {
+  override remind(...entries: readonly Message[]): void {
     this.appended.push(...entries.map((entry) => contextFromHistoryEntry(entry)));
   }
 
@@ -1052,8 +1055,10 @@ describe('AgentToolSelectService view shaping (gate open)', () => {
     expect(h.sut.requestTools(frozen, true, false)).toBe(frozen);
     expect(h.sut.requestTools(frozen, true, true)).toBe(frozen);
     const staticTools = h.sut.requestTools(shaped, false, true, messages);
-    expect(staticTools.map((tool) => tool.name)).toEqual(['Echo', MCP_ALPHA]);
+    expect(staticTools.map((tool) => tool.name)).toEqual(['Echo', MCP_ALPHA, MCP_BETA]);
     expect(staticTools.find((tool) => tool.name === MCP_ALPHA)?.deferred).toBeUndefined();
+    expect(staticTools.find((tool) => tool.name === MCP_BETA)?.deferred).toBeUndefined();
+    expect(staticTools.find((tool) => tool.name === SELECT_TOOLS_TOOL_NAME)).toBeUndefined();
     expect(h.sut.requestTools(shaped, true, true, messages)).toBe(shaped);
     expect(shaped.find((tool) => tool.name === SELECT_TOOLS_TOOL_NAME)).toBeDefined();
   });
