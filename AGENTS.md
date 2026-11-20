@@ -70,7 +70,10 @@ otherwise only warn. A fresh build work dir has its own `HOME`. During conda bui
 `_build_codex` defaults `CARGO_HOME` to the checkout's `.pixi/cargo-home`, preserving
 dependency sources (including the V8 crate) alongside the compiled artifacts in
 `codex/vendor/codex-rs/target` (an explicit `CARGO_HOME` takes precedence), and `_build_kimi`
-passes `--store-dir=.pixi/pnpm-store` and `--config.confirm-modules-purge=false` to pnpm.
+passes `--filter=@moonshot-ai/kimi-code...` (mirrored by `pnpmWorkspaces` in `package.nix`,
+excluding `apps/desktop`'s cyclic `@moonshot-ai/app-client` ↔ `@moonshot-ai/app-composer`
+symlinks that fail `pixi-build`'s directory walk), `--store-dir=.pixi/pnpm-store` (under
+`CONDA_BUILD=1`), and `--config.confirm-modules-purge=false` to pnpm.
 
 **Redistributable bundles.** agy and Claude Code are built from proprietary upstream executables.
 A non-editable conda build (`pixi publish`, a conda source dependency; `redistributable_bundle`
@@ -386,7 +389,10 @@ upstream caches or claim prelinked module metadata is a native addon. The runtim
 reconstructs external module records. Verify actual cache hits, Unicode semantics,
 relocation and stale-source rejection. Preserve text asset primitive exports with
 UTF-8 files and CommonJS adapters; loose Markdown loading changes semantics. Resolve
-source imports and worker/browser paths relative to the installed tree.
+source imports, worker/browser paths, and Claude 2.1.327+'s Linux `O_TMPFILE` `process.dlopen`
+native-addon template (`/$bunfs/root/${e}` → `../../modules/root/${e}`, recorded as
+`native_addon_module` / `native_addon_loader` in `source_contracts`; any non-`dlopen` template
+fails closed) relative to the installed tree.
 
 The headless SDK uses its existing subprocess `stream-json` protocol. Native UI
 startup automatically exposes a private Unix socket; managed screens publish it as

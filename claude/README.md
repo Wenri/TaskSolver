@@ -65,7 +65,10 @@ compiler (`PT_BUN_PAYLOAD` with its own pieces) the reserved headers go back to
 `PT_NULL`. A payload of compiled machine code has no source to patch, so bun_graph
 refuses to extract it. Statically linked native helpers such as
 ripgrep and bfs remain in the private runtime; the launcher preserves their
-`argv[0]` dispatch. Native `.node` modules are separate files. Prelinked JavaScript
+`argv[0]` dispatch. Native `.node` modules are separate files under `modules/`, resolved both
+through `tasksolver-resolver.mjs` (`import` / `import.meta.require`) and by relocating Claude
+2.1.327+'s Linux `O_TMPFILE` `process.dlopen` template path (`/$bunfs/root/${e}`) relative to
+`modules/root/` (`native_addon_module` / `native_addon_loader` in `source_contracts`). Prelinked JavaScript
 records are module metadata, not native addons; the external loader reconstructs
 its module records from the current source.
 

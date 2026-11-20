@@ -35,7 +35,8 @@ no-op-safe) plus **three one-line emit sites**:
   2.5.0–2.6.x, `agent/llmRequester/llmRequesterService.ts` before 2.5.0) — after
   `this.observer.recordAttempt(observation, attemptRequest, appliedRecoveries)` in `onAttempt` →
   `kimi_request` per attempt (the full normalized systemPrompt + tools + messages via
-  `wiretapEmitAttempt`); after `this.observer.reportEvent(...)` in `onEvent` → `kimi_event` per
+  `wiretapEmitAttempt`, reading `model.spec.name` in 2.7+ or `model.name` in ≤ 2.6.x); after
+  `this.observer.reportEvent(...)` in `onEvent` → `kimi_event` per
   `LlmRunEvent` (`part`/`usage`/`timing`/`finish` via `wiretapEmitRunEvent`).
 - `wire/wireService.ts` `appendRecordLow()` → `kimi_wire` (every appended wire-journal record
   + its agent scope; reading/restoring the journal does not emit records).
@@ -50,10 +51,12 @@ ESM packaging config when updating the source: `python3 tools/runtimes.py adopt 
 [--version X.Y.Z]` replays the wiretap module, the emit sites and the `tsdown.config.ts` edits onto
 a new release with a three-way merge against the pinned tag and keeps the gitignored build output.
 The emit sites are also declared as hooks (`_KIMI_HOOKS` in `tools/runtimes.py`: each line and the
-anchor line that places it). When upstream moves or rewrites the code around them, as 2.5.0 did,
-the conflicted file takes the new release's copy with the hooks re-inserted, provided each anchor
-matches exactly one line; any other conflicted file is named to fix by hand. So an emit site
-changed here must change its hook too, and `test_kimi_capture.py` is the proof either way. `pnpm-lock.yaml` comes from upstream (the build
+anchor line that places it). When upstream moves or rewrites the code around them within a file or
+across a file rename (as 2.5.0 did), the conflicted file takes the new release's copy with the
+hooks re-inserted, provided each anchor matches exactly one line; folding a hooked file into an
+existing file (as 2.7.0 folded `requester.ts` into `loopService.ts`) or any other conflict is
+named to fix by hand. So an emit site changed here must change its hook too, and
+`test_kimi_capture.py` is the proof either way. `pnpm-lock.yaml` comes from upstream (the build
 installs with `--frozen-lockfile`). Then run `pixi reinstall --locked tasksolver`, which rebuilds
 the bundle and addon.
 
@@ -62,8 +65,11 @@ Built by **`pixi install`** (setup.py's `_build_kimi`; the addon compiles its ow
 
 1. the CLI bundle — `pnpm install --frozen-lockfile --filter=@moonshot-ai/kimi-code... --config.confirm-modules-purge=false` then
    `tsdown` (invoked as `npx -y pnpm@<pin> …`, honoring the vendored `packageManager` field;
-   conda-forge has no pnpm 10, and `setup.py` passes `--store-dir=<checkout>/.pixi/pnpm-store`
-   under `CONDA_BUILD=1` so fresh build `HOME` directories reuse cached tarballs). A stub
+   conda-forge has no pnpm 10, `setup.py` passes `--store-dir=<checkout>/.pixi/pnpm-store` under
+   `CONDA_BUILD=1` so fresh build `HOME` directories reuse cached tarballs, and `--filter=@moonshot-ai/kimi-code...`
+   — mirrored by `pnpmWorkspaces` in `package.nix` — skips `apps/desktop` and its cyclic
+   `@moonshot-ai/app-client` ↔ `@moonshot-ai/app-composer` symlinks that trip `pixi-build`'s
+   directory walk). A stub
    `vis-web-asset.ts` is written so the vite/tailwind prebuild is skipped (breaks only
    `kimi vis`); invoking tsdown directly (not `pnpm run build`) also skips the darwin/win32
    native-asset copy and the dist-web check. This emits
