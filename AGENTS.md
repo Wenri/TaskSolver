@@ -72,8 +72,10 @@ dependency sources (including the V8 crate) alongside the compiled artifacts in
 `codex/vendor/codex-rs/target` (an explicit `CARGO_HOME` takes precedence), and `_build_kimi`
 passes `--filter=@moonshot-ai/kimi-code...` (mirrored by `pnpmWorkspaces` in `package.nix`,
 excluding `apps/desktop`'s cyclic `@moonshot-ai/app-client` ↔ `@moonshot-ai/app-composer`
-symlinks that fail `pixi-build`'s directory walk), `--store-dir=.pixi/pnpm-store` (under
-`CONDA_BUILD=1`), and `--config.confirm-modules-purge=false` to pnpm.
+symlinks that fail `pixi-build`'s directory walk; `package.nix`'s `preBuild` also restores
+`pnpmConfigHook`'s `store-dir` and `package-import-method` after moving `HOME=$TMPDIR`),
+`--store-dir=.pixi/pnpm-store` (under `CONDA_BUILD=1`), and
+`--config.confirm-modules-purge=false` to pnpm.
 
 **Redistributable bundles.** agy and Claude Code are built from proprietary upstream executables.
 A non-editable conda build (`pixi publish`, a conda source dependency; `redistributable_bundle`
@@ -264,7 +266,7 @@ overrides (`effort`, `thinking`, `system_prompt`, `timeout`, ...). kimi-code rai
 - **agy** (`pyagy.model.CHAT_AGENT_MD`): a workspace agent with only `read_file`, run with
   `trust=False` and without `SSH_*`; see `antigravity/README.md`. The reader's name and its path
   argument belong to the agy release (`CHAT_TOOLS`, `CHAT_PATH_ARG`): `view_file(AbsolutePath)` up
-  to agy 1.2.x, `read_file(Path)` since 1.5. Checked with agy 1.5.8. Programmatic `pyagy` and
+  to agy 1.2.x, `read_file(Path)` since 1.5. Checked with agy 1.5.14. Programmatic `pyagy` and
   `AgyModel` launches default to `--app_data_dir=pyagy` (`~/.gemini/pyagy/`), isolating conversation
   history and workspace trust from the interactive CLI's `~/.gemini/antigravity-cli/` while sharing
   `~/.gemini/config/` and login (`PYAGY_APP_DATA_DIR` or `app_data_dir=` overrides). Dedicated
@@ -469,6 +471,14 @@ into `pyclaude.claude_process`, emitting `claude_turn` events); headless Claude 
     `antigravity/vendor.json` pins the archive and the extracted binary (configure verifies both
     and reports a new binary's sha512/size); `shim-symbols` refreshes the outputs, and
     `shim-agy-update` prints the latest archive pin.
+  - Since agy 1.5.14 retired `gemini_coder/framework/{executor,generator}` and
+    `CodeAssistClient.StreamGenerateContent`, `fh_finalize`/`fh_process` book `oneharness`'s
+    `(*Machine).finishModelOutput` and `processModelStream`, `fh_update`/`traj_appendstep_exec`
+    book `(*executionIDDecorator).{SetStep,AppendStep}` (`SetStep(ctx, idx, step)` passes `*Step`
+    in `RSI` and `idx` in `RDI`, so `cgt_response_emit` reads `RSI` and validates
+    `AGY_PLANNER_RESPONSE_ITAB`), `rpc_stream_generate` books `(*CodeAssistClient).GenerateStream`
+    (still rendered under `StreamGenerateContent` in `rpctrace`), and `usage_delta` books
+    `ccpa.(*ccpaWireAdapter).applyUsageOutcome`.
   - Run `test_scripts/test_agy_symbols.py` and `test_scripts/test_agy_stubs.py` after build-tool,
     stub or toolchain changes. `test_appresponse.py` checks native planner-response reads,
     Unicode, payload truncation and concurrent stack diagnostics. App/SSE capture errors are

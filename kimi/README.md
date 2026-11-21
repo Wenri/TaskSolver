@@ -67,7 +67,9 @@ Built by **`pixi install`** (setup.py's `_build_kimi`; the addon compiles its ow
    `tsdown` (invoked as `npx -y pnpm@<pin> …`, honoring the vendored `packageManager` field;
    conda-forge has no pnpm 10, `setup.py` passes `--store-dir=<checkout>/.pixi/pnpm-store` under
    `CONDA_BUILD=1` so fresh build `HOME` directories reuse cached tarballs, and `--filter=@moonshot-ai/kimi-code...`
-   — mirrored by `pnpmWorkspaces` in `package.nix` — skips `apps/desktop` and its cyclic
+   — mirrored by `pnpmWorkspaces` in `package.nix`, whose `preBuild` also restores
+   `pnpmConfigHook`'s `store-dir` and `package-import-method` after moving `HOME=$TMPDIR` — skips
+   `apps/desktop` and its cyclic
    `@moonshot-ai/app-client` ↔ `@moonshot-ai/app-composer` symlinks that trip `pixi-build`'s
    directory walk). A stub
    `vis-web-asset.ts` is written so the vite/tailwind prebuild is skipped (breaks only

@@ -93,7 +93,7 @@ step type and this oneof type identity, then reads the fields verified by
 | --- | --- | --- |
 | entry-argument object graph | `AGY_PROC_CGT_ARGS` / `ask(..., arg_probe=True)` | `.cgt_args` |
 | deduped Go call stacks | `AGY_PROC_STACK` / `ask(..., stack=True)` | `.stacks`, `.call_graph` |
-| backend RPC timeline (`CodeAssistClient.*`) | always on | `.rpc_trace` |
+| backend RPC timeline (`CodeAssistClient.*`, `GenerateStream` as `StreamGenerateContent`) | always on | `.rpc_trace` |
 | decoded answer at the app boundary (`SetStep`) | always on | `.app_text` |
 
 Native stack deduplication uses 1,024 bounded atomic slots shared by concurrent producers.
@@ -412,8 +412,8 @@ commandExecutionPolicy: off
 
 Using any other tool, or opening a file it was not handed, raises `ChatModeViolation`; the harness
 still offers `manage_task`, and agy still makes its own small session-title call. Checked with agy
-1.5.8: the model is offered `read_file` and `manage_task` (13 tools without the agent), and the
-first request has ~0.7k input tokens in place of ~14.4k.
+1.5.14: the model is offered `read_file` and `manage_task` (13 tools without the agent), and the
+first request has ~0.6k input tokens in place of ~14.4k.
 
 The reader's name belongs to the agy release. Up to agy 1.2.x it was `view_file`, with the file in
 `AbsolutePath`; agy 1.5 renamed it `read_file`, with the file in `Path`, and a turn checked against
