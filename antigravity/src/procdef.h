@@ -67,18 +67,18 @@ inline constexpr agy_book BOOKS[] = {
 { "resp_thinking", WIRE_ASYNC, 1, AGY_OFF("google3/third_party/jetski/cortex_pb/cortex_go_proto.(*CortexStepPlannerResponse).GetThinking") },
 { "resp_view", WIRE_ASYNC, 1, AGY_OFF("google3/third_party/jetski/cortex/trajectory/trajectory.(*PlannerResponseStepView).Response") },
 /* Response consumers; fh_update decodes the answer as app_response. */
-{ "fh_finalize", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).finalizePlannerResponse") },
-{ "fh_update", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).updateWithStep") },
-{ "fh_process", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/gemini_coder/framework/generator/generator.(*streamResponseHandler).processStream") },
+{ "fh_finalize", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/oneharness/internal/core/core.(*Machine).finishModelOutput") },
+{ "fh_update", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cortex/trajectory/decorators/decorators.(*executionIDDecorator).SetStep") },
+{ "fh_process", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/oneharness/internal/core/core.processModelStream") },
 { "core_planstep", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/oneharness/internal/core/core.createPlannerResponseStep") },
 /* Trajectory updates, each taking the completed step as an entry arg. */
 { "traj_appendstep", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/oneharness/internal/core/integration/integration.(*iapiStrippingTrajectory).AppendStep") },
 { "traj_addstep", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep") },
 { "traj_onsteps", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged") },
-{ "traj_appendstep_exec", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/gemini_coder/framework/executor/executor.(*ExecutionTrajectory).AppendStep") },
+{ "traj_appendstep_exec", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cortex/trajectory/decorators/decorators.(*executionIDDecorator).AppendStep") },
 /* CloudCode RPCs, one row per method. */
 #define CAC "google3/third_party/jetski/language_server/code_assist_client/codeassistclient.(*CodeAssistClient)."
-{ "rpc_stream_generate", WIRE_ASYNC, 0, AGY_FULLGO(CAC "StreamGenerateContent") },
+{ "rpc_stream_generate", WIRE_ASYNC, 0, AGY_FULLGO(CAC "GenerateStream") },
 { "rpc_generate", WIRE_ASYNC, 0, AGY_FULLGO(CAC "GenerateContent") },
 { "rpc_load_code_assist", WIRE_ASYNC, 0, AGY_FULLGO(CAC "FetchLoadCodeAssistResponse") },
 { "rpc_fetch_userinfo", WIRE_ASYNC, 0, AGY_FULLGO(CAC "FetchUserInfo") },
@@ -91,8 +91,8 @@ inline constexpr agy_book BOOKS[] = {
 /* The response stream: each decoded SSE line, and the usage. */
 #define CAC2 "google3/third_party/jetski/language_server/code_assist_client/codeassistclient."
 { "resp_chunk", WIRE_ASYNC, 0, AGY_FULLGO(CAC2 "toStreamResponseChunk") },
-{ "usage_delta", WIRE_ASYNC, 0, AGY_FULLGO(CAC2 "(*streamResponseHandler).sendUsageDelta") },
 #undef CAC2
+{ "usage_delta", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/model_api/codecs/ccpa/ccpa.(*ccpaWireAdapter).applyUsageOutcome") },
 };
 
 #undef AGY_FULLGO

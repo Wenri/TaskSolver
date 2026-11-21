@@ -230,9 +230,10 @@ static void cgt_response_packet(const char *kind, uint64_t id, uint64_t ptr, uin
 static void cgt_response_emit(agy_block *b)
 {
     /* Pinned Step.GetPlannerResponse and CortexStepPlannerResponse.GetResponse:
-     * RDI is the Step. Type 15 is the planner response; +0x60 holds its oneof wrapper.
-     * Step.Metadata.ToolCall is a different string and must never become the answer. */
-    const uint64_t step = b->regs.rdi;
+     * SetStep(ctx, idx, step) passes Step in RSI (RDI is idx). Type 15 is the planner
+     * response; +0x60 holds its oneof wrapper. Step.Metadata.ToolCall is a different
+     * string and must never become the answer. */
+    const uint64_t step = b->regs.rsi;
     uint32_t type = 0;
     uint64_t itab = 0, wrapper = 0, response = 0;
     uint64_t text[2];

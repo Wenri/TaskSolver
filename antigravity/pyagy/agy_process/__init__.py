@@ -259,7 +259,7 @@ _ROUTER: dict[str, Callable[[int, bytes], bytes | None]] = {
     "resp_text": _on_model_text("resp_text"),
     "resp_thinking": _on_model_text("resp_thinking"),
     "resp_view": _on_model_text("resp_view"),
-    # Assembled assistant answer at updateWithStep, validated before text decoding.
+    # Assembled assistant answer at SetStep, validated before text decoding.
     "app_response": _on_model_text("app_response"),
     "system_message": _on_system_message("system_message"),
     "system_message_legacy": _on_system_message("system_message_legacy"),

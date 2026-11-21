@@ -84,8 +84,8 @@ must stay unmarked. Unsupported spills, closure contexts and ambiguous layouts f
 The header also contains `AGY_PLANNER_RESPONSE_ITAB`, derived from the validated
 `Step.GetPlannerResponse` getter. App-response capture requires both the planner-response
 step type and this oneof type identity, then reads the fields verified by
-`CortexStepPlannerResponse.GetResponse`. It starts from the step argument in `RDI`; scratch
-registers and metadata strings do not supply answer text.
+`CortexStepPlannerResponse.GetResponse`. It starts from the step argument in `RSI`
+(`SetStep`); scratch registers, step indices and metadata strings do not supply answer text.
 
 ## Diagnostics
 
@@ -94,7 +94,7 @@ registers and metadata strings do not supply answer text.
 | entry-argument object graph | `AGY_PROC_CGT_ARGS` / `ask(..., arg_probe=True)` | `.cgt_args` |
 | deduped Go call stacks | `AGY_PROC_STACK` / `ask(..., stack=True)` | `.stacks`, `.call_graph` |
 | backend RPC timeline (`CodeAssistClient.*`) | always on | `.rpc_trace` |
-| decoded answer at the app boundary (`updateWithStep`) | always on | `.app_text` |
+| decoded answer at the app boundary (`SetStep`) | always on | `.app_text` |
 
 Native stack deduplication uses 1,024 bounded atomic slots shared by concurrent producers.
 Stacks need `symbols/funcmap.tsv.gz` (`pixi run shim-symbols`). Offline renderers:
@@ -213,7 +213,7 @@ insert an index before the filename extension so their captures remain separate.
 | surface | books | `AgyResponse` field |
 |---|---|---|
 | wire | egress `tls_write` + `resp_chunk` | `.turns` / `.request` / `.events` / `.usage` / `.model` |
-| app boundary | framework consumer (`updateWithStep`) | `.app_text` (+ `.source=="app"`) |
+| app boundary | trajectory step update (`SetStep`) | `.app_text` (+ `.source=="app"`) |
 | response capture diagnostics | app and SSE payload framing | `.response_capture_errors` |
 | system notifications | native system-step serializers | `.system_messages` / `.system_message_errors` |
 | rpc trace | `CodeAssistClient.*` backend RPCs | `.rpc_trace` |

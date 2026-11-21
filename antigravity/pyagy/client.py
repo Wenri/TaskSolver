@@ -156,7 +156,7 @@ class AgyResponse:
     @property
     def app_text(self) -> str:
         """The assembled answer captured at agy's own consumer boundary
-        (``updateWithStep``'s step argument) — the app-boundary RESPONSE. ``""``
+        (``SetStep``'s step argument) — the app-boundary RESPONSE. ``""``
         when the capture holds no ``app_response`` events. The text-bearing fires carry
         the full answer, so take the longest."""
         return max(self.app_turns, key=len) if self.app_turns else ""

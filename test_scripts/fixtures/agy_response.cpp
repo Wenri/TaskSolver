@@ -77,16 +77,16 @@ int main(int argc, char **argv)
     step[11] = AGY_PLANNER_RESPONSE_ITAB; step[12] = (uintptr_t)&wrapper;
     if (source == "app_response") {
         block.book = bk("fh_update");
-        block.regs.rdi = (uintptr_t)step.data();
-        block.regs.rsi = 0xdeadbeef;  // Stale non-argument register must never supply text.
+        block.regs.rsi = (uintptr_t)step.data();
+        block.regs.rdi = 0xdeadbeef;  // Stale non-step register must never supply text.
     } else {
         block.book = bk("resp_chunk");
         block.regs.rax = (uintptr_t)text.data();
         block.regs.rbx = text.size();
     }
     bool expect = true;
-    if (mode == "bad_step") { block.regs.rdi = 0x10000; expect = false; }
-    if (mode == "overflow_step") { block.regs.rdi = UINT64_MAX - 8; expect = false; }
+    if (mode == "bad_step") { block.regs.rsi = 0x10000; expect = false; }
+    if (mode == "overflow_step") { block.regs.rsi = UINT64_MAX - 8; expect = false; }
     if (mode == "other_step") { step[1] = 101; expect = false; }
     if (mode == "wrong_oneof") { step[11]++; expect = false; }
     if (mode == "bad_wrapper") { step[12] = 0x10000; expect = false; }
