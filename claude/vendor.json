@@ -1,8 +1,8 @@
 {
   "sdk": {
     "repository": "https://github.com/anthropics/claude-agent-sdk-python.git",
-    "tag": "v0.2.186",
-    "commit": "69846cdf82aef59add3b14a26b4f16d1ccee26ba"
+    "tag": "v0.2.187",
+    "commit": "3184360393a92ca8a6ec7bbbdee571afd1ce1c56"
   },
   "cli": {
     "version": "2.1.330",
