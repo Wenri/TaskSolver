@@ -5,9 +5,9 @@
     "commit": "69846cdf82aef59add3b14a26b4f16d1ccee26ba"
   },
   "cli": {
-    "version": "2.1.329",
-    "url": "https://downloads.claude.ai/claude-code-releases/2.1.329/linux-x64/claude",
-    "sha256": "30e2724e2aecb1bf5dc9f3130901afb71c5fa229051c190a6d7ad9aff6378d6d",
-    "size": 377545232
+    "version": "2.1.330",
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.330/linux-x64/claude",
+    "sha256": "f390eaa0814e6a1bff74cbb47acb74cb9c89d30ced809fe0af5af00c7bfe8ebb",
+    "size": 381121040
   }
 }
