@@ -165,6 +165,24 @@ class NativeResponseTests(unittest.TestCase):
     def test_native_stack_deduplication_is_bounded_under_concurrent_producers(self) -> None:
         self.assertEqual(self.packet("stack"), b"1024")
 
+    def test_native_legacy_line_and_ccpa_block_produce_wire_turns(self) -> None:
+        from pyagy import agy_process as ap
+        from pyagy.agy_process.http1sse import GenaiTurnBuilder
+        from wirecap.decode.capture import BaseCorrelator
+
+        for source in ("resp_chunk", "resp_chunk_ccpa"):
+            with self.subTest(source=source):
+                packet = self.packet(source, "sse")
+                records: list[Event] = []
+                correlator = BaseCorrelator(ap._rec, GenaiTurnBuilder())
+                with patch.object(ap._rec, "event", records.append), patch.object(ap, "_corr", correlator):
+                    ap.dispatch("resp_chunk_packet", 42, packet)
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["kind"], "genai_turn")
+                self.assertEqual(records[0]["text"], "fixture 中文")
+                self.assertEqual(records[0]["finish_reason"], "STOP")
+                self.assertEqual(records[0]["n_events"], 1)
+
     def test_native_reader_rejects_invalid_step_objects(self) -> None:
         for mode in ("bad_step", "overflow_step", "other_step", "wrong_oneof", "bad_wrapper", "bad_response", "bad_text", "negative_length"):
             with self.subTest(mode=mode):

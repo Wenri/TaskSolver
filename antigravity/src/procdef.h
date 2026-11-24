@@ -92,6 +92,8 @@ inline constexpr agy_book BOOKS[] = {
 #define CAC2 "google3/third_party/jetski/language_server/code_assist_client/codeassistclient."
 { "resp_chunk", WIRE_ASYNC, 0, AGY_FULLGO(CAC2 "toStreamResponseChunk") },
 #undef CAC2
+/* agy 1.5.15's HTTP transport passes a complete SSE block as a Go string. */
+{ "resp_chunk_ccpa", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/model_api/transports/ccpahttp/ccpahttp.parseSSEBlock") },
 { "usage_delta", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/model_api/codecs/ccpa/ccpa.(*ccpaWireAdapter).applyUsageOutcome") },
 };
 

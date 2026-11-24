@@ -49,6 +49,10 @@ takes three); `R14` holds the goroutine and must never be clobbered.
 In agy 1.5.15, `iapiStrippingTrajectory` moved from `oneharness/internal/core/integration`
 to `oneharness/internal/agentexecutor`. The `traj_appendstep` book follows its pointer-receiver
 `AppendStep` method at the new path; its event ID and argument layout remain unchanged.
+That release also adds `ccpahttp`'s HTTP transport, which bypasses the legacy
+`toStreamResponseChunk` function. `resp_chunk_ccpa` captures `ccpahttp.parseSSEBlock`'s
+whole SSE block through the same response handler; both entry points take a Go string
+in `RAX`/`RBX`. The shared SSE decoder handles either a single line or a multiline block.
 
 ## The cgocall-trampoline path
 

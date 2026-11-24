@@ -33,7 +33,7 @@ static agy_book_fn agy_handler_for(std::string_view id) {
     if (id == "file_open")       return &agy_on_file_open;
     if (id == "http_rt")         return &agy_on_http_rt;
     if (id == "exit")            return &agy_on_exit;
-    if (id == "resp_chunk")      return &agy_on_resp_chunk;
+    if (id == "resp_chunk" || id == "resp_chunk_ccpa") return &agy_on_resp_chunk;
     if (id == "system_message" || id == "system_message_legacy")
         return &agy_on_system_message;
     if (id == "readlink_filter") return &agy_on_readlink_filter;
@@ -338,6 +338,7 @@ void agy_on_exit(agy_block *b)
 void agy_on_resp_chunk(agy_block *b)
 {
     cgt_common(b);
+    /* Both toStreamResponseChunk and ccpahttp.parseSSEBlock take a Go string in AX/BX. */
     cgt_response_packet("resp_chunk_packet", b->regs.rax, b->regs.rax, b->regs.rbx);
 }
 

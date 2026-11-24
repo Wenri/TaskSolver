@@ -109,6 +109,8 @@ BOOKS: list[Book] = [
      "mode": 'async', "kind": 'rpc_write_acls', "mech": 'fullcgo', "retcap": 0},
     {"id": 'resp_chunk', "symbol": 'google3/third_party/jetski/language_server/code_assist_client/codeassistclient.toStreamResponseChunk',
      "mode": 'async', "kind": 'resp_chunk', "mech": 'fullcgo', "retcap": 0},
+    {"id": 'resp_chunk_ccpa', "symbol": 'google3/third_party/jetski/model_api/transports/ccpahttp/ccpahttp.parseSSEBlock',
+     "mode": 'async', "kind": 'resp_chunk_ccpa', "mech": 'fullcgo', "retcap": 0},
     {"id": 'usage_delta', "symbol": 'google3/third_party/jetski/model_api/codecs/ccpa/ccpa.(*ccpaWireAdapter).applyUsageOutcome',
      "mode": 'async', "kind": 'usage_delta', "mech": 'fullcgo', "retcap": 0},
 ]
