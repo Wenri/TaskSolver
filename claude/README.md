@@ -25,7 +25,7 @@ a missing bundle is an error rather than a fallback to a global CLI.
 
 `pixi install` builds the runtime automatically, using
 [`bun_graph`](https://github.com/Wenri/patchnar/blob/main/src/bun_graph.cc) from
-`PATH`. Provide that executable in the build environment: patchnar's (`3fba16bc` or
+`PATH`. Provide that executable in the build environment: patchnar's (`cff1dfca` or
 newer), supporting `--clean`, `--no-bytecode` and `--natives`, which reports the
 private Bun entry points the runtime calls. [`vendor.json`](vendor.json)
 pins a Claude Code release that is the one the SDK bundles or newer, since `tools/runtimes.py`

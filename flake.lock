@@ -23,11 +23,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794567449,
-        "narHash": "sha256-3+qmBcTcFUNERR5JvmBUIpO9MQHLaaFUZbbspidQFKg=",
+        "lastModified": 1795529940,
+        "narHash": "sha256-a8VJDREXZFSGLoqr6xI5j89hRLhMMXd5SFVN1kf5csA=",
         "owner": "Wenri",
         "repo": "patchnar",
-        "rev": "3fba16bc5313e0d37aa37ea340e3cdd996dbae99",
+        "rev": "cff1dfca947fc5c1189f07e76b361c006bf66941",
         "type": "github"
       },
       "original": {
