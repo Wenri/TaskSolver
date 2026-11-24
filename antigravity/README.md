@@ -46,6 +46,10 @@ generated `symbols/symbols.json`; candidates for new books are in `symbols/funcm
 amd64 register ABI passes arguments in `RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11` (a `[]byte`
 takes three); `R14` holds the goroutine and must never be clobbered.
 
+In agy 1.5.15, `iapiStrippingTrajectory` moved from `oneharness/internal/core/integration`
+to `oneharness/internal/agentexecutor`. The `traj_appendstep` book follows its pointer-receiver
+`AppendStep` method at the new path; its event ID and argument layout remain unchanged.
+
 ## The cgocall-trampoline path
 
 Books use static entry trampolines: a goroutine may park and resume on another thread, so a book

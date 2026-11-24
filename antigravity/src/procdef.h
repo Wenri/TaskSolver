@@ -72,7 +72,7 @@ inline constexpr agy_book BOOKS[] = {
 { "fh_process", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/oneharness/internal/core/core.processModelStream") },
 { "core_planstep", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/oneharness/internal/core/core.createPlannerResponseStep") },
 /* Trajectory updates, each taking the completed step as an entry arg. */
-{ "traj_appendstep", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/oneharness/internal/core/integration/integration.(*iapiStrippingTrajectory).AppendStep") },
+{ "traj_appendstep", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/oneharness/internal/agentexecutor/agentexecutor.(*iapiStrippingTrajectory).AppendStep") },
 { "traj_addstep", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cortex/traj/traj.(*Trajectory).AddStep") },
 { "traj_onsteps", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cortex/agent_state_component/agent_state_component.(*AgentState).OnStepsChanged") },
 { "traj_appendstep_exec", WIRE_ASYNC, 0, AGY_FULLGO("google3/third_party/jetski/cortex/trajectory/decorators/decorators.(*executionIDDecorator).AppendStep") },
