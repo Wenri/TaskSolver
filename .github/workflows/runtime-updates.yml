@@ -82,8 +82,8 @@ env:
     nix/hashes.json
   # github:Wenri/patchnar 0.22.0, whose bun_graph unbundles Claude Code: --extract, --clean (the
   # runtime without its payload, either of Bun's layouts) and --natives (the private Bun entry
-  # points the split runtime calls).
-  PATCHNAR_REF: 3fba16bc5313e0d37aa37ea340e3cdd996dbae99
+  # points the split runtime calls; cff1dfca knows Claude Code 2.1.331's).
+  PATCHNAR_REF: cff1dfca947fc5c1189f07e76b361c006bf66941
 
 jobs:
   check:
