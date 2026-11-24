@@ -35,7 +35,9 @@ codex does not depend on the agy build; its fat GCC LTO objects provide regular 
 Rust linker. `cli/src/main.rs` starts and stops the bridge.
 Each SSE or WebSocket transport owns a capture guard: it records the outgoing JSON before
 compression, tags response events with the same request ID, and emits `codex_end` on completion,
-error or cancellation. The Python decoder accumulates each ID separately, so concurrent
+error or cancellation. The recorded JSON is the request as sent: since 0.172.0 that includes the
+private connector results upstream attaches to `executed_tool_calls` rows and keeps out of its own
+traces, so treat a capture file accordingly. The Python decoder accumulates each ID separately, so concurrent
 requests cannot merge their text or exchange request metadata. Both transports use the same
 Responses event decoder.
 

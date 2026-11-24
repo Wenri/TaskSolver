@@ -876,7 +876,9 @@ async fn run_websocket_response_stream(
         // No request reached the backend, so this socket is still reusable.
         return Ok(());
     }
-    let capture = codex_wirecap::ResponseCapture::new(request_text.as_bytes());
+    // Capture the text as sent, including private connector results, which upstream keeps
+    // out of its own traces only.
+    let capture = codex_wirecap::ResponseCapture::new(request_text.text.as_bytes());
     send_websocket_request(
         ws_stream,
         request_text,

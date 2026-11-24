@@ -170,6 +170,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         turn_state: Option<Arc<OnceLock<String>>>,
     ) -> Result<ResponseStream, ApiError> {
         // Capture JSON before transport compression, and retain its ID through the response.
+        // A with_private_json body is captured as sent, private connector results included.
         let capture = codex_wirecap::ResponseCapture::new(body.as_bytes());
         let request_compression = match compression {
             Compression::None => RequestCompression::None,
