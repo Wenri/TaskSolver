@@ -1049,10 +1049,7 @@ fn main() -> anyhow::Result<()> {
     // pycodex) BEFORE the tokio runtime, so CPython initializes on the bridge's own worker thread.
     codex_wirecap::start();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
-<<<<<<< 9ff7d18ab5fdf3f4e39933c8c2f1f0c394b57fb1
     let result = arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
-=======
-    arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if std::env::args_os().nth(1).as_deref()
             == Some(std::ffi::OsStr::new("--codex-run-as-sandbox-launcher"))
@@ -1064,7 +1061,6 @@ fn main() -> anyhow::Result<()> {
             return codex_cli::shared_sandbox_launcher::run(arg0_paths.codex_linux_sandbox_exe)
                 .await;
         }
->>>>>>> 30000f2a2c356befc7c8b738577821a78707382c
         // Finish polling the large subcommand dispatcher before polling interactive TUI events.
         if let Some(tui) = Box::pin(dispatch_cli(arg0_paths, remote_control_disabled)).await? {
             tui.await?;
