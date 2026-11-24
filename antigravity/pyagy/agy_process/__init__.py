@@ -111,7 +111,8 @@ def on_tls_read(stream_id: int, data: bytes) -> None:
 
 
 def on_resp_chunk(stream_id: int, data: bytes) -> None:
-    # The wire RESPONSE: one decoded SSE `data:` line per fire (toStreamResponseChunk).
+    # The wire RESPONSE: a legacy SSE line (toStreamResponseChunk) or a whole
+    # block from agy 1.5.15's HTTP transport (ccpahttp.parseSSEBlock).
     # Hand it to the correlator, which accumulates the stream and emits a genai_turn at
     # the terminal event. stream_id is the Go string pointer (not a connection id) — agy
     # overlaps model and title turns, so the decoder keys them by responseId.

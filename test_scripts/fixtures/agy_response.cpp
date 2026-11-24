@@ -62,7 +62,14 @@ int main(int argc, char **argv)
     }
     std::string text;
     for (int i = 0; i < 9000; ++i) text += "\xe4\xb8\xad\xe6\x96\x87";
-    if (source == "resp_chunk") text = "{\"response\":{\"responseId\":\"fixture\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"" + text + "\"}]},\"finishReason\":\"STOP\"}]}}";
+    if (source == "resp_chunk" || source == "resp_chunk_ccpa") {
+        if (mode == "sse") text = "fixture \xe4\xb8\xad\xe6\x96\x87";
+        text = "{\"responseId\":\"fixture\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"" + text + "\"}]},\"finishReason\":\"STOP\"}]}";
+        if (mode == "sse" && source == "resp_chunk_ccpa")
+            text = "event: message\nid: fixture\n: keepalive\ndata: {\"response\":\ndata: " + text + "}\n\n";
+        else
+            text = (mode == "sse" ? "data: " : "") + std::string("{\"response\":") + text + "}";
+    }
     if (mode == "long") text.assign(2u << 20, 'x');
     agy_block block{};
     std::array<uint64_t, 3> response = {0, (uintptr_t)text.data(), text.size()};
@@ -80,7 +87,7 @@ int main(int argc, char **argv)
         block.regs.rsi = (uintptr_t)step.data();
         block.regs.rdi = 0xdeadbeef;  // Stale non-step register must never supply text.
     } else {
-        block.book = bk("resp_chunk");
+        block.book = source == "resp_chunk_ccpa" ? bk("resp_chunk_ccpa") : bk("resp_chunk");
         block.regs.rax = (uintptr_t)text.data();
         block.regs.rbx = text.size();
     }
@@ -94,11 +101,12 @@ int main(int argc, char **argv)
     if (mode == "bad_text") { response[1] = 0x10000; expect = false; }
     if (mode == "negative_length") { response[2] = UINT64_MAX; expect = false; }
     const agy_block before = block;
-    if (source == "app_response") agy_on_fh_update(&block);
-    else agy_on_resp_chunk(&block);
+    agy_enable_books(0, false);
+    CHECK(g_agy_on[block.book] == (source == "app_response" ? &agy_on_fh_update : &agy_on_resp_chunk));
+    g_agy_on[block.book](&block);
     CHECK(!std::memcmp(&before, &block, sizeof(block)));
     if (expect) {
-        CHECK(kind == source + "_packet");
+        CHECK(kind == (source == "app_response" ? "app_response_packet" : "resp_chunk_packet"));
         CHECK(packet.size() == (mode == "long" ? 1u << 20 : text.size() + 16));
         CHECK(!std::memcmp(packet.data(), "AGTX", 4));
         if (mode != "long") CHECK(!std::memcmp(packet.data() + 16, text.data(), text.size()));

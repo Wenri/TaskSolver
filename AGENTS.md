@@ -479,6 +479,11 @@ into `pyclaude.claude_process`, emitting `claude_turn` events); headless Claude 
     `AGY_PLANNER_RESPONSE_ITAB`), `rpc_stream_generate` books `(*CodeAssistClient).GenerateStream`
     (still rendered under `StreamGenerateContent` in `rpctrace`), and `usage_delta` books
     `ccpa.(*ccpaWireAdapter).applyUsageOutcome`.
+    Since agy 1.5.15, `traj_appendstep` books
+    `agentexecutor.(*iapiStrippingTrajectory).AppendStep`; the type moved from
+    `oneharness/internal/core/integration` to `oneharness/internal/agentexecutor`.
+    Its new HTTP transport bypasses `toStreamResponseChunk`: `resp_chunk_ccpa` books
+    `ccpahttp.parseSSEBlock` and shares the legacy response handler (Go string in `RAX`/`RBX`).
   - Run `test_scripts/test_agy_symbols.py` and `test_scripts/test_agy_stubs.py` after build-tool,
     stub or toolchain changes. `test_appresponse.py` checks native planner-response reads,
     Unicode, payload truncation and concurrent stack diagnostics. App/SSE capture errors are

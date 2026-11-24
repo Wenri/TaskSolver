@@ -24,6 +24,7 @@ binary, shim not built, or the running agy's build-id doesn't match symbols.json
 checks are skipped when agy isn't logged in.
 
     python3 test_scripts/test_trampoline.py            # validates the full union (mixed full-cgo + asmcgo)
+    python3 test_scripts/test_trampoline.py --model MODEL  # compare releases using the same model
 """
 
 from __future__ import annotations
@@ -66,7 +67,8 @@ class RunResult(TypedDict):
     unicode_err: int
 
 
-def run(extra: dict[str, str], workdir: str, timeout: float=200.0) -> RunResult:
+def run(extra: dict[str, str | None], workdir: str, timeout: float=200.0,
+        model: str | None=None) -> RunResult:
     """Run one agy --print turn under the shim to completion; return a dict of signals."""
     label = "-".join(f"{k}={v or 'empty'}" for k, v in sorted(extra.items())) or "union"
     cap = os.path.join(workdir, f"cap_{label}.jsonl")
@@ -76,7 +78,7 @@ def run(extra: dict[str, str], workdir: str, timeout: float=200.0) -> RunResult:
             os.remove(f)
     s = AgySession(agy=AGY, capture=cap, log=log, workdir=workdir, extra_env=extra)
     try:
-        s.start(["--print", PROMPT])
+        s.start([*(["--model", model] if model else []), "--print", PROMPT])
         s.collect(timeout=timeout)      # one-shot: drive to completion (drains the PTY + collects turns)
         out = s.transcript              # rendered transcript (ZORPLE + any crash traceback)
     finally:
@@ -96,12 +98,13 @@ def run(extra: dict[str, str], workdir: str, timeout: float=200.0) -> RunResult:
             text = obj.get("text")
             if kind == "genai_turn" and isinstance(text, str):
                 genai_text += text
+    # Native installation diagnostics use stderr; the remaining log may use AGY_PROC_LOG.
     combined = out + "\n" + logtxt
     answer = "\n".join(l for l in out.splitlines()
                        if l.strip() and "antigravity" not in l and "wirecap" not in l
                        and "gobook" not in l and "gomod" not in l)
     return {
-        "kinds": dict(kinds), "log": logtxt, "genai_text": genai_text,
+        "kinds": dict(kinds), "log": combined, "genai_text": genai_text,
         "zorple": bool(re.search(r"\bZORPLE\b", answer)),
         "crashes": sum(combined.count(k) for k in CRASH),
         "home_bad": combined.count("HOME is not defined"),
@@ -109,8 +112,14 @@ def run(extra: dict[str, str], workdir: str, timeout: float=200.0) -> RunResult:
     }
 
 
+class Arguments(argparse.Namespace):
+    model: str | None = None
+
+
 def main() -> None:
-    argparse.ArgumentParser(description="Smoke-test the antigravity book union").parse_args()
+    parser = argparse.ArgumentParser(description="Smoke-test the antigravity book union")
+    parser.add_argument("--model", help="Explicit model for comparisons across agy releases")
+    args = parser.parse_args(namespace=Arguments())
 
     if not os.path.exists(AGY):
         skip(f"agy not found at {AGY} (set AGY_BIN)")
@@ -134,7 +143,7 @@ def main() -> None:
     # books). Validate the mechanism login-independently first: install + a book firing
     # end-to-end + no startup corruption. os.Getenv fires before any auth/network.
     print("[union] full working book union under one agy --print turn")
-    r = run({}, wd)
+    r = run({}, wd, model=args.model)
     if "build-id ok" not in r["log"]:
         skip("shim build-id does not match the running agy — re-run "
              "`pixi run shim-symbols` && `pixi run build-shim` (agy may have auto-updated)")
@@ -149,8 +158,8 @@ def main() -> None:
     check(r["unicode_err"] == 0, "union: no worker UnicodeDecodeError (kind intact)")
     check(r["crashes"] == 0, "union: no throw/unknown-pc/panic (GC unwind safe)")
 
-    # Auth probe: a plain (no-shim) turn must return ZORPLE, else agy isn't logged in.
-    authed = run({"LD_PRELOAD": ""}, wd)["zorple"]
+    # Auth probe: disable linked capture (LD_PRELOAD no longer controls the hooks).
+    authed = run({"AGY_PROC_ENABLE": None}, wd, model=args.model)["zorple"]
     if not authed:
         print("NOTE: agy not authenticated — skipping model-turn checks "
               "(run `agy` once to sign in to exercise them)")
@@ -161,6 +170,7 @@ def main() -> None:
         check(r["zorple"], "union: turn completes (ZORPLE) with all books active")
         check(r["kinds"].get("send_user_msg", 0) >= 1, "union: SendUserMessage fired (full-cgo trampoline)")
         check(r["kinds"].get("stream_send", 0) >= 1, "union: callbackStreamer.Send fired (asmcgo trampoline)")
+        check(r["kinds"].get("traj_appendstep", 0) >= 1, "union: trajectory AppendStep fired")
         check(r["kinds"].get("http_rt", 0) >= 1, "union: RoundTrip fired (asmcgo trampoline)")
         check(r["kinds"].get("genai_turn", 0) >= 1, "union: genai_turn emitted (wire)")
         check("ZORPLE" in r["genai_text"], "union: decoded wire text is non-empty (ZORPLE)")
