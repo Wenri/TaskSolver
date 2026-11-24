@@ -351,7 +351,7 @@ and `test_webpage.py`. Run them through Pixi; they send input only to local stub
 
 All Claude launches use the bundled bridged runtime. `claude/build_cli.py` verifies
 and caches the pristine pin, uses the externally provided `bun_graph` on `PATH`
-(patchnar's, 3fba16bc or later for `--clean`, `--no-bytecode` and `--natives`; the workflow pins it as
+(patchnar's, cff1dfca or later for `--clean`, `--no-bytecode` and `--natives`; the workflow pins it as
 `PATCHNAR_REF`),
 and installs a split runtime under the SDK's `_bundled/`:
 `bun` with `.bun` removed, a native `claude` launcher, `source/`, `assets/`,
