@@ -1,4 +1,6 @@
 
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import { buildRestUrl, buildWsUrl } from '../config';
 import { noopTracer } from '../../contracts';
 import type { ClientIdentity, CredentialStore, Tracer } from '../../contracts';
@@ -6,6 +8,7 @@ import type {
   AddProviderInput,
   AppCatalogProvider,
   AppConfig,
+  EditableTextFile,
   AppHost,
   AppHostConnectFailure,
   AppHostDefinition,
@@ -33,6 +36,9 @@ import type {
   AppSession,
   AppSessionRatingReport,
   AppSessionRatingOffer,
+  SessionContextItemDetail,
+  SessionContextItemsResponse,
+  SessionContextSummary,
   AppSkill,
   AppSkillAttachment,
   AppSkillActivationOptions,
@@ -59,6 +65,7 @@ import type {
   OAuthRegion,
   PromptSubmission,
   PromptSubmitResult,
+  PromptPredictionCancelReason,
   QuestionResponse,
   ReadRequestOptions,
   RemoteControlStatus,
@@ -229,6 +236,7 @@ interface WireMeta {
   server_version: string;
   server_id: string;
   started_at: string;
+  home_dir: string;
   capabilities: Record<string, boolean>;
   open_in_apps?: string[];
   dangerous_bypass_auth?: boolean;
@@ -362,6 +370,7 @@ export class DaemonKimiWebApi implements KimiWebApi {
     serverVersion: string;
     serverId: string;
     startedAt: string;
+    homeDir: string;
     capabilities: Record<string, boolean>;
     openInApps: string[];
     dangerousBypassAuth: boolean;
@@ -375,6 +384,7 @@ export class DaemonKimiWebApi implements KimiWebApi {
       serverVersion: data.server_version,
       serverId: data.server_id,
       startedAt: data.started_at,
+      homeDir: data.home_dir,
       capabilities: data.capabilities,
       openInApps: Array.isArray(data.open_in_apps) ? data.open_in_apps : [],
       dangerousBypassAuth: data.dangerous_bypass_auth === true,
@@ -437,9 +447,10 @@ export class DaemonKimiWebApi implements KimiWebApi {
       has_prompt: input?.hasPrompt,
       updated_after: input?.updatedAfter,
       updated_before: input?.updatedBefore,
+      query: input?.query,
       sort: input?.sort,
       include: input?.include,
-      hosts: hasWorkspaceCursor ? undefined : this.hostsQuery(),
+      hosts: input?.localOnly === true || hasWorkspaceCursor ? undefined : this.hostsQuery(),
     };
     const data = await this.http.get<WireSessionsPage>('/sessions', query, options);
     return {
@@ -846,10 +857,58 @@ export class DaemonKimiWebApi implements KimiWebApi {
     return { cancelled: data.cancelled };
   }
 
+  async continueSession(sessionId: string): Promise<{ continued: true }> {
+    const data = await this.http.post<{ continued: true }>(
+      `/sessions/${encodeURIComponent(sessionId)}:continue`,
+      {},
+    );
+    return { continued: data.continued };
+  }
+
   async compactSession(sessionId: string, instruction?: string): Promise<void> {
     await this.http.post(
       `/sessions/${encodeURIComponent(sessionId)}:compact`,
       instruction ? { instruction } : {},
+    );
+  }
+
+  async getSessionContextSummary(
+    sessionId: string,
+    agentId?: string,
+    options?: ReadRequestOptions,
+  ): Promise<SessionContextSummary> {
+    return this.http.get<SessionContextSummary>(
+      `/sessions/${encodeURIComponent(sessionId)}/context/summary`,
+      { agent_id: agentId },
+      options,
+    );
+  }
+
+  async getSessionContextItems(
+    sessionId: string,
+    query?: { agentId?: string; role?: string; roles?: readonly string[]; offset?: number; limit?: number },
+    options?: ReadRequestOptions,
+  ): Promise<SessionContextItemsResponse> {
+    return this.http.get<SessionContextItemsResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/context/items`,
+      {
+        agent_id: query?.agentId,
+        role: query?.roles?.length ? query.roles : query?.role,
+        offset: query?.offset !== undefined ? String(query.offset) : undefined,
+        limit: query?.limit !== undefined ? String(query.limit) : undefined,
+      },
+      options,
+    );
+  }
+
+  async getSessionContextItem(
+    sessionId: string,
+    itemId: string,
+    agentId?: string,
+  ): Promise<SessionContextItemDetail> {
+    return this.http.get<SessionContextItemDetail>(
+      `/sessions/${encodeURIComponent(sessionId)}/context/items/${encodeURIComponent(itemId)}`,
+      { agent_id: agentId },
     );
   }
 
@@ -897,6 +956,34 @@ export class DaemonKimiWebApi implements KimiWebApi {
       {},
     );
     return { agentId: data.agent_id };
+  }
+
+  async closeAgent(sessionId: string, agentId: string): Promise<{ closed: true }> {
+    await this.http.post<{ closed: true }>(
+      `/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}:close`,
+      {},
+      { allowCodes: [40401] },
+    );
+    return { closed: true };
+  }
+
+  async predictNextPrompt(
+    sessionId: string,
+    input: { predictionId: string; expectedTurnId: number },
+  ): Promise<string | null> {
+    const data = await this.http.post<{ prediction: string | null }>(
+      `/sessions/${encodeURIComponent(sessionId)}:predict-prompt`,
+      { prediction_id: input.predictionId, expected_turn_id: input.expectedTurnId },
+    );
+    return data.prediction;
+  }
+
+  async cancelPromptPrediction(sessionId: string, predictionId: string, reason?: PromptPredictionCancelReason): Promise<boolean> {
+    const data = await this.http.post<{ cancelled: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}:cancel-prompt-prediction`,
+      { prediction_id: predictionId, reason },
+    );
+    return data.cancelled;
   }
 
   respondApproval(
@@ -1821,6 +1908,25 @@ export class DaemonKimiWebApi implements KimiWebApi {
     }
     const data = await this.http.post<WireConfig>('/config', wirePatch);
     return toAppConfig(data);
+  }
+
+  async readHostTextFile(path: string): Promise<EditableTextFile> {
+    let blob: Blob;
+    try {
+      blob = await this.http.getBlob('/fs:content', { path }, { cache: 'no-store', maxBytes: HOST_READ_MAX_BYTES });
+    } catch (error) {
+      if (isDaemonApiError(error) && error.code === 40409) return { path, content: '', revision: null };
+      throw error;
+    }
+    if (blob.size > HOST_READ_MAX_BYTES) throw new FileTooLargeError({ size: blob.size, limit: HOST_READ_MAX_BYTES });
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    if (content.includes('\0')) throw new Error('Cannot edit a binary file as text');
+    return { path, content, revision: bytesToHex(sha256(bytes)) };
+  }
+
+  writeHostTextFile(path: string, content: string, revision: string | null): Promise<{ revision: string }> {
+    return this.http.putText('/fs:content', { path, revision: revision ?? 'missing' }, content);
   }
 
   async getAuth(): Promise<AuthResult> {

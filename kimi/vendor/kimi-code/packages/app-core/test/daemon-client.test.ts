@@ -193,6 +193,14 @@ describe('DaemonKimiWebApi lists across hosts', () => {
     expect(found.hostId).toBe('dev');
   });
 
+  it('searches only this machine when a session listing is local-only', async () => {
+    vi.mocked(fetch).mockResolvedValue(envelope({ items: [], has_more: false }));
+
+    await hostAwareApi(true).listSessions({ query: 'login fix', pageSize: 50, localOnly: true });
+
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('http://daemon.test/api/v1/sessions?page_size=50&query=login+fix');
+  });
+
   it.each([
     ['beforeId', 'before_id'],
     ['afterId', 'after_id'],
@@ -886,13 +894,25 @@ describe('DaemonKimiWebApi request timeout budgets', () => {
 
   it('ordinary session actions keep the default 30s budget', async () => {
     vi.mocked(fetch).mockImplementation(timeoutRejection);
+    const api = createApi();
 
-    const caught = await createApi()
-      .undoSession('sess_1', 't_1')
+    const caught = await api.undoSession('sess_1', 't_1').catch((error: unknown) => error);
+    const predictionError = await api.predictNextPrompt('sess/1', {
+      predictionId: 'prediction-1',
+      expectedTurnId: 7,
+    }).catch((error: unknown) => error);
+    const cancelError = await api.cancelPromptPrediction('sess/1', 'prediction-1', 'visibility')
       .catch((error: unknown) => error);
 
-    expect(caught).toMatchObject({ timeoutMs: 30_000 });
-    expect(isDaemonTimeoutError(caught)).toBe(true);
+    for (const error of [caught, predictionError, cancelError]) {
+      expect(error).toMatchObject({ timeoutMs: 30_000 });
+      expect(isDaemonTimeoutError(error)).toBe(true);
+    }
+    expect(vi.mocked(fetch).mock.calls.map(([url, init]) => [url, init?.body])).toEqual([
+      ['http://daemon.test/api/v1/sessions/sess_1:undo', JSON.stringify({ turn_id: 't_1' })],
+      ['http://daemon.test/api/v1/sessions/sess%2F1:predict-prompt', JSON.stringify({ prediction_id: 'prediction-1', expected_turn_id: 7 })],
+      ['http://daemon.test/api/v1/sessions/sess%2F1:cancel-prompt-prediction', JSON.stringify({ prediction_id: 'prediction-1', reason: 'visibility' })],
+    ]);
   });
 
   it('a connect failure is not reported as a timeout', async () => {
@@ -1612,5 +1632,26 @@ describe('DaemonKimiWebApi.mkdirFs', () => {
       name: 'DaemonApiError',
       code: 40919,
     });
+  });
+
+  it('posts closeAgent to /sessions/{id}/agents/{agentId}:close and treats 40401 as closed', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ code: 40401, msg: 'agent not found', data: null, request_id: 'r1' }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    await expect(createApi().closeAgent('sess/1', 'btw/2')).resolves.toEqual({ closed: true });
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe(
+      'http://daemon.test/api/v1/sessions/sess%2F1/agents/btw%2F2:close',
+    );
+  });
+
+  it('posts continueSession to /sessions/{id}:continue', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(envelope({ continued: true }));
+    await expect(createApi().continueSession('sess/9')).resolves.toEqual({ continued: true });
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe(
+      'http://daemon.test/api/v1/sessions/sess%2F9:continue',
+    );
   });
 });

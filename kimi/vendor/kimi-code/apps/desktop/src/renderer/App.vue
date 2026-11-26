@@ -46,7 +46,7 @@ import MobileSettingsSheet from './components/mobile/MobileSettingsSheet.vue';
 import OnboardingWizard from './components/onboarding/OnboardingWizard.vue';
 import { GlobalLoading } from '@moonshot-ai/app-components';
 import { getDeviceApi, useKimiWebClient, promptAttachmentToTurnAttachment, turnFileContentFetcher } from '@moonshot-ai/app-client/client';
-import { sessionViewsStore, workspacesStore, modelsStore, notificationsStore, authStore, sessionsStore, warningsStore, filesStore, permissionsStore, enableSessionRating, modelSwitchConfirmStore, hostsStore } from '@moonshot-ai/app-client/stores';
+import { sessionViewsStore, workspacesStore, modelsStore, notificationsStore, authStore, sessionsStore, warningsStore, filesStore, permissionsStore, enableSessionRating, modelSwitchConfirmStore, effortSwitchStore, hostsStore } from '@moonshot-ai/app-client/stores';
 import { FetchTurnFileContentKey, InsertPathMentionKey, ModelDisplayKey, OpenWithDefaultAppKey, ResolveSwarmMembersKey, RevealInFolderKey, SelectionContextMenuKey, SessionRatingKey, SubagentEffortKey } from '@moonshot-ai/app-client/contracts';
 import { OpenFileLinkKey, OpenHtmlFileInPanelKey, OpenLocalHtmlFileKey, OpenMarkdownImageKey, OpenSidebarBrowserUrlKey, ResolveImageKey } from '@moonshot-ai/app-core/contracts';
 import { getKimiWebApi } from './api';
@@ -76,6 +76,7 @@ import { effectiveThinkingLevel } from '@moonshot-ai/app-core/lib';
 import { isPurePreviewFile, modelDisplayName, subagentEffortSuffix } from '@moonshot-ai/app-core/lib';
 import { stripSkillPrefix, skillCommandArgs } from '@moonshot-ai/app-core/lib';
 import { TOWER_STATUS_PROMPT, TOWER_TEARDOWN_PROMPT } from '@moonshot-ai/app-core/lib';
+import { useContextInspector } from '@moonshot-ai/app-core';
 import { sessionDisplayStatus, type SessionDisplayStatus } from '@moonshot-ai/app-core/lib';
 import { Icon, IconButton, StatusDot } from '@moonshot-ai/app-ui';
 import { hasCustomTitleBar, hasDesktopBridge, isMacosDesktop, isWindowsDesktop } from '@moonshot-ai/app-core/lib';
@@ -203,7 +204,7 @@ provide(FetchTurnFileContentKey, turnFileContentFetcher(() => client.activeSessi
 provide(SubagentEffortKey, (effort: string | undefined): string | undefined =>
   subagentEffortSuffix(effort),
 );
-const { confirm, isConfirmOpen, settle: settleConfirm, busy: confirmBusy } = useConfirmDialog();
+const { confirm, confirmWithCheckbox, isConfirmOpen, settle: settleConfirm, busy: confirmBusy } = useConfirmDialog();
 
 const workspaces = workspacesStore();
 const { visibleWorkspace, activeWorkspaceId } = storeToRefs(workspaces);
@@ -211,6 +212,7 @@ const { mobileWorkspaceGroups, pinnedSessions, attentionBySession, attentionByWo
   storeToRefs(sessionViews);
 const { models, activeModels, starredModelIds, defaultModel } = storeToRefs(modelsStore());
 const { pending: modelSwitchConfirmPending } = storeToRefs(modelSwitchConfirmStore());
+const { pending: effortSwitchConfirmPending } = storeToRefs(effortSwitchStore());
 const { notifyEnabled, notifySound, notifyPermission } = storeToRefs(notificationsStore());
 const { setNotifyEnabled, setNotifySound } = notificationsStore();
 const { signedIn, managedProviderStatus, managedUserInfo } = storeToRefs(authStore());
@@ -377,7 +379,10 @@ onMounted(() => {
       .kimiDesktop?.onMenuAction?.((menuId) => {
       if (menuId === 'close-panel-tab') {
         if (anyOverlayOpen.value) return;
-        if (panel.panelVisible.value && panel.activeTabId.value) panel.closeTab(panel.activeTabId.value);
+        if (panel.panelVisible.value && panel.activeTabId.value) {
+          if (panelTabsRef.value?.requestClose) void panelTabsRef.value.requestClose('close', panel.activeTabId.value);
+          else panel.closeTab(panel.activeTabId.value);
+        }
         else window.close();
         return;
       }
@@ -401,6 +406,21 @@ onMounted(() => {
       }
       if (menuId === 'retry-connection') {
         track('action_invoked', { action: 'retry-connection', source: 'menu' });
+        return;
+      }
+      if (menuId === 'open-feedback') {
+        if (cancelPendingFeedbackMenu !== null) return;
+        const openFromMenu = (): void => {
+          cancelPendingFeedbackMenu = null;
+          if (anyOverlayOpen.value) return;
+          track('action_invoked', { action: 'open-feedback', source: 'menu' });
+          openGlobalFeedback('menu');
+        };
+        if (initialized.value) {
+          openFromMenu();
+        } else {
+          cancelPendingFeedbackMenu = runWhenInitialized(initialized, openFromMenu);
+        }
         return;
       }
       const actionId = MENU_ACTION_TO_SHORTCUT[menuId];
@@ -443,6 +463,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onShortcutKeydown);
+  if (cancelPendingFeedbackMenu !== null) {
+    cancelPendingFeedbackMenu();
+    cancelPendingFeedbackMenu = null;
+  }
   if (offMenuAction !== null) {
     offMenuAction();
     offMenuAction = null;
@@ -476,6 +500,7 @@ onUnmounted(() => {
 });
 
 let offMenuAction: (() => void) | null = null;
+let cancelPendingFeedbackMenu: (() => void) | null = null;
 let offBrowserAutomationUiRequest: (() => void) | null = null;
 let offScreenshotHotkey: (() => void) | null = null;
 let offScreenshotHotkeyResult: (() => void) | null = null;
@@ -559,7 +584,8 @@ function runShortcutAction(id: AppActionId, source: 'shortcut' | 'menu' | 'butto
       break;
     case 'closeSessionView':
       if (!anyOverlayOpen.value && panel.panelVisible.value && panel.activeTabId.value) {
-        panel.closeTab(panel.activeTabId.value);
+        if (panelTabsRef.value?.requestClose) void panelTabsRef.value.requestClose('close', panel.activeTabId.value);
+        else panel.closeTab(panel.activeTabId.value);
         break;
       }
       if (
@@ -1011,12 +1037,13 @@ const deadBtwTabIds = computed(() =>
     })
     .map((tab) => tab.id),
 );
-watch(deadBtwTabIds, (ids) => {
+function reapPanelTabs(ids: readonly string[]): void {
   if (ids.length === 0) return;
   const snapshot = reapFocusSnapshot(ids);
   for (const id of ids) panel.closeTab(id);
   focusHandoffAfterReap(snapshot.reapedActive, snapshot.focusWasInside);
-});
+}
+watch(deadBtwTabIds, reapPanelTabs);
 
 
 const canOpenTermTab = computed(() => terminalStore.available && !isMobile.value);
@@ -1152,6 +1179,10 @@ provide(panelApiKey, {
     closeDockWorkPanel();
     panel.openAgentPanel(id);
   },
+  openContext: () => {
+    closeDockWorkPanel();
+    panel.openTab('context', {});
+  },
   openTurnDiff: (payload) => {
     closeDockWorkPanel();
     panel.openTurnDiff(payload);
@@ -1160,6 +1191,7 @@ provide(panelApiKey, {
     closeDockWorkPanel();
     panel.openCompactionPanel(target);
   },
+  isCompactionOpen: (turnId) => panel.isCompactionPanelOpen(turnId),
   openDiff: () => {
     closeDockWorkPanel();
     panel.openDiffDetail();
@@ -1298,6 +1330,14 @@ function openSessionInfoTab(type: PanelLauncherType): void {
   void panelTabsRef.value?.openLauncherTab(type);
 }
 
+const { contextInspectorEnabled } = useContextInspector();
+const disabledContextTabIds = computed(() =>
+  contextInspectorEnabled.value
+    ? []
+    : panel.panelTabs.value.filter((tab) => tab.type === 'context').map((tab) => tab.id),
+);
+watch(disabledContextTabIds, reapPanelTabs, { immediate: true });
+
 function armSideChatFocus(): { acted: () => boolean; focusWhenReady: () => void } {
   let userActed = false;
   const onUserAction = (e: Event): void => {
@@ -1390,6 +1430,7 @@ const {
 
 const offQuitConfirm = useQuitConfirm({
   confirm,
+  confirmWithCheckbox,
   cancelCurrent: () => settleConfirm(false),
   isBusy: () => confirmBusy.value,
   isOverlayOpen: () => interruptiveOverlayOpen.value,
@@ -1663,6 +1704,19 @@ async function handleInterrupt(): Promise<void> {
   await client.abortCurrentPrompt();
 }
 
+async function handleContinue(): Promise<void> {
+  const gateSid = client.activeSessionId.value;
+  if (!gateSid) return;
+  const verdict = await client.ensureChatReady();
+  if (verdict !== 'ok') {
+    if (verdict !== 'server-auth-required') await actOnGateVerdict(verdict);
+    return;
+  }
+  if (client.activeSessionId.value !== gateSid) return;
+  ++sendGeneration;
+  await client.continueSession(gateSid);
+}
+
 const pendingQuoteInserts = ref<Array<{ quote: string; comment?: string; source?: string; sessionId: string | undefined }>>([]);
 watch(
   () => [client.activeSessionId.value, conversationPaneRef.value?.hasInsertableComposer() ?? false] as const,
@@ -1840,21 +1894,22 @@ watch([client.sendFailureVerdict, isConfirmOpen], ([payload, confirmOpen]) => {
   void actOnGateVerdict(payload.verdict, undefined, payload.sessionId);
 });
 
-async function passAuthGate(text: string, attachments: PromptAttachment[], restoreText?: string, restoreEntries?: AttachmentEntry[], snapshot?: ComposerDocumentSnapshot): Promise<boolean> {
+async function passAuthGate(text: string, attachments: PromptAttachment[], restoreText?: string, restoreEntries?: AttachmentEntry[], snapshot?: ComposerDocumentSnapshot, preserveDraft = false): Promise<boolean> {
   const originSid = client.activeSessionId.value ?? undefined;
   const verdict = await client.ensureChatReady();
   if (verdict === 'ok') return true;
   if (verdict === 'server-auth-required') {
-    restoreDraftAtOrigin(originSid, text, attachments, restoreText, restoreEntries, snapshot);
+    if (!preserveDraft) restoreDraftAtOrigin(originSid, text, attachments, restoreText, restoreEntries, snapshot);
     return false;
   }
-  await actOnGateVerdict(verdict, () =>
-    restoreDraftAtOrigin(originSid, text, attachments, restoreText, restoreEntries, snapshot),
+  await actOnGateVerdict(
+    verdict,
+    preserveDraft ? undefined : () => restoreDraftAtOrigin(originSid, text, attachments, restoreText, restoreEntries, snapshot),
   );
   return false;
 }
 
-async function passWorkspaceGateForCommand(text: string, attachments: PromptAttachment[] = [], restoreText?: string, restoreEntries?: AttachmentEntry[], snapshot?: ComposerDocumentSnapshot): Promise<boolean> {
+async function passWorkspaceGateForCommand(text: string, attachments: PromptAttachment[] = [], restoreText?: string, restoreEntries?: AttachmentEntry[], snapshot?: ComposerDocumentSnapshot, preserveDraft = false): Promise<boolean> {
   if (client.activeSessionId.value || client.activeWorkspaceId.value) return true;
   const pick = await confirm({
     title: t('workspace.requiredTitle'),
@@ -1862,22 +1917,24 @@ async function passWorkspaceGateForCommand(text: string, attachments: PromptAtta
     confirmLabel: t('conversation.addWorkspace'),
     variant: 'primary',
   });
-  conversationPaneRef.value?.loadComposerForEdit(restoreText ?? text, toEditableAttachments(attachments), restoreEntries, snapshot);
+  if (!preserveDraft) {
+    conversationPaneRef.value?.loadComposerForEdit(restoreText ?? text, toEditableAttachments(attachments), restoreEntries, snapshot);
+  }
   if (pick) requestWorkspaceDialog();
   return false;
 }
 
-async function passCommandGates(text: string, attachments: PromptAttachment[] = [], restoreText?: string, restoreEntries?: AttachmentEntry[], snapshot?: ComposerDocumentSnapshot): Promise<boolean> {
+async function passCommandGates(text: string, attachments: PromptAttachment[] = [], restoreText?: string, restoreEntries?: AttachmentEntry[], snapshot?: ComposerDocumentSnapshot, preserveDraft = false): Promise<boolean> {
   const originSid = client.activeSessionId.value;
   const originWsId = client.activeWorkspaceId.value;
-  if (!(await passAuthGate(text, attachments, restoreText, restoreEntries, snapshot))) return false;
-  if (!(await passWorkspaceGateForCommand(text, attachments, restoreText, restoreEntries, snapshot))) return false;
+  if (!(await passAuthGate(text, attachments, restoreText, restoreEntries, snapshot, preserveDraft))) return false;
+  if (!(await passWorkspaceGateForCommand(text, attachments, restoreText, restoreEntries, snapshot, preserveDraft))) return false;
   if (client.activeSessionId.value !== originSid || client.activeWorkspaceId.value !== originWsId) {
-    restoreDraftAtOrigin(originSid ?? undefined, text, attachments, restoreText, restoreEntries, snapshot);
+    if (!preserveDraft) restoreDraftAtOrigin(originSid ?? undefined, text, attachments, restoreText, restoreEntries, snapshot);
     return false;
   }
   if (!useWorkspaceTrust().gateSubmitForTrust()) {
-    restoreDraftAtOrigin(originSid ?? undefined, text, attachments, restoreText, restoreEntries, snapshot);
+    if (!preserveDraft) restoreDraftAtOrigin(originSid ?? undefined, text, attachments, restoreText, restoreEntries, snapshot);
     return false;
   }
   return true;
@@ -1898,24 +1955,30 @@ function onToggleTower(): void {
   void client.toggleTowerMode();
 }
 
-async function handleCommand(payload: { cmd: string; attachments: PromptAttachment[]; restoreText?: string; skillName?: string; skillPath?: string; restoreEntries?: AttachmentEntry[]; snapshot?: ComposerDocumentSnapshot; editText?: string; delivery?: 'steer' | 'queue' }): Promise<void> {
-  const { cmd, attachments, restoreText, restoreEntries, snapshot } = payload;
+function enableSwarmMode(): void {
+  if (!client.swarmMode.value) client.toggleSwarmMode();
+}
+
+async function handleCommand(payload: { cmd: string; attachments: PromptAttachment[]; restoreText?: string; skillName?: string; skillPath?: string; restoreEntries?: AttachmentEntry[]; snapshot?: ComposerDocumentSnapshot; editText?: string; delivery?: 'steer' | 'queue'; preserveDraft?: boolean }): Promise<void> {
+  const { cmd, attachments, restoreText, restoreEntries, snapshot, preserveDraft } = payload;
   if (cmd === '/feedback' && payload.skillName === undefined) {
     openGlobalFeedback('command');
     return;
   }
   if (cmd === '/compact' || cmd.startsWith('/compact ')) {
-    if (!(await passCommandGates(cmd, [], restoreText, restoreEntries, snapshot))) return;
+    if (!(await passCommandGates(cmd, [], restoreText, restoreEntries, snapshot, preserveDraft))) return;
     const result = client.compact(commandArgumentText(cmd, snapshot) || undefined);
     if (result === undefined) {
-      conversationPaneRef.value?.loadComposerForEdit(restoreText ?? cmd, toEditableAttachments(attachments), restoreEntries, snapshot);
+      if (!preserveDraft) {
+        conversationPaneRef.value?.loadComposerForEdit(restoreText ?? cmd, toEditableAttachments(attachments), restoreEntries, snapshot);
+      }
       client.notify({ severity: 'warning', title: t('commands.compact.requiresSession') });
       return;
     }
-    if (result === 'queued') {
-      client.notify({ severity: 'info', title: t('commands.compactQueue.queued') });
-    } else if (result === 'duplicate' || result === 'compacting') {
-      conversationPaneRef.value?.loadComposerForEdit(restoreText ?? cmd, toEditableAttachments(attachments), restoreEntries, snapshot);
+    if (result === 'duplicate' || result === 'compacting') {
+      if (!preserveDraft) {
+        conversationPaneRef.value?.loadComposerForEdit(restoreText ?? cmd, toEditableAttachments(attachments), restoreEntries, snapshot);
+      }
       client.notify({
         severity: 'warning',
         title: t(result === 'duplicate' ? 'commands.compactQueue.alreadyQueued' : 'commands.compactQueue.compacting'),
@@ -1925,12 +1988,12 @@ async function handleCommand(payload: { cmd: string; attachments: PromptAttachme
   }
   if (cmd === '/swarm' || cmd.startsWith('/swarm ')) {
     const arg = cmd.slice('/swarm'.length).trim();
-    if (arg === 'on') client.setSwarmMode(true);
+    if (arg === 'on') enableSwarmMode();
     else if (arg === 'off') client.setSwarmMode(false);
     else if (arg) {
       const originSid = client.activeSessionId.value;
       if (!(await passCommandGates(cmd, attachments, restoreText, restoreEntries, snapshot))) return;
-      client.setSwarmMode(true);
+      enableSwarmMode();
       const prompt = client.createPromptEnvelope(commandPromptContent(cmd, attachments, snapshot));
       if (payload.delivery === 'steer') {
         const generation = ++sendGeneration;
@@ -2492,6 +2555,7 @@ function openPr(url: string): void {
       @login="openLogin()"
       @command="handleCommand"
       @interrupt="handleInterrupt"
+      @continue="handleContinue"
       @steer-queued="handleSteerQueued"
       @toggle-pin="togglePinFromHeader"
       @pick-model="openModelPicker()"
@@ -2634,8 +2698,21 @@ function openPr(url: string): void {
     <ModelSwitchConfirmDialog
       v-if="modelSwitchConfirmPending !== null"
       :open="true"
+      :session-type="modelSwitchConfirmPending.sessionType"
       :hint="modelSwitchConfirmPending.hint"
+      :warning="modelSwitchConfirmPending.warning"
       @select="modelSwitchConfirmStore().settle($event)"
+    />
+    <ModelSwitchConfirmDialog
+      v-if="effortSwitchConfirmPending !== null"
+      :open="true"
+      kind="effort"
+      :session-type="effortSwitchConfirmPending.sessionType"
+      :from-effort="effortSwitchConfirmPending.fromEffort"
+      :to-effort="effortSwitchConfirmPending.toEffort"
+      :hint="effortSwitchConfirmPending.hint"
+      :warning="effortSwitchConfirmPending.warning"
+      @select="action => { if (action !== 'compact') effortSwitchStore().settle(action) }"
     />
 
     <!-- Settings page (modal) -->
@@ -2884,7 +2961,7 @@ function openPr(url: string): void {
   display: grid;
   grid-template-columns: auto 0 minmax(0, 1fr) auto;
   grid-template-rows: minmax(0, 1fr) auto;
-  background: var(--bg);
+  background: var(--color-bg);
   color: var(--color-text);
   overflow: clip;
   box-sizing: border-box;

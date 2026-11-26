@@ -497,8 +497,8 @@ into `pyclaude.claude_process`, emitting `claude_turn` events); headless Claude 
 - **`kimi/`** → the `pykimi` package: Moonshot's Node kimi-code built from a vendored tree, with a
   wiretap module and three one-line emit sites loading the bridge as an N-API addon
   (`kimi/native/`). `test_kimi_capture.py` runs a print-mode turn of the real bundle against a
-  loopback model and checks every emit site, so an update that moves one fails it. See
-  `kimi/README.md`.
+  loopback model and checks every emit site, so an update that moves one, or renames an event the
+  wiretap forwards (2.8.0's `llm.streaming.*` → `llm.delta.*`), fails it. See `kimi/README.md`.
 - **`claude/`** → `pyclaude` and the pristine `claude/vendor/sdk`. `claude/vendor.json` pins the SDK
   tag and a Claude Code release, tracked separately and never older than the one the SDK bundles
   (`build_cli.py` enforces it); `claude/build_cli.py` installs the bridged runtime and

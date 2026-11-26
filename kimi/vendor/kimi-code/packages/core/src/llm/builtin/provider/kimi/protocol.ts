@@ -1,4 +1,4 @@
-import type { Message, ToolDescription, ContentPart } from '#/llm/message';
+import { readToolLifecycleMeta, type Message, type ToolDescription, type ContentPart } from '#/llm/message';
 import { providerImagePolicy } from '#/llm/protocol/kit/media';
 import { requestIdFromHeader } from '#/llm/protocol/kit/http';
 import type { LlmErrorDiagnosticsInput } from '#/llm/protocol/protocol';
@@ -18,6 +18,7 @@ import {
   type OpenAINativeToolCall,
   type OpenAILowerContext,
 } from '#/llm/builtin/protocol/openai/index';
+import { openAIMediaConversionPatterns } from '#/llm/builtin/protocol/openai/media-conversion';
 import {
   openAIResponsesModelLegality,
   openAIResponsesProtocol,
@@ -144,6 +145,7 @@ export const kimiOpenAIProtocol = openAIProtocol.with((base) => ({
     ...openAIModelLegality,
     fillMaxOutputTokens: fillKimiMaxOutputTokens,
   },
+  patterns: (module) => openAIMediaConversionPatterns(module.options?.toolMessageConversion ?? 'keep_parts'),
   thinking: (thinking) => (thinking === undefined ? undefined : kimiOpenAIThinkingParams(thinking)),
   maxOutputTokens: (cap) => ({ max_completion_tokens: cap }),
   tool: convertKimiTool,
@@ -158,7 +160,11 @@ export const kimiOpenAIProtocol = openAIProtocol.with((base) => ({
         module.model.thinking?.keep === 'all' && module.model.thinking?.effort !== 'off',
       toolMessageConversion: module.options?.toolMessageConversion ?? 'keep_parts',
     };
-    return lowerOpenAIMessage(message, ctx).map((native) => applyKimiMessageExtras(message, native));
+    const messages = lowerOpenAIMessage(message, ctx).map((native) => applyKimiMessageExtras(message, native));
+    if (module.model.spec.capability?.dynamically_loaded_tools !== true) return messages;
+    const removed = message.content.flatMap((part) => readToolLifecycleMeta(part)?.removed ?? []);
+    if (removed.length === 0) return messages;
+    return [...messages, { role: 'system', unload_tools: removed } as unknown as OpenAINativeMessage];
   },
   flatten: (native, module) => {
     const { extra_body: extraBody, ...extras } = module.options?.extras ?? {};

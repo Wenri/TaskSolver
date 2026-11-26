@@ -691,6 +691,7 @@ export function startMentionTooltip(host: MentionTooltipHost): () => void {
       );
     }
     const mention = pillMention(pill);
+    if (mention.kind === 'session') return buildMentionSkillTooltip({ name: mention.name, description: '' });
     if (mention.kind === 'skill') {
       const skill = host.resolveSkill?.(mention.name, mention.path || undefined);
       if (!skill?.path || !host.openPath) {
@@ -840,7 +841,7 @@ export function startMentionTooltip(host: MentionTooltipHost): () => void {
   function show(pill: HTMLElement): void {
     if (!bubble) {
       bubble = document.createElement('div');
-      bubble.className = 'mention-tip';
+      bubble.classList.add('ui-tip-surface', 'mention-tip');
       bubble.id = 'mention-tip';
       bubble.setAttribute('role', 'tooltip');
       bubble.addEventListener('mouseenter', clearHideTimer);
@@ -884,7 +885,7 @@ export function startMentionTooltip(host: MentionTooltipHost): () => void {
       }
     } else if (!pill.classList.contains('quote-pill')) {
       const mention = pillMention(pill);
-      shownPath = mention.kind !== 'skill' && mention.path !== '' ? mention.path : null;
+      shownPath = (mention.kind === 'file' || mention.kind === 'folder') && mention.path !== '' ? mention.path : null;
       if (shownPath !== null) {
         probeRequest = {
           path: shownPath,

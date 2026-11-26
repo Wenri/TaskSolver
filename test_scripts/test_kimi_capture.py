@@ -5,8 +5,9 @@ The built bundle and its wirecap addon run one print-mode turn through ``pykimi.
 is an OpenAI-compatible chat-completions fixture on 127.0.0.1, defined by the ``KIMI_MODEL_*``
 variables, with the store scoped by ``kimi_home``. The capture must hold what TaskSolver's wiretap
 patch emits: the request with the prompt, wire-journal records, and the turn pykimi decodes from
-the streamed events. A hook that an adoption dropped or misplaced fails here; ``--version`` checks
-never send a request. No credentials and no network beyond loopback.
+the streamed events. A hook that an adoption dropped or misplaced fails here, and so does a stream
+event the wiretap no longer recognizes (Kimi 2.8.0 renamed them); ``--version`` checks never send
+a request. No credentials and no network beyond loopback.
 
     pixi run python test_scripts/test_kimi_capture.py
 """

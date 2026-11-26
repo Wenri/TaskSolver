@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, h, nextTick, reactive, type App } from 'vue';
+import { useContextInspector } from '@moonshot-ai/app-core';
 import { createKimiI18n } from '@moonshot-ai/app-i18n';
 import { IconResolverKey } from '@moonshot-ai/app-ui';
 import { getIcon, type IconName } from '@moonshot-ai/app-client/icons';
-import type { SessionFolderInfoRow } from '@moonshot-ai/app-client/stores';
+import { panelApiKey, type PanelApi } from '@moonshot-ai/app-client/panel';
+import type { SessionContextInfoState, SessionFolderInfoRow } from '@moonshot-ai/app-client/stores';
 
+import SessionInfoContext from '../../src/renderer/components/chat/SessionInfoContext.vue';
 import SessionInfoFolder from '../../src/renderer/components/chat/SessionInfoFolder.vue';
 import SessionInfoPanel from '../../src/renderer/components/chat/SessionInfoPanel.vue';
+import { ActivityNotice } from '@moonshot-ai/app-components';
+import { resolveCompactPhase } from '@moonshot-ai/app-components/support';
 import sessionInfoFolderSource from '../../src/renderer/components/chat/SessionInfoFolder.vue?raw';
 import sessionInfoPanelSource from '../../src/renderer/components/chat/SessionInfoPanel.vue?raw';
 import sessionInfoTabsSource from '../../src/renderer/components/chat/SessionInfoTabs.vue?raw';
@@ -20,8 +25,12 @@ import turnFoldSource from '../../../../packages/app-components/src/chat/TurnFol
 const store = vi.hoisted(() => ({
   rows: vi.fn(),
   foldersForSession: vi.fn(),
+  contextState: vi.fn<(_sessionId: string) => SessionContextInfoState | undefined>(),
   observe: vi.fn(),
+  observeContext: vi.fn(),
+  refreshContext: vi.fn(),
   unobserve: vi.fn(),
+  unobserveContext: vi.fn(),
 }));
 
 vi.mock('@moonshot-ai/app-client/stores', () => ({
@@ -34,8 +43,13 @@ let host: HTMLDivElement | undefined;
 beforeEach(() => {
   store.rows.mockReset();
   store.foldersForSession.mockReset();
+  store.contextState.mockReset();
   store.observe.mockReset();
+  store.observeContext.mockReset();
+  store.refreshContext.mockReset();
   store.unobserve.mockReset();
+  store.unobserveContext.mockReset();
+  useContextInspector().setContextInspectorEnabled(false);
 });
 
 afterEach(() => {
@@ -126,7 +140,7 @@ describe('SessionInfoFolder', () => {
       await nextTick();
       const branch = host!.querySelector<HTMLElement>('.sif-branch')!;
       expect(branch.getAttribute('title')).toBeNull();
-      expect(host!.querySelector('.ui-tip')).toBeNull();
+      expect(host!.querySelector('.sif-branch-line .ui-tip')).toBeNull();
 
       Object.defineProperties(branch, {
         scrollWidth: { value: 240, configurable: true },
@@ -134,7 +148,7 @@ describe('SessionInfoFolder', () => {
       });
       callback([], {} as ResizeObserver);
       await nextTick();
-      expect(host!.querySelector('.ui-tip')).not.toBeNull();
+      expect(host!.querySelector('.sif-branch-line .ui-tip')).not.toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -153,10 +167,10 @@ describe('SessionInfoFolder', () => {
 
     row.state.value.branch = 'feat/a-very-long-branch-name-that-needs-a-tooltip';
     await nextTick();
-    expect(host!.querySelector('.ui-tip')).not.toBeNull();
+    expect(host!.querySelector('.sif-branch-line .ui-tip')).not.toBeNull();
     row.state.value.branch = 'main';
     await nextTick();
-    expect(host!.querySelector('.ui-tip')).toBeNull();
+    expect(host!.querySelector('.sif-branch-line .ui-tip')).toBeNull();
   });
 
   it('collapses additional folders by default and toggles their content', async () => {
@@ -328,7 +342,9 @@ describe('SessionInfoPanel', () => {
 
   it('wires the overflow action to the right panel', () => {
     expect(conversationPaneSource).toContain('@show-tabs="emit(\'showTabs\')"');
+    expect(conversationPaneSource).toContain('preserveDraft: true');
     expect(appSource).toContain('@show-tabs="panel.showPanel"');
+    expect(appSource).not.toContain('commands.compactQueue.queued');
   });
 
   it('uses the sidebar width for the floating panel', () => {
@@ -423,6 +439,293 @@ describe('SessionInfoPanel', () => {
     expect(primaryStyle).not.toContain('margin-left: auto');
   });
 
+  it('renders context composition, toggles collapse, and forwards compact and detail actions', async () => {
+    useContextInspector().setContextInspectorEnabled(true);
+    const compact = vi.fn();
+    const openContext = vi.fn();
+    store.rows.mockReturnValue([readyRow()]);
+    store.foldersForSession.mockReturnValue([{ path: '/repo/a', primary: true }]);
+    store.contextState.mockReturnValue({
+      status: 'ready',
+      value: {
+        session_id: 's1',
+        agent_id: 'main',
+        captured_at: 1000,
+        tokens: { used: 640000, max: 1048576 },
+        groups: [
+          { role: 'system', count: 1, tokens: 128000 },
+          { role: 'definition', count: 10, tokens: 192000 },
+          { role: 'user', count: 4, tokens: 320000 },
+        ],
+      },
+    });
+
+    host = document.createElement('div');
+    document.body.append(host);
+    app = createApp(SessionInfoPanel, {
+      sessionId: 's1',
+      mode: 'sidebar',
+      onCompact: compact,
+    });
+    app.use(createKimiI18n({ locale: 'zh' }));
+    app.provide(IconResolverKey, (name) => getIcon(name as IconName)?.component);
+    app.provide(panelApiKey, { openContext } as unknown as PanelApi);
+    app.mount(host);
+    await nextTick();
+
+    expect(store.observeContext).toHaveBeenCalledWith('s1');
+    const section = host.querySelector<HTMLElement>('.si-context')!;
+    expect(section).not.toBeNull();
+    expect(section.querySelector('.sic-title')?.textContent).toBe('上下文');
+    expect(section.querySelector('.sic-usage')).toBeNull();
+    expect(section.querySelector('.ctx-usage-headline')?.textContent).toBe('62% 已用');
+    expect(section.querySelector('.ctx-usage-total')?.textContent).toBe('625k / 1M');
+    const segWidths = Array.from(section.querySelectorAll<HTMLElement>('.ctx-composition-seg'))
+      .map((seg) => Number.parseFloat(seg.style.width));
+    expect(segWidths).toHaveLength(3);
+    expect(segWidths[0]).toBeCloseTo((128000 / 1048576) * 100, 5);
+    expect(segWidths[1]).toBeCloseTo((192000 / 1048576) * 100, 5);
+    expect(segWidths[2]).toBeCloseTo((320000 / 1048576) * 100, 5);
+    const rowText = (selector: string) => [...section.querySelectorAll(selector)].map((el) => el.textContent);
+    expect(rowText('.ctx-role-name')).toEqual(['系统提示词', '工具定义', '用户消息']);
+    expect(rowText('.ctx-role-tokens')).toEqual(['~125k', '~188k', '~313k']);
+    expect(rowText('.ctx-role-share')).toEqual(['12.2%', '18.3%', '30.5%']);
+
+    vi.useFakeTimers();
+    try {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab' }));
+      section.querySelectorAll<HTMLElement>('.ctx-role-name')[1]!.focus();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(document.querySelector('[role="tooltip"]')?.textContent?.trim()).toBe('10 个工具');
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const actionButtons = section.querySelectorAll<HTMLButtonElement>('.ctx-summary-btn');
+    expect(actionButtons).toHaveLength(2);
+    actionButtons[0]!.click();
+    actionButtons[1]!.click();
+    expect(compact).toHaveBeenCalledOnce();
+    expect(openContext).toHaveBeenCalledOnce();
+
+    const heading = section.querySelector<HTMLButtonElement>('.sic-heading')!;
+    heading.click();
+    await nextTick();
+    expect(heading.getAttribute('aria-expanded')).toBe('false');
+    expect(section.querySelector('.ctx-summary')).toBeNull();
+    expect(section.querySelector('.sic-usage')?.textContent).toBe('已用 625k · 剩余 399k');
+
+    app.unmount();
+    expect(store.unobserveContext).toHaveBeenCalledWith('s1');
+  });
+
+  it('refreshes the context section when the model changes while idle', async () => {
+    useContextInspector().setContextInspectorEnabled(true);
+    store.rows.mockReturnValue([readyRow()]);
+    store.foldersForSession.mockReturnValue([{ path: '/repo/a', primary: true }]);
+    const props = reactive({
+      sessionId: 's1',
+      mode: 'sidebar' as const,
+      ctxUsed: 1000,
+      ctxMax: 10000,
+      modelId: 'model-a',
+      running: false,
+    });
+    host = document.createElement('div');
+    document.body.append(host);
+    app = createApp({ render: () => h(SessionInfoPanel, props) });
+    app.use(createKimiI18n({ locale: 'zh' }));
+    app.provide(IconResolverKey, (name) => getIcon(name as IconName)?.component);
+    app.mount(host);
+    await nextTick();
+    expect(store.refreshContext).not.toHaveBeenCalled();
+
+    props.modelId = 'model-b';
+    props.ctxMax = 20000;
+    await nextTick();
+    expect(store.refreshContext).toHaveBeenCalledExactlyOnceWith('s1');
+  });
+
+  it('skips the context section and its reads while the context inspector is off', async () => {
+    store.rows.mockReturnValue([readyRow()]);
+    store.foldersForSession.mockReturnValue([{ path: '/repo/a', primary: true }]);
+    store.contextState.mockReturnValue({
+      status: 'ready',
+      value: {
+        session_id: 's1',
+        agent_id: 'main',
+        captured_at: 1000,
+        tokens: { used: 1000, max: 10000 },
+        groups: [{ role: 'user', count: 1, tokens: 1000 }],
+      },
+    });
+    const el = mount(SessionInfoPanel, {
+      sessionId: 's1',
+      mode: 'sidebar',
+      available: [{ type: 'term', icon: 'terminal', label: '终端', keys: [], disabled: false }],
+    });
+    await nextTick();
+
+    expect(el.querySelector('.si-context')).toBeNull();
+    expect(el.querySelector('.si-folders + .sit')).not.toBeNull();
+    expect(store.observeContext).not.toHaveBeenCalled();
+
+    useContextInspector().setContextInspectorEnabled(true);
+    await nextTick();
+    expect(el.querySelector('.si-folders + .si-context + .sit')).not.toBeNull();
+    expect(store.observeContext).toHaveBeenCalledWith('s1');
+
+    useContextInspector().setContextInspectorEnabled(false);
+    await nextTick();
+    expect(el.querySelector('.si-context')).toBeNull();
+    expect(store.unobserveContext).toHaveBeenCalledWith('s1');
+  });
+
+  it('keeps showing the last summary with a notice after a refresh fails', async () => {
+    mount(SessionInfoContext, {
+      canCompact: true,
+      state: {
+        status: 'error',
+        message: 'offline',
+        value: {
+          session_id: 's1',
+          agent_id: 'main',
+          captured_at: 1000,
+          tokens: { used: 1000, max: 10000 },
+          groups: [{ role: 'user', count: 1, tokens: 1000 }],
+        },
+      },
+    });
+    await nextTick();
+    expect(host!.querySelectorAll('.ctx-role-row')).toHaveLength(1);
+    expect(host!.querySelector('.ctx-summary-stale')?.textContent?.trim()).toBe('刷新失败，显示的是上次读取的数据');
+    expect(host!.querySelector('.ctx-summary-error')).toBeNull();
+  });
+
+  it('hides the view-details button when openContext is not provided', async () => {
+    mount(SessionInfoContext, {
+      canCompact: true,
+      state: {
+        status: 'ready',
+        value: {
+          session_id: 's1',
+          agent_id: 'main',
+          captured_at: 1000,
+          tokens: { used: 1000, max: 10000 },
+          groups: [{ role: 'user', count: 1, tokens: 1000 }],
+        },
+      },
+    });
+    await nextTick();
+    const buttons = host!.querySelectorAll<HTMLButtonElement>('.ctx-summary-btn');
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]!.textContent).toContain('压缩上下文');
+  });
+
+  it('shows token counts without window shares when the context limit is unknown', async () => {
+    mount(SessionInfoContext, {
+      state: {
+        status: 'ready',
+        value: {
+          session_id: 's1',
+          agent_id: 'main',
+          captured_at: 1000,
+          tokens: { used: 3000 },
+          groups: [
+            { role: 'user', count: 2, tokens: 1000 },
+            { role: 'tool', count: 1, tokens: 2000 },
+          ],
+        },
+      },
+    });
+    await nextTick();
+    expect(host!.querySelector('.ctx-usage-headline')?.textContent).toBe('已用 2.9k');
+    expect(host!.querySelector('.ctx-usage-total')).toBeNull();
+    expect([...host!.querySelectorAll('.ctx-role-tokens')].map((el) => el.textContent)).toEqual(['~1000', '~2k']);
+    expect(host!.querySelector('.ctx-role-share')).toBeNull();
+    const widths = [...host!.querySelectorAll<HTMLElement>('.ctx-composition-seg')]
+      .map((seg) => Number.parseFloat(seg.style.width));
+    expect(widths[0]).toBeCloseTo(100 / 3, 5);
+    expect(widths[1]).toBeCloseTo(200 / 3, 5);
+  });
+
+  it('keeps compact clickable while a turn is running and reflects queued and compacting phases', async () => {
+    useContextInspector().setContextInspectorEnabled(true);
+    const compact = vi.fn();
+    store.rows.mockReturnValue([readyRow()]);
+    store.foldersForSession.mockReturnValue([{ path: '/repo/a', primary: true }]);
+    store.contextState.mockReturnValue({
+      status: 'ready',
+      value: {
+        session_id: 's1',
+        agent_id: 'main',
+        captured_at: 1000,
+        tokens: { used: 120000, max: 1000000 },
+        groups: [{ role: 'user', count: 2, tokens: 120000 }],
+      },
+    });
+    const props = reactive({
+      sessionId: 's1',
+      mode: 'sidebar' as const,
+      running: true,
+      hasMessages: true,
+      compactPhase: 'idle' as 'idle' | 'queued' | 'compacting',
+    });
+    host = document.createElement('div');
+    document.body.append(host);
+    app = createApp({ render: () => h(SessionInfoPanel, { ...props, onCompact: compact }) });
+    app.use(createKimiI18n({ locale: 'zh' }));
+    app.provide(IconResolverKey, (name) => getIcon(name as IconName)?.component);
+    app.mount(host);
+    await nextTick();
+
+    const btn = () => host!.querySelector<HTMLButtonElement>('.ctx-summary-btn')!;
+    expect(btn().disabled).toBe(false);
+    expect(btn().textContent?.trim()).toBe('压缩上下文');
+    btn().click();
+    expect(compact).toHaveBeenCalledOnce();
+
+    props.compactPhase = resolveCompactPhase(null, [{ kind: 'compact' }]);
+    await nextTick();
+    expect(btn().disabled).toBe(true);
+    expect(btn().textContent?.trim()).toBe('等待压缩');
+
+    props.compactPhase = resolveCompactPhase({ status: 'running' }, [{ kind: 'compact' }]);
+    await nextTick();
+    expect(btn().disabled).toBe(true);
+    expect(btn().getAttribute('aria-busy')).toBe('true');
+    expect(btn().textContent?.trim()).toBe('正在压缩…');
+
+    props.running = false;
+    props.compactPhase = 'idle';
+    await nextTick();
+    expect(store.refreshContext).toHaveBeenCalledWith('s1');
+
+    props.hasMessages = false;
+    await nextTick();
+    expect(btn().disabled).toBe(true);
+  });
+});
+
+describe('ActivityNotice compaction timer', () => {
+  it('displays elapsed duration once a second passes', async () => {
+    vi.useFakeTimers();
+    try {
+      mount(ActivityNotice, {});
+      await nextTick();
+      expect(host!.querySelector('.activity-notice')).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(1000);
+      await nextTick();
+      expect(host!.querySelector('.activity-notice')?.textContent).toBe('1秒');
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await nextTick();
+      expect(host!.querySelector('.activity-notice')?.textContent).toBe('3秒');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('Wide table session info layout', () => {

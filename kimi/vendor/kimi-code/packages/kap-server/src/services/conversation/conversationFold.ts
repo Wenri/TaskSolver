@@ -13,16 +13,17 @@ import { stripBundledSkillBlocks } from '@moonshot-ai/core/llm/origin';
 import type { ContentPart } from '@moonshot-ai/core/llm/message';
 import type { WireRecord } from '@moonshot-ai/agent-core-v2/wire/record';
 
-import type {
-  CompactionItem,
-  ConversationItem,
-  ConversationOutcome,
-  ConversationTurn,
-  ErrorInfo,
-  NotificationItem,
-  ToolCallItem,
-  TurnEndReason,
-  UserMessageItem,
+import {
+  conversationContinuationSchema,
+  type CompactionItem,
+  type ConversationItem,
+  type ConversationOutcome,
+  type ConversationTurn,
+  type ErrorInfo,
+  type NotificationItem,
+  type ToolCallItem,
+  type TurnEndReason,
+  type UserMessageItem,
 } from '../../protocol/conversation';
 import {
   agentRefOf,
@@ -115,7 +116,11 @@ export interface ConversationState {
   implicitlyEnded: Record<string, true>;
   provisionalEnds: Record<string, TurnEnd>;
   recordsTurnEnds: boolean;
+  trailingRejectedPrompt: boolean;
+  awaitingContinuationTurnNumber?: number;
+  latestPromptId?: string;
   stepParts: Record<string, number>;
+  stepNextBlock: Record<string, number>;
   compaction?: CompactionDetails;
 }
 
@@ -137,7 +142,9 @@ export function createConversationState(agentId: string, fork?: ConversationFork
     implicitlyEnded: {},
     provisionalEnds: {},
     recordsTurnEnds: false,
+    trailingRejectedPrompt: false,
     stepParts: {},
+    stepNextBlock: {},
   };
 }
 
@@ -158,13 +165,21 @@ export function applyConversationRecord(state: ConversationState, record: WireRe
     state.inheriting = false;
   }
   switch (record.type) {
-    case 'turn.prompt':
+    case 'turn.prompt': {
+      if (typeof record['trigger'] === 'string') state.recordsTurnEnds = true;
+      state.trailingRejectedPrompt = false;
+      const promptId = stringField(record['promptId']);
+      const turnNumber = numberField(record['turnId']);
+      state.awaitingContinuationTurnNumber =
+        record['trigger'] === 'continue' && promptId === undefined ? (turnNumber ?? -1) : undefined;
+      if (promptId !== undefined) state.latestPromptId = promptId;
       state.pendingPrompt = {
-        turnNumber: numberField(record['turnId']),
-        promptId: stringField(record['promptId']),
+        turnNumber,
+        promptId,
         originKind: stringField((record['origin'] as { kind?: unknown } | undefined)?.kind),
       };
       return;
+    }
     case 'context.append_message':
       applyMessage(state, record['message'] as ContextMessage | undefined, time);
       return;
@@ -195,7 +210,19 @@ export function applyConversationRecord(state: ConversationState, record: WireRe
       applyTurnEnded(state, record, time);
       return;
     case 'prompt.completed':
-      if (record['reason'] === 'blocked') applyPromptBlocked(state, stringField(record['promptId']), time);
+      if (record['reason'] === 'blocked' || record['reason'] === 'failed') {
+        applyPromptRejected(
+          state,
+          stringField(record['promptId']),
+          record['reason'] === 'blocked',
+          time,
+        );
+      } else {
+        state.awaitingContinuationTurnNumber = undefined;
+      }
+      return;
+    case 'prompt.aborted':
+      state.awaitingContinuationTurnNumber = undefined;
       return;
     case 'interaction.request':
       applyInteractionRequest(state, record, time);
@@ -237,12 +264,18 @@ export interface RunningWork {
 export function settleOrphanTurns(state: ConversationState, running: RunningWork = {}): ConversationState {
   const orphaned = (turn: ConversationTurn): boolean =>
     turn.status === 'running' && (turn.turn_number === undefined || turn.turn_number !== running.turnNumber);
-  if (!state.turns.some(orphaned)) return state;
+  const staleContinuation =
+    state.awaitingContinuationTurnNumber !== undefined &&
+    (running.turnNumber === undefined || state.awaitingContinuationTurnNumber !== running.turnNumber);
+  if (!state.turns.some(orphaned)) {
+    return staleContinuation ? { ...state, awaitingContinuationTurnNumber: undefined } : state;
+  }
   const next: ConversationState = {
     ...state,
     turns: [...state.turns],
     tools: { ...state.tools },
     provisionalEnds: { ...state.provisionalEnds },
+    awaitingContinuationTurnNumber: staleContinuation ? undefined : state.awaitingContinuationTurnNumber,
   };
   next.turns.forEach((turn, index) => {
     if (!orphaned(turn)) return;
@@ -293,7 +326,10 @@ export function undoConversationTurns(state: ConversationState, count: number): 
   }
   if (state.openTurnId !== undefined && removed.has(state.openTurnId)) state.openTurnId = undefined;
   state.pendingPrompt = undefined;
+  state.latestPromptId = undefined;
   state.pendingSteers = 0;
+  state.trailingRejectedPrompt = false;
+  state.awaitingContinuationTurnNumber = undefined;
   return state;
 }
 
@@ -427,10 +463,17 @@ function applyLoopEvent(state: ConversationState, event: LoopRecordedEvent | und
         turn.items = turn.items.filter((item) => !item.item_id.startsWith(`${previous.id}:`));
       }
       steps.push({ id: event.uuid, index, startedAt: time, ended: false });
+      if (
+        state.stepNextBlock[event.uuid] === undefined &&
+        !turn.items.some((item) => item.item_id.startsWith(`${event.uuid}:`))
+      ) {
+        state.stepNextBlock[event.uuid] = 0;
+      }
       return;
     }
     case 'step.end': {
       delete state.stepParts[event.uuid];
+      delete state.stepNextBlock[event.uuid];
       const found = findStep(state, event.uuid);
       if (found === undefined) return;
       const { turn, step } = found;
@@ -453,14 +496,16 @@ function applyLoopEvent(state: ConversationState, event: LoopRecordedEvent | und
       const position = state.stepParts[event.stepUuid] ?? 0;
       state.stepParts[event.stepUuid] = position + 1;
       const startedAt = event.startedAt ?? findStep(state, event.stepUuid)?.step.startedAt ?? time;
-      const item = contentItem(
-        event.part,
-        `${event.stepUuid}:${event.block ?? position}`,
-        event.step,
-        startedAt,
-        event.durationMs,
-      );
-      if (item !== undefined) upsertItem(turn, item);
+      const block = event.block ?? position;
+      const item = contentItem(event.part, `${event.stepUuid}:${block}`, event.step, startedAt, event.durationMs);
+      if (item === undefined) return;
+      const nextBlock = state.stepNextBlock[event.stepUuid];
+      if (nextBlock !== undefined && block >= nextBlock) {
+        turn.items.push(item);
+        state.stepNextBlock[event.stepUuid] = block + 1;
+      } else {
+        upsertItem(turn, item);
+      }
       return;
     }
     case 'tool.call': {
@@ -538,6 +583,9 @@ function applyStepRetrying(state: ConversationState, record: WireRecord): void {
 
 function applyTurnEnded(state: ConversationState, record: WireRecord, time: number): void {
   state.recordsTurnEnds = true;
+  if (record['reason'] !== 'failed' && record['reason'] !== 'blocked') {
+    state.awaitingContinuationTurnNumber = undefined;
+  }
   const turnNumber = numberField(record['turnId']);
   if (turnNumber !== undefined && state.pendingPrompt?.turnNumber === turnNumber) state.pendingPrompt = undefined;
   const turn = findTurnByNumber(state, turnNumber) ?? unnumberedOpenTurn(state);
@@ -551,6 +599,7 @@ function applyTurnEnded(state: ConversationState, record: WireRecord, time: numb
   }
   const error = errorInfoOf(record['error'], requestId);
   endTurn(state, turn, turnEndOf(record['reason'], error, state.provisionalEnds[turn.turn_id]), time);
+  turn.continuation = conversationContinuationSchema.safeParse(record['continuation']).data;
   delete state.implicitlyEnded[turn.turn_id];
   const durationMs = numberField(record['durationMs']);
   if (durationMs !== undefined) turn.duration_ms = durationMs;
@@ -582,15 +631,33 @@ function failureReasonOf(error: ErrorInfo | undefined): TurnEndReason {
   return 'error';
 }
 
-function applyPromptBlocked(state: ConversationState, promptId: string | undefined, time: number): void {
+function applyPromptRejected(
+  state: ConversationState,
+  promptId: string | undefined,
+  blocked: boolean,
+  time: number,
+): void {
   if (promptId === undefined) return;
   for (let index = state.turns.length - 1; index >= 0; index--) {
     const turn = state.turns[index]!;
-    const opener = turn.items[0];
-    if (opener?.type !== 'user_message' || opener.item_id !== promptId) continue;
-    endTurn(state, turn, { outcome: 'failed', reason: 'blocked' }, time);
+    const hasPrompt = turn.items.some(
+      (item) =>
+        (item.type === 'user_message' &&
+          (item.item_id === promptId || item.prompt_ids.includes(promptId))) ||
+        (item.type === 'notification' &&
+          (item.item_id === promptId || item.item_id.startsWith(`${promptId}:`))),
+    );
+    if (!hasPrompt) continue;
+    if (blocked && turn.items[0]?.type === 'user_message' && turn.items[0].item_id === promptId) {
+      endTurn(state, turn, { outcome: 'failed', reason: 'blocked' }, time);
+    }
     return;
   }
+  if (!blocked && state.awaitingContinuationTurnNumber !== undefined) {
+    state.awaitingContinuationTurnNumber = undefined;
+    return;
+  }
+  state.trailingRejectedPrompt = true;
 }
 
 function applyInteractionRequest(state: ConversationState, record: WireRecord, time: number): void {
@@ -720,11 +787,15 @@ function clearConversation(state: ConversationState): void {
   state.anchors = [];
   state.implicitlyEnded = {};
   state.provisionalEnds = {};
+  state.trailingRejectedPrompt = false;
+  state.awaitingContinuationTurnNumber = undefined;
   state.stepParts = {};
+  state.stepNextBlock = {};
   state.compaction = undefined;
 }
 
 function startTurn(state: ConversationState, time: number): ConversationTurn {
+  state.trailingRejectedPrompt = false;
   const previous = openTurn(state);
   if (previous !== undefined) {
     endTurn(state, previous, state.provisionalEnds[previous.turn_id] ?? COMPLETED, time);
@@ -805,6 +876,7 @@ function turnForNumber(state: ConversationState, turnNumber: number | undefined,
       known.status = 'running';
       known.outcome = undefined;
       known.end_reason = undefined;
+      known.continuation = undefined;
       known.error = undefined;
       known.ended_at = undefined;
       known.duration_ms = undefined;

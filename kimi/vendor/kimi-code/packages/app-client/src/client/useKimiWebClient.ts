@@ -1,5 +1,5 @@
 
-import { computed, h, reactive, ref, watch, type Component } from 'vue';
+import { computed, h, reactive, ref, watch, watchEffect, type Component } from 'vue';
 import { formatDuration as formatTaskDuration } from '@moonshot-ai/app-core/lib';
 import {
   getKimiWebApi,
@@ -34,28 +34,31 @@ import { clearTurnFileHistorySession } from './turnFileHistory';
 import { ackSwarmPending, foldDaemonSwarmMode } from '@moonshot-ai/app-core/lib';
 import { ackTowerPending, foldDaemonTowerMode } from '@moonshot-ai/app-core/lib';
 import {
+  effectiveThinkingLevel,
+  matchEffortSwitchRule,
   matchModelSwitchRule,
   resolveModelSwitchHint,
+  resolveModelSwitchWarning,
   upstreamModelIdFromConfigModels,
   type ModelSwitchAction,
   type ModelSwitchRule,
 } from '@moonshot-ai/app-core/lib';
 import { detect as detectKimiLocale } from '@moonshot-ai/app-i18n';
 import { modelSwitchConfirmStore } from '../stores/modelSwitchConfirm';
+import { effortSwitchStore } from '../stores/effortSwitch';
 import { ackPlanPending, foldDaemonPlanMode } from '@moonshot-ai/app-core/lib';
 import {
-  draftAttachmentsStorageKey,
+  composerSessionScope,
   draftSnapshotStorageKey,
   draftStorageKey,
-  composerSessionScope,
   safeGetJson,
   safeGetString,
   safeRemove,
-  safeSetJson,
   safeSetString,
   STORAGE_KEYS,
 } from '@moonshot-ai/app-core/lib';
-import { discardStashedEditorState } from '@moonshot-ai/app-composer/runtime';
+import { liveComposerEditorFor } from '@moonshot-ai/app-composer/runtime';
+import { createPromptPrediction } from './promptPrediction';
 import { sessionTasksToAppTasks, subagentDisplayName } from '@moonshot-ai/app-core/client';
 import {
   conversationTurnError,
@@ -69,12 +72,13 @@ import {
   turnResult,
   undoableOpener,
   type CompactionItem,
+  type ConversationContinuation,
   type ConversationLoadError,
   type ConversationNotice,
   type ConversationTurn,
   type ConversationTurnHeader,
 } from '@moonshot-ai/app-core/conversation';
-import { useAppearance, useSidebarTabs } from '@moonshot-ai/app-core';
+import { useAppearance, useSessionMentions, useSidebarTabs } from '@moonshot-ai/app-core';
 import { shouldNotifyCompletion } from '../composables/useNotification';
 import { notificationsStore } from '../stores/notifications';
 import { promptAttachmentToTurnAttachment } from './attachmentsToContent';
@@ -93,8 +97,11 @@ import { usePromptPipeline } from './usePromptPipeline';
 import { createChatMcpAutoOpen } from '../composables/chatMcpAuthorization';
 import { useConfirmDialog } from '../composables/useConfirmDialog';
 import { persistComposerDraftSnapshot } from '../lib/composerDraftLifecycle';
+import { configureWorkspaceHooks } from '../lib/workspaceHooks';
+import { workspaceModeActions } from '../lib/workspaceModeActions';
 import { closeSessionBusyWindow, openSessionBusyWindow } from '../lib/perfTracking';
 import { waitForSessionExecution, type SessionExecutionState } from '../lib/sessionExecutionReadiness';
+import { sessionMentionCandidates as buildSessionMentionCandidates, type SessionMentionCandidate } from '../lib/sessionReferences';
 import { useSessionAdmin } from './useSessionAdmin';
 import { useBrowserTabTitle } from '../composables/useBrowserTabTitle';
 import { useDocumentTitle } from '../composables/useDocumentTitle';
@@ -104,9 +111,9 @@ import { workspacesStore, setWorkspacesHooks } from '../stores/workspaces';
 import { approvalsStore, setApprovalsHooks } from '../stores/approvals';
 import { filesStore } from '../stores/files';
 import { modelsStore } from '../stores/models';
-import { modeStore, setModeHooks } from '../stores/mode';
+import { modeStore } from '../stores/mode';
 import { warningsStore, warningDetail } from '../stores/warnings';
-import { goalStore, setGoalHooks } from '../stores/goal';
+import { goalStore } from '../stores/goal';
 import { configStore, setConfigHooks } from '../stores/config';
 import { hostsStore, setHostsHooks } from '../stores/hosts';
 import { tasksStore, setTasksHooks } from '../stores/tasks';
@@ -114,7 +121,7 @@ import { agentStatesStore } from '../stores/agentStates';
 import { setFilesHooks } from '../stores/files';
 import { authStore, setAuthHooks } from '../stores/auth';
 import { computeGateVerdict, mapDaemonAuthError, AUTH_MODEL_NOT_RESOLVED_CODE, type ChatGateInput, type ChatGateVerdict } from '../lib/chatGate';
-import { permissionsStore, setPermissionsHooks } from '../stores/permissions';
+import { permissionsStore } from '../stores/permissions';
 import { promptStore } from '../stores/prompt';
 import {
   connectionStore,
@@ -479,10 +486,9 @@ function recoverStaleConnection(): void {
 
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      clearActiveUnread();
-      recoverStaleConnection();
-    }
+    if (document.visibilityState !== 'visible') return;
+    clearActiveUnread();
+    recoverStaleConnection();
   });
 }
 if (typeof window !== 'undefined') {
@@ -714,6 +720,44 @@ function hasPendingLocalWork(sessionId: string): boolean {
     (promptStore().optimisticMessagesBySession[sessionId] ?? []).length > 0
   );
 }
+
+function hasEmptyPromptPredictionInput(sessionId: string): boolean {
+  const editor = liveComposerEditorFor(composerSessionScope(sessionId));
+  if (editor !== undefined) {
+    return editor.getText().trim().length === 0 && editor.getAttachmentInventory().activeIds.size === 0;
+  }
+  if ((safeGetString(draftStorageKey(sessionId)) ?? '').trim().length > 0) return false;
+  const snapshot = safeGetJson<{ attachmentOrder?: unknown }>(draftSnapshotStorageKey(sessionId));
+  return !Array.isArray(snapshot?.attachmentOrder) || snapshot.attachmentOrder.length === 0;
+}
+
+function canUsePromptPrediction(sessionId: string): boolean {
+  return (
+    rawState.experimentalFlags?.['prompt_prediction'] === true &&
+    sessionId === rawState.activeSessionId &&
+    rawState.mainView === 'chat' &&
+    !rawState.sessionLoading &&
+    typeof document !== 'undefined' &&
+    document.visibilityState === 'visible' &&
+    !modeStore().planMode &&
+    !modeStore().planArmed &&
+    !modeStore().goalMode &&
+    !hasPendingLocalWork(sessionId) &&
+    (rawState.approvalsBySession[sessionId] ?? []).length === 0 &&
+    (rawState.questionsBySession[sessionId] ?? []).length === 0
+  );
+}
+
+const promptPredictionController = createPromptPrediction({
+  api: getKimiWebApi,
+  isActiveSession: (sessionId) => sessionId === rawState.activeSessionId,
+  canPredict: canUsePromptPrediction,
+  hasEmptyInput: hasEmptyPromptPredictionInput,
+});
+
+watchEffect(() => {
+  promptPredictionController.refresh();
+});
 
 function conversationConnection(): ReturnType<typeof getEventConn> {
   connectEventsIfNeeded();
@@ -1348,6 +1392,7 @@ function createOnConnectionChangeHandler(): KimiEventHandlers['onConnectionChang
       }
       warningsStore().dismissWsError();
       void configStore().refreshServerMeta();
+      sideChat.flushPendingCloses();
       if (connectionStore().connectionGeneration > 1) {
         void workspacesStore().loadWorkspaces();
         void reconcileSessionWorkAfterReconnect();
@@ -1405,10 +1450,12 @@ export function connectEventsIfNeeded(): void {
       onAgentState: (sessionId, agentId, state) => {
         if (state.status === 'ended') {
           agentStatesStore().forgetAgent(sessionId, agentId);
+          sideChat.handleAgentEnded(sessionId, agentId);
           return;
         }
         agentStatesStore().setState(sessionId, agentId, state);
         if (agentId !== MAIN_AGENT_ID) return;
+        promptStore().settleContinueTurnStart(sessionId);
         applyMainAgentState(sessionId, state);
         observeMainCompaction(sessionId);
         if (state.status === 'idle') promptPipeline.resumeQueueIfIdle(sessionId);
@@ -1756,7 +1803,12 @@ const turns = computed<ChatTurn[]>(() => {
   if (!sid) return [];
   const conversation = activeMainConversation();
   if (conversation === null) return [];
-  const options = { sessionId: sid, getFileUrl: getFileUrlById, getSessionMediaUrl };
+  const options = {
+    sessionId: sid,
+    getFileUrl: getFileUrlById,
+    getSessionMediaUrl,
+    swarmMode: modeStore().swarmModeBySession[sid] ?? false,
+  };
   const base = mainConversationProjector(conversation.view.turns, options);
   const uncovered = unechoedOptimisticMessages(sid);
   if (uncovered.length === 0) return base;
@@ -1769,7 +1821,14 @@ const promptPending = computed<boolean>(() => {
   return sid !== undefined && unechoedOptimisticMessages(sid).length > 0;
 });
 
-const working = computed<boolean>(() => inFlight.value || turnActive.value || promptPending.value);
+const continuePending = computed<boolean>(() => {
+  const sid = rawState.activeSessionId;
+  return sid !== undefined && promptStore().isContinueTurnStarting(sid);
+});
+
+const working = computed<boolean>(
+  () => inFlight.value || turnActive.value || promptPending.value || continuePending.value,
+);
 
 watch(
   [() => rawState.activeSessionId, working],
@@ -1848,6 +1907,7 @@ function onMainPage(entry: ConversationEntry, previous: readonly ConversationTur
 }
 
 function onMainTurnsRemoved(entry: ConversationEntry, turnIds: readonly string[]): void {
+  promptStore().settleContinueTurnStart(entry.sessionId);
   const phases = turnPhasesOf(entry);
   for (const turnId of turnIds) phases.delete(turnId);
   clearTurnFileHistorySession(entry.sessionId);
@@ -1855,6 +1915,7 @@ function onMainTurnsRemoved(entry: ConversationEntry, turnIds: readonly string[]
 }
 
 function onMainTurnStarted(entry: ConversationEntry, turn: ConversationTurn): void {
+  promptPredictionController.handleTurnStarted(entry.sessionId);
   turnPhasesOf(entry).set(turn.turn_id, 'running');
   scheduleSessionRowRefresh(entry.sessionId);
 }
@@ -1865,6 +1926,7 @@ function onMainTurnEnded(entry: ConversationEntry, turn: ConversationTurn): void
 
 function settleMainTurnEnd(entry: ConversationEntry, turn: ConversationTurn): void {
   const sessionId = entry.sessionId;
+  promptStore().settleContinueTurnStart(sessionId);
   turnPhasesOf(entry).set(turn.turn_id, 'settled');
   pruneEchoedPrompts(sessionId);
   promptPipeline.resumeQueueIfIdle(sessionId);
@@ -1874,6 +1936,9 @@ function settleMainTurnEnd(entry: ConversationEntry, turn: ConversationTurn): vo
     firstTurn: turn.ordinal === 0,
     promptId: openerPromptId(turn),
     ratingTurnId: turn.turn_id,
+    predictionSourceId: turn.turn_id,
+    predictionTurnId: turn.ordinal,
+    continuation: turn.continuation,
   });
 }
 
@@ -1940,9 +2005,12 @@ const todos = computed<TodoView[]>(() => {
     .map((item) => ({ title: item.title, status: item.status }));
 });
 
+const isMainCompactingOrStarting = (sessionId: string): boolean =>
+  mainCompacting(sessionId) || promptStore().isCompactStarting(sessionId);
+
 const compaction = computed<CompactionStatus | null>(() => {
   const sid = rawState.activeSessionId;
-  return sid && mainCompacting(sid) ? { status: 'running' } : null;
+  return sid && isMainCompactingOrStarting(sid) ? { status: 'running' } : null;
 });
 
 const connection = computed<ConnectionState>(() => connectionStore().connection);
@@ -2200,41 +2268,32 @@ async function applySelectModel(modelId: string): Promise<void> {
 
 function matchedModelSwitchRuleForActiveSession(
   modelId: string,
-): { rule: ModelSwitchRule; fromDisplay: string; toDisplay: string } | undefined {
+): { rule: ModelSwitchRule; fromDisplay: string; toDisplay: string; sessionType: 'old' | 'new' } | undefined {
   const sid = rawState.activeSessionId;
-  if (sid === null || sid === undefined) return undefined;
-  const session = rawState.sessions.find((s) => s.id === sid);
-  if (session === undefined || session.lastPrompt === undefined) return undefined;
-  if (session.model === modelId) return undefined;
+  const session = sid === null || sid === undefined ? undefined : rawState.sessions.find((s) => s.id === sid);
+  if (sid !== null && sid !== undefined && session === undefined) return undefined;
   const store = modelsStore();
-  const fromEntry = store.activeModels.find((m) => m.id === session.model);
+  const fromModel = session === undefined ? store.resolveSendModel(undefined, { includeDraft: true }) : session.model;
+  if (fromModel === null || fromModel === modelId) return undefined;
+  const fromEntry = store.activeModels.find((m) => m.id === fromModel);
   const toEntry = store.activeModels.find((m) => m.id === modelId);
   if (fromEntry === undefined || toEntry === undefined) return undefined;
   const configModels = configStore().config?.models;
-  const fromUpstream = upstreamModelIdFromConfigModels(configModels, session.model);
+  const fromUpstream = upstreamModelIdFromConfigModels(configModels, fromModel);
   const toUpstream = upstreamModelIdFromConfigModels(configModels, modelId);
   if (fromUpstream === undefined || toUpstream === undefined) return undefined;
-  const rule = matchModelSwitchRule(modelSwitchConfirmStore().peek(), fromUpstream, toUpstream);
+  const hasConversationHistory =
+    session !== undefined &&
+    (session.lastPrompt !== undefined || session.messageCount > 0 || session.usage.turnCount > 0);
+  const sessionType = hasConversationHistory ? 'old' : 'new';
+  const rule = matchModelSwitchRule(modelSwitchConfirmStore().peek(), fromUpstream, toUpstream, sessionType);
   if (rule === undefined) return undefined;
   return {
     rule,
     fromDisplay: fromEntry.displayName ?? fromEntry.model,
     toDisplay: toEntry.displayName ?? toEntry.model,
+    sessionType,
   };
-}
-
-function migrateSessionDraftToNewSession(sid: string | null | undefined): void {
-  if (sid === null || sid === undefined) return;
-  const text = safeGetString(draftStorageKey(sid));
-  if (text !== null) safeSetString(draftStorageKey(undefined), text);
-  else safeRemove(draftStorageKey(undefined));
-  const snapshot = safeGetJson(draftSnapshotStorageKey(sid));
-  if (snapshot !== null) safeSetJson(draftSnapshotStorageKey(undefined), snapshot);
-  else safeRemove(draftSnapshotStorageKey(undefined));
-  const attachments = safeGetJson(draftAttachmentsStorageKey(sid));
-  if (attachments !== null) safeSetJson(draftAttachmentsStorageKey(undefined), attachments);
-  else safeRemove(draftAttachmentsStorageKey(undefined));
-  discardStashedEditorState(composerSessionScope(undefined));
 }
 
 async function runModelSwitchAction(
@@ -2250,12 +2309,6 @@ async function runModelSwitchAction(
       return;
     case 'continue':
       if (isSuperseded()) return;
-      await applySelectModel(modelId);
-      return;
-    case 'new':
-      if (isSuperseded()) return;
-      migrateSessionDraftToNewSession(triggerSid);
-      workspacesStore().clearActiveSession();
       await applySelectModel(modelId);
       return;
     case 'compact': {
@@ -2312,18 +2365,95 @@ async function runModelSwitchAction(
 async function selectModel(modelId: string): Promise<void> {
   modelSelectGeneration += 1;
   const generation = modelSelectGeneration;
+  const triggerSid = rawState.activeSessionId;
+  const readiness: Promise<unknown>[] = [];
+  if (modelSwitchConfirmStore().needsLoad()) readiness.push(modelSwitchConfirmStore().refresh());
+  if (configStore().config === null) readiness.push(configStore().loadConfig());
+  if (readiness.length > 0) {
+    await Promise.all(readiness);
+    if (generation !== modelSelectGeneration || rawState.activeSessionId !== triggerSid) return;
+  }
   const matched = matchedModelSwitchRuleForActiveSession(modelId);
   if (matched === undefined) {
     await applySelectModel(modelId);
     return;
   }
-  const triggerSid = rawState.activeSessionId;
   const action = await modelSwitchConfirmStore().requestConfirm({
     fromModel: matched.fromDisplay,
     toModel: matched.toDisplay,
+    sessionType: matched.sessionType,
     hint: resolveModelSwitchHint(matched.rule, detectKimiLocale()),
+    warning: resolveModelSwitchWarning(matched.rule, detectKimiLocale()),
   });
   await runModelSwitchAction(action, modelId, triggerSid, generation);
+}
+
+function effortModelIdForSession(sessionId: string | null | undefined): string | undefined {
+  const store = modelsStore();
+  const activeSession = sessionId
+    ? rawState.sessions.find((session) => session.id === sessionId)
+    : undefined;
+  const rawModel =
+    activeSession === undefined
+      ? store.draftModel ?? store.activeDefaultModel
+      : activeSession.model || store.activeDefaultModel;
+  if (rawModel === null || rawModel === undefined || rawModel.length === 0) return undefined;
+  return (
+    store.activeModels.find((model) => model.id === rawModel)?.id ??
+    store.activeModels.find((model) => model.model === rawModel)?.id ??
+    rawModel
+  );
+}
+
+let effortSelectGeneration = 0;
+
+async function setThinking(level: ThinkingLevel): Promise<void> {
+  effortSelectGeneration += 1;
+  const generation = effortSelectGeneration;
+  const triggerSid = rawState.activeSessionId;
+  const triggerModelId = effortModelIdForSession(triggerSid);
+  const fromThinking = rawState.thinking;
+  const store = modelsStore();
+  const modelEntry = store.activeModels.find((model) => model.id === triggerModelId);
+  if (modelEntry?.provider !== MANAGED_KIMI_CODE_PROVIDER_ID) {
+    modelProvider.setThinking(level);
+    return;
+  }
+  const fromEffort = effectiveThinkingLevel(modelEntry, fromThinking);
+  if (fromEffort === level) {
+    modelProvider.setThinking(level);
+    return;
+  }
+  const isStale = () =>
+    generation !== effortSelectGeneration ||
+    rawState.activeSessionId !== triggerSid ||
+    effortModelIdForSession(triggerSid) !== triggerModelId ||
+    rawState.thinking !== fromThinking;
+  if (effortSwitchStore().needsLoad()) await effortSwitchStore().refresh();
+  if (isStale()) return;
+  const activeSession = rawState.sessions.find((session) => session.id === triggerSid);
+  const currentModel = store.activeModels.find((model) => model.id === triggerModelId);
+  if (currentModel?.provider !== MANAGED_KIMI_CODE_PROVIDER_ID) {
+    modelProvider.setThinking(level);
+    return;
+  }
+  const hasConversationHistory =
+    activeSession !== undefined &&
+    (activeSession.lastPrompt !== undefined || activeSession.messageCount > 0 || activeSession.usage.turnCount > 0);
+  const sessionType = hasConversationHistory ? 'old' : 'new';
+  const rule = matchEffortSwitchRule(effortSwitchStore().peek(), fromEffort, level, sessionType);
+  if (rule === undefined) {
+    modelProvider.setThinking(level);
+    return;
+  }
+  const action = await effortSwitchStore().requestConfirm({
+    fromEffort,
+    toEffort: level,
+    sessionType,
+    hint: resolveModelSwitchHint(rule, detectKimiLocale()),
+    warning: resolveModelSwitchWarning(rule, detectKimiLocale()),
+  });
+  if (action === 'continue' && !isStale()) modelProvider.setThinking(level);
 }
 
 let ensureChatReadyFlight: { sid: string | undefined; promise: Promise<EnsureChatReadyResult> } | null = null;
@@ -2445,6 +2575,37 @@ const workspacesView = computed<WorkspaceView[]>(() => workspacesStore().workspa
 
 const activeWorkspaceId = computed<string | null>(() => workspacesStore().activeWorkspaceId);
 const visibleWorkspace = computed<WorkspaceView | null>(() => workspacesStore().visibleWorkspace);
+
+const SESSION_MENTION_SEARCH_PAGE_SIZE = 50;
+
+function mentionCandidatesFrom(sessions: readonly AppSession[]): SessionMentionCandidate[] {
+  return buildSessionMentionCandidates({
+    sessions,
+    activeSessionId: rawState.activeSessionId,
+    activeWorkspaceId: activeWorkspaceId.value,
+    workspaceName: (id) => workspacesView.value.find((workspace) => workspace.id === id)?.name,
+    formatTime,
+  });
+}
+
+const sessionMentionsAvailable = computed(
+  () => useSessionMentions().sessionMentions.value && visibleWorkspace.value?.hostId === undefined,
+);
+
+const sessionMentionCandidates = computed<SessionMentionCandidate[]>(() => {
+  if (!sessionMentionsAvailable.value) return [];
+  void sessionViewsStore().sessionTimeClock;
+  return mentionCandidatesFrom(rawState.sessions);
+});
+
+async function searchSessionMentions(query: string, options: { signal: AbortSignal }): Promise<SessionMentionCandidate[]> {
+  if (!sessionMentionsAvailable.value) return [];
+  const page = await getKimiWebApi().listSessions(
+    { query, pageSize: SESSION_MENTION_SEARCH_PAGE_SIZE, hasPrompt: true, localOnly: true },
+    options,
+  );
+  return mentionCandidatesFrom(page.items);
+}
 
 const activeWorkspaceTrust = computed<boolean | undefined>(() => {
   const store = workspacesStore();
@@ -2776,9 +2937,10 @@ const promptPipeline = usePromptPipeline(rawState, {
   mapSendAuthFailure,
   isMainTurnRunning: mainTurnRunning,
   hasUnechoedPrompt: (sessionId) => unechoedOptimisticMessages(sessionId).length > 0,
-  isCompacting: mainCompacting,
+  isCompacting: isMainCompactingOrStarting,
   isMainWaitForWaiting: mainWaitForWaiting,
   promptIdToAbort: mainPromptIdToAbort,
+  lastAgentTurnId: (sessionId) => mainTurnsOf(sessionId).findLast((turn) => turn.kind === 'agent')?.turn_id,
   selectSession: sessionSelection.selectSession,
   upsertSessionSorted,
 });
@@ -2790,7 +2952,7 @@ const sessionActions = createSessionActions({
   upsertSessionSorted,
   promptBacklog: promptPipeline.promptBacklog,
   isCompactionRunning: (sessionId) =>
-    promptStore().isCompactFlushHeld(sessionId) || mainCompacting(sessionId),
+    promptStore().isCompactFlushHeld(sessionId) || isMainCompactingOrStarting(sessionId),
   flushQueue: promptPipeline.flushQueueHead,
 });
 
@@ -2814,30 +2976,16 @@ const workspaceBoot = createWorkspaceBoot(rawState, {
 });
 
 const { confirm } = useConfirmDialog();
-setModeHooks({
+configureWorkspaceHooks({
   persistSessionProfile,
-  confirmSwarmEnable: () =>
-    confirm({
-      title: t('workspace.swarmEnableTitle'),
-      message: t('workspace.swarmEnableConfirm'),
-      variant: 'primary',
-    }),
-});
-setGoalHooks({
-  pushOperationFailure: warningsStore().pushOperationFailure,
   confirmGoalStart: (objective) =>
     confirm({
       title: t('workspace.goalStartTitle'),
       message: t('workspace.goalStartConfirm', { objective }),
       variant: 'primary',
     }),
-  createDraftSession: promptPipeline.createDraftSession,
-  sendPrompt: promptPipeline.sendPrompt,
-  steerPromptDirect: promptPipeline.steerPromptDirect,
-  submitPromptInternal: promptPipeline.submitPromptInternal,
-  flushQueueHead: promptPipeline.flushQueueHead,
+  promptPipeline,
 });
-setPermissionsHooks({ persistSessionProfile });
 setFilesHooks({ pushOperationFailure: warningsStore().pushOperationFailure });
 setConfigHooks({ pushOperationFailure: warningsStore().pushOperationFailure });
 setApprovalsHooks({ pushOperationFailure: warningsStore().pushOperationFailure });
@@ -3119,7 +3267,14 @@ function isWindowHidden(): boolean {
 function onMainTurnEnd(
   sid: string,
   status: 'idle' | 'aborted',
-  opts: { firstTurn: boolean; promptId?: string; ratingTurnId?: string },
+  opts: {
+    firstTurn: boolean;
+    promptId?: string;
+    ratingTurnId?: string;
+    predictionSourceId?: string;
+    predictionTurnId?: number;
+    continuation?: ConversationContinuation;
+  },
 ): void {
   const goalActive = rawState.goalBySession[sid]?.status === 'active';
 
@@ -3149,7 +3304,7 @@ function onMainTurnEnd(
 
   const hasPendingApproval = (rawState.approvalsBySession[sid] ?? []).length > 0;
   const hasPendingQuestion = (rawState.questionsBySession[sid] ?? []).length > 0;
-  if (!goalActive && shouldNotifyCompletion(status, hasPendingApproval, hasPendingQuestion)) {
+  if (!goalActive && shouldNotifyCompletion(status, hasPendingApproval, hasPendingQuestion, opts.continuation)) {
     notificationsStore().maybeNotifyCompletion(sid, {
       isUserWatching: isUserWatching(sid),
       sessionTitle: rawState.sessions.find((s) => s.id === sid)?.title ?? '',
@@ -3158,6 +3313,10 @@ function onMainTurnEnd(
         void sessionSelection.selectSession(sid, { source: 'notification' });
       },
     });
+  }
+
+  if (opts.predictionSourceId !== undefined && opts.predictionTurnId !== undefined && Number.isSafeInteger(opts.predictionTurnId)) {
+    promptPredictionController.handleTurnEnded(sid, opts.predictionSourceId, opts.predictionTurnId, status === 'idle');
   }
 }
 
@@ -3203,6 +3362,8 @@ export function useKimiWebClient() {
     workspaceSortMode,
     visibleWorkspace,
     activeWorkspaceId,
+    sessionMentionCandidates,
+    searchSessionMentions,
     activeWorkspaceTrust,
     activeWorkspaceTrustError,
     activeWorkspaceTrustLoading,
@@ -3304,6 +3465,25 @@ export function useKimiWebClient() {
     towerMode,
     goalMode,
     queued,
+    promptPrediction: computed(() => {
+      const current = promptPredictionController.suggestion.value;
+      return current !== null && canUsePromptPrediction(current.sessionId) ? current : null;
+    }),
+    promptPredictionHasTurn: computed(() => {
+      const target = promptPredictionController.predictionTarget.value;
+      if (target === undefined || target.sessionId !== rawState.activeSessionId) return false;
+      if (promptPredictionController.active.value !== undefined || promptPredictionController.suggestion.value !== null) return true;
+      return promptPredictionController.canAttemptPrediction();
+    }),
+    promptPredictionPending: computed(() => {
+      const current = promptPredictionController.active.value;
+      return current !== undefined && canUsePromptPrediction(current.sessionId) && hasEmptyPromptPredictionInput(current.sessionId)
+        ? { sessionId: current.sessionId, parked: current.parked }
+        : null;
+    }),
+    acceptPromptPrediction: (key: 'tab' | 'right') => promptPredictionController.accept(key),
+    handlePromptPredictionInput: () => promptPredictionController.handleInput(),
+    handlePromptPredictionSubmit: (text: string) => promptPredictionController.handleSubmit(text),
     warnings,
     questions,
     activity,
@@ -3438,11 +3618,14 @@ export function useKimiWebClient() {
     sideChatTurnErrorOf: sideChat.sideChatTurnErrorOf,
     openSideChatOn: sideChat.openSideChatOn,
     sendSideChatPromptOn: sideChat.sendSideChatPromptOn,
+    cancelSideChat: sideChat.cancelSideChat,
+    cancelSideChatOn: sideChat.cancelSideChatOn,
     saveSideChatDraft: sideChat.saveSideChatDraft,
     sideChatDraft: sideChat.sideChatDraft,
     clearSideChatDraftIfUnchanged: sideChat.clearSideChatDraftIfUnchanged,
     uploadImage: promptPipeline.uploadImage,
     abortCurrentPrompt: promptPipeline.abortCurrentPrompt,
+    continueSession: promptPipeline.continueSession,
     respondApproval: approvalsStore().respondApproval,
     respondQuestion: approvalsStore().respondQuestion,
     dismissQuestion: approvalsStore().dismissQuestion,
@@ -3457,19 +3640,8 @@ export function useKimiWebClient() {
     taskOutputOf: taskOutputStream.outputOf,
 
     setPermission: permissionsStore().setPermission,
-    setThinking: modelProvider.setThinking,
-    setPlanMode: modeStore().setPlanMode,
-    togglePlanMode: modeStore().togglePlanMode,
-    setSwarmMode: modeStore().setSwarmMode,
-    toggleSwarmMode: modeStore().toggleSwarmMode,
-    setTowerMode: modeStore().setTowerMode,
-    toggleTowerMode: modeStore().toggleTowerMode,
-    sendTowerPrompt,
-    setGoalMode: modeStore().setGoalMode,
-    toggleGoalMode: modeStore().toggleGoalMode,
-    createGoal: goalStore().createGoal,
-    controlGoal: goalStore().controlGoal,
-    editGoalObjective: goalStore().editGoalObjective,
+    setThinking,
+    ...workspaceModeActions(sendTowerPrompt),
     enqueue: promptPipeline.enqueue,
     renameSession: sessionListStore().renameSession,
     regenerateSessionTitle: sessionListStore().regenerateSessionTitle,
@@ -3550,6 +3722,9 @@ export function useKimiWebClient() {
     config,
     loadConfig: configStore().loadConfig,
     updateConfig: configStore().updateConfig,
+    loadServerHome: async () => (await getKimiWebApi().getMeta()).homeDir,
+    readHostTextFile: (path: string) => getKimiWebApi().readHostTextFile(path),
+    writeHostTextFile: (path: string, content: string, revision: string | null) => getKimiWebApi().writeHostTextFile(path, content, revision),
 
     checkAuth: () => authStore().checkAuth(),
     probeManagedMembership: () => authStore().probeMembership(),

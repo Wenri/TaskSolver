@@ -3,12 +3,13 @@ target).
 
 The wiretap-patched kimi-code's embedded worker (wirecap/native, hosted by the
 ``wirecap_node.node`` N-API addon) imports this module and calls
-``dispatch(kind, stream_id, data)`` for every event the vendored patch emits:
+``dispatch(kind, stream_id, data)`` for every event the vendored patch emits (its wiretap,
+``packages/agent-core-v2/src/wiretap/wiretap.ts``, defines the payloads):
 
-  * ``kimi_request`` — the full ``LLMRequestLogInput`` JSON (one per model request; carries the
-    normalized system prompt + tools + messages).
-  * ``kimi_event``   — one ``ModelRequestEvent`` JSON (``part``/``usage``/``finish``/``timing``;
-    many per request).
+  * ``kimi_request`` — one model request attempt as JSON, in the shape of agent-core-v2's former
+    ``LLMRequestLogInput`` (the normalized system prompt + tools + messages).
+  * ``kimi_event``   — one streamed event as JSON, in the shape of its former
+    ``ModelRequestEvent`` (``part``/``usage``/``finish``/``timing``; many per request).
   * ``kimi_wire``    — one persisted wire-journal record ``{scope, record}`` (the same typed
     records kimi-code appends to its per-agent ``wire.jsonl``), recorded raw for the capture.
 

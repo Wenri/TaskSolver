@@ -28,6 +28,7 @@ import {
   IWorkspaceService,
   followSessionLifecycles,
   getLiveSessionById,
+  missingConfiguredModelAlias,
   resumeSessionById,
   interactions,
   toDisposable,
@@ -61,13 +62,13 @@ import type { AgentFeedMessage } from '../../../protocol/ws-agent';
 import type { TaskEventMessage, TaskListMessage } from '../../../protocol/ws-task';
 import { toConfigResponse } from '../../../routes/config';
 import { resolveSessionFacts, toWireSession, type SessionFacts, type SessionWireFields } from '../../../routes/sessions';
-import { missingConfiguredModelAlias } from '../../../services/legacyStatus/legacyStatus';
 import { toWireWorkspace } from '../../../routes/workspaces';
 import type { ConversationEvent, ConversationFeed } from '../../../services/conversation/conversationFeed';
 import type {
   ConversationFeedCreated,
   ConversationService,
 } from '../../../services/conversation/conversationService';
+import { workspaceRootOf } from '../../../services/workspaceVisibility';
 import { mapError } from '../../errors';
 import { ensureMainAgent, MAIN_AGENT_ID } from '../../mainAgent';
 import { SessionAgentFeed } from './sessionAgentFeed';
@@ -595,6 +596,8 @@ export class SessionEventBroadcaster {
               id: meta.id,
               workspaceId: ctx.workspaceId,
               cwd: ctx.cwd,
+              environmentId: meta.environmentId,
+              environmentCwd: meta.environmentCwd,
               title: meta.title,
               lastPrompt: meta.lastPrompt,
               createdAt: meta.createdAt,
@@ -614,7 +617,12 @@ export class SessionEventBroadcaster {
       if (summary === undefined) return undefined;
       const cwd = summary.cwd ?? (await this.opts.core.accessor.get(IWorkspaceService).get(summary.workspaceId))?.root;
       if (cwd === undefined) return undefined;
-      session = toWireSession(summary, cwd, factsOverride ?? resolveSessionFacts(this.opts.core, sessionId));
+      const workspaceRoot = await workspaceRootOf(this.opts.core, summary.workspaceId);
+      session = toWireSession(
+        { ...summary, workspaceRoot },
+        cwd,
+        factsOverride ?? resolveSessionFacts(this.opts.core, sessionId),
+      );
     }
     if (change === 'archived') {
       session = {
@@ -766,7 +774,7 @@ export class SessionEventBroadcaster {
   }
 
   private sendGlobal(event: Event): void {
-    const { agentId: _agentId, sessionId: _sessionId, time, ...fields } = event;
+    const { agentId: _agentId, sessionId: _sessionId, time, ...fields } = this.withCurrentPendingInteraction(event);
     const envelope = {
       ...fields,
       event_created_at: time !== undefined ? new Date(time).toISOString() : new Date().toISOString(),
@@ -776,6 +784,16 @@ export class SessionEventBroadcaster {
         target.send(envelope, 'immediate');
       } catch {
       }
+    }
+  }
+
+  private withCurrentPendingInteraction(event: Event): Event {
+    if (event.type !== 'session' || event.change !== 'updated') return event;
+    try {
+      const { pendingInteraction } = resolveSessionFacts(this.opts.core, event.session.id);
+      return { ...event, session: { ...event.session, pending_interaction: pendingInteraction } };
+    } catch {
+      return event;
     }
   }
 

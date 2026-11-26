@@ -10,7 +10,7 @@ import type {
 } from './types';
 import type { DaemonKimiWebApi } from './daemon/client';
 
-type Route = 'local' | 'session' | 'localSession' | 'workspace' | 'file' | 'custom';
+type Route = 'local' | 'session' | 'sessionSync' | 'localSession' | 'workspace' | 'file' | 'custom';
 
 const ROUTES = {
   dispose: 'custom',
@@ -37,6 +37,9 @@ const ROUTES = {
   getTurnFileChanges: 'session',
   getTurnFileContent: 'session',
   getSessionWarnings: 'session',
+  getSessionContextSummary: 'session',
+  getSessionContextItems: 'session',
+  getSessionContextItem: 'session',
   archiveSession: 'session',
   restoreSession: 'session',
   reloadSession: 'session',
@@ -51,11 +54,15 @@ const ROUTES = {
   steerPrompts: 'session',
   abortPrompt: 'session',
   cancelSession: 'session',
+  continueSession: 'session',
   compactSession: 'session',
   undoSession: 'session',
   generateSessionTitle: 'session',
   forkSession: 'session',
   startBtw: 'session',
+  closeAgent: 'session',
+  predictNextPrompt: 'session',
+  cancelPromptPrediction: 'session',
   respondApproval: 'session',
   respondQuestion: 'session',
   dismissQuestion: 'session',
@@ -90,7 +97,7 @@ const ROUTES = {
   getGitStatusBatch: 'session',
   getPullRequestBatch: 'session',
   getFileDiff: 'session',
-  getFileDownloadUrl: 'session',
+  getFileDownloadUrl: 'sessionSync',
   downloadSessionFile: 'session',
   openFile: 'localSession',
   revealFile: 'localSession',
@@ -130,12 +137,14 @@ const ROUTES = {
   uploadFile: 'custom',
   getFileUrl: 'file',
   getFileBlob: 'file',
-  getSessionMediaUrl: 'session',
+  getSessionMediaUrl: 'sessionSync',
   getSessionMediaBlob: 'session',
   readHostFileContent: 'local',
   downloadHostFile: 'local',
   getConfig: 'local',
   setConfig: 'local',
+  readHostTextFile: 'local',
+  writeHostTextFile: 'local',
   getAuth: 'local',
   startOAuthLogin: 'local',
   pollOAuthLogin: 'local',
@@ -287,6 +296,12 @@ export class HostRouter implements HostRoutingControls {
       const owner = this.sessionHost.get(key);
       if (owner === undefined) return this.dispatchUnknownSession(method, route, args);
       return this.dispatchSession(method, route, args, owner ?? undefined);
+    }
+    if (route === 'sessionSync') {
+      const owner = this.sessionHost.get(key);
+      if (owner === undefined) void this.ownerOf(key).catch(() => undefined);
+      const api = this.apiFor(owner ?? undefined);
+      return api[method]!(...args);
     }
     const hostId = route === 'workspace' ? this.workspaceHost.get(key) : route === 'file' ? this.fileHost.get(key) : undefined;
     const api = this.apiFor(hostId);

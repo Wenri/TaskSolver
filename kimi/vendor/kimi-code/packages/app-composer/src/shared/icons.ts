@@ -1,6 +1,6 @@
 import RawFile from '~icons/kimi/file?raw';
 import RawFolderOpen from '~icons/kimi/folder-open?raw';
-import RawSparklingLine from '~icons/ri/sparkling-line?raw';
+import RawSkill from '~icons/kimi/skill?raw';
 import RawCopy from '~icons/kimi/copy?raw';
 import RawCheck from '~icons/kimi/check?raw';
 import RawExternalLinkLine from '~icons/ri/external-link-line?raw';
@@ -14,8 +14,9 @@ import RawFullscreenLine from '~icons/ri/fullscreen-line?raw';
 import RawChatQuoteLine from '~icons/ri/chat-quote-line?raw';
 import RawBrowser from '~icons/kimi/browser?raw';
 import RawFileTextLine from '~icons/ri/file-text-line?raw';
+import RawComment from '~icons/kimi/comment?raw';
 
-type IconName = 'file' | 'folder' | 'skill' | 'copy' | 'check' | 'external-link' | 'target' | 'file-edit' | 'close' | 'attachment' | 'image' | 'video' | 'fullscreen' | 'quote' | 'browser' | 'text';
+type IconName = 'file' | 'folder' | 'skill' | 'session' | 'copy' | 'check' | 'external-link' | 'target' | 'file-edit' | 'close' | 'attachment' | 'image' | 'video' | 'fullscreen' | 'quote' | 'browser' | 'text';
 type IconSize = 'sm' | 'md' | 'lg';
 
 const SIZE_PX: Record<IconSize, number> = { sm: 14, md: 16, lg: 20 };
@@ -23,7 +24,8 @@ const SIZE_PX: Record<IconSize, number> = { sm: 14, md: 16, lg: 20 };
 const RAW: Record<IconName, string> = {
   file: RawFile,
   folder: RawFolderOpen,
-  skill: RawSparklingLine,
+  skill: RawSkill,
+  session: RawComment,
   copy: RawCopy,
   check: RawCheck,
   'external-link': RawExternalLinkLine,
