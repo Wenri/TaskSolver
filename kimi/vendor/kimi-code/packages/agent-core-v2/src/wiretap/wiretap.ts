@@ -109,7 +109,7 @@ export function wiretapEmitRunEvent(event: unknown, modelOrResolved?: unknown): 
   if (addon === undefined) return;
   const ev = recordOf(event);
   const type = ev?.['type'];
-  if (type === 'llm.streaming.part') {
+  if (type === 'llm.delta.part' || type === 'llm.streaming.part') {
     wiretapEmitEvent({ type: 'part', part: ev?.['part'] });
     return;
   }

@@ -37,7 +37,9 @@ no-op-safe) plus **three one-line emit sites**:
   `kimi_request` per attempt (the full normalized systemPrompt + tools + messages via
   `wiretapEmitAttempt`, reading `model.spec.name` in 2.7+ or `model.name` in ≤ 2.6.x); after
   `this.observer.reportEvent(...)` in `onEvent` → `kimi_event` per
-  `LlmRunEvent` (`part`/`usage`/`timing`/`finish` via `wiretapEmitRunEvent`).
+  `LlmRunEvent` (`part`/`usage`/`timing`/`finish` via `wiretapEmitRunEvent`: a `part` for each
+  `llm.delta.part`, named `llm.streaming.part` before 2.8.0, and the rest from the `done` outcome
+  of `llm.ended`).
 - `wire/wireService.ts` `appendRecordLow()` → `kimi_wire` (every appended wire-journal record
   + its agent scope; reading/restoring the journal does not emit records).
 
@@ -211,7 +213,8 @@ artifact set. `test_kimi_capture.py` runs one `pykimi.ask` print-mode turn of th
 and addon against an OpenAI-compatible model on loopback (the `KIMI_MODEL_*` family, a scoped
 `kimi_home`). It checks each emit site: the `kimi_request` with the prompt, `kimi_wire`
 records, and the decoded `kimi_turn` (answer, usage, the streamed parts, the finish event).
-So after an update it catches an emit site that moved or vanished. These checks do not validate
+So after an update it catches an emit site that moved or vanished, and a stream event the wiretap
+no longer recognizes (2.8.0 renamed the streamed parts). These checks do not validate
 authenticated model calls, and a skip is not a pass. `kimi vis` remains unavailable in this
 linked build because the web asset is stubbed.
 
