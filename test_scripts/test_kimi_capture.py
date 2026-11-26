@@ -7,7 +7,8 @@ variables, with the store scoped by ``kimi_home``. The capture must hold what Ta
 patch emits: the request with the prompt, wire-journal records, and the turn pykimi decodes from
 the streamed events. A hook that an adoption dropped or misplaced fails here, and so does a stream
 event the wiretap no longer recognizes (Kimi 2.8.0 renamed them); ``--version`` checks never send
-a request. No credentials and no network beyond loopback.
+a request. A two-turn ``pykimi.Session`` then drives the shell UI the same way, so a change to how
+Kimi's editor takes typed input fails here too. No credentials and no network beyond loopback.
 
     pixi run python test_scripts/test_kimi_capture.py
 """
@@ -32,6 +33,33 @@ PROMPT: Final = "Reply with the loopback answer."
 ANSWER: Final = "Loopback answer from the fixture."
 MODEL: Final = "loopback-model"
 USAGE: Final = {"prompt_tokens": 21, "completion_tokens": 6, "total_tokens": 27}
+# The shell-mode turns: a single line (typed out with its CR, Kimi's editor took it for a pasted
+# newline), then two lines over 1,000 characters (the editor shows such a paste as a marker
+# and expands it on submit).
+SHELL_FIRST: Final = "Shell turn one: remember the word osprey."
+SHELL_SECOND: Final = "Shell turn two, its first line.\n" + " ".join(f"word{i}" for i in range(200))
+
+
+def loopback_env(model: LoopbackModel) -> dict[str, str]:
+    """The ``KIMI_MODEL_*`` family that points Kimi Code at the fixture."""
+    return {"KIMI_MODEL_PROVIDER_TYPE": "openai", "KIMI_MODEL_BASE_URL": model.url,
+            "KIMI_MODEL_API_KEY": "loopback", "KIMI_DISABLE_TELEMETRY": "1"}
+
+
+def prompts_of(request: JSONObject) -> list[str]:
+    """The user messages of a chat-completions request, without Kimi's ``<system-reminder>``s."""
+    texts: list[str] = []
+    for message in json_array(request.get("messages") or []):
+        entry = json_object(message)
+        if entry.get("role") != "user":
+            continue
+        content = entry.get("content")
+        text = content if isinstance(content, str) else "".join(
+            part_text for part in json_array(content or [])
+            if isinstance(part_text := json_object(part).get("text"), str))
+        if not text.lstrip().startswith("<system-reminder>"):
+            texts.append(text)
+    return texts
 
 
 class LoopbackModel:
@@ -118,9 +146,7 @@ class KimiCaptureTests(unittest.TestCase):
             capture = root / "capture.jsonl"
             response = pykimi.ask(
                 PROMPT, model=MODEL, workspace=str(root / "workspace"), timeout=120,
-                kimi_home=str(root / "home"), capture=str(capture),
-                extra_env={"KIMI_MODEL_PROVIDER_TYPE": "openai", "KIMI_MODEL_BASE_URL": model.url,
-                           "KIMI_MODEL_API_KEY": "loopback", "KIMI_DISABLE_TELEMETRY": "1"})
+                kimi_home=str(root / "home"), capture=str(capture), extra_env=loopback_env(model))
             records = [json_loads_object(line) for line in capture.read_text(encoding="utf-8").splitlines()
                        if line.strip()]
         detail = (f"exit {response.exit_status}, timed out {response.timed_out}, fixture saw {model.paths}, "
@@ -154,6 +180,36 @@ class KimiCaptureTests(unittest.TestCase):
                            and isinstance(text := part.get("text"), str))
         self.assertEqual(streamed, ANSWER, parts)
         self.assertEqual(response.text, ANSWER)
+
+    def test_shell_mode_session_submits_each_turn(self) -> None:
+        """``pykimi.Session`` types each turn into the real TUI: each is submitted as its own
+        request in one session, the second carrying the first, and each comes back as a
+        captured ``kimi_turn``."""
+        model = LoopbackModel()
+        self.addCleanup(model.close)
+        with tempfile.TemporaryDirectory(prefix="tasksolver-kimi-shell-") as directory:
+            root = Path(directory)
+            for name in ("home", "workspace"):
+                (root / name).mkdir()
+            with pykimi.Session(model=MODEL, workspace=str(root / "workspace"), timeout=120, idle=2,
+                                kimi_home=str(root / "home"), extra_env=loopback_env(model)) as session:
+                first = session.ask(SHELL_FIRST)
+                second = session.ask(SHELL_SECOND)
+                session_id = session.session_id
+                history = [row.get("content") for row in session.history() if row.get("role") == "user"
+                           and not str(row.get("content")).lstrip().startswith("<system-reminder>")]
+        detail = f"fixture saw {model.paths}, transcript tail {second.transcript[-1500:]!r}"
+        for response in (first, second):
+            self.assertFalse(response.timed_out, detail)
+            self.assertEqual(response.text, ANSWER, detail)
+        self.assertEqual([prompts_of(request) for request in model.requests],
+                         [[SHELL_FIRST], [SHELL_FIRST, SHELL_SECOND]], detail)
+        self.assertTrue(session_id, detail)
+        self.assertEqual(history, [SHELL_FIRST, SHELL_SECOND])
+        records = [json_loads_object(json.dumps(turn)) for turn in (*first.turns, *second.turns)]
+        captured = [json_object(record.get("request") or {}).get("first_user_text")
+                    for record in records if record.get("kind") == "kimi_turn"]
+        self.assertEqual(captured, [SHELL_FIRST, SHELL_SECOND])
 
 
 if __name__ == "__main__":

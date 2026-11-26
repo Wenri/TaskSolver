@@ -7,9 +7,10 @@ Pins: persistent argv carries no ``-p`` (and rejects a positional prompt);
 shell mode; ``encode_workdir_key`` reproduces a key minted by the real CLI
 (production golden); ``trust_workspace`` writes the CLI's exact record shape,
 idempotently, under the home; ``read_transcript`` projects wire journals into
-pycodex's transcript shape; multi-line prompts arrive bracketed-paste-wrapped
-over the PTY while single-line prompts stay plain; and a stub-backed Session
-types turn 1 (no prefill), guards a dead CLI, and sweeps on close.
+pycodex's transcript shape; every prompt, single- or multi-line, arrives over the
+PTY as one bracketed paste with its submitting CR outside it (Kimi's editor takes a
+CR typed in the same burst as its text for a pasted newline); and a stub-backed
+Session types turn 1 (no prefill), guards a dead CLI, and sweeps on close.
 
     python3 test_scripts/test_kimi_session.py
 """
@@ -269,8 +270,11 @@ def test_session_stub(td: str) -> None:
         r2 = s.ask("single")
         check("GOT:" in r2.transcript.replace("\r", ""),
               "stub echoed a typed line back")
-        check(b"\x1b[200~single" not in bytes(s._proc._popen.raw),
-              "single-line follow-up not paste-wrapped")
+        # A single-line prompt and its CR typed in one burst would make Kimi's editor insert
+        # a newline instead of submitting: it goes in as a paste too, and the CR after the
+        # paste's end marker is what ends the line the stub read.
+        check(b"GOT:\x1b[200~single\x1b[201~\r\n" in bytes(s._proc._popen.raw),
+              "single-line follow-up typed as one bracketed paste, CR after it")
     finally:
         s.close()
     assert s._proc is not None
