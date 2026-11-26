@@ -290,6 +290,54 @@ describe('conversationToTurns', () => {
     ]);
   });
 
+  it('hides an AgentSwarm call rejected before any subagent starts', () => {
+    const rejected = tool('swarm-rejected', {
+      name: 'AgentSwarm',
+      outcome: 'failed',
+      output: undefined,
+      error: 'Swarm mode is off, so AgentSwarm did not run and no subagents were started.',
+    });
+    const turns = project([
+      turn(0, [opener('p0', 'delegate'), answer('a0', 'Trying swarm'), rejected, answer('a1', 'Swarm mode is off.')]),
+    ]);
+
+    const assistant = turns.find((value) => value.role === 'assistant');
+    expect(assistant?.tools).toBeUndefined();
+    expect(assistant?.blocks?.some((block) => block.kind === 'tool')).toBe(false);
+    expect(assistant?.text).toBe('Trying swarm\nSwarm mode is off.');
+  });
+
+  it('hides a running AgentSwarm call only while swarm mode is off', () => {
+    const swarm = tool('swarm-running', { ...running, name: 'AgentSwarm', output: undefined });
+    const input = [turn(0, [opener('p0', 'delegate'), swarm], running)];
+    const off = conversationToTurns(input, { sessionId: 'session-1', swarmMode: false });
+    const on = conversationToTurns(input, { sessionId: 'session-1', swarmMode: true });
+
+    expect(toolsOf(off)).toEqual([]);
+    expect(toolsOf(on)).toEqual([expect.objectContaining({ id: 'swarm-running', name: 'AgentSwarm', status: 'running' })]);
+  });
+
+  it('keeps AgentSwarm calls with subagents and cancellations', () => {
+    const started = tool('swarm-started', {
+      name: 'AgentSwarm',
+      outcome: 'failed',
+      output: undefined,
+      error: 'Unexpected failure',
+      agent_refs: [{ agent_id: 'agent-1', role: 'member', swarm_index: 0 }],
+    });
+    const cancelled = tool('swarm-cancelled', {
+      name: 'AgentSwarm',
+      outcome: 'interrupted',
+      output: undefined,
+      error: 'Interrupted by user',
+    });
+
+    expect(toolsOf(project([turn(0, [opener('p0', 'delegate'), started, cancelled])]))).toEqual([
+      expect.objectContaining({ id: 'swarm-started', status: 'error' }),
+      expect.objectContaining({ id: 'swarm-cancelled', status: 'cancelled' }),
+    ]);
+  });
+
   it('reads an ExitPlanMode plan and its review from display.plan_review', () => {
     const planReview = (review: PlanReviewDisplay['review']): PlanReviewDisplay => ({
       kind: 'plan_review',
@@ -688,5 +736,17 @@ describe('conversationToTurns', () => {
     expect(after[0]).toBe(before[0]);
     expect(after[1]).toBe(before[1]);
     expect(after[3]).not.toBe(before[3]);
+  });
+
+  it('projects a continuation turn without an opener user_message cleanly without an empty user bubble', () => {
+    const turns = project([
+      turn(0, [opener('p0', 'start work'), answer('a0', 'partial output')], {
+        outcome: 'interrupted',
+        end_reason: 'user_cancelled',
+      }),
+      turn(1, [answer('a1', 'resumed output')]),
+    ]);
+    expect(turns.map((entry) => entry.role)).toEqual(['user', 'assistant']);
+    expect(turns[1]?.text).toBe('partial output\nresumed output');
   });
 });

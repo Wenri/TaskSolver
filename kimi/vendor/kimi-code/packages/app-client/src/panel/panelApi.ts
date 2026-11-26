@@ -6,6 +6,7 @@ import type { PanelTabType } from './panelRegistry';
 export interface PanelApi {
   openFile: (req: FilePreviewRequest) => void;
   openAgent: (id: string) => void;
+  openContext?: () => void;
   openTurnDiff: (payload: {
     turnId: string;
     daemonTurnId?: number;
@@ -14,6 +15,7 @@ export interface PanelApi {
     change: TurnFileChange;
   }) => void;
   openCompaction?: (target: { turnId: string }) => void;
+  isCompactionOpen?: (turnId: string) => boolean;
   openDiff: () => void;
   openBtw: () => void;
   openTerm: () => void;

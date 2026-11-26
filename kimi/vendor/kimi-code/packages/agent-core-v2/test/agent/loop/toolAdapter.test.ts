@@ -109,17 +109,22 @@ describe('actor handler execution', () => {
       requester: scripted,
       executor,
     });
+    const continuations: Array<string | undefined> = [];
+    loop.subscribe((event) => {
+      if (event.type === 'turn.ended') continuations.push(event.continuation);
+    });
     const detached = loop.wait('tool.ended', { match: (event) => event.detached });
     const turn = loop.runTurn(prompt());
 
     const detachedEvent = await detached;
     expect(extractText(detachedEvent.outcome.message)).toBe('background task_id=task-bg');
-    expect(await loop.waitForTasks({ taskId: 'bg', timeoutMs: 0 })).toMatchObject({ running: ['bg'] });
+    expect(await loop.waitForTasks({ taskId: 'bg', timeoutMs: 0 })).toMatchObject({ running: ['bg'], timedOut: true });
     expect((await turn).type).toBe('done');
     gate.resolve();
     expect(await loop.waitForTasks({ taskId: 'bg', timeoutMs: 1000 })).toMatchObject({ completed: ['bg'] });
     await loop.waitForIdle();
     expect(loop.state.messages.some((entry) => extractText(entry).includes('[async tool completed]'))).toBe(true);
+    expect(continuations).toEqual(['background', 'none']);
     await loop.close();
 
     const toolGate = deferred<void>();
@@ -286,6 +291,62 @@ describe('actor handler execution', () => {
     }
   });
 
+  it.each([true, false])('resolves pending detached completion continuation when shouldQueue=%s', async (shouldQueue) => {
+    const runGate = deferred<void>();
+    const messageGate = deferred<ReturnType<typeof prompt>>();
+    const stepTwoStarted = deferred<void>();
+    let step = 0;
+    let notifyCompletion!: () => void;
+    const completionStarted = new Promise<void>((resolve) => {
+      notifyCompletion = resolve;
+    });
+    const executor = executorFrom(['Bash'], async (context) => {
+      context.onDetach(() => ({ content: textToolContent('detached') }));
+      context.detach('detached');
+      await runGate.promise;
+      return { content: [{ type: 'text', text: 'done' }] };
+    });
+    const scripted = createMockProviderRequester((_request, signal) => {
+      step += 1;
+      if (step === 1) return done('', [call('bg')]);
+      if (step === 2) {
+        stepTwoStarted.resolve();
+        return {
+          parts: [],
+          error: new Promise<never>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          }),
+        };
+      }
+      return done('notified');
+    });
+    const loop = createLoop({
+      requester: scripted,
+      executor,
+      abortGraceMs: 5,
+      completionMessage: () => {
+        notifyCompletion();
+        return messageGate.promise;
+      },
+      shouldQueueTaskNotification: () => shouldQueue,
+    });
+    const continuations: Array<string | undefined> = [];
+    loop.subscribe((event) => {
+      if (event.type === 'turn.ended') continuations.push(event.continuation);
+    });
+    const turn = loop.runTurn(prompt());
+    await stepTwoStarted.promise;
+    runGate.resolve();
+    await completionStarted;
+    loop.abort('user');
+    expect((await turn).type).toBe('aborted');
+    expect(continuations).toEqual([shouldQueue ? 'turn' : 'none']);
+    messageGate.resolve(createUserMessage('background finished'));
+    await loop.waitForIdle();
+    expect(continuations).toEqual(shouldQueue ? ['turn', 'none'] : ['none']);
+    await loop.close();
+  });
+
   it('settles late results only in their original StepCall when an id is reused', async () => {
     const gates: Array<ReturnType<typeof deferred<void>>> = [];
     const executor = executorFrom(['Bash'], async (context) => {
@@ -374,5 +435,70 @@ describe('actor handler execution', () => {
     const unknown = unknownLoop.state.messages.find((entry): entry is ToolMessage => entry.role === 'tool');
     expect(unknown?.attributes?.isError).toBe(true);
     await unknownLoop.close();
+  });
+});
+
+describe('actor interruption', () => {
+  it('keeps detached tools running across turn abort and stops them on close', async () => {
+    let requests = 0;
+    let backgroundSignal: AbortSignal | undefined;
+    const scripted = createMockProviderRequester((_request, signal) => {
+      requests += 1;
+      if (requests === 1) return done('', [call('background')]);
+      return {
+        parts: [{ type: 'text', text: 'pending' }],
+        error: new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+          }, { once: true });
+        }),
+      };
+    });
+    const executor = executorFrom(['Bash'], async (context) => {
+      context.onDetach(() => ({ content: textToolContent('background') }));
+      context.detach('background');
+      backgroundSignal = context.signal;
+      return new Promise<ToolReturn>((resolve) => {
+        context.signal.addEventListener('abort', () => {
+          resolve({ content: [{ type: 'text', text: 'background stopped' }] });
+        }, { once: true });
+      });
+    });
+    const loop = createLoop({ requester: scripted, executor });
+    const pendingRequest = loop.wait('llm.delta.part', {
+      match: (event) => event.part.type === 'text' && event.part.text === 'pending',
+    });
+    const turn = loop.runTurn(prompt());
+    await pendingRequest;
+
+    loop.abort('stop turn');
+
+    expect((await turn).type).toBe('aborted');
+    expect(backgroundSignal?.aborted).toBe(false);
+    await loop.close();
+    expect(backgroundSignal?.aborted).toBe(true);
+  });
+});
+
+describe('background task waiting', () => {
+  it('returns immediately for an unknown id and when no tasks are running', async () => {
+    const loop = createLoop({
+      requester: requester([]),
+      executor: executorFrom(['Bash'], async () => ({ content: [] })),
+    });
+
+    await expect(loop.waitForTasks({ taskId: 'missing', timeoutMs: 1_000 })).resolves.toEqual({
+      completed: [],
+      running: [],
+      unknown: ['missing'],
+      timedOut: false,
+    });
+    await expect(loop.waitForTasks({ timeoutMs: 1_000 })).resolves.toEqual({
+      completed: [],
+      running: [],
+      unknown: [],
+      timedOut: false,
+    });
+    await loop.close();
   });
 });

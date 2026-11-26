@@ -2,6 +2,7 @@ import type { AppMessage, AppMessageContent, AppTurnError, AppTurnRetry, Session
 import { isModelSupportedImageMime } from '../lib/mediaMime';
 import { normalizeToolName } from '../lib/normalizeToolName';
 import { isNotifyUserTool } from '../lib/notifyUser';
+import { isSwarmRejection } from '../lib/parseSwarmResult';
 import type {
   CompactionItem,
   ConversationAttachment,
@@ -31,6 +32,7 @@ export interface ConversationProjectionOptions {
   readonly sessionId: string;
   readonly getFileUrl?: (fileId: string) => string;
   readonly getSessionMediaUrl?: (sessionId: string, fileId: string) => string;
+  readonly swarmMode?: boolean;
 }
 
 export interface ConversationProjector {
@@ -189,7 +191,8 @@ function sameOptions(a: ConversationProjectionOptions, b: ConversationProjection
   return (
     a.sessionId === b.sessionId &&
     a.getFileUrl === b.getFileUrl &&
-    a.getSessionMediaUrl === b.getSessionMediaUrl
+    a.getSessionMediaUrl === b.getSessionMediaUrl &&
+    a.swarmMode === b.swarmMode
   );
 }
 
@@ -344,6 +347,7 @@ function projectTurns(turns: readonly ConversationTurn[], startNo: number, optio
           break;
         }
         case 'tool_call': {
+          if (hidesRejectedSwarmCall(item, options)) break;
           const g = assistantGroup(turn, promptId, item.item_id, item.started_at);
           const tool = toolCallOf(item, options);
           g.candidate = undefined;
@@ -524,6 +528,12 @@ function compactionTurn(item: CompactionItem, no: number): ChatTurn {
     text: item.summary ?? '',
     compaction: { trigger: item.trigger, tokensBefore: item.tokens_before, tokensAfter: item.tokens_after },
   };
+}
+
+function hidesRejectedSwarmCall(item: ToolCallItem, options: ConversationProjectionOptions): boolean {
+  if (normalizeToolName(item.name) !== 'agentswarm' || (item.agent_refs?.length ?? 0) > 0) return false;
+  if (item.status !== 'ended') return options.swarmMode === false;
+  return item.outcome === 'failed' && isSwarmRejection(item.error ?? item.output);
 }
 
 function toolCallOf(item: ToolCallItem, options: ConversationProjectionOptions): ToolCall {

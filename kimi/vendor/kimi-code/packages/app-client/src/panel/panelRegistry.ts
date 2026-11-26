@@ -12,7 +12,8 @@ export type PanelTabType =
   | 'btw'
   | 'term'
   | 'browser'
-  | 'inspector';
+  | 'inspector'
+  | 'context';
 
 export type PanelTabPolicy = 'singleton' | 'keyed' | 'always';
 
@@ -137,7 +138,7 @@ export const panelRegistry: Record<PanelTabType, PanelTabDef> = {
     policy: 'keyed',
     keyOf: (payload) => (payload as CompactionTabPayload).turnId,
     title: (_payload, t) => t('panel.tabs.compaction'),
-    icon: 'list',
+    icon: 'collapse',
     i18nKey: 'panel.tabs.compaction',
     restorable: true,
   },
@@ -182,5 +183,14 @@ export const panelRegistry: Record<PanelTabType, PanelTabDef> = {
     icon: 'microscope',
     i18nKey: 'panel.tabs.inspector',
     restorable: true,
+  },
+  context: {
+    type: 'context',
+    policy: 'singleton',
+    title: (_payload, t) => t('inspector.title'),
+    icon: 'list-numbers',
+    i18nKey: 'inspector.title',
+    restorable: true,
+    expandable: true,
   },
 };

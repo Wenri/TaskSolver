@@ -28,10 +28,10 @@ dependencies:
 
 | CLI | Pinned version | Integration and build notes |
 | --- | --- | --- |
-| Antigravity (`agy`) | **1.5.16** | [BuildID-matched shim and symbol map](antigravity/README.md) |
+| Antigravity (`agy`) | **1.5.17** | [BuildID-matched shim and symbol map](antigravity/README.md) |
 | Codex | **0.172.0** (`rust-v0.172.0`) | [Rust source capture and session-store compatibility](codex/README.md) |
-| Kimi Code | **2.7.3** (`@moonshot-ai/kimi-code@2.7.3`) | [Node bundle, search worker, and native addon](kimi/README.md) |
-| Claude Code | **2.1.331**, with Agent SDK **0.2.188** | [Vendored Python SDK and checksum-verified executable](claude/README.md) |
+| Kimi Code | **2.8.0** (`@moonshot-ai/kimi-code@2.8.0`) | [Node bundle, search worker, and native addon](kimi/README.md) |
+| Claude Code | **2.1.332**, with Agent SDK **0.2.189** | [Vendored Python SDK and checksum-verified executable](claude/README.md) |
 
 ## Install
 

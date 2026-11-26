@@ -1,24 +1,77 @@
 <script lang="ts">
+import type { PromptAttachment } from '@moonshot-ai/app-client/client';
+import type { AttachmentEntry } from '@moonshot-ai/app-composer/features/attachment';
+import type { ComposerDocumentSnapshot } from '@moonshot-ai/app-composer/model';
+
+export interface ComposerSubmitPayload {
+  text: string;
+  restoreText: string;
+  editText: string;
+  attachments: PromptAttachment[];
+  restoreEntries: AttachmentEntry[];
+  snapshot?: ComposerDocumentSnapshot;
+  skills?: { name: string; path?: string }[];
+  forceQueue?: boolean;
+}
+
+export interface ComposerSteerPayload {
+  text: string;
+  restoreText: string;
+  editText: string;
+  attachments: PromptAttachment[];
+  restoreEntries: AttachmentEntry[];
+  snapshot?: ComposerDocumentSnapshot;
+  skills?: { name: string; path?: string }[];
+}
+
+export interface ComposerCommandPayload {
+  cmd: string;
+  attachments: PromptAttachment[];
+  restoreText?: string;
+  skillName?: string;
+  skillPath?: string;
+  restoreEntries?: AttachmentEntry[];
+  snapshot?: ComposerDocumentSnapshot;
+  editText?: string;
+  delivery?: 'steer' | 'queue';
+  preserveDraft?: boolean;
+}
+
+export type ComposerEmits = {
+  submit: [payload: ComposerSubmitPayload];
+  steer: [payload: ComposerSteerPayload];
+  steerQueued: [index: number];
+  command: [payload: ComposerCommandPayload];
+  interrupt: [];
+  focusGoal: [];
+  pickModel: [];
+  login: [];
+  configureModel: [];
+};
+
 let composerMenuSequence = 0;
 </script>
 
 <script setup lang="ts">
 import { useComposerNativeMenuHost } from './nativeMenus';
+import { applyModelMenuDraft } from './modelMenuDraft';
 import BrowserReferenceDetails from './BrowserReferenceDetails.vue';
+import ContextSummaryBody, { resolveCompactPhase } from './ContextSummaryBody.vue';
 import { useBrowserReferenceDetails } from './browserReferenceDetails';
 import { BrowserScreenshotRecovery } from '@moonshot-ai/app-client/lib';
 import { useComposerBrowserReferenceHost, restoreBrowserCaptureBookmark, browserReferenceAnchor, type BrowserCaptureResource } from './browserReferences';
 import type { BrowserCapture, BrowserReference } from '@moonshot-ai/app-core/browser-reference';
 import { newAttId } from '@moonshot-ai/app-composer/features/attachment';
-import { composerSnapshotDocument, docToText, type ComposerDocumentSnapshot } from '@moonshot-ai/app-composer/model';
+import { composerSnapshotDocument, docToText } from '@moonshot-ai/app-composer/model';
 import type { NativeMenuItem } from '@moonshot-ai/app-core/native-menu';
 import { measureNaturalWidth, prepareWithSegments } from '@chenglou/pretext';
 import { v4 as randomUUID } from 'uuid';
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, useId, watch, watchEffect } from 'vue';
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, shallowRef, useId, watch, watchEffect } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { MANAGED_KIMI_CODE_PROVIDER_ID, type ReadRequestOptions, type SessionContextSummary } from '@moonshot-ai/app-core/api';
 import { analyzeLeadingSlashCommand, basename, buildSlashItems, formatShortcutText, formatTokens, providerDisplayName, type SlashCommand } from '@moonshot-ai/app-core/lib';
 import { placeholderText } from '@moonshot-ai/app-core/lib';
-import { useAppearance } from '@moonshot-ai/app-core';
+import { useAppearance, useContextInspector } from '@moonshot-ai/app-core';
 import type { IconName } from '@moonshot-ai/app-client/icons';
 import type { PermissionMode, ToolMedia, TurnAttachment } from '@moonshot-ai/app-core/client/types';
 import {
@@ -27,15 +80,17 @@ import {
   effortLabel,
   isThinkingOn,
   modelThinkingAvailability,
+  resolveEffortDescription,
   segmentsFor,
+  thinkingLevelForModelSwitch,
 } from '@moonshot-ai/app-core/lib';
 import { openAgentSettings, openHostSettings, useInputHistory, useIsMobile, useRunningSendMode } from '@moonshot-ai/app-client/composables';
-import { useSlashMenu } from '@moonshot-ai/app-client/composables';
+import { slashMenuQuery, useSlashMenu } from '@moonshot-ai/app-client/composables';
 import { useMentionMenu, type MentionEntry } from '@moonshot-ai/app-client/composables';
 import { useComposerDraft } from '@moonshot-ai/app-client/composables';
 import { useAttachmentUpload, usePasteImageAutoMention } from '@moonshot-ai/app-client/composables';
 import { useKimiWebClient } from '@moonshot-ai/app-client/client';
-import { hostsStore } from '@moonshot-ai/app-client/stores';
+import { effortSwitchStore, hostsStore } from '@moonshot-ai/app-client/stores';
 import {
   createComposerEditor,
   discardStashedEditorState,
@@ -47,7 +102,6 @@ import {
   adoptAttachment,
   attachmentReferenceName,
   rebaseAttachmentMediaOrdinals,
-  type AttachmentEntry,
   type AttachmentInventoryState,
 } from '@moonshot-ai/app-composer/features/attachment';
 import { startMentionSelectionSync } from '@moonshot-ai/app-composer/features/mention';
@@ -76,9 +130,8 @@ import {
   type SubmitDecision,
   type AttachmentInputSource,
 } from '@moonshot-ai/app-client/lib';
-import { getKimiWebApi } from '@moonshot-ai/app-client/client';
+import { getKimiWebApi, sessionObservationOptions } from '@moonshot-ai/app-client/client';
 import { composerSessionScope } from '@moonshot-ai/app-core/lib';
-import type { PromptAttachment } from '@moonshot-ai/app-client/client';
 import {
   ContextRing,
   Icon,
@@ -93,6 +146,7 @@ import {
   trackMenuSurface,
 } from '@moonshot-ai/app-ui';
 import { resolveComposerBinding } from '@moonshot-ai/app-client/contracts';
+import { panelApiKey } from '@moonshot-ai/app-client/panel';
 import BottomSheet from '../dialogs/BottomSheet.vue';
 import MediaLightbox from '../chat/MediaLightbox.vue';
 import ComposerMediaRail from './ComposerMediaRail.vue';
@@ -102,6 +156,7 @@ import SlashMenu from './SlashMenu.vue';
 
 const props = defineProps<{
   variant?: 'full' | 'side-chat';
+  workingOverride?: boolean;
   interruptArmed?: boolean;
   hideContext?: boolean;
   submitDisabled?: boolean;
@@ -121,14 +176,18 @@ const props = defineProps<{
 const isSideChat = computed(() => props.variant === 'side-chat');
 
 const { t, locale } = useI18n();
+const panelApi = inject(panelApiKey, undefined);
 const client = useKimiWebClient();
 
 const sessionId = client.activeSessionId;
 const scopeId = computed(() => props.draftScopeKey ?? sessionId.value);
 const running = computed(() => client.activity.value !== 'idle');
 const working = client.working;
+const stopButtonVisible = computed(() => (isSideChat.value ? Boolean(props.workingOverride) : working.value));
 const starting = client.isStartingFirstPrompt;
 const queued = client.queued;
+const compacting = computed(() => client.compaction?.value?.status === 'running');
+const compactPhase = computed(() => resolveCompactPhase(client.compaction?.value, queued?.value));
 const searchFiles = client.searchFiles;
 const uploadImage = client.uploadImage;
 const status = client.status;
@@ -176,20 +235,10 @@ const placeholder = computed(() =>
           ? t('status.goalPlaceholder')
           : planArmed.value || planMode.value
             ? t('status.planPlaceholder')
-            : t('composer.placeholder')
+            : t(isMobile.value || isSideChat.value ? 'composer.placeholder' : 'composer.placeholderHints')
 );
 
-const emit = defineEmits<{
-  submit: [payload: { text: string; restoreText: string; editText: string; attachments: PromptAttachment[]; restoreEntries: AttachmentEntry[]; snapshot?: ComposerDocumentSnapshot; skills?: { name: string; path?: string }[]; forceQueue?: boolean }];
-  steer: [payload: { text: string; restoreText: string; editText: string; attachments: PromptAttachment[]; restoreEntries: AttachmentEntry[]; snapshot?: ComposerDocumentSnapshot; skills?: { name: string; path?: string }[] }];
-  steerQueued: [index: number];
-  command: [payload: { cmd: string; attachments: PromptAttachment[]; restoreText?: string; skillName?: string; skillPath?: string; restoreEntries?: AttachmentEntry[]; snapshot?: ComposerDocumentSnapshot; editText?: string; delivery?: 'steer' | 'queue' }];
-  interrupt: [];
-  focusGoal: [];
-  pickModel: [];
-  login: [];
-  configureModel: [];
-}>();
+const emit = defineEmits<ComposerEmits>();
 
 const browserReferenceHost = useComposerBrowserReferenceHost();
 const browserDetails = useBrowserReferenceDetails(() => JSON.stringify([sessionId.value, client.activeWorkspaceId.value]));
@@ -198,12 +247,64 @@ const browserCaptures = ref<BrowserCapture[]>([]);
 
 const towerEnabled = computed(() => client.experimentalFlags.value['tower'] === true);
 
+const attachmentEntries = ref<AttachmentEntry[]>([]);
+const attachmentInventoryState = shallowRef<AttachmentInventoryState>({
+  orderedIds: [],
+  activeIds: new Set(),
+  refCounts: new Map(),
+  resourceRevision: 0,
+});
+const activeAttachmentEntries = computed(() => {
+  const byAttId = new Map(attachmentEntries.value.map((entry) => [entry.attId, entry] as const));
+  return attachmentInventoryState.value.orderedIds
+    .map((attId) => byAttId.get(attId))
+    .filter((entry): entry is AttachmentEntry => entry !== undefined);
+});
+
+const promptPredictionIdle = computed(() =>
+  client.experimentalFlags.value['prompt_prediction'] === true &&
+  client.promptPredictionHasTurn?.value === true &&
+  props.placeholderText === undefined &&
+  !starting.value &&
+  !isSideChat.value &&
+  !running.value &&
+  !goalMode.value &&
+  !planArmed.value &&
+  !planMode.value &&
+  text.value.trim().length === 0 &&
+  activeAttachmentEntries.value.length === 0
+);
+const promptPredictionSuggestion = computed(() => {
+  const suggestion = client.promptPrediction?.value ?? null;
+  if (!promptPredictionIdle.value || suggestion === null || suggestion.sessionId !== sessionId.value) return undefined;
+  return suggestion;
+});
+const promptPredictionText = computed(() => promptPredictionSuggestion.value?.text);
+const promptPredictionPlaceholderActive = computed(() => promptPredictionIdle.value || promptPredictionText.value !== undefined);
+const promptPredictionPlaceholder = computed(() => promptPredictionText.value ?? placeholder.value);
+const promptPredictionActionAvailable = computed(() => promptPredictionIdle.value);
+const promptPredictionA11yId = useId();
+const promptPredictionA11yText = computed(() => {
+  const prediction = promptPredictionText.value;
+  return prediction === undefined ? '' : t('composer.promptPredictionHint', { prediction });
+});
+
 const { text, editorRef, loadForEdit: loadTextForEdit, clearDraft, loadDraftAttachments, saveDraftAttachments, saveDraft, loadRestorableDraftSnapshot, saveDraftSnapshot } = useComposerDraft({
   sessionId: () => scopeId.value,
   onBeforeSessionSave: (sid) => {
     restoreBrowsingDraftForDeparture(sid);
     if (editor !== null && editorSessionScope === composerSessionScope(sid)) saveDraftSnapshot(sid, editor.getSnapshot());
   },
+});
+
+let insertedPromptPredictionRevision: string | undefined;
+watch(promptPredictionSuggestion, (suggestion) => {
+  if (suggestion?.accepted !== true) return;
+  const revision = `${suggestion.predictionId}:${String(suggestion.acceptedRevision)}`;
+  if (insertedPromptPredictionRevision === revision) return;
+  insertedPromptPredictionRevision = revision;
+  loadTextForEdit(suggestion.text);
+  handleInput();
 });
 
 const highlightCommands = computed(() => buildSlashItems([], { towerEnabled: towerEnabled.value, extraBuiltins: props.extraBuiltinCommands }));
@@ -225,13 +326,6 @@ const commandArgumentDescription = computed(() => {
 
 const commandArgumentDescriptionId = useId();
 
-const attachmentEntries = ref<AttachmentEntry[]>([]);
-const attachmentInventoryState = shallowRef<AttachmentInventoryState>({
-  orderedIds: [],
-  activeIds: new Set(),
-  refCounts: new Map(),
-  resourceRevision: 0,
-});
 let releaseAttachmentStore: (() => void) | null = null;
 let inventoryReady = false;
 
@@ -239,12 +333,6 @@ function attachmentScope(sid = scopeId.value): string {
   return composerSessionScope(sid);
 }
 
-const activeAttachmentEntries = computed(() => {
-  const byAttId = new Map(attachmentEntries.value.map((entry) => [entry.attId, entry] as const));
-  return attachmentInventoryState.value.orderedIds
-    .map((attId) => byAttId.get(attId))
-    .filter((entry): entry is AttachmentEntry => entry !== undefined);
-});
 const activeMediaEntries = computed(() =>
   activeAttachmentEntries.value.filter(
     (entry): entry is AttachmentEntry & { kind: 'image' | 'video' } =>
@@ -609,7 +697,9 @@ onMounted(() => {
     );
   });
   watchEffect(() => {
-    editor?.setPlaceholder(commandArgumentPlaceholder.value || placeholder.value);
+    editor?.setPlaceholder(commandArgumentPlaceholder.value || promptPredictionPlaceholder.value, {
+      allowWhitespace: commandArgumentPlaceholder.value === '' && promptPredictionPlaceholderActive.value,
+    });
   });
 
   function restoreSessionState(sid: string | undefined): void {
@@ -693,8 +783,12 @@ onMounted(() => {
     const dom = editor?.dom;
     if (!dom) return;
     dom.setAttribute('aria-label', t('composer.inputLabel'));
-    dom.setAttribute('aria-placeholder', placeholderText(placeholder.value));
-    if (commandArgumentDescription.value) dom.setAttribute('aria-describedby', commandArgumentDescriptionId);
+    dom.setAttribute('aria-placeholder', placeholderText(commandArgumentPlaceholder.value || promptPredictionPlaceholder.value));
+    const descriptionIds = [
+      commandArgumentDescription.value ? commandArgumentDescriptionId : '',
+      promptPredictionA11yText.value ? promptPredictionA11yId : '',
+    ].filter((id) => id !== '').join(' ');
+    if (descriptionIds) dom.setAttribute('aria-describedby', descriptionIds);
     else dom.removeAttribute('aria-describedby');
     dom.setAttribute('aria-expanded', String(!!menuAriaControls.value));
     const controls = menuAriaControls.value;
@@ -832,7 +926,10 @@ const {
   ranges: slashRanges,
   active: slashActive,
   update: updateSlashMenu,
+  close: closeSlashMenu,
+  dismiss: dismissSlashMenu,
   select: selectSlashCommand,
+  complete: completeSlashCommand,
 } = useSlashMenu({
   text,
   editorRef,
@@ -864,9 +961,7 @@ const {
   resolveDesc: (item) => (item.isSkill ? item.desc : t(item.desc)),
 });
 
-const slashQuery = computed(() =>
-  text.value.startsWith('/') && !text.value.includes(' ') ? text.value.slice(1) : '',
-);
+const slashQuery = computed(() => slashMenuQuery(text.value) ?? '');
 
 const menuAriaControls = computed(() => {
   if (slashOpen.value) return 'composer-slash-menu';
@@ -884,18 +979,23 @@ const {
   items: mentionItems,
   active: mentionActive,
   loading: mentionLoading,
-  fileStale: mentionFileStale,
+  query: mentionQuery,
+  sessionMenuOpen: mentionSessionMenuOpen,
   update: updateMentionMenu,
   close: closeMentionMenu,
+  dismiss: dismissMentionMenu,
   select: selectMentionItem,
   complete: completeMentionItem,
   navigate: mentionNavigate,
+  leaveSessionMenu: leaveMentionSessionMenu,
   getToken: getMentionToken,
 } = useMentionMenu({
   text,
   editorRef,
   searchFiles: () => searchFiles,
   skills: () => skills.value,
+  sessions: () => client.sessionMentionCandidates.value,
+  searchSessions: client.searchSessionMentions,
   attachments: () => attachmentMentionCandidates.value,
   browsers: () => browserCaptures.value.map((capture) => ({
     captureId: capture.id, label: capture.label, title: capture.page.title, url: capture.page.url,
@@ -911,6 +1011,8 @@ const {
     }
   },
 });
+
+const mentionSubmenuTitle = computed(() => (mentionSessionMenuOpen.value ? t('mention.sessions') : undefined));
 
 const slashSheetQuery = computed<string>({
   get: () => slashQuery.value,
@@ -960,7 +1062,7 @@ watch(mentionOpen, (open) => {
   }
 });
 function onSlashSheetClose(): void {
-  slashOpen.value = false;
+  closeSlashMenu();
 }
 function onMentionSheetClose(): void {
   closeMentionMenu();
@@ -976,21 +1078,42 @@ const mentionMenuEl = computed(() => mentionMenuRef.value?.el ?? null);
 trackMenuSurface(slashOpen, slashMenuEl);
 trackMenuSurface(mentionOpen, mentionMenuEl);
 
+function onTokenMenuOutsidePointerDown(e: PointerEvent): void {
+  const target = e.target as Node;
+  const inside = [editorHostRef.value, slashMenuEl.value, mentionMenuEl.value].some((el) => el?.contains(target) === true);
+  if (inside) return;
+  closeSlashMenu();
+  closeMentionMenu();
+}
+
+watch(
+  () => !isMobile.value && (slashOpen.value || mentionOpen.value),
+  (open) => {
+    if (open) document.addEventListener('pointerdown', onTokenMenuOutsidePointerDown, true);
+    else document.removeEventListener('pointerdown', onTokenMenuOutsidePointerDown, true);
+  },
+);
+
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', onTokenMenuOutsidePointerDown, true);
+});
+
 watch(() => scopeId.value, () => {
   expanded.value = false;
-  slashOpen.value = false;
+  closeSlashMenu();
   closeMentionMenu();
 });
 
 function handleEditorBlur(): void {
   if (isMobile.value) return;
-  slashOpen.value = false;
+  closeSlashMenu();
   closeMentionMenu();
 }
 
 function handleInput(): void {
   resetHistoryBrowse();
   if (!isSideChat.value) {
+    client.handlePromptPredictionInput();
     updateSlashMenu();
     updateMentionMenu();
   }
@@ -1013,7 +1136,7 @@ function insertFolderPaths(paths: string[]): void {
     firstPos = undefined;
     if (plan.entry) ed.upsertAttachmentEntry(plan.entry);
   }
-  slashOpen.value = false;
+  closeSlashMenu();
   closeMentionMenu();
 }
 
@@ -1023,7 +1146,7 @@ function insertPathMention(path: string, kind: 'file' | 'folder'): void {
   if (!ed) return;
   const pos = document.activeElement === ed.dom ? (ed.selectionStart ?? ed.getText().length) : ed.getText().length;
   ed.insertMention({ kind, name: basename(path) || path, path }, { start: pos, end: pos });
-  slashOpen.value = false;
+  closeSlashMenu();
   closeMentionMenu();
   ed.focus({ preventScroll: true });
 }
@@ -1712,9 +1835,7 @@ function resetAfterDispatch(
       },
       clearDraft,
       clearDraftAttachments,
-      closeSlashMenu: () => {
-        slashOpen.value = false;
-      },
+      closeSlashMenu,
       closeMentionMenu,
       collapse: collapseAndRefit,
     },
@@ -1744,7 +1865,7 @@ function passSubmitGate(): boolean {
   return true;
 }
 
-function handleSteer(): void {
+function handleRunningSend(delivery: 'steer' | 'queue'): void {
   const decision = currentSubmitDecision();
   if (
     decision.kind !== 'submit' &&
@@ -1760,32 +1881,22 @@ function handleSteer(): void {
   historyEntrySnapshot = null;
   if (props.deferSubmitReset !== true || decision.kind === 'prompt-command') clearAfterDispatch();
   if (decision.kind === 'prompt-command') {
-    emit('command', { cmd: decision.cmd, attachments: decision.attachments, restoreText: decision.restoreText, restoreEntries, snapshot, editText: decision.editText, delivery: 'steer' });
+    emit('command', { cmd: decision.cmd, attachments: decision.attachments, restoreText: decision.restoreText, restoreEntries, snapshot, editText: decision.editText, delivery });
     return;
   }
-  emit('steer', { text: decision.text, restoreText: decision.restoreText, editText: decision.editText, attachments: decision.attachments, restoreEntries, snapshot, ...(decision.kind === 'multi-skill-activation' ? { skills: decision.skills } : {}) });
-}
-
-function handleQueue(): void {
-  const decision = currentSubmitDecision();
-  if (
-    decision.kind !== 'submit' &&
-    decision.kind !== 'multi-skill-activation' &&
-    !(decision.kind === 'prompt-command' && decision.target === 'main')
-  ) {
-    return;
-  }
-  if (!passSubmitGate()) return;
-  const snapshot = editor?.getSnapshot();
-  const restoreEntries = snapshotAttachmentEntries(activeAttachmentEntries.value);
-  history.push(decision.historyText, snapshot);
-  historyEntrySnapshot = null;
-  if (props.deferSubmitReset !== true || decision.kind === 'prompt-command') clearAfterDispatch();
-  if (decision.kind === 'prompt-command') {
-    emit('command', { cmd: decision.cmd, attachments: decision.attachments, restoreText: decision.restoreText, restoreEntries, snapshot, editText: decision.editText, delivery: 'queue' });
+  if (delivery === 'steer') {
+    emit('steer', { text: decision.text, restoreText: decision.restoreText, editText: decision.editText, attachments: decision.attachments, restoreEntries, snapshot, ...(decision.kind === 'multi-skill-activation' ? { skills: decision.skills } : {}) });
     return;
   }
   emit('submit', { text: decision.text, restoreText: decision.restoreText, editText: decision.editText, attachments: decision.attachments, restoreEntries, snapshot, ...(decision.kind === 'multi-skill-activation' ? { skills: decision.skills } : {}), forceQueue: true });
+}
+
+function handleSteer(): void {
+  handleRunningSend('steer');
+}
+
+function handleQueue(): void {
+  handleRunningSend('queue');
 }
 
 function handleSubmit(): void {
@@ -1804,6 +1915,7 @@ function handleSubmit(): void {
     decision.kind === 'prompt-command' ||
     (decision.kind === 'builtin-command' && decision.leave === true);
   if (sessionBound && !passSubmitGate()) return;
+  if (!isSideChat.value) client.handlePromptPredictionSubmit(text.value);
   const snapshot = editor?.getSnapshot();
   const restoreEntries = snapshotAttachmentEntries(activeAttachmentEntries.value);
   history.push(decision.historyText, snapshot);
@@ -1931,6 +2043,12 @@ function isComposingKeyEvent(e: KeyboardEvent): boolean {
   return isComposingText || e.isComposing || e.keyCode === 229;
 }
 
+function acceptPromptPrediction(key: 'tab' | 'right'): boolean {
+  if (!promptPredictionActionAvailable.value) return false;
+  const prediction = client.acceptPromptPrediction(key);
+  return prediction !== null || (client.promptPredictionPending?.value ?? null) !== null;
+}
+
 function handleKeydown(e: KeyboardEvent): boolean {
   if (isComposingKeyEvent(e)) return false;
 
@@ -1941,6 +2059,18 @@ function handleKeydown(e: KeyboardEvent): boolean {
       clearWorkMode();
       return true;
     }
+  }
+
+  if (
+    dropdownOpen.value &&
+    (!nativeModelMenu?.available || isMobile.value) &&
+    e.key === 'Enter' &&
+    (e.ctrlKey || e.metaKey)
+  ) {
+    e.preventDefault();
+    commitModelMenuDraft();
+    closeDropdown();
+    return true;
   }
 
   if (e.key === 'Escape') {
@@ -1959,16 +2089,21 @@ function handleKeydown(e: KeyboardEvent): boolean {
       closePermDropdown();
       return true;
     }
+    if (ctxCardOpen.value) {
+      e.preventDefault();
+      closeCtxCard();
+      return true;
+    }
   }
 
   if (slashOpen.value) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      slashOpen.value = false;
+      dismissSlashMenu();
       return true;
     }
     if (e.key === 'Tab' && slashItems.value.length === 0) {
-      slashOpen.value = false;
+      closeSlashMenu();
       return false;
     }
   }
@@ -1983,10 +2118,16 @@ function handleKeydown(e: KeyboardEvent): boolean {
       slashActive.value = (slashActive.value - 1 + slashItems.value.length) % slashItems.value.length;
       return true;
     }
-    if (e.key === 'Enter' || e.key === 'Tab') {
+    if (e.key === 'Enter') {
       e.preventDefault();
       const item = slashItems.value[slashActive.value];
       if (item) selectSlashCommand(item);
+      return true;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const item = slashItems.value[slashActive.value];
+      if (item) completeSlashCommand(item);
       return true;
     }
   }
@@ -1994,12 +2135,21 @@ function handleKeydown(e: KeyboardEvent): boolean {
   if (mentionOpen.value) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      closeMentionMenu();
+      dismissMentionMenu();
+      return true;
+    }
+    if (e.key === 'Backspace' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && mentionSessionMenuOpen.value && getMentionToken()?.token === '') {
+      e.preventDefault();
+      leaveMentionSessionMenu();
       return true;
     }
     if (e.key === 'Tab' && mentionItems.value.length === 0) {
       closeMentionMenu();
       return false;
+    }
+    if (e.key === 'Enter' && mentionItems.value.length === 0 && mentionLoading.value) {
+      e.preventDefault();
+      return true;
     }
     if (mentionItems.value.length > 0) {
       if (e.key === 'ArrowDown') {
@@ -2025,6 +2175,18 @@ function handleKeydown(e: KeyboardEvent): boolean {
         return true;
       }
     }
+  }
+
+  if (
+    (e.key === 'Tab' || e.key === 'ArrowRight') &&
+    !e.shiftKey &&
+    !e.altKey &&
+    !e.metaKey &&
+    !e.ctrlKey &&
+    acceptPromptPrediction(e.key === 'Tab' ? 'tab' : 'right')
+  ) {
+    e.preventDefault();
+    return true;
   }
 
   if (e.key === 's' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
@@ -2057,13 +2219,13 @@ function handleKeydown(e: KeyboardEvent): boolean {
         });
       }
       history.recallOlder();
-      slashOpen.value = false;
+      closeSlashMenu();
       return true;
     }
     if (e.key === 'ArrowDown' && browsing) {
       e.preventDefault();
       history.recallNewer();
-      slashOpen.value = false;
+      closeSlashMenu();
       if (!history.isBrowsing()) {
         const snapshot = historyEntrySnapshot;
         historyEntrySnapshot = null;
@@ -2111,13 +2273,36 @@ const hasUpload = computed(() => !!uploadImage);
 
 const dropdownOpen = ref(false);
 const permDropdownOpen = ref(false);
+const ctxCardOpen = ref(false);
 const addMenuOpen = ref(false);
 type MenuHandle = InstanceType<typeof Menu>;
 const toolbarRef = ref<HTMLElement | null>(null);
 const addMenuRef = ref<HTMLElement | null>(null);
 const addSheetRef = ref<HTMLElement | null>(null);
 const permPillRef = ref<HTMLElement | null>(null);
+const ctxBtnRef = ref<HTMLElement | null>(null);
+const ctxCardRef = ref<MenuHandle | null>(null);
 const modelPillRef = ref<HTMLElement | null>(null);
+
+const { contextInspectorEnabled } = useContextInspector();
+const ctxSnapshot = shallowRef<SessionContextSummary | null>(null);
+const ctxLoading = ref(false);
+const ctxError = ref('');
+const ctxCardLeft = ref('');
+const ctxCardMaxWidth = ref('');
+const ctxCardMaxHeight = ref('');
+const ctxCardDropDown = ref(false);
+const ctxCardStyle = computed<Record<string, string>>(() => {
+  const style: Record<string, string> = {};
+  if (ctxCardLeft.value) {
+    style.left = ctxCardLeft.value;
+    style.right = 'auto';
+  }
+  if (ctxCardMaxWidth.value) style.maxWidth = ctxCardMaxWidth.value;
+  if (ctxCardMaxHeight.value) style.maxHeight = ctxCardMaxHeight.value;
+  return style;
+});
+let ctxFetchToken = 0;
 
 trackMenuSurface(addMenuOpen, addMenuRef);
 
@@ -2182,15 +2367,22 @@ const modelMenuStyle = computed<Record<string, string>>(() => {
 });
 
 const anyPopupOpen = computed(
-  () => dropdownOpen.value || permDropdownOpen.value || addMenuOpen.value || slashOpen.value || mentionOpen.value,
+  () =>
+    dropdownOpen.value ||
+    permDropdownOpen.value ||
+    ctxCardOpen.value ||
+    addMenuOpen.value ||
+    slashOpen.value ||
+    mentionOpen.value,
 );
 
 function closeOverlays(): void {
-  slashOpen.value = false;
+  closeSlashMenu();
   closeMentionMenu();
   closeAddMenu();
   closeDropdown();
   closePermDropdown();
+  closeCtxCard();
   closeMediaAttachment();
   browserDetails.close();
 }
@@ -2199,9 +2391,14 @@ const isEmpty = () => text.value.trim().length === 0 && activeAttachmentEntries.
 
 defineExpose({ loadForEdit, insertQuote, insertScreenshotAnnotation, insertPathMention, addFiles, loadAttachmentsForEdit, restoreDraftEntries, focus, closeOverlays, anyPopupOpen, isEmpty, clearAfterDispatch });
 
+function hasAnyToolbarMenuOpen(): boolean {
+  return dropdownOpen.value || permDropdownOpen.value || ctxCardOpen.value || addMenuOpen.value;
+}
+
 function toggleDropdown(): void {
   if (nativeModelMenu?.available && !isMobile.value && modelPillRef.value !== null) {
     closePermDropdown();
+    closeCtxCard();
     closeAddMenu();
     nativeModelMenu.toggle(modelPillRef.value, { initialFocus: 'first-item' });
     return;
@@ -2210,9 +2407,10 @@ function toggleDropdown(): void {
   if (dropdownOpen.value) {
     updateModelMenuPosition();
     permDropdownOpen.value = false;
+    ctxCardOpen.value = false;
     addMenuOpen.value = false;
     document.addEventListener('click', onDocClick, true);
-  } else {
+  } else if (!hasAnyToolbarMenuOpen()) {
     document.removeEventListener('click', onDocClick, true);
   }
 }
@@ -2220,7 +2418,7 @@ function toggleDropdown(): void {
 function closeDropdown(): void {
   nativeModelMenu?.close();
   dropdownOpen.value = false;
-  if (!permDropdownOpen.value && !addMenuOpen.value) {
+  if (!hasAnyToolbarMenuOpen()) {
     document.removeEventListener('click', onDocClick, true);
   }
 }
@@ -2228,6 +2426,7 @@ function closeDropdown(): void {
 function togglePermDropdown(): void {
   if (nativePermissionMenu?.available && !isMobile.value && permPillRef.value !== null) {
     closeDropdown();
+    closeCtxCard();
     closeAddMenu();
     nativePermissionMenu.toggle(permPillRef.value, { initialFocus: 'first-item' });
     return;
@@ -2236,9 +2435,10 @@ function togglePermDropdown(): void {
   if (permDropdownOpen.value) {
     updatePermissionMenuPosition();
     dropdownOpen.value = false;
+    ctxCardOpen.value = false;
     addMenuOpen.value = false;
     document.addEventListener('click', onDocClick, true);
-  } else {
+  } else if (!hasAnyToolbarMenuOpen()) {
     document.removeEventListener('click', onDocClick, true);
   }
 }
@@ -2246,7 +2446,28 @@ function togglePermDropdown(): void {
 function closePermDropdown(): void {
   nativePermissionMenu?.close();
   permDropdownOpen.value = false;
-  if (!dropdownOpen.value && !addMenuOpen.value) {
+  if (!hasAnyToolbarMenuOpen()) {
+    document.removeEventListener('click', onDocClick, true);
+  }
+}
+
+function toggleCtxCard(): void {
+  ctxCardOpen.value = !ctxCardOpen.value;
+  if (ctxCardOpen.value) {
+    closeDropdown();
+    closePermDropdown();
+    addMenuOpen.value = false;
+    slashOpen.value = false;
+    closeMentionMenu();
+    document.addEventListener('click', onDocClick, true);
+  } else if (!hasAnyToolbarMenuOpen()) {
+    document.removeEventListener('click', onDocClick, true);
+  }
+}
+
+function closeCtxCard(): void {
+  ctxCardOpen.value = false;
+  if (!hasAnyToolbarMenuOpen()) {
     document.removeEventListener('click', onDocClick, true);
   }
 }
@@ -2254,23 +2475,24 @@ function closePermDropdown(): void {
 function toggleAddMenu(): void {
   addMenuOpen.value = !addMenuOpen.value;
   if (addMenuOpen.value) {
-    dropdownOpen.value = false;
-    permDropdownOpen.value = false;
-    slashOpen.value = false;
+    closeDropdown();
+    closePermDropdown();
+    ctxCardOpen.value = false;
+    closeSlashMenu();
     closeMentionMenu();
     document.addEventListener('click', onDocClick, true);
     void nextTick(() => {
       const root = isMobile.value ? addSheetRef.value : addMenuRef.value;
       root?.querySelector<HTMLElement>('.am-row')?.focus();
     });
-  } else {
+  } else if (!hasAnyToolbarMenuOpen()) {
     document.removeEventListener('click', onDocClick, true);
   }
 }
 
 function closeAddMenu(): void {
   addMenuOpen.value = false;
-  if (!dropdownOpen.value && !permDropdownOpen.value) {
+  if (!hasAnyToolbarMenuOpen()) {
     document.removeEventListener('click', onDocClick, true);
   }
 }
@@ -2384,8 +2606,12 @@ function onDocClick(e: MouseEvent): void {
   const insideToolbar = toolbarRef.value?.contains(target) ?? false;
   const insideAddMenu = addMenuRef.value?.contains(target) ?? false;
   if (!insideToolbar && !insideAddMenu) {
+    if (dropdownOpen.value && (!nativeModelMenu?.available || isMobile.value)) {
+      commitModelMenuDraft();
+    }
     closeDropdown();
     closePermDropdown();
+    closeCtxCard();
     closeAddMenu();
   }
 }
@@ -2401,20 +2627,125 @@ const pct = computed(() => {
 });
 
 const ctxTooltip = computed(() => {
-  const used = formatTokens(status.value?.ctxUsed ?? 0);
-  const max = formatTokens(status.value?.ctxMax ?? 0);
+  const usedRaw = status.value?.ctxUsed ?? 0;
+  const maxRaw = status.value?.ctxMax ?? 0;
+  const used = formatTokens(usedRaw);
+  const max = formatTokens(maxRaw);
+  if (contextInspectorEnabled.value && maxRaw > 0) {
+    const remaining = formatTokens(Math.max(0, maxRaw - usedRaw));
+    return t('inspector.ringTooltipWithMax', { used, remaining, max, pct: pct.value });
+  }
   return t('status.ctxTooltip', { used, max, pct: pct.value });
 });
+
+const canOpenContextDetail = computed(() => Boolean(panelApi?.openContext));
+
+async function refreshCtxSnapshot(options?: ReadRequestOptions): Promise<void> {
+  const sid = sessionId.value;
+  if (!ctxCardOpen.value || !sid) {
+    ctxLoading.value = false;
+    return;
+  }
+  if (ctxSnapshot.value && ctxSnapshot.value.session_id !== sid) {
+    ctxSnapshot.value = null;
+  }
+  const token = ++ctxFetchToken;
+  ctxLoading.value = true;
+  ctxError.value = '';
+  try {
+    const next = await getKimiWebApi().getSessionContextSummary(sid, undefined, options);
+    if (token !== ctxFetchToken || !ctxCardOpen.value || sessionId.value !== sid) return;
+    ctxSnapshot.value = next;
+  } catch (err) {
+    if (token !== ctxFetchToken || !ctxCardOpen.value || sessionId.value !== sid) return;
+    if (err instanceof Error && err.name === 'AbortError') return;
+    ctxError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    if (token === ctxFetchToken) ctxLoading.value = false;
+  }
+}
+
+watch(sessionId, () => {
+  ctxSnapshot.value = null;
+  ctxError.value = '';
+  ctxLoading.value = false;
+  closeCtxCard();
+});
+
+const canCompactContext = computed(() => {
+  if (!ctxCardOpen.value || !sessionId.value) return false;
+  if (running.value || client.turns?.value === undefined) return true;
+  return client.turns.value.length > 0;
+});
+
+watch(
+  [ctxCardOpen, sessionId, () => status.value?.ctxUsed, () => running.value, compacting],
+  ([open, sid, used, isRunning, isCompacting], [wasOpen, prevSid, prevUsed, wasRunning, wasCompacting]) => {
+    if (!open) {
+      ctxLoading.value = false;
+      return;
+    }
+    if (
+      wasOpen &&
+      sid === prevSid &&
+      used === prevUsed &&
+      isRunning === wasRunning &&
+      isCompacting &&
+      !wasCompacting
+    ) {
+      return;
+    }
+    void refreshCtxSnapshot(wasOpen ? sessionObservationOptions(sid ?? undefined) : undefined).then(() => {
+      if (ctxCardOpen.value) void nextTick(clampCtxCardToViewport);
+    });
+  },
+);
+
+function handleCompactFromCard(): void {
+  closeCtxCard();
+  emit('command', { cmd: '/compact', attachments: [], preserveDraft: true });
+}
+
+function handleOpenContextDetail(): void {
+  closeCtxCard();
+  panelApi?.openContext?.();
+}
+
+function onCtxCardKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape' || !ctxCardOpen.value) return;
+  event.preventDefault();
+  closeCtxCard();
+  ctxBtnRef.value?.focus();
+}
 
 const currentModel = computed(() =>
   models.value?.find((m) => m.id === status.value?.modelId),
 );
-const thinkingAvailability = computed(() => modelThinkingAvailability(currentModel.value));
-const thinkingSegments = computed(() => segmentsFor(currentModel.value));
+const draftModelId = ref(status.value?.modelId);
+const draftEffortSegment = ref<string>();
+const menuModel = computed(() =>
+  models.value?.find((model) => model.id === draftModelId.value) ?? currentModel.value,
+);
+const thinkingAvailability = computed(() => modelThinkingAvailability(menuModel.value));
+const thinkingSegments = computed(() => segmentsFor(menuModel.value));
 const thinkingLevel = computed(() => effectiveThinkingLevel(currentModel.value, thinking.value));
+const menuDefaultThinkingLevel = computed(() => effectiveThinkingLevel(
+  menuModel.value,
+  thinkingLevelForModelSwitch(
+    menuModel.value,
+    thinking.value,
+    menuModel.value?.id !== currentModel.value?.id,
+    sessionId.value === null || sessionId.value === undefined ? client.config.value?.thinking : undefined,
+  ),
+));
+const menuThinkingLevel = computed(() =>
+  draftEffortSegment.value === undefined
+    ? menuDefaultThinkingLevel.value
+    : commitLevel(menuModel.value, draftEffortSegment.value),
+);
 const activeThinkingSegment = computed(() => {
   const segs = thinkingSegments.value;
-  return segs.includes(thinkingLevel.value) ? thinkingLevel.value : '';
+  return segs.includes(menuThinkingLevel.value) ? menuThinkingLevel.value : '';
 });
 const thinkingOn = computed(() => isThinkingOn(thinkingLevel.value));
 const thinkingReadonly = computed(
@@ -2429,11 +2760,34 @@ const thinkingSuffix = computed(() => {
 });
 function setThinkingSegment(draft: string): void {
   if (thinkingReadonly.value) return;
-  client.setThinking(commitLevel(currentModel.value, draft));
+  draftEffortSegment.value = draft;
 }
 const thinkingOptions = computed(() =>
   thinkingSegments.value.map((seg) => ({ value: seg, label: effortLabel(seg) })),
 );
+const effortDescription = computed(() => {
+  if (menuModel.value?.provider !== MANAGED_KIMI_CODE_PROVIDER_ID) return undefined;
+  const effort = activeThinkingSegment.value || menuThinkingLevel.value;
+  return resolveEffortDescription(effortSwitchStore().config, effort, locale.value === 'zh' ? 'zh' : 'en');
+});
+function commitModelMenuDraft(): void {
+  const modelId = draftModelId.value;
+  if (modelId === undefined) return;
+  const effort = draftEffortSegment.value !== undefined && menuThinkingLevel.value !== menuDefaultThinkingLevel.value
+    ? menuThinkingLevel.value
+    : undefined;
+  void applyModelMenuDraft(
+    { modelId, effort },
+    {
+      currentModelId: status.value?.modelId,
+      currentSessionId: sessionId.value,
+      getCurrentModelId: () => status.value?.modelId,
+      getCurrentSessionId: () => sessionId.value,
+      selectModel: (id) => client.selectModel(id),
+      setThinking: (level) => client.setThinking(level),
+    },
+  );
+}
 
 const planOn = computed(() => planArmed.value === true || planMode.value === true);
 const swarmOn = computed(() => swarmMode.value === true);
@@ -2736,6 +3090,46 @@ const showAllModels = computed(() => showPickModel.value || currentProvider.valu
 const unstarredGroups = computed(() =>
   showAllModels.value ? groupUnstarredModelsByProvider(models.value ?? [], starredIds.value ?? []) : [],
 );
+const fallbackModelEntries = computed(() => {
+  const entries: (
+    | { kind: 'section'; key: string; label: string }
+    | { kind: 'divider'; key: string }
+    | {
+        kind: 'model';
+        key: string;
+        model: NonNullable<typeof models.value>[number];
+        showProvider: boolean;
+        starred: boolean;
+      }
+  )[] = [];
+  if (starredOtherModels.value.length > 0) {
+    entries.push({ kind: 'section', key: 'starred', label: t('status.starredModels') });
+    for (const model of starredOtherModels.value) {
+      entries.push({ kind: 'model', key: `model:${model.id}`, model, showProvider: true, starred: true });
+    }
+    entries.push({ kind: 'divider', key: 'starred-divider' });
+  }
+  if (showAllModels.value) {
+    unstarredGroups.value.forEach((group, index) => {
+      entries.push({ kind: 'section', key: `provider:${index}`, label: providerDisplayName(group.provider, t) });
+      for (const model of group.models) {
+        entries.push({ kind: 'model', key: `model:${model.id}`, model, showProvider: false, starred: false });
+      }
+    });
+  } else if (providerModels.value.length > 0) {
+    entries.push({ kind: 'section', key: 'provider', label: providerDisplayName(currentProvider.value, t) });
+    for (const model of providerModels.value) {
+      entries.push({
+        kind: 'model',
+        key: `model:${model.id}`,
+        model,
+        showProvider: false,
+        starred: isStarred(model.id),
+      });
+    }
+  }
+  return entries;
+});
 
 const modelDropdownRef = ref<MenuHandle | null>(null);
 const permDropdownRef = ref<MenuHandle | null>(null);
@@ -2743,7 +3137,7 @@ const permDropdownRef = ref<MenuHandle | null>(null);
 function clampToolbarPopupToViewport(options: {
   menu: HTMLElement | null;
   anchor: HTMLElement | null;
-  align: 'left' | 'right';
+  align: 'left' | 'right' | 'center';
   setOffset: (value: string) => void;
   setMaxWidth: (value: string) => void;
   setMaxHeight: (value: string) => void;
@@ -2772,13 +3166,23 @@ function clampToolbarPopupToViewport(options: {
       if (anchor) {
         const anchorRect = anchor.getBoundingClientRect();
         if (anchorRect.width > 0) {
-          if (align === 'right') menu.style.right = '0px';
-          else menu.style.left = '0px';
+          if (align === 'right') {
+            menu.style.right = '0px';
+          } else {
+            menu.style.left = '0px';
+            menu.style.right = 'auto';
+          }
           const menuW = Math.min(menu.offsetWidth, availableWidth);
           if (align === 'right') {
             const rightEdge = Math.min(Math.max(anchorRect.right, minLeft + menuW), maxRight);
             const offsetPx = `${Math.round(rect.right - rightEdge)}px`;
             menu.style.right = offsetPx;
+            setOffset(offsetPx);
+          } else if (align === 'center') {
+            const centeredLeft = anchorRect.left + anchorRect.width / 2 - menuW / 2;
+            const leftEdge = Math.max(Math.min(centeredLeft, maxRight - menuW), minLeft);
+            const offsetPx = `${Math.round(leftEdge - rect.left)}px`;
+            menu.style.left = offsetPx;
             setOffset(offsetPx);
           } else {
             const leftEdge = Math.max(Math.min(anchorRect.left, maxRight - menuW), minLeft);
@@ -2825,9 +3229,22 @@ function clampPermissionMenuToViewport(): void {
   });
 }
 
+function clampCtxCardToViewport(): void {
+  clampToolbarPopupToViewport({
+    menu: menuElement(ctxCardRef.value),
+    anchor: ctxBtnRef.value,
+    align: 'center',
+    setOffset: (value) => { ctxCardLeft.value = value; },
+    setMaxWidth: (value) => { ctxCardMaxWidth.value = value; },
+    setMaxHeight: (value) => { ctxCardMaxHeight.value = value; },
+    setDropDown: (value) => { ctxCardDropDown.value = value; },
+  });
+}
+
 function onViewportResize(): void {
   closeDropdown();
   closePermDropdown();
+  closeCtxCard();
 }
 
 function addModelMenuViewportListeners(): void {
@@ -2840,13 +3257,25 @@ function removeModelMenuViewportListeners(): void {
   window.visualViewport?.removeEventListener('resize', onViewportResize);
 }
 
-watch([dropdownOpen, permDropdownOpen], ([modelOpen, permOpen]) => {
-  if (modelOpen || permOpen) addModelMenuViewportListeners();
+watch([dropdownOpen, permDropdownOpen, ctxCardOpen], ([modelOpen, permOpen, ctxOpen]) => {
+  if (modelOpen || permOpen || ctxOpen) addModelMenuViewportListeners();
   else removeModelMenuViewportListeners();
+});
+
+watch(ctxCardOpen, async (open) => {
+  if (!open) return;
+  ctxCardDropDown.value = false;
+  ctxCardLeft.value = '';
+  ctxCardMaxWidth.value = '';
+  ctxCardMaxHeight.value = '';
+  await nextTick();
+  clampCtxCardToViewport();
 });
 
 watch(dropdownOpen, async (open) => {
   if (!open) return;
+  draftModelId.value = status.value?.modelId;
+  draftEffortSegment.value = undefined;
   modelMenuDropDown.value = false;
   modelMenuMaxWidth.value = '';
   modelMenuMaxHeight.value = '';
@@ -2889,6 +3318,17 @@ onUnmounted(() => {
 });
 
 function onModelDropdownKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    commitModelMenuDraft();
+    closeDropdown();
+    return;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeDropdown();
+    return;
+  }
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
   const rows = Array.from(
     menuElement(modelDropdownRef.value)?.querySelectorAll<HTMLElement>('.md-row:not(:disabled)') ?? [],
@@ -2902,8 +3342,8 @@ function onModelDropdownKeydown(event: KeyboardEvent): void {
 }
 
 function selectModel(modelId: string): void {
-  void client.selectModel(modelId);
-  closeDropdown();
+  if (modelId !== draftModelId.value) draftEffortSegment.value = undefined;
+  draftModelId.value = modelId;
 }
 const nativeMenuHost = useComposerNativeMenuHost();
 const nativeMenuId = `composer-${++composerMenuSequence}`;
@@ -2921,7 +3361,7 @@ const nativeModelIds = new Map<string, string>();
 function nativeModelItem(model: NonNullable<typeof models.value>[number], detail = false): NativeMenuItem {
   let id = nativeModelIds.get(model.id);
   if (id === undefined) { id = `model-${nativeModelIds.size}`; nativeModelIds.set(model.id, id); }
-  return { kind: 'item', id, label: model.displayName ?? model.model, selected: model.id === status.value?.modelId, starred: isStarred(model.id), ...(detail ? { detail: model.provider } : {}) };
+  return { kind: 'item', id, label: model.displayName ?? model.model, selected: model.id === draftModelId.value, starred: isStarred(model.id), keepOpen: true, ...(detail ? { detail: model.provider } : {}) };
 }
 const nativeModelList = computed<NativeMenuItem[]>(() => {
   const items: NativeMenuItem[] = [];
@@ -2946,14 +3386,15 @@ const nativeModelItems = computed<NativeMenuItem[]>(() => [
   ...(thinkingSegments.value.length > 1 && thinkingAvailability.value !== 'unsupported' ? [{
     kind: 'choices' as const, id: 'thinking', label: t('status.thinkingLabel'), value: activeThinkingSegment.value ? `thinking-${activeThinkingSegment.value}` : '',
     options: thinkingOptions.value.map(option => ({ id: `thinking-${option.value}`, label: option.label })),
-  }] : [{ kind: 'note' as const, id: 'thinking-note', label: `${t('status.thinkingLabel')} · ${thinkingAvailability.value === 'unsupported' ? t('status.modeNotSupported') : effortLabel(thinkingSegments.value[0] ?? thinkingLevel.value)}` }]),
-  { kind: 'separator' },
-  { kind: 'note', id: 'cache-note', label: t('status.cacheNote') },
+  }] : [{ kind: 'note' as const, id: 'thinking-note', label: `${t('status.thinkingLabel')} · ${thinkingAvailability.value === 'unsupported' ? t('status.modeNotSupported') : effortLabel(thinkingSegments.value[0] ?? menuThinkingLevel.value)}` }]),
+  ...(effortDescription.value === undefined ? [] : [
+    { kind: 'note' as const, id: 'effort-description', label: effortDescription.value, size: 'xs' as const },
+  ]),
   { kind: 'separator' },
   { kind: 'item', id: 'more-models', label: t('status.moreModels'), icon: 'list' },
 ]);
 const nativeModelMenu = nativeMenuHost?.register({
-  id: `${nativeMenuId}-models`, width: 200, autoWidth: true, placement: 'top-end',
+  id: `${nativeMenuId}-models`, width: 200, autoWidth: true, placement: 'top-end', submitOnCtrlEnter: true,
   items: () => nativeModelItems.value,
   footerStart: () => nativeModelList.value.length,
   onSelect: id => {
@@ -2964,6 +3405,7 @@ const nativeModelMenu = nativeMenuHost?.register({
       if (model !== undefined) selectModel(model);
     }
   },
+  onDismiss: commitModelMenuDraft,
 });
 if (nativePermissionMenu !== undefined) watch(nativePermissionMenu.open, open => { permDropdownOpen.value = open; });
 if (nativeModelMenu !== undefined) watch(nativeModelMenu.open, open => { dropdownOpen.value = open; });
@@ -3031,12 +3473,14 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
           :items="mentionItems"
           :active-index="mentionActive"
           :loading="mentionLoading"
-          :stale="mentionFileStale"
+          :query="mentionQuery"
+          :submenu-title="mentionSubmenuTitle"
           @select="selectMentionItem"
           @hover="mentionNavigate"
+          @back="leaveMentionSessionMenu"
         />
 
-        <Transition name="composer-menu-pop">
+        <Transition name="ui-menu-pop">
           <div v-if="addMenuOpen && !isMobile" ref="addMenuRef" class="add-menu" @click.stop @keydown="onAddMenuKeydown">
             <div ref="addScrollRef" class="am-scroll" role="menu" @scroll="onAddMenuScroll">
               <div v-for="item in addItems" :key="item.id" class="am-entry">
@@ -3074,6 +3518,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
             :data-wm="workMode ? 'true' : 'false'"
           ></div>
           <span :id="commandArgumentDescriptionId" class="composer-sr-only" role="status">{{ commandArgumentDescription }}</span>
+          <span :id="promptPredictionA11yId" class="composer-sr-only" role="status">{{ promptPredictionA11yText }}</span>
           <Tooltip :text="expanded ? t('composer.collapseTitle') : t('composer.expandTitle')">
           <button
             v-if="expanded || isGrown"
@@ -3146,7 +3591,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
             </span>
           </Tooltip>
 
-          <Transition name="composer-menu-pop">
+          <Transition name="ui-menu-pop">
             <Menu
               v-if="permDropdownOpen && status && (!nativePermissionMenu?.available || isMobile)"
               ref="permDropdownRef"
@@ -3176,8 +3621,10 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
           </Transition>
 
           <span v-if="swarmOn && !isSideChat" class="swarm-chip">
-            <Icon class="swarm-ic" name="sparkles" size="md" />
-            <span class="swarm-label">{{ t('status.swarmLabel') }}</span>
+            <Tooltip :text="t('status.swarmTooltip')">
+              <Icon class="swarm-ic" name="sparkles" size="md" />
+              <span class="swarm-label">{{ t('status.swarmLabel') }}</span>
+            </Tooltip>
             <IconButton
               class="swarm-x"
               size="sm"
@@ -3208,16 +3655,32 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
         </div>
 
         <div ref="toolbarRightRef" class="toolbar-right">
-          <Tooltip :text="ctxTooltip">
-            <span
-              v-if="status && !hideContext && !isSideChat"
-              class="ctx-group"
-              role="img"
-              tabindex="0"
-              :aria-label="ctxTooltip"
-            >
-              <ContextRing :pct="pct" />
-            </span>
+          <Tooltip :text="ctxCardOpen ? null : ctxTooltip">
+            <template v-if="status && !hideContext && !isSideChat">
+              <button
+                v-if="contextInspectorEnabled"
+                ref="ctxBtnRef"
+                type="button"
+                class="ctx-group ctx-trigger"
+                :class="{ open: ctxCardOpen }"
+                aria-haspopup="dialog"
+                :aria-expanded="ctxCardOpen"
+                :aria-label="ctxTooltip"
+                @click.stop="toggleCtxCard"
+                @keydown="onCtxCardKeydown"
+              >
+                <ContextRing :pct="pct" :indeterminate="compacting" />
+              </button>
+              <span
+                v-else
+                class="ctx-group"
+                role="img"
+                tabindex="0"
+                :aria-label="ctxTooltip"
+              >
+                <ContextRing :pct="pct" :indeterminate="compacting" />
+              </span>
+            </template>
           </Tooltip>
 
           <Tooltip v-if="status && !isSideChat && hostSetupId" :text="modelPillCollapsed ? t('login.configureHostModelsAction') : null">
@@ -3308,13 +3771,14 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
           </button>
           </Tooltip>
           <span v-if="statusNote" class="status-note">{{ statusNote }}</span>
-          <Tooltip v-if="working && !isSideChat" :text="t(interruptArmed ? 'composer.interruptConfirm' : 'composer.interruptTitle')">
+          <Tooltip v-if="stopButtonVisible" :text="t(interruptArmed ? 'composer.interruptConfirm' : 'composer.interruptTitle')">
             <button
               class="stop"
+              :class="{ 'is-armed': interruptArmed }"
               :aria-label="t(interruptArmed ? 'composer.interruptConfirm' : 'composer.interrupt')"
               @click="emit('interrupt')"
             >
-              <span v-if="interruptArmed" class="text-ui-xs" aria-hidden="true">ESC</span>
+              <span v-if="interruptArmed" class="stop-esc" aria-hidden="true">ESC</span>
               <Icon v-else name="stop" size="sm" />
             </button>
           </Tooltip>
@@ -3333,7 +3797,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
         </div>
 
         <!-- Model dropdown — current provider models + controls + more -->
-        <Transition name="composer-menu-pop">
+        <Transition name="ui-menu-pop">
         <Menu
           v-if="dropdownOpen && status && (!nativeModelMenu?.available || isMobile)"
           ref="modelDropdownRef"
@@ -3346,54 +3810,20 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
           <!-- Scrollable model list — capped so a large provider catalog
                can't push the controls below out of the viewport. -->
           <div class="md-list">
-            <!-- Starred models from other providers -->
-            <div v-if="starredOtherModels.length > 0" class="md-section">{{ t('status.starredModels') }}</div>
-            <MenuItem
-              v-for="m in starredOtherModels"
-              :key="m.id"
-              class="md-row"
-              :class="{ 'is-current': m.id === status.modelId }"
-              :active="m.id === status.modelId"
-              @click="selectModel(m.id)"
-            >
-              <span class="md-check"><Icon v-if="m.id === status.modelId" name="check" size="sm" style="color: var(--color-accent)" /></span>
-              <span class="md-name">{{ m.displayName ?? m.model }}</span>
-              <span class="md-provider">{{ providerDisplayName(m.provider, t) }}</span>
-              <Icon class="md-star" name="star" size="sm" style="color: var(--star)" />
-            </MenuItem>
-
-            <div v-if="starredOtherModels.length > 0" class="md-divider" />
-
-            <!-- Current provider models -->
-            <template v-if="showAllModels">
-              <template v-for="group in unstarredGroups" :key="group.provider">
-                <div class="md-section">{{ providerDisplayName(group.provider, t) }}</div>
-                <MenuItem
-                  v-for="m in group.models"
-                  :key="m.id"
-                  class="md-row"
-                  :class="{ 'is-current': m.id === status.modelId }"
-                  :active="m.id === status.modelId"
-                  @click="selectModel(m.id)"
-                >
-                  <span class="md-check"><Icon v-if="m.id === status.modelId" name="check" size="sm" style="color: var(--color-accent)" /></span>
-                  <span class="md-name">{{ m.displayName ?? m.model }}</span>
-                </MenuItem>
-              </template>
-            </template>
-            <template v-else>
-              <div v-if="providerModels.length > 0" class="md-section">{{ providerDisplayName(currentProvider, t) }}</div>
+            <template v-for="entry in fallbackModelEntries" :key="entry.key">
+              <div v-if="entry.kind === 'section'" class="md-section">{{ entry.label }}</div>
+              <div v-else-if="entry.kind === 'divider'" class="md-divider" />
               <MenuItem
-                v-for="m in providerModels"
-                :key="m.id"
+                v-else
                 class="md-row"
-                :class="{ 'is-current': m.id === status.modelId }"
-                :active="m.id === status.modelId"
-                @click="selectModel(m.id)"
+                :class="{ 'is-current': entry.model.id === draftModelId }"
+                :active="entry.model.id === draftModelId"
+                @click="selectModel(entry.model.id)"
               >
-                <span class="md-check"><Icon v-if="m.id === status.modelId" name="check" size="sm" style="color: var(--color-accent)" /></span>
-                <span class="md-name">{{ m.displayName ?? m.model }}</span>
-                <Icon v-if="isStarred(m.id)" class="md-star" name="star" size="sm" style="color: var(--star)" />
+                <span class="md-check"><Icon v-if="entry.model.id === draftModelId" name="check" size="sm" style="color: var(--color-accent)" /></span>
+                <span class="md-name">{{ entry.model.displayName ?? entry.model.model }}</span>
+                <span v-if="entry.showProvider" class="md-provider">{{ providerDisplayName(entry.model.provider, t) }}</span>
+                <Icon v-if="entry.starred" class="md-star" name="star" size="sm" style="color: var(--star)" />
               </MenuItem>
             </template>
           </div>
@@ -3416,21 +3846,52 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
               size="xs"
               @update:model-value="setThinkingSegment"
             />
-            <span v-else class="md-note">{{ effortLabel(thinkingSegments[0] ?? thinkingLevel) }}</span>
+            <span v-else class="md-note">{{ effortLabel(thinkingSegments[0] ?? menuThinkingLevel) }}</span>
           </div>
 
-          <div class="md-divider" />
-          <div class="md-cache-note">{{ t('status.cacheNote') }}</div>
+          <div v-if="effortDescription" class="md-effort-description">{{ effortDescription }}</div>
 
           <div class="md-divider" />
 
           <!-- More models → open full picker -->
           <MenuItem class="md-row md-row-more" @click="closeDropdown(); emit('pickModel');">
-            <span class="md-check md-more-icon"><Icon name="list" size="sm" style="color: var(--dim)" /></span>
+            <span class="md-check md-more-icon"><Icon name="list" size="sm" style="color: var(--color-text-muted)" /></span>
             <span class="md-name">{{ t('status.moreModels') }}</span>
             <Icon class="md-more-arrow" name="chevron-right" size="sm" style="color: var(--md-more-arrow-color)" />
           </MenuItem>
         </Menu>
+        </Transition>
+
+        <Transition name="ui-menu-pop">
+          <Menu
+            v-if="ctxCardOpen && status && !isSideChat"
+            ref="ctxCardRef"
+            role="dialog"
+            class="ctx-card"
+            :class="{ 'flip-down': ctxCardDropDown }"
+            :style="ctxCardStyle"
+            :aria-label="t('inspector.title')"
+            @click.stop
+            @keydown="onCtxCardKeydown"
+          >
+            <div class="ctx-card-head">
+              <span class="ctx-card-title">{{ t('inspector.title') }}</span>
+            </div>
+
+            <ContextSummaryBody
+              :snapshot="ctxSnapshot"
+              :ctx-used="status.ctxUsed"
+              :ctx-max="status.ctxMax"
+              :loading="ctxLoading"
+              :error="ctxError"
+              :can-compact="canCompactContext"
+              :compact-phase="compactPhase"
+              :can-open-detail="canOpenContextDetail"
+              show-divider
+              @compact="handleCompactFromCard"
+              @open-detail="handleOpenContextDetail"
+            />
+          </Menu>
         </Transition>
       </div>
   </div>
@@ -3521,9 +3982,11 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
         :items="mentionItems"
         :active-index="mentionActive"
         :loading="mentionLoading"
-        :stale="mentionFileStale"
+        :query="mentionQuery"
+        :submenu-title="mentionSubmenuTitle"
         @select="selectMentionItem"
         @hover="mentionNavigate"
+        @back="leaveMentionSessionMenu"
       />
     </BottomSheet>
   </Teleport>
@@ -3591,17 +4054,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   visibility: visible;
 }
 .drop-card {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
   padding: var(--space-4) var(--space-6);
-  border-radius: var(--radius-lg);
-  border: var(--p-hairline) dashed var(--color-accent);
-  background: var(--color-bg);
-  color: var(--color-accent);
-  font-size: var(--ui-font-size-lg);
-  font-weight: var(--weight-medium);
-  box-shadow: var(--shadow-md);
 }
 
 .composer-tip {
@@ -3616,7 +4069,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   box-shadow: var(--shadow-xs);
   color: var(--color-text-muted);
   font-family: var(--font-ui);
-  font-size: var(--ui-font-size-sm);
+  font-size: var(--text-sm);
   line-height: var(--leading-normal);
   animation: composer-tip-in var(--duration-base) var(--ease-out);
 }
@@ -3724,7 +4177,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--dim);
+  color: var(--color-text-muted);
   cursor: pointer;
   padding: 0;
   transition: background 0.12s, color 0.12s;
@@ -3741,7 +4194,9 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
 }
 
 .ph {
-  color: var(--faint);
+  --ph-leading: 1.5;
+  --ph-line-height: calc(var(--content-font-size) * var(--ph-leading));
+  color: var(--color-text-quaternary);
   caret-color: var(--color-text);
   position: relative;
   flex: 1;
@@ -3755,7 +4210,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   max-height: calc(var(--app-height, 100dvh) / 4);
   overflow-y: auto;
   scrollbar-width: none;
-  line-height: 1.5;
+  line-height: var(--ph-leading);
   margin-bottom: 6px;
   user-select: text;
 }
@@ -3839,18 +4294,18 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   align-items: center;
   gap: var(--space-1);
   vertical-align: top;
-  height: calc(var(--content-font-size) * 1.5);
+  height: var(--ph-line-height);
   margin-left: calc(-1 * var(--space-05));
   margin-right: var(--space-1-5);
-  padding: 0 calc((var(--content-font-size) * 1.5 - var(--wm-x-size)) / 2) 0 var(--space-2);
+  padding: 0 calc((var(--ph-line-height) - var(--wm-x-size)) / 2) 0 var(--space-2);
   border: none;
   border-radius: var(--radius-full);
   background: var(--color-selected);
   color: var(--color-text);
   font-family: var(--font-ui);
-  font-size: var(--ui-font-size-sm);
+  font-size: var(--text-sm);
   font-weight: var(--weight-medium);
-  line-height: calc(var(--content-font-size) * 1.5);
+  line-height: var(--ph-line-height);
   white-space: nowrap;
   user-select: none;
 }
@@ -3906,7 +4361,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  color: var(--muted);
+  color: var(--color-text-faint);
   pointer-events: none;
   user-select: none;
 }
@@ -3916,19 +4371,17 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
 }
 
 .ph :deep(.composer-placeholder-overlay kbd) {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: var(--kbd-min-width);
-  height: var(--kbd-height);
-  padding: 0 var(--kbd-padding-x);
-  border: var(--p-hairline) solid var(--color-line);
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: inherit;
-  font-family: var(--font-kbd);
-  font-size: var(--kbd-font-size);
-  line-height: var(--leading-solid);
+  vertical-align: top;
+  margin-top: max(0px, calc((var(--ph-line-height) - var(--kbd-height)) / 2));
+}
+
+@supports (text-box: trim-both cap alphabetic) {
+  .ph :deep(.composer-placeholder-overlay kbd) {
+    display: inline-block;
+    padding-top: calc((var(--kbd-height) - 1cap) / 2 - var(--p-hairline));
+    text-align: center;
+    text-box: trim-both cap alphabetic;
+  }
 }
 
 .composer.expanded .ph {
@@ -4018,7 +4471,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   border-radius: var(--radius-menu-row);
   background: none;
   cursor: pointer;
-  font-size: var(--ui-font-size);
+  font-size: var(--text-base);
   color: var(--color-text);
   text-align: left;
   transition: background var(--duration-base) var(--ease-out);
@@ -4048,7 +4501,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   min-width: 0;
   margin-left: var(--space-1);
   color: var(--color-text-muted);
-  font-size: var(--ui-font-size-sm);
+  font-size: var(--text-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4141,6 +4594,10 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   flex-shrink: 0;
   transition: background 0.16s ease, color 0.16s ease, transform 0.12s ease;
 }
+.stop.is-armed {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
 .stop:hover {
   background: var(--color-danger);
   color: var(--color-text-on-accent);
@@ -4152,6 +4609,14 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   flex: none;
   width: var(--composer-send-icon-size);
   height: var(--composer-send-icon-size);
+}
+.stop-esc {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.02em;
+  line-height: 1;
+  transform: scale(0.72);
 }
 
 .toolbar {
@@ -4200,7 +4665,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   background: transparent;
   color: var(--color-text);
   font-family: var(--font-ui);
-  font-size: var(--ui-font-size);
+  font-size: var(--text-base);
   font-weight: var(--weight-medium);
   line-height: 1;
   white-space: nowrap;
@@ -4210,7 +4675,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
     color var(--duration-base) var(--ease-out);
 }
 .perm-pill {
-  font-size: var(--ui-font-size-sm);
+  font-size: var(--text-sm);
 }
 .perm-pill::after,
 .swarm-chip::after,
@@ -4278,7 +4743,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
 }
 
 .perm-pill.perm-manual {
-  color: var(--dim);
+  color: var(--color-text-muted);
 }
 .perm-pill.perm-yolo {
   color: var(--color-warning);
@@ -4382,6 +4847,60 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
+.ctx-trigger {
+  display: inline-flex;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: background var(--duration-base) var(--ease-out);
+}
+.ctx-trigger:hover {
+  background: var(--color-hover);
+}
+.ctx-trigger.open {
+  background: var(--color-accent-soft);
+}
+.ctx-trigger:focus-visible {
+  outline: none;
+  box-shadow: var(--p-focus-ring);
+}
+
+.ctx-card {
+  position: absolute;
+  bottom: calc(100% + var(--space-1));
+  right: calc(var(--composer-control-inset) + var(--composer-send-size) + var(--space-1));
+  z-index: var(--z-dropdown);
+  width: 268px;
+  max-width: calc(100vw - var(--space-8));
+  padding: var(--space-3);
+  gap: var(--space-2);
+  transform-origin: bottom center;
+  font-family: var(--font-ui);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ctx-card.flip-down {
+  top: calc(100% + var(--space-1));
+  bottom: auto;
+  transform-origin: top center;
+}
+
+.ctx-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.ctx-card-title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
 
 .model-pill {
   gap: var(--space-1);
@@ -4417,7 +4936,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   flex: none;
 }
 .model-pill .cv {
-  color: var(--faint);
+  color: var(--color-text-quaternary);
   flex: none;
   transition:
     transform var(--duration-base) var(--ease-out),
@@ -4425,7 +4944,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
 }
 .model-pill:hover .cv,
 .model-pill.open .cv {
-  color: var(--dim);
+  color: var(--color-text-muted);
 }
 .model-pill.open .cv {
   transform: rotate(180deg);
@@ -4468,27 +4987,16 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   transform-origin: top right;
 }
 
-.composer-menu-pop-enter-active {
-  transition:
-    opacity var(--duration-base) var(--ease-out),
-    transform var(--duration-base) var(--ease-out);
+.add-menu,
+.model-dropdown,
+.perm-dropdown,
+.ctx-card {
+  --menu-pop-shift: 2px;
 }
-.composer-menu-pop-leave-active {
-  transition:
-    opacity var(--duration-fast) var(--ease-out),
-    transform var(--duration-fast) var(--ease-out);
-  pointer-events: none;
-}
-.composer-menu-pop-enter-from,
-.composer-menu-pop-leave-to {
-  opacity: 0;
-  transform: scale(0.97) translateY(2px);
-}
-.model-dropdown.flip-down.composer-menu-pop-enter-from,
-.model-dropdown.flip-down.composer-menu-pop-leave-to,
-.perm-dropdown.flip-down.composer-menu-pop-enter-from,
-.perm-dropdown.flip-down.composer-menu-pop-leave-to {
-  transform: scale(0.97) translateY(-2px);
+.model-dropdown.flip-down,
+.perm-dropdown.flip-down,
+.ctx-card.flip-down {
+  --menu-pop-shift: -2px;
 }
 
 .md-list {
@@ -4503,7 +5011,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
 .md-section {
   padding: 4px 9px 2px;
   font-size: var(--text-xs);
-  color: var(--muted);
+  color: var(--color-text-faint);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-weight: var(--weight-semibold);
@@ -4511,7 +5019,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
 
 .md-row {
   gap: 7px;
-  font-size: var(--ui-font-size);
+  font-size: var(--text-base);
   padding: 5px 9px;
   border-radius: var(--radius-dropdown-row);
 }
@@ -4523,12 +5031,12 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
 .md-row.is-current { background: var(--color-selected); }
 .md-note {
   margin-left: auto;
-  color: var(--muted);
-  font-size: var(--ui-font-size-xs);
+  color: var(--color-text-faint);
+  font-size: var(--text-xs);
 }
 
-.md-row-more { --md-more-arrow-color: var(--faint); }
-.md-row-more:hover { --md-more-arrow-color: var(--dim); }
+.md-row-more { --md-more-arrow-color: var(--color-text-quaternary); }
+.md-row-more:hover { --md-more-arrow-color: var(--color-text-muted); }
 .md-row-more .md-more-arrow {
   width: var(--p-ic-sm);
   height: var(--p-ic-sm);
@@ -4559,8 +5067,8 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   transition: color var(--duration-base) var(--ease-out);
 }
 .md-provider {
-  color: var(--muted);
-  font-size: var(--ui-font-size-xs);
+  color: var(--color-text-faint);
+  font-size: var(--text-xs);
   flex: none;
 }
 .md-star {
@@ -4576,7 +5084,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
 
 .md-divider {
   height: 1px;
-  background: var(--line);
+  background: var(--color-line);
   margin: 3px 0;
 }
 
@@ -4591,7 +5099,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
 }
 .md-thinking .md-name {
   font-family: var(--font-ui);
-  font-size: var(--ui-font-size);
+  font-size: var(--text-base);
   color: var(--color-text);
   flex: none;
 }
@@ -4599,12 +5107,12 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   margin-left: auto;
 }
 
-.md-cache-note {
+.md-effort-description {
   width: 0;
   min-width: 100%;
   padding: 2px 7px 4px;
-  color: var(--muted);
-  font-size: var(--ui-font-size-xs);
+  color: var(--color-text-faint);
+  font-size: var(--text-2xs);
   line-height: 1.4;
 }
 
@@ -4664,7 +5172,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   width: var(--p-ic-sm);
   min-height: 1lh;
   color: var(--color-accent);
-  font-size: var(--ui-font-size);
+  font-size: var(--text-base);
   font-weight: var(--weight-medium);
   display: flex;
   align-items: center;
@@ -4685,7 +5193,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   grid-column: 2;
   grid-row: 1;
   font-family: var(--font-ui);
-  font-size: var(--ui-font-size-sm);
+  font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   line-height: var(--leading-tight);
 }
@@ -4699,7 +5207,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   font-family: var(--font-ui);
   font-size: var(--text-xs);
   font-weight: var(--weight-caption);
-  color: var(--muted);
+  color: var(--color-text-faint);
   line-height: var(--leading-tight);
 }
 
@@ -4759,7 +5267,7 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
   }
   .model-pill,
   .attach-btn {
-    font-size: var(--ui-font-size);
+    font-size: var(--text-base);
   }
   .toolbar {
     gap: 6px;
@@ -4776,16 +5284,16 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
     max-width: min(40vw, 170px);
   }
   .md-row {
-    font-size: var(--ui-font-size);
+    font-size: var(--text-base);
   }
   .md-section {
-    font-size: var(--ui-font-size);
+    font-size: var(--text-base);
   }
   .md-thinking :deep(.ui-seg--xs .ui-seg__item) {
     padding: 0 var(--space-1-5);
   }
   .pd-name {
-    font-size: var(--ui-font-size);
+    font-size: var(--text-base);
   }
   .pd-desc {
     font-size: var(--text-xs);
@@ -4840,5 +5348,6 @@ watch(() => client.activeSessionId.value, () => { closeDropdown(); closePermDrop
     height: var(--touch-target-min);
   }
 }
-
 </style>
+
+<style scoped src="../lib/drop-card.css"></style>

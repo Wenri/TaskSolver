@@ -1,9 +1,9 @@
 import type { Locator, Page } from '@playwright/test';
 import { deferred } from '@moonshot-ai/testkit/fixtures';
+import { held, say, type FakeModel } from '@moonshot-ai/testkit/model';
 
-import { expect, test, type DesktopApp } from './fixtures/app';
+import { expect, testWithProvider, type DesktopApp } from './fixtures/app';
 import { captureClipboardWrites } from './fixtures/clipboard';
-import { held, say, type StubModel } from './fixtures/model';
 import { sessionRowById } from './fixtures/sessions';
 import { waitForSettledReply } from './fixtures/transcript';
 
@@ -77,7 +77,7 @@ async function expectVisibleCheckmark(app: DesktopApp, checkbox: Locator): Promi
   expect(pixels.longStroke, 'long stroke of the checkmark').toBeGreaterThan(minimumContrast);
 }
 
-test('submits global and reply feedback with opt-in attachments', async ({ app, model }) => {
+testWithProvider('submits global and reply feedback with opt-in attachments', async ({ app, provider }) => {
   const page = app.window;
   const feedbackRequests: Array<{ path: string; method: string; body: unknown }> = [];
   const uploaded: Array<{ kind: string | null; bytes: Buffer }> = [];
@@ -200,9 +200,9 @@ test('submits global and reply feedback with opt-in attachments', async ({ app, 
   ]);
   expect(uploaded).toHaveLength(0);
 
-  model.script(held('first-chunk', say(['A completed', ' answer.']), 1));
+  provider.script(held('first-chunk', say(['A completed', ' answer.']), 1));
   await app.submit('Inspect the issue');
-  const firstChunk = model.hold('first-chunk');
+  const firstChunk = provider.hold('first-chunk');
   await firstChunk.reached();
   try {
     await expect(page.getByText('A completed', { exact: true })).toBeVisible();
@@ -338,7 +338,7 @@ test('submits global and reply feedback with opt-in attachments', async ({ app, 
   await dialog.getByRole('button', { name: 'Feature request' }).click();
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await page.getByRole('button', { name: /^New Session/ }).first().click();
-  model.script(say('The next answer.'));
+  provider.script(say('The next answer.'));
   await app.submit('Start another conversation');
   await expect(page.getByText('The next answer.', { exact: true })).toBeVisible();
   const nextSession = await app.sessionId();
@@ -413,10 +413,10 @@ const hostProxy = `/api/v1/hosts/${hostId}/proxy`;
 type OwnedRecord = { host_id?: string };
 type SessionDirectory = OwnedRecord & { items?: OwnedRecord[]; groups?: (OwnedRecord & { sessions: OwnedRecord[] })[] };
 
-async function openSshConversation(app: DesktopApp, model: StubModel, hostCapabilities: Record<string, boolean> = { feedback: true }) {
+async function openSshConversation(app: DesktopApp, provider: FakeModel, hostCapabilities: Record<string, boolean> = { feedback: true }) {
   const page = app.window;
   const reply = 'The remote task finished.';
-  model.script(say(reply));
+  provider.script(say(reply));
   await app.submit('Check the task');
   await waitForSettledReply(page, reply);
   const sessionId = await app.sessionId();
@@ -464,7 +464,7 @@ async function openSshConversation(app: DesktopApp, model: StubModel, hostCapabi
   return { sessionId, requests };
 }
 
-test('keeps reply feedback visible while scrolling the conversation', async ({ app, model }) => {
+testWithProvider('keeps reply feedback visible while scrolling the conversation', async ({ app, provider }) => {
   const page = app.window;
   await page.route('**/api/v1/auth', route => route.fulfill({ json: envelope({
     models_ready: true, providers_count: 1, managed_provider: { status: 'authenticated' },
@@ -474,7 +474,7 @@ test('keeps reply feedback visible while scrolling the conversation', async ({ a
   await page.reload();
   const lastLine = 'End of the example';
   const paragraphs = Array.from({ length: 60 }, (_, i) => `Example paragraph ${i + 1}.`);
-  model.script(say([...paragraphs, lastLine].join('\n\n')));
+  provider.script(say([...paragraphs, lastLine].join('\n\n')));
   await app.submit('Write the example paragraphs');
   await waitForSettledReply(page, lastLine);
   const down = page.getByRole('button', { name: 'Poor response' });
@@ -511,8 +511,8 @@ test('keeps reply feedback visible while scrolling the conversation', async ({ a
   await expect(dialog).toBeHidden();
 });
 
-test('submits global feedback locally from an SSH conversation by default', async ({ app, model }) => {
-  const { requests } = await openSshConversation(app, model);
+testWithProvider('submits global feedback locally from an SSH conversation by default', async ({ app, provider }) => {
+  const { requests } = await openSshConversation(app, provider);
   const page = app.window;
   await expect(page.getByRole('button', { name: 'Good response' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Poor response' })).toBeVisible();
@@ -534,8 +534,8 @@ test('submits global feedback locally from an SSH conversation by default', asyn
   expect(requests).toEqual([{ path: '/api/v1/feedback', body: expect.objectContaining({ kind: 'global', source: 'command', upload_session: false }) }]);
 });
 
-test('keeps local feedback available when the SSH host lacks feedback support', async ({ app, model }) => {
-  const { sessionId, requests } = await openSshConversation(app, model, {});
+testWithProvider('keeps local feedback available when the SSH host lacks feedback support', async ({ app, provider }) => {
+  const { sessionId, requests } = await openSshConversation(app, provider, {});
   const page = app.window;
   await expect(page.getByRole('button', { name: 'Good response' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Poor response' })).toHaveCount(0);
@@ -561,8 +561,8 @@ test('keeps local feedback available when the SSH host lacks feedback support', 
   })));
 });
 
-test('sends reply feedback to its SSH host by default', async ({ app, model }) => {
-  const { sessionId, requests } = await openSshConversation(app, model);
+testWithProvider('sends reply feedback to its SSH host by default', async ({ app, provider }) => {
+  const { sessionId, requests } = await openSshConversation(app, provider);
   const page = app.window;
   const account = await openAccountMenu(page);
   await expect(account.getByRole('menuitem', { name: 'Feedback', exact: true })).toBeVisible();
@@ -570,7 +570,7 @@ test('sends reply feedback to its SSH host by default', async ({ app, model }) =
   const input = page.getByRole('combobox', { name: 'Message input' });
   await input.fill('/');
   await expect(page.getByRole('listbox')).toBeVisible();
-  await expect(page.getByRole('option', { name: '/feedback Send feedback', exact: true })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'feedback Send feedback', exact: true })).toBeVisible();
   await input.press('Escape');
   await input.fill('');
   await page.getByRole('button', { name: 'Good response' }).click();
@@ -579,8 +579,8 @@ test('sends reply feedback to its SSH host by default', async ({ app, model }) =
   expect(requests).toEqual([{ path: `${hostProxy}/api/v1/feedback`, body: expect.objectContaining({ kind: 'turn', session_id: sessionId, rating: 'up' }) }]);
 });
 
-test('attaches an SSH conversation to the locally submitted feedback', async ({ app, model }) => {
-  const { sessionId, requests } = await openSshConversation(app, model);
+testWithProvider('attaches an SSH conversation to the locally submitted feedback', async ({ app, provider }) => {
+  const { sessionId, requests } = await openSshConversation(app, provider);
   const page = app.window;
   await openAccountFeedback(page);
   const dialog = page.getByRole('dialog', { name: 'Send feedback' });
@@ -593,8 +593,8 @@ test('attaches an SSH conversation to the locally submitted feedback', async ({ 
   ]);
 });
 
-test('requires a reason from the SSH host before submitting reply feedback', async ({ app, model }) => {
-  const { requests } = await openSshConversation(app, model);
+testWithProvider('requires a reason from the SSH host before submitting reply feedback', async ({ app, provider }) => {
+  const { requests } = await openSshConversation(app, provider);
   const page = app.window;
   const configPath = '/api/v1/client-configs/feedback_form';
   let pendingReasons = deferred();
@@ -694,4 +694,165 @@ test('requires a reason from the SSH host before submitting reply feedback', asy
   await openAccountFeedback(page);
   const global = page.getByRole('dialog', { name: 'Send feedback' });
   await expect(global.getByRole('link', { name: 'Learn more', exact: true })).toHaveAttribute('href', localGuide);
+});
+
+async function readTooltipStyle(tooltip: Locator) {
+  return tooltip.evaluate(el => {
+    const style = getComputedStyle(el);
+    return {
+      hasArrow: el.classList.contains('ui-tip__bubble--arrow'),
+      fontSize: style.fontSize,
+      padding: style.padding,
+      borderRadius: style.borderRadius,
+      backgroundColor: style.backgroundColor,
+      color: style.color,
+    };
+  });
+}
+
+function resolveColorValue(page: Page, value: string): Promise<string> {
+  return page.evaluate(cssValue => {
+    const swatch = document.createElement('span');
+    swatch.style.color = cssValue;
+    document.body.append(swatch);
+    const resolved = getComputedStyle(swatch).color;
+    swatch.remove();
+    return resolved;
+  }, value);
+}
+
+async function clickHelpFeedbackMenu(app: DesktopApp): Promise<void> {
+  await app.electron.evaluate(({ Menu }) => {
+    const item = Menu.getApplicationMenu()?.getMenuItemById('open-feedback');
+    if (item === null || item === undefined) throw new Error('Help > Feedback menu item is missing');
+    item.click();
+  });
+}
+
+testWithProvider('opens feedback from the Help menu and aligns reply feedback buttons with copy and fork', async ({ app, provider }) => {
+  const page = app.window;
+  let signedIn = false;
+  const feedbackRequests: Array<{ path: string; body: unknown }> = [];
+
+  await page.route('**/api/v1/client-configs/feedback_form', route => route.fulfill({ status: 404 }));
+  await page.route('**/api/v1/auth', route => route.fulfill({ json: envelope({
+    models_ready: true, providers_count: 1, managed_provider: signedIn ? { status: 'authenticated' } : null,
+  }) }));
+  await page.route('**/api/v1/oauth/userinfo*', route => route.fulfill({ json: envelope({ kind: 'error' }) }));
+  await page.route('**/api/v1/feedback**', route => {
+    feedbackRequests.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
+    return route.fulfill({ json: envelope({ feedback_id: 41 }) });
+  });
+  const configGate = deferred();
+  let holdConfig = true;
+  await page.route('**/api/v1/config', async route => {
+    if (holdConfig) {
+      holdConfig = false;
+      await configGate.promise;
+    }
+    await route.continue();
+  });
+  const configPending = page.waitForRequest('**/api/v1/config');
+  await page.reload();
+  await configPending;
+  await expect(page.locator('.gload')).toBeVisible();
+
+  const helpMenuOrder = await app.electron.evaluate(({ Menu }) => {
+    const menu = Menu.getApplicationMenu();
+    const help = menu?.items.find(item => item.submenu?.items.some(entry => entry.id === 'help-docs'));
+    return (help?.submenu?.items ?? []).map(entry => ({ id: entry.id, label: entry.label }));
+  });
+  const docsIndex = helpMenuOrder.findIndex(item => item.id === 'help-docs');
+  const feedbackIndex = helpMenuOrder.findIndex(item => item.id === 'open-feedback');
+  const consoleIndex = helpMenuOrder.findIndex(item => item.id === 'help-console');
+  expect(docsIndex).toBeGreaterThanOrEqual(0);
+  expect(feedbackIndex).toBe(docsIndex + 1);
+  expect(consoleIndex).toBe(feedbackIndex + 1);
+  expect(helpMenuOrder[feedbackIndex]?.label).toBe('Feedback');
+
+  const loginDialog = page.getByRole('dialog', { name: 'Sign in to Kimi Code' });
+  try {
+    await clickHelpFeedbackMenu(app);
+    await clickHelpFeedbackMenu(app);
+    await expect(loginDialog).toBeHidden();
+  } finally {
+    configGate.resolve();
+  }
+  await expect(page.locator('.gload')).toBeHidden();
+  await expect(loginDialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(loginDialog).toBeHidden();
+
+  signedIn = true;
+  await page.reload();
+  provider.script(say('Reply for feedback alignment check.'));
+  await app.submit('Check reply actions');
+  await waitForSettledReply(page, 'Reply for feedback alignment check.');
+  const sessionId = await app.sessionId();
+
+  await clickHelpFeedbackMenu(app);
+  const dialog = page.getByRole('dialog', { name: 'Send feedback' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('checkbox', { name: 'Submit this conversation' })).toBeVisible();
+  await dialog.getByRole('textbox', { name: 'Description' }).fill('Opened from Help menu');
+  await dialog.getByRole('button', { name: 'Submit', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(feedbackRequests).toEqual([{
+    path: '/api/v1/feedback',
+    body: expect.objectContaining({ kind: 'global', source: 'menu', session_id: sessionId, content: 'Opened from Help menu' }),
+  }]);
+
+  const copy = page.locator('.a-cpbtn').first();
+  const fork = page.getByRole('button', { name: 'Fork from here' });
+  const up = page.getByRole('button', { name: 'Good response' });
+  const down = page.getByRole('button', { name: 'Poor response' });
+  const tooltip = page.getByRole('tooltip');
+  await expect(fork).toBeVisible();
+
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme });
+    await page.mouse.move(0, 0);
+    const muted = await themeColor(page, '--color-text-muted');
+    const accent = await themeColor(page, '--color-accent');
+    const hoverBg = await themeColor(page, '--color-hover');
+    const radiusXs = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--radius-xs').trim());
+
+    for (const button of [copy, fork, up, down]) {
+      await expect(button).toHaveCSS('color', muted);
+      await expect(button).toHaveCSS('border-radius', radiusXs);
+    }
+
+    await copy.hover();
+    await expect(tooltip).toBeVisible();
+    await expect(copy).toHaveCSS('color', accent);
+    await expect(copy).toHaveCSS('background-color', hoverBg);
+    const copyTooltipStyle = await readTooltipStyle(tooltip);
+    expect(copyTooltipStyle.hasArrow).toBe(false);
+
+    for (const button of [fork, up, down]) {
+      await page.mouse.move(0, 0);
+      await expect(tooltip).toBeHidden();
+      await button.hover();
+      await expect(tooltip).toBeVisible();
+      await expect(button).toHaveCSS('color', accent);
+      await expect(button).toHaveCSS('background-color', hoverBg);
+      expect(await readTooltipStyle(tooltip)).toEqual(copyTooltipStyle);
+      if (colorScheme === 'light' && button === up) {
+        await app.snapshot('reply-feedback-hover-aligned');
+      }
+    }
+  }
+
+  await page.emulateMedia({ colorScheme: 'light' });
+  await up.click();
+  const liked = page.getByRole('button', { name: 'Remove like' });
+  await expect(liked).toHaveAttribute('aria-pressed', 'true');
+  const accent = await themeColor(page, '--color-accent');
+  const pressedBg = await resolveColorValue(page, 'color-mix(in srgb, var(--color-accent) 10%, transparent)');
+  await page.mouse.move(0, 0);
+  await expect(liked).toHaveCSS('color', accent);
+  await expect(liked).toHaveCSS('background-color', pressedBg);
+  await liked.hover();
+  await expect(liked).toHaveCSS('color', accent);
+  await expect(liked).toHaveCSS('background-color', pressedBg);
 });

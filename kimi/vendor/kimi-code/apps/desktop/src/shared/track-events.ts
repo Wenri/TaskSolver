@@ -50,6 +50,7 @@ const settingsChangedPropertiesSchema = z.discriminatedUnion('key', [
   z.object({ key: z.literal('open-in-default'), value: shortStringSchema, ...settingsSourcePanel }),
   z.object({ key: z.literal('dock-icon'), value: z.enum(['light', 'dark']), ...settingsSourcePanel }),
   z.object({ key: z.literal('sidebar-multi-tab'), value: z.enum(['on', 'off']), ...settingsSourcePanel }),
+  z.object({ key: z.literal('session-mentions'), value: z.enum(['on', 'off']), ...settingsSourcePanel }),
   z.object({ key: z.literal('native-title-bar'), value: z.enum(['on', 'off']), ...settingsSourcePanel }),
   z.object({ key: z.literal('update-auto-download'), value: z.enum(['on', 'off']), ...settingsSourcePanel }),
   z.object({ key: z.literal('browser-autoplay'), value: z.enum(['allow', 'block']), ...settingsSourcePanel }),
@@ -399,6 +400,35 @@ export const rendererTrackEventSchema = z.discriminatedUnion('event', [
       session_id: shortStringSchema,
       duration_ms: clampedPerfMsSchema,
       cached: z.boolean(),
+    }),
+  }),
+  z.object({
+    event: z.literal('prediction_shown'),
+    properties: z.object({
+      prediction_id: shortStringSchema,
+      turn_id: z.number().int().nonnegative(),
+      duration_ms: clampedPerfMsSchema,
+      prediction_chars: clampedCountSchema,
+    }),
+  }),
+  z.object({
+    event: z.literal('prediction_accepted'),
+    properties: z.object({
+      prediction_id: shortStringSchema,
+      turn_id: z.number().int().nonnegative(),
+      duration_ms: clampedPerfMsSchema,
+      prediction_chars: clampedCountSchema,
+      key: z.enum(['tab', 'right']),
+    }),
+  }),
+  z.object({
+    event: z.literal('prediction_submitted'),
+    properties: z.object({
+      prediction_id: shortStringSchema,
+      turn_id: z.number().int().nonnegative(),
+      duration_ms: clampedPerfMsSchema,
+      prediction_chars: clampedCountSchema,
+      edited: z.boolean(),
     }),
   }),
 ]);

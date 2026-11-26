@@ -1,4 +1,5 @@
-import { IConfigService, ITelemetryService, type Scope } from '@moonshot-ai/agent-core-v2';
+import { resolve } from 'node:path';
+import { IBootstrapService, IConfigService, ITelemetryService, type Scope } from '@moonshot-ai/agent-core-v2';
 import { FiberState } from '@moonshot-ai/agent-core-v2/_base/di/fiber';
 import { IFeatureManager } from '@moonshot-ai/agent-core-v2/app/feature/featureManager';
 import { IFlagService } from '@moonshot-ai/agent-core-v2/app/flag/flag';
@@ -13,6 +14,7 @@ import { registerAuthRoute } from './auth';
 import { registerCapabilitiesRoutes } from './capabilities';
 import { registerClientConfigsRoutes } from './clientConfigs';
 import { registerConfigRoutes } from './config';
+import { registerContextRoutes } from './context';
 import { registerFeedbackRoutes } from './feedback';
 import { registerFileHistoryRoutes } from './fileHistory';
 import { registerFilesRoutes } from './files';
@@ -94,6 +96,7 @@ export async function registerApiV1Routes(
         product: opts.hostIdentity.productName,
         serverId: opts.serverId ?? ulid(),
         startedAt: new Date().toISOString(),
+        homeDir: resolve(core.accessor.get(IBootstrapService).homeDir),
         dangerousBypassAuth: opts.dangerousBypassAuth === true,
         webTitle: opts.webTitle,
         getExperimentalFlags: async () => {
@@ -138,6 +141,10 @@ export async function registerApiV1Routes(
         apiV1 as unknown as Parameters<typeof registerSessionListAndBatchRoutes>[0],
         core,
         hostSources(opts.hostBridges),
+      );
+      registerContextRoutes(
+        apiV1 as unknown as Parameters<typeof registerContextRoutes>[0],
+        core,
       );
       registerEnvironmentRoutes(apiV1 as unknown as Parameters<typeof registerEnvironmentRoutes>[0], core);
       registerHostsRoutes(apiV1 as unknown as Parameters<typeof registerHostsRoutes>[0], core, opts.hostBridges);
@@ -201,6 +208,7 @@ export async function registerApiV1Routes(
       );
       registerConversationRoutes(
         apiV1 as unknown as Parameters<typeof registerConversationRoutes>[0],
+        core,
         opts.conversations,
       );
       if (opts.enableShutdown !== false) {

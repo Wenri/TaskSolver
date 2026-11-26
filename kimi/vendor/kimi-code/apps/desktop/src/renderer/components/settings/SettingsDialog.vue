@@ -7,7 +7,7 @@ import { serverEndpointLabel } from '../../api/config';
 import { useDialogFocus } from '@moonshot-ai/app-components';
 import { useConfirmDialog } from '@moonshot-ai/app-client/composables';
 import LanguageSwitcher from './LanguageSwitcher.vue';
-import { BrowserTabTitleSetting, FontSettingsPage, FontSettingsRow, useSettingsSubpage } from '@moonshot-ai/app-components';
+import { BrowserTabTitleSetting, FontSettingsPage, FontSettingsRow, GlobalAgentsMdSetting, useSettingsSubpage } from '@moonshot-ai/app-components';
 import type { FontTarget } from '@moonshot-ai/app-core';
 import ShortcutsPanel from './ShortcutsPanel.vue';
 import type { ShortcutActionId } from '../../../shared/action-ids';
@@ -32,7 +32,7 @@ import { track } from '../../lib/track';
 import DockIconPicker from './DockIconPicker.vue';
 import BrowserSettingsTab from '../browser/BrowserSettingsTab.vue';
 import { copyTextToClipboard, hasDesktopBridge, isLinuxDesktop, isMacosDesktop, isRcLocation, prefersNativeTitleBar, providerDisplayName } from '@moonshot-ai/app-core/lib';
-import { useSidebarTabs } from '@moonshot-ai/app-core';
+import { useContextInspector, useSessionMentions, useSidebarTabs } from '@moonshot-ai/app-core';
 import { configStore, hostsStore } from '@moonshot-ai/app-client/stores';
 import { useActivityRunFolding, usePasteImageAutoMention, useRunningSendMode, useTurnFolding, type RunningSendMode, type SettingsHighlightKey } from '@moonshot-ai/app-client';
 import { useVibrancy } from '../../composables/useVibrancy';
@@ -46,7 +46,7 @@ import type { AppConfig, AppModel, ManagedQuotaResult, ManagedUserInfo, Thinking
 import PlanUsageCard from './PlanUsageCard.vue';
 import { SecondaryModelPicker } from '@moonshot-ai/app-components';
 import { PlanUpgradeCard } from '@moonshot-ai/app-components';
-import { Badge, Button, Dialog, Icon, IconButton, SegmentedControl, Select, Switch } from '@moonshot-ai/app-ui';
+import { Avatar, Badge, Button, Dialog, Icon, IconButton, SegmentedControl, Select, Switch } from '@moonshot-ai/app-ui';
 import type { BrowserSettingsSection } from '../../../shared/browser-data';
 import {
   visibleSettingsTabs,
@@ -64,6 +64,7 @@ const { vibrancy, setVibrancy } = useVibrancy();
 const { preventSleepState, lidSleepStopped, setPreventSystemSleep, setPreventLidSleep } = usePreventSystemSleep();
 
 const { sidebarTabs, setSidebarTabs } = useSidebarTabs();
+const { contextInspectorEnabled, setContextInspectorEnabled } = useContextInspector();
 
 const { turnFolding, setTurnFolding } = useTurnFolding();
 const { activityRunFolding, setActivityRunFolding } = useActivityRunFolding();
@@ -81,10 +82,23 @@ function onSidebarTabsChange(on: boolean): void {
   track('settings_changed', { key: 'sidebar-multi-tab', value: on ? 'on' : 'off', source_panel: 'settings' });
 }
 
+const { sessionMentions, setSessionMentions } = useSessionMentions();
+
+function onSessionMentionsChange(on: boolean): void {
+  setSessionMentions(on);
+  track('settings_changed', { key: 'session-mentions', value: on ? 'on' : 'off', source_panel: 'settings' });
+}
+
 const notifyUserEnabled = computed(() => configStore().experimentalFlags['notify_user'] === true);
 
 async function onNotifyUserChange(on: boolean): Promise<void> {
   await configStore().setNotifyUserEnabled(on);
+}
+
+const promptPredictionEnabled = computed(() => configStore().experimentalFlags['prompt_prediction'] === true);
+
+async function onPromptPredictionChange(on: boolean): Promise<void> {
+  await configStore().setPromptPredictionEnabled(on);
 }
 
 function onColorScheme(scheme: ColorScheme): void {
@@ -229,15 +243,6 @@ const accountName = computed(() => {
 
 const accountLevel = computed(() => props.managedUserInfo?.userLevelName?.trim() ?? '');
 
-const avatarLoadFailed = ref(false);
-watch(
-  () => props.managedUserInfo?.avatar,
-  () => {
-    avatarLoadFailed.value = false;
-  },
-);
-const showAvatar = computed(() => Boolean(props.managedUserInfo?.avatar) && !avatarLoadFailed.value);
-
 const accountSubtitle = computed(() =>
   signedIn.value ? t('settings.signedIn') : t('settings.signedOutHint'),
 );
@@ -341,7 +346,7 @@ const { isConfirmOpen, confirm } = useConfirmDialog();
 function handleKeydown(e: KeyboardEvent): void {
   if (e.key === 'Escape' && !e.defaultPrevented && !isConfirmOpen.value && !remoteControl.conflictDialogOpen.value && !runtimeEnvironmentOpen.value) {
     e.stopPropagation();
-    emit('close');
+    void requestClose();
   }
 }
 onMounted(() => {
@@ -660,18 +665,30 @@ function toggleAutoSessionTitle(): void {
   emit('updateConfig', { autoSessionTitle: !enabled } as Partial<AppConfig>);
 }
 
-function setTab(tab: SettingsTab): void {
+const globalAgentsMdSettingRef = ref<InstanceType<typeof GlobalAgentsMdSetting> | null>(null);
+const globalAgentsMdOpen = ref(false);
+
+async function setTab(tab: SettingsTab): Promise<void> {
   if (tab !== activeTab.value) {
+    if (globalAgentsMdOpen.value && !(await globalAgentsMdSettingRef.value?.confirmDiscard())) return;
     clearHighlightTimer();
     highlightedSetting.value = null;
   }
   activeTab.value = tab;
 }
 
+async function requestClose(): Promise<void> {
+  if (globalAgentsMdOpen.value && !(await globalAgentsMdSettingRef.value?.confirmDiscard())) return;
+  emit('close');
+}
+
 const bodyRef = ref<HTMLElement | null>(null);
 const fontPage = useSettingsSubpage<FontTarget>(() => bodyRef.value);
 const fontPageTarget = fontPage.page;
-watch(activeTab, () => fontPage.reset());
+watch(activeTab, () => {
+  fontPage.reset();
+  globalAgentsMdSettingRef.value?.reset();
+});
 
 const client = useKimiWebClient();
 
@@ -770,7 +787,7 @@ function archiveTime(iso: string): string {
 </script>
 
 <template>
-  <Dialog :open="true" :close-on-esc="false" forward-esc :aria-label="t('settings.title')" size="xl" height="fixed" :panel-class="'settings-dialog'" :panel-style="fontPage.fitHeight.value === null ? undefined : { height: `${fontPage.fitHeight.value}px` }" :padded="false" level="grouped" @close="emit('close')">
+  <Dialog :open="true" :close-on-esc="false" forward-esc :aria-label="t('settings.title')" size="xl" height="fixed" :panel-class="'settings-dialog'" :panel-style="fontPage.fitHeight.value === null ? undefined : { height: `${fontPage.fitHeight.value}px` }" :padded="false" level="grouped" @close="requestClose">
     <div ref="dialogRef" class="sd">
       <nav class="settings-tabs" role="tablist" :aria-label="t('settings.title')">
         <header class="settings-tabs-header">
@@ -795,7 +812,7 @@ function archiveTime(iso: string): string {
 
       <section class="settings-region">
         <header class="settings-region-header">
-          <IconButton size="sm" :label="t('settings.close')" :tooltip="t('settings.close')" @click="emit('close')">
+          <IconButton size="sm" :label="t('settings.close')" :tooltip="t('settings.close')" @click="requestClose">
             <Icon name="close" size="md" />
           </IconButton>
         </header>
@@ -1043,10 +1060,7 @@ function archiveTime(iso: string): string {
             <h3 class="sec-title">{{ t('settings.account') }}</h3>
             <div class="settings-group">
             <div class="account-row">
-              <span class="account-avatar" aria-hidden="true">
-                <img v-if="showAvatar" :src="props.managedUserInfo?.avatar" alt="" @error="avatarLoadFailed = true" />
-                <Icon v-else name="user" size="md" />
-              </span>
+              <Avatar :src="props.managedUserInfo?.avatar" size="lg" shape="circle" aria-hidden="true" />
               <span class="account-meta">
                 <span class="account-name-row">
                   <span class="account-name">{{ accountName }}</span>
@@ -1068,6 +1082,7 @@ function archiveTime(iso: string): string {
         </section>
 
         <section v-show="activeTab === 'agent'" class="panel">
+          <div v-show="!globalAgentsMdOpen">
           <section class="sec">
             <div class="sec-head">
               <h3 class="sec-title">{{ t('settings.agentDefaults') }}</h3>
@@ -1144,7 +1159,11 @@ function archiveTime(iso: string): string {
             </div>
             </div>
           </section>
+          </div>
 
+          <GlobalAgentsMdSetting ref="globalAgentsMdSettingRef" @open-change="globalAgentsMdOpen = $event" />
+
+          <div v-show="!globalAgentsMdOpen">
           <section v-if="config" class="sec">
             <div class="sec-head">
               <h3 class="sec-title">{{ t('settings.secondaryModelSection') }}</h3>
@@ -1254,6 +1273,7 @@ function archiveTime(iso: string): string {
             </div>
             </div>
           </section>
+          </div>
         </section>
 
         <section v-show="activeTab === 'advanced'" class="panel">
@@ -1433,6 +1453,39 @@ function archiveTime(iso: string): string {
                 @update:model-value="onNotifyUserChange"
               />
             </div>
+            <div class="row">
+              <span class="rlabel">
+                {{ t('settings.lab.sessionMentions') }}
+                <span class="hint">{{ t('settings.lab.sessionMentionsHint') }}</span>
+              </span>
+              <Switch
+                :model-value="sessionMentions"
+                :label="t('settings.lab.sessionMentions')"
+                @update:model-value="onSessionMentionsChange"
+              />
+            </div>
+            <div class="row">
+              <span class="rlabel">
+                {{ t('settings.lab.contextInspector') }}
+                <span class="hint">{{ t('settings.lab.contextInspectorHint') }}</span>
+              </span>
+              <Switch
+                :model-value="contextInspectorEnabled"
+                :label="t('settings.lab.contextInspector')"
+                @update:model-value="setContextInspectorEnabled"
+              />
+            </div>
+            <div class="row">
+              <span class="rlabel">
+                {{ t('settings.lab.promptPrediction') }}
+                <span class="hint">{{ t('settings.lab.promptPredictionHint') }}</span>
+              </span>
+              <Switch
+                :model-value="promptPredictionEnabled"
+                :label="t('settings.lab.promptPrediction')"
+                @update:model-value="onPromptPredictionChange"
+              />
+            </div>
             </div>
           </section>
         </section>
@@ -1534,7 +1587,7 @@ function archiveTime(iso: string): string {
   </Dialog>
 </template>
 
-<style scoped src="./settings-common.css"></style>
+<style scoped src="@moonshot-ai/app-components/settings-common.css"></style>
 
 <style scoped>
 .sd {
@@ -1640,23 +1693,6 @@ function archiveTime(iso: string): string {
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-4);
-}
-.account-avatar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--color-surface-sunken);
-  color: var(--color-text-muted);
-}
-.account-avatar img {
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  object-fit: cover;
 }
 .account-name-row {
   display: flex;

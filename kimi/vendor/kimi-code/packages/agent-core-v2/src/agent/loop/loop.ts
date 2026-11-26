@@ -244,12 +244,22 @@ export interface LoopDetachedTask {
   readonly completion: ToolCompletionFactory;
 }
 
+export interface LoopRequestContent {
+  readonly systemPrompt: string;
+  readonly tools: readonly Tool[];
+  readonly messages: readonly Message[];
+}
+
 export interface IAgentLoopService extends EffectiveProfileReader {
   readonly _serviceBrand: undefined;
 
   readonly requester: LoopRequester;
 
   start(tools?: readonly Tool[]): Promise<void>;
+
+  readonly started: boolean;
+
+  readonly hasPersistedState: boolean;
 
   baselineTools(): readonly Tool[];
 
@@ -277,6 +287,10 @@ export interface IAgentLoopService extends EffectiveProfileReader {
 
   history(): readonly ContextMessage[];
 
+  rawHistory(): readonly Message[];
+
+  previewRequestContent(): LoopRequestContent;
+
   historyRevision(): number;
 
   replaceHistory(messages: readonly Message[], reason?: string, onAccepted?: () => void): boolean;
@@ -301,6 +315,8 @@ export interface IAgentLoopService extends EffectiveProfileReader {
   snapshot(): LoopSnapshot;
 
   settled(): Promise<TurnResult | undefined>;
+
+  continueTurn(reminders?: readonly Message[]): void;
 
   retry(): Promise<TurnResult | undefined>;
 
