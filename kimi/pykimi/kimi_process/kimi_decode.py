@@ -1,12 +1,14 @@
 """Decode kimi-code's wiretap events into ``kimi_turn`` dicts.
 
-The vendored patch emits, per model request, one ``kimi_request`` (the agent-core-v2
-``LLMRequestLogInput``: protocol/provider/model + the full normalized systemPrompt, tools and
-messages) and a stream of ``kimi_event``s (``ModelRequestEvent``: ``part`` / ``usage`` /
-``finish`` / ``timing`` — see the vendored
-``packages/agent-core-v2/src/kosong/model/modelRequester.ts``). The ``finish`` event carries the
-complete assistant ``Message``, so the assembled turn's text/tool-calls come from it, with the
-streamed ``part`` deltas only as the fallback for a stream that dies before finishing.
+The vendored wiretap (``packages/agent-core-v2/src/wiretap/wiretap.ts``) emits, per model
+request attempt, one ``kimi_request`` (protocol/provider/model + the full normalized
+systemPrompt, tools and messages: the shape of agent-core-v2's former ``LLMRequestLogInput``)
+and a stream of ``kimi_event``s (``part`` / ``usage`` / ``timing`` / ``finish``: the shape of its
+former ``ModelRequestEvent``). It maps them from the loop's ``LlmRunEvent``s: a ``part`` per
+``llm.delta.part`` (``llm.streaming.part`` before Kimi 2.8.0), the rest from the ``done``
+outcome of ``llm.ended``. The ``finish`` event carries the complete assistant ``Message``, so the
+assembled turn's text/tool-calls come from it, with the streamed ``part`` deltas only as the
+fallback for a stream that dies before finishing.
 
 Stdlib-only (the purity probe enforces it): this runs inside the embedded interpreter.
 """
