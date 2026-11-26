@@ -159,16 +159,15 @@ class KimiProcess(WirePtyProcess[KimiPopen]):
     def submit(self, prompt: str) -> None:
         """Type + submit one turn into the shell UI.
 
-        Multi-line prompts are wrapped in **bracketed paste** (``ESC[200~ … ESC[201~``)
-        with the submitting CR sent separately: kimi's editor treats a pasted block as
-        one insertion, whereas typed-out newlines submit at the first ``\\n`` — a
-        multi-line prompt sent via plain ``send_line`` would fire N partial turns
-        (editor.ts handles paste vs. Enter distinctly). Single-line prompts go the
-        plain route. Resets ``last_output`` either way (the WireSession contract)."""
-        text = prompt
-        if "\n" in text:
-            self.write(b"\x1b[200~" + text.encode() + b"\x1b[201~")
-            self.write(b"\r")
-            self.last_output = time.time()
-        else:
-            super().submit(text)
+        Every prompt goes in as one **bracketed paste** (``ESC[200~ … ESC[201~``), with the
+        submitting CR after it. Kimi's editor (pi-tui's ``Editor``) has a paste-burst fallback
+        for terminals without bracketed paste: once eight plain characters arrive within 8 ms
+        of each other, an Enter in the next 120 ms inserts a newline instead of submitting.
+        A typed-out prompt and its CR, written together, always trip it, so the turn would
+        sit unsubmitted in the input box. A bracketed paste is one insertion and resets that
+        detector, so the CR submits; a multi-line prompt stays one turn. A paste over 1,000
+        characters or 10 lines shows as a ``[paste #N …]`` marker, which the editor expands
+        on submit. Resets ``last_output`` (the WireSession contract)."""
+        self.write(b"\x1b[200~" + prompt.encode() + b"\x1b[201~")
+        self.write(b"\r")
+        self.last_output = time.time()

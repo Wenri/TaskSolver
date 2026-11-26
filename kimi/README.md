@@ -162,9 +162,14 @@ Shell-mode specifics, each with its own machinery here:
 
 - **No positional prompt**: turn 1 is *typed* like every follow-up
   (`WireSession._PREFILL_FIRST = False`); `kimi_argv(persistent=True)` rejects one.
-- **Bracketed paste**: kimi's editor submits on every typed newline, so
-  `KimiProcess.submit` wraps multi-line prompts in `ESC[200~ … ESC[201~` with the CR sent
-  separately — one insertion, one turn.
+- **Bracketed paste**: `KimiProcess.submit` sends every prompt as one `ESC[200~ … ESC[201~`
+  paste, with the submitting CR after it. Kimi's editor has a paste-burst fallback for
+  terminals without bracketed paste: once eight plain characters arrive within 8 ms of each
+  other, an Enter in the next 120 ms inserts a newline instead of submitting. So a prompt
+  typed out with its CR in one write never submits. A bracketed paste is one insertion and
+  resets that detector: one prompt, one turn, single-line or not. A paste over 1,000
+  characters or 10 lines shows as a `[paste #N …]` marker, which the editor expands on
+  submit.
 - **Trust gate**: the TUI opens with a folder-trust dialog for an unknown workspace.
   `Session._pre_start` seeds `<home>/workspace-trust/<encodeWorkDirKey(cwd)>` with the CLI's
   exact record shape (`pykimi.config.trust_workspace`, key port verified against a
@@ -193,8 +198,8 @@ Offline, no node/bundle needed (`pixi run python test_scripts/<file>.py`):
 - `test_kimi_session.py` — shell-mode plumbing: persistent argv (no `-p`), the
   production-golden `encode_workdir_key`, the trust record's shape/placement/idempotence,
   legacy and v2 wire→transcript projection (tools, interrupted/resumed steps, compaction,
-  and multiple agents), and a stub-backed `Session` (typed turn 1, bracketed-paste framing
-  on the raw PTY bytes, close sweep).
+  and multiple agents), and a stub-backed `Session` (typed turn 1, every prompt's
+  bracketed-paste framing with the CR after it, on the raw PTY bytes, close sweep).
 - `test_wire_session.py` (repo root `test_scripts/`) — the shared `WireSession`/`ask_turn`
   base, including failed startup, cleanup failures, idempotent close and exited-session guards.
 
@@ -214,9 +219,12 @@ and addon against an OpenAI-compatible model on loopback (the `KIMI_MODEL_*` fam
 `kimi_home`). It checks each emit site: the `kimi_request` with the prompt, `kimi_wire`
 records, and the decoded `kimi_turn` (answer, usage, the streamed parts, the finish event).
 So after an update it catches an emit site that moved or vanished, and a stream event the wiretap
-no longer recognizes (2.8.0 renamed the streamed parts). These checks do not validate
-authenticated model calls, and a skip is not a pass. `kimi vis` remains unavailable in this
-linked build because the web asset is stubbed.
+no longer recognizes (2.8.0 renamed the streamed parts). It then drives a two-turn
+`pykimi.Session` through the shell UI, a single-line prompt and a long two-line one: each must
+reach the model as its own request in one session, the second carrying the first, and come back
+as a captured `kimi_turn`. So a change to how Kimi's editor takes typed input fails it too.
+These checks do not validate authenticated model calls, and a skip is not a pass. `kimi vis`
+remains unavailable in this linked build because the web asset is stubbed.
 
 Live (needs the built bundle + addon):
 
