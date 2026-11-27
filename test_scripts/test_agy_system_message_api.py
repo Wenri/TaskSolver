@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -25,6 +26,8 @@ sys.path[:0] = [str(REPO / "antigravity"), str(REPO)]
 
 
 from pyagy import client
+from pyagy import conversations as conv
+from pyagy.agyprocess import AgyProcess
 
 from wirecap.runtime import session as wire_session
 from wirecap.runtime.session import ResultChannel, TurnReason
@@ -579,6 +582,81 @@ class ActualChannelTests(unittest.TestCase):
                 self.assertIsNone(s._messages)
                 with self.assertRaisesRegex(RuntimeError, "disabled"):
                     s.send_system_message("no injection in chat mode")
+
+
+class ConversationLatchTests(unittest.TestCase):
+    """Which stored conversation a run latches (``AgyProcess.conversation_id``), the id a
+    Session binds its system-message channel to. agy 1.5.18's interactive TUI opens the most
+    recent stored conversation before it creates its own; latching that first open made the
+    first turn fail to bind the channel the hook had bound to the real conversation."""
+
+    def setUp(self) -> None:
+        self.home = Path(tempfile.mkdtemp(prefix="pyagy-latch-"))
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.store = Path(conv.conversations_dir("pyagy", self.home))
+        self.store.mkdir(parents=True)
+        self.capture = self.home / "capture.jsonl"
+
+    def stored(self, *conversation_ids: str) -> None:
+        for conversation_id in conversation_ids:
+            (self.store / f"{conversation_id}.db").write_bytes(b"")
+
+    def opened(self, *conversation_ids: str) -> None:
+        with self.capture.open("a", encoding="utf-8") as f:
+            for conversation_id in conversation_ids:
+                _ = f.write(json.dumps({"kind": "conversation_id", "id": conversation_id}) + "\n")
+
+    def latch(self, before: conv.ConversationSnapshot, *, fresh: bool,
+              capture: bool = True) -> str | None:
+        return conv.capture_conversation_id(before, capture_path=self.capture if capture else None,
+                                            app_data_dir="pyagy", home=self.home, fresh=fresh)
+
+    def test_new_conversation_after_opening_a_stored_one(self) -> None:
+        self.stored("stale")
+        before = conv.snapshot("pyagy", self.home)
+        self.opened("stale", "new")
+        self.stored("new")
+        self.assertEqual(self.latch(before, fresh=True), "new")
+
+    def test_new_conversation_opened_alone(self) -> None:
+        before = conv.snapshot("pyagy", self.home)
+        self.opened("new")
+        self.stored("new")
+        self.assertEqual(self.latch(before, fresh=True), "new")
+
+    def test_new_conversation_ahead_of_its_subagent(self) -> None:
+        self.stored("stale")
+        before = conv.snapshot("pyagy", self.home)
+        self.opened("stale", "main", "subagent")
+        self.stored("main", "subagent")
+        self.assertEqual(self.latch(before, fresh=True), "main")
+
+    def test_continued_conversation_ahead_of_a_new_subagent(self) -> None:
+        self.stored("continued")
+        before = conv.snapshot("pyagy", self.home)
+        self.opened("continued", "subagent")
+        self.stored("subagent")
+        self.assertEqual(self.latch(before, fresh=False), "continued")
+
+    def test_new_conversation_without_a_capture(self) -> None:
+        self.stored("stale")
+        before = conv.snapshot("pyagy", self.home)
+        self.stored("new")
+        self.assertEqual(self.latch(before, fresh=True, capture=False), "new")
+
+    def test_new_conversation_the_capture_missed(self) -> None:
+        self.stored("stale")
+        before = conv.snapshot("pyagy", self.home)
+        self.opened("stale")
+        self.stored("new")
+        self.assertEqual(self.latch(before, fresh=True), "new")
+
+    def test_which_launches_start_a_conversation(self) -> None:
+        self.assertTrue(AgyProcess(persistent=True)._fresh)
+        self.assertTrue(AgyProcess(prompt="one shot")._fresh)
+        self.assertFalse(AgyProcess(persistent=True, conversation_id="resumed")._fresh)
+        self.assertFalse(AgyProcess(persistent=True, continue_latest=True)._fresh)
+        self.assertFalse(AgyProcess(agy_args=["--print", "explicit argv"])._fresh)
 
 
 if __name__ == "__main__":

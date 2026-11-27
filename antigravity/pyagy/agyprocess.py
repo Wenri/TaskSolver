@@ -91,6 +91,9 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
         self._capture = capture
         self._persistent = persistent  # long-lived interactive agy (drive via .ask()/.send())
         self._conversation_id = conversation_id  # resume id; else captured after first turn
+        # A run that starts a conversation (no resume id, no continue, argv built here): its
+        # id is the first store it opens that did not exist before launch.
+        self._fresh = agy_args is None and conversation_id is None and not continue_latest
         self._data_dir = data_dir      # scope the conversation store to a project repo
         self._app_data_dir = app_data_dir  # subdirectory under ~/.gemini (default: pyagy)
         self._account = account        # named pyagy account profile (e.g. 'alt' -> pyagy-alt)
@@ -105,15 +108,16 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
     @property
     def conversation_id(self) -> str | None:
         """agy's native conversation id for this run — the resume id, or the one captured
-        after launch (from the shim's conversation_id event, else the newest store db).
-        Persist it and pass ``conversation_id=`` to a new AgyProcess (or ``pyagy.resume``)
-        to continue this conversation with full prior context."""
+        after launch (from the shim's conversation_id events: for a new conversation the first
+        store absent before launch, else the first opened; failing those, the store dbs vs the
+        pre-launch snapshot). Persist it and pass ``conversation_id=`` to a new AgyProcess (or
+        ``pyagy.resume``) to continue this conversation with full prior context."""
         if self._conversation_id is None and self._popen is not None:
             self._conversation_id = _conv.capture_conversation_id(
                 self._popen._snap,
                 capture_path=self._popen._capture_path,
                 app_data_dir=self._popen._app_data_dir,
-                home=self._popen._home)
+                home=self._popen._home, fresh=self._fresh)
         return self._conversation_id
 
     # The decoded-answer collection helpers (collect / ask-turn / collect_many) live in the caller

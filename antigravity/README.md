@@ -322,7 +322,8 @@ message `claimed`, which is not retried automatically because agy may already ha
 
 Checks: `test_system_messages.py` exercises the native reader and decoder,
 `test_agy_system_message_queue.py` covers routing and configuration cleanup, and
-`test_agy_system_message_api.py` covers response capture and turn boundaries. The authenticated
+`test_agy_system_message_api.py` covers response capture, turn boundaries and which stored
+conversation a run latches. The authenticated
 `test_agy_system_messages_live.py` verifies one-shot and persistent delivery against native
 observations and outgoing model requests. All run with `pixi run python test_scripts/<file>`.
 
@@ -338,7 +339,13 @@ local to `~/.gemini/pyagy/settings.json`.
 `Session` is the first-class object (on `wirecap.runtime.session.WireSession`); `ask()` is one-shot
 sugar. Both carry a `conversation_id` that `pyagy.resume(cid)`, `pyagy.continue_latest()`,
 `pyagy.list_conversations()` and `pyagy.read_transcript(cid)` work with, as do
-`AgyProcess(conversation_id=)` and `AgyModel(multi_turn=True)`.
+`AgyProcess(conversation_id=)` and `AgyModel(multi_turn=True)`. The id comes from the capture's
+`conversation_id` events, one per conversation store agy opens. A run that starts a conversation
+takes the first store that did not exist before launch: agy's interactive TUI opens the most
+recent stored conversation at startup, before it creates its own (agy 1.5.18). A resumed or
+continued run takes the first store it opens, the conversation it continues; a subagent's store
+opens after its parent's. A Session binds its system-message channel to this id, which must
+match the main conversation the hook sees.
 
 - **Dedicated login and account switching:** upstream `agy` stores a single global OAuth token in the
   OS D-Bus Secret Service keyring (`service="antigravity", user="gemini"` via `/run/user/<uid>/bus`) on
