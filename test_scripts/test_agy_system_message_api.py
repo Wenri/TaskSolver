@@ -654,9 +654,15 @@ class ConversationLatchTests(unittest.TestCase):
     def test_which_launches_start_a_conversation(self) -> None:
         self.assertTrue(AgyProcess(persistent=True)._fresh)
         self.assertTrue(AgyProcess(prompt="one shot")._fresh)
+        self.assertTrue(AgyProcess(persistent=True, extra_flags=["--model", "m"])._fresh)
+        self.assertTrue(AgyProcess(agy_args=["--print", "explicit argv"])._fresh)
         self.assertFalse(AgyProcess(persistent=True, conversation_id="resumed")._fresh)
         self.assertFalse(AgyProcess(persistent=True, continue_latest=True)._fresh)
-        self.assertFalse(AgyProcess(agy_args=["--print", "explicit argv"])._fresh)
+        # agy's own flags for the same, passed through extra_flags or an explicit argv.
+        for flags in (["--continue"], ["-c"], ["-r", "resumed"], ["--resume=resumed"],
+                      ["--conversation", "resumed"]):
+            self.assertFalse(AgyProcess(persistent=True, extra_flags=flags)._fresh, flags)
+        self.assertFalse(AgyProcess(agy_args=["--print", "x", "--conversation=resumed"])._fresh)
 
 
 if __name__ == "__main__":

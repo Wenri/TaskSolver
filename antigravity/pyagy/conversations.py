@@ -429,10 +429,11 @@ def capture_conversation_id(snapshot: ConversationSnapshot | None = None,
     """Resolve the conversation a just-finished run created or continued, most-reliable first:
       1. the ``conversation_id`` events from the file_open book in the capture JSONL (exact,
          in-process — needs AGY_PROC_CONV_ID + a linked run). A ``fresh`` run (no resume id,
-         no continue) takes the first one absent from the pre-run ``snapshot``: agy opens the
-         most recent stored conversation before it creates its own (the interactive TUI does,
-         as of 1.5.18), so the first open can be another conversation. Any other run takes the
-         first, the conversation it continued; a subagent's store opens after its parent's.
+         no resume or continue flag) takes the first one absent from the pre-run ``snapshot``:
+         agy opens the most recent stored conversation before it creates its own (the
+         interactive TUI does, as of 1.5.18), so the first open can be another conversation.
+         Any other run takes the first, the conversation it continued; a subagent's store
+         opens after its parent's.
       2. vs the pre-run ``snapshot``: the newest conversation that is NEW or whose mtime
          advanced (covers both create and resume);
       3. else the newest conversation overall.

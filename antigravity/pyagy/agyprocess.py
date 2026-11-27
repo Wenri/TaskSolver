@@ -28,12 +28,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from multiprocessing.process import BaseProcess
+from typing import Final
 
 from wirecap.runtime.process import Target
 from wirecap.runtime.pty import WirePtyProcess
 
 from . import conversations as _conv
 from ._pty import PtyPopen
+
+
+#: agy's flags that select a stored conversation instead of starting one (``agy --help``):
+#: ``-c``/``--continue`` and ``-r``/``--resume``/``--conversation``, alone or ``=``-joined.
+_CONVERSATION_FLAGS: Final = frozenset({"-c", "--continue", "-r", "--resume", "--conversation"})
+
+
+def _selects_conversation(argv: Sequence[str]) -> bool:
+    """Whether an agy argv tail continues or resumes a stored conversation."""
+    return any(arg.split("=", 1)[0] in _CONVERSATION_FLAGS for arg in argv)
 
 
 def _agy_argv(prompt: str | None, persistent: bool, model: str | None,
@@ -91,9 +102,9 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
         self._capture = capture
         self._persistent = persistent  # long-lived interactive agy (drive via .ask()/.send())
         self._conversation_id = conversation_id  # resume id; else captured after first turn
-        # A run that starts a conversation (no resume id, no continue, argv built here): its
-        # id is the first store it opens that did not exist before launch.
-        self._fresh = agy_args is None and conversation_id is None and not continue_latest
+        # A run that starts a conversation: its id is the first store it opens that did not
+        # exist before launch. The argv decides, flags passed through extra_flags included.
+        self._fresh = conversation_id is None and not _selects_conversation(self._agy_args)
         self._data_dir = data_dir      # scope the conversation store to a project repo
         self._app_data_dir = app_data_dir  # subdirectory under ~/.gemini (default: pyagy)
         self._account = account        # named pyagy account profile (e.g. 'alt' -> pyagy-alt)

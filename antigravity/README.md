@@ -343,9 +343,11 @@ sugar. Both carry a `conversation_id` that `pyagy.resume(cid)`, `pyagy.continue_
 `conversation_id` events, one per conversation store agy opens. A run that starts a conversation
 takes the first store that did not exist before launch: agy's interactive TUI opens the most
 recent stored conversation at startup, before it creates its own (agy 1.5.18). A resumed or
-continued run takes the first store it opens, the conversation it continues; a subagent's store
-opens after its parent's. A Session binds its system-message channel to this id, which must
-match the main conversation the hook sees.
+continued run, one whose argv has `-c`/`--continue` or `-r`/`--resume`/`--conversation` (from
+`conversation_id=`, `continue_latest=`, `extra_flags` or an explicit argv), takes the first
+store it opens, the conversation it continues; a subagent's store opens after its parent's. A
+Session binds its system-message channel to this id, which must match the main conversation the
+hook sees.
 
 - **Dedicated login and account switching:** upstream `agy` stores a single global OAuth token in the
   OS D-Bus Secret Service keyring (`service="antigravity", user="gemini"` via `/run/user/<uid>/bus`) on
