@@ -334,6 +334,27 @@ class BundleModeTests(unittest.TestCase):
             for path in LOCAL_ONLY:
                 self.assertFalse((stage / path).exists(), path)
 
+    def test_codex_builds_without_debug_info(self) -> None:
+        # Upstream's line tables cost the codex build memory a hosted runner lacks, and bundling
+        # strips them; an explicit setting still wins. package.nix replaces the cargo argv by its
+        # literal text (substituteInPlace --replace-fail), so the literal stays as written.
+        from setuptools import Distribution
+
+        argv = ["cargo", "build", "--release", "-p", "codex-cli"]
+        self.assertIn(json.dumps(argv), (ROOT / "setup.py").read_text())
+        builder_type = cast("type[BuildPyNative]", self.setup_namespace["BuildPyNative"])
+        builder = builder_type(Distribution({"name": "tasksolver-codex-build-test",
+                                             "script_name": str(ROOT / "setup.py")}))
+        cases: list[tuple[dict[str, str], str]] = [
+            ({}, "none"), ({"CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only"}, "line-tables-only")]
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "codex/vendor/codex-rs").mkdir(parents=True)
+            for given, expected in cases:
+                with patch("subprocess.run") as cargo:
+                    builder._build_codex(directory, given)
+                self.assertEqual(cargo.call_args.args[0], argv)
+                self.assertEqual(cargo.call_args.kwargs["env"]["CARGO_PROFILE_RELEASE_DEBUG"], expected)
+
     def test_local_build_keeps_everything(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             environment = {key: value for key, value in os.environ.items() if key != "CONDA_BUILD"}

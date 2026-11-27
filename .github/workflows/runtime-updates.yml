@@ -158,7 +158,8 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/share/swift
           sudo docker system prune --all --force > /dev/null || true
           sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
-          # rustc reaches 8 GB on codex's largest crates; swap keeps 16 GB runners from OOM-killing it.
+          # Codex's build peaks near 18 GB on 4 CPUs (four large crates compiling at once, without
+          # debug info: setup.py), so swap keeps 16 GB runners from OOM-killing it.
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
           sudo fallocate -l 16G /mnt/swapfile && sudo chmod 600 /mnt/swapfile
@@ -240,7 +241,24 @@ jobs:
             echo "mode=$mode"; } >> "$GITHUB_OUTPUT"
 
       - name: Build the workspace (agy, Codex, Claude Code and Kimi Code)
-        run: pixi install --locked 2>&1 | tee "$RUNNER_TEMP/build.log"
+        run: |
+          # How close the build comes to the runner's memory: RAM and swap in use every 5 s, in a
+          # .tsv (the hand-over quotes the newest *.log, which must stay build.log).
+          while sleep 5; do
+            LC_ALL=C awk '{v[$1] = $2} END {ram = v["MemTotal:"] - v["MemAvailable:"]
+              swap = v["SwapTotal:"] - v["SwapFree:"]; print ram / 1048576, swap / 1048576}' /proc/meminfo
+          done > "$RUNNER_TEMP/memory.tsv" &
+          sampler=$!
+          pixi install --locked 2>&1 | tee "$RUNNER_TEMP/build.log"
+          kill "$sampler" 2> /dev/null || true
+          peak() {
+            LC_ALL=C awk '$1 > ram {ram = $1} $2 > swap {swap = $2}
+              END {printf "%.1f GB RAM and %.1f GB swap", ram, swap}'
+          }
+          # The whole build peaks while codex's large crates compile together; its last 25 minutes
+          # are codex's final link (26-33 minutes on these runners), which must stay in RAM.
+          echo "::notice::Build memory high-water mark: $(peak < "$RUNNER_TEMP/memory.tsv") in use;" \
+            "in its last 25 minutes (codex's final link): $(tail -n 300 "$RUNNER_TEMP/memory.tsv" | peak)"
 
       - name: Refresh the Nix hashes
         if: steps.adopt.outputs.mode != 'validate' && hashFiles('nix/update-hashes') != ''
