@@ -492,7 +492,8 @@ into `pyclaude.claude_process`, emitting `claude_turn` events); headless Claude 
 - **`codex/`** → the `pycodex` package: OpenAI's Rust codex built from a vendored tree with the bridge
   compiled in. Each transport request owns a `ResponseCapture` ID through SSE/WebSocket events
   and termination; never correlate concurrent streams using a global latest-request ID.
-  `test_codex_sdk_native.py` verifies overlapping requests against the real built app-server.
+  `test_codex_sdk_native.py` verifies overlapping requests against the real built app-server,
+  and a three-turn `pycodex.Session` on the real TUI whose typed follow-ups must each submit.
   See `codex/README.md`.
 - **`kimi/`** → the `pykimi` package: Moonshot's Node kimi-code built from a vendored tree, with a
   wiretap module and three one-line emit sites loading the bridge as an N-API addon
@@ -509,8 +510,14 @@ into `pyclaude.claude_process`, emitting `claude_turn` events); headless Claude 
 The PTY paths are symmetric (`agy --print` ≡ `codex exec` ≡ `kimi -p`), so a change to one usually
 belongs in `wirecap/`. `pyagy.Session`, `pycodex.Session` and `pykimi.Session` share
 `wirecap/runtime/session.py` (`ask_turn` and the `WireSession` base); providers supply only process
-construction and response shape. Build session processes with `max_wait=None` (asserted in
-`_start`), or a deadline kills the bridge mid-session. `pycodex.SDKSession` and `pyclaude.Session`
+construction and response shape. `WirePtyProcess.submit` types a turn out with its CR unless the
+process class sets `_PASTE_SUBMIT`: then the turn goes in as one bracketed paste with the CR after
+it. Codex's and Kimi's TUIs need that (their paste-burst fallbacks take a CR typed in the same
+burst as its text for a pasted newline, so a typed-out turn never submits); agy's TUI submits
+typed turns, one line or several (checked live with agy 1.5.18). Opt a provider in only after its
+real TUI is shown to need it and to take the paste. Build session processes with
+`max_wait=None` (asserted in `_start`), or a deadline kills the bridge mid-session.
+`pycodex.SDKSession` and `pyclaude.Session`
 have their own SDK lifecycles and never use `WireSession`. Failed `WireSession` startup unwinds
 all resources, and closing is idempotent; closed sessions and ended workers cannot accept turns.
 

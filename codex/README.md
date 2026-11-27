@@ -172,7 +172,14 @@ command, file change, tool or web call raises `tasksolver.cli_backend.ChatModeVi
 > Multi-turn `pycodex.Session` rides the shared `wirecap.runtime.session`
 > base (`ask_turn` + `WireSession`) — see `wirecap/runtime/session.py` and
 > `test_scripts/test_wire_session.py`; only process construction and the
-> `CodexResponse` shape live here.
+> `CodexResponse` shape live here. Turn 1 rides the argv, and the TUI submits it itself;
+> each follow-up goes into the composer as one bracketed paste with the submitting CR
+> after it (`CodexProcess._PASTE_SUBMIT`). The composer's paste-burst fallback
+> (`tui/src/bottom_pane/paste_burst.rs`) would take a typed-out follow-up's CR for a
+> newline, so it would never submit. A paste over 1,000 characters shows as a
+> `[Pasted Content N chars]` placeholder, which the composer expands on submit.
+> `test_codex_sdk_native.py` drives three turns through the real TUI against a mock
+> Responses server.
 
 The low-level `pycodex.ask` and `pycodex.Session` drive codex through the **same wirecap mp-child machinery as agy** (the shared
 `wirecap.runtime.process.WirePopen`/`WireProcess` base + `wirecap.decode.mp_child`): `ask()` launches

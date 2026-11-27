@@ -292,14 +292,29 @@ class WirePtyProcess[PopenT: WirePtyHandle = WirePtyHandle](WireProcess[PopenT])
         """Type a line + Enter into the PTY."""
         self._wire_popen().send_line(text)
 
-    def submit(self, prompt: str) -> None:
-        """Type + submit a prompt into the CLI's interactive TUI.
+    #: Whether :meth:`submit` enters a prompt as one bracketed paste (``ESC[200~ … ESC[201~``)
+    #: with the submitting CR after it, instead of typing it out with its CR. A TUI with a
+    #: paste-burst fallback for terminals without bracketed paste takes a CR that arrives in
+    #: the same burst as typed text for a pasted newline, so a typed-out prompt never submits
+    #: there; a bracketed paste is one insertion, and the CR after it submits. A provider opts
+    #: in once its real TUI is shown to take it; the default stays typed.
+    _PASTE_SUBMIT = False
 
-        The one primitive `wirecap.runtime.session.ask_turn` submits through:
-        it types the line AND resets ``last_output``, so the idle clock starts
-        at the submit and the reset can never be forgotten by a caller."""
-        self._wire_popen().send_line(prompt)
-        self._wire_popen()._last_output = time.time()
+    def submit(self, prompt: str) -> None:
+        """Enter + submit a prompt into the CLI's interactive TUI.
+
+        The one primitive `wirecap.runtime.session.ask_turn` submits through: it enters the
+        prompt (typed out with its CR, or pasted and then the CR under ``_PASTE_SUBMIT``) AND
+        resets ``last_output``, so the idle clock starts at the submit and the reset can never
+        be forgotten by a caller. :meth:`send_line` stays the typed primitive for anything
+        that is not a prompt."""
+        popen = self._wire_popen()
+        if self._PASTE_SUBMIT:
+            popen.write(b"\x1b[200~" + prompt.encode() + b"\x1b[201~")
+            popen.write(b"\r")
+        else:
+            popen.send_line(prompt)
+        popen._last_output = time.time()
 
     #: Historical name for :meth:`submit`.
     send = submit

@@ -21,7 +21,7 @@ for directory in (ROOT, ROOT / "codex", ROOT / "codex/vendor/sdk/python/src",
     sys.path.insert(0, str(directory))
 
 from codex.vendor.sdk.python.tests.app_server_harness import AppServerHarness
-from pycodex import SDKSession, ask_sdk
+from pycodex import SDKSession, Session, ask_sdk
 from pycodex._env import CODEX_BIN
 from pycodex.client import _load_capture
 from wirecap.types import JSONObject, JSONValue, json_object
@@ -148,6 +148,38 @@ def main() -> None:
             assert harness.responses.requests()[-1].header("authorization") == (
                 "Bearer sk-synthetic-inherited-auth")
             print("ok native SDK API-key auth: Authorization sent, stored login untouched")
+
+    with tempfile.TemporaryDirectory(prefix="tasksolver-tui-native-") as directory:
+        with AppServerHarness(Path(directory)) as harness:
+            # The TUI also asks the model for a task title, so every reply carries the same text
+            # and which request takes which reply does not matter.
+            for index in range(8):
+                harness.responses.enqueue_assistant_message("TUI answer", response_id=f"tui-{index}")
+            tui_env: Final = {
+                "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG": "1", "OPENAI_API_KEY": "",
+                "OPENAI_BASE_URL": "", "CODEX_API_KEY": "", "CODEX_ACCESS_TOKEN": "",
+                "HOME": directory, "RUST_LOG": "warn",
+            }
+            # Turn 1 rides the argv; the follow-ups are typed into the composer, whose paste-burst
+            # fallback took a typed-out prompt's CR for a newline: one line, then two lines over
+            # 1,000 characters (a collapsed paste the composer expands on submit).
+            prompts: Final = ("TUI turn one.", "TUI turn two, typed.",
+                              "TUI turn three.\n" + " ".join(f"word{index}" for index in range(200)))
+            with Session(codex_bin=CODEX_BIN, codex_home=str(harness.codex_home),
+                         workspace=str(harness.workspace), extra_env=tui_env, timeout=60,
+                         idle=2) as tui:
+                answers: Final = [tui.ask(prompt) for prompt in prompts]
+                tui_session: Final = tui.session_id
+            for answer in answers:
+                assert answer.text == "TUI answer" and not answer.timed_out, (
+                    answer.text, answer.transcript[-1500:])
+            conversation: Final = [
+                texts for request in harness.responses.requests()
+                if (texts := [text for text in request.message_input_texts("user")
+                              if not text.lstrip().startswith("<")]) and texts[-1] in prompts]
+            assert conversation == [list(prompts[:1]), list(prompts[:2]), list(prompts)], conversation
+            assert tui_session, tui_session
+            print("ok native TUI session: typed follow-ups submit, one line or a long paste")
     print("All native Codex SDK checks passed")
 
 
