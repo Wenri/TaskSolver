@@ -155,6 +155,15 @@ class CodexProcess(WirePtyProcess[CodexPopen]):
     ``service_pty``/``last_output``/``transcript``/``write``/``send_line``/``send``/``workspace`` are
     inherited from ``WirePtyProcess``; ``reap``/``close`` from ``WireProcess``."""
 
+    #: Typed turns go in as one bracketed paste, with the submitting CR after it
+    #: (``WirePtyProcess.submit``). The TUI's composer has a paste-burst fallback for terminals
+    #: without bracketed paste (``tui/src/bottom_pane/paste_burst.rs``): three plain characters
+    #: within 8 ms of each other start a burst, and an Enter in the next 120 ms inserts a newline
+    #: instead of submitting, so a typed-out follow-up would never submit. A paste over 1,000
+    #: characters shows as a ``[Pasted Content N chars]`` placeholder, which the composer expands
+    #: on submit. Turn 1 is unaffected either way: the TUI submits the argv prompt itself.
+    _PASTE_SUBMIT = True
+
     @staticmethod
     def _Popen(process_obj: BaseProcess) -> CodexPopen:
         return CodexPopen(process_obj)

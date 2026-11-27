@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 
 from collections.abc import Mapping, Sequence
 from multiprocessing.process import BaseProcess
@@ -156,18 +155,12 @@ class KimiProcess(WirePtyProcess[KimiPopen]):
         self._kimi_home = kimi_home            # first-class KIMI_CODE_HOME scoping (config/sessions)
         self._echo = echo                      # mirror the CLI's PTY output to our stdout (debug)
 
-    def submit(self, prompt: str) -> None:
-        """Type + submit one turn into the shell UI.
-
-        Every prompt goes in as one **bracketed paste** (``ESC[200~ … ESC[201~``), with the
-        submitting CR after it. Kimi's editor (pi-tui's ``Editor``) has a paste-burst fallback
-        for terminals without bracketed paste: once eight plain characters arrive within 8 ms
-        of each other, an Enter in the next 120 ms inserts a newline instead of submitting.
-        A typed-out prompt and its CR, written together, always trip it, so the turn would
-        sit unsubmitted in the input box. A bracketed paste is one insertion and resets that
-        detector, so the CR submits; a multi-line prompt stays one turn. A paste over 1,000
-        characters or 10 lines shows as a ``[paste #N …]`` marker, which the editor expands
-        on submit. Resets ``last_output`` (the WireSession contract)."""
-        self.write(b"\x1b[200~" + prompt.encode() + b"\x1b[201~")
-        self.write(b"\r")
-        self.last_output = time.time()
+    #: Every prompt goes in as one bracketed paste, with the submitting CR after it
+    #: (``WirePtyProcess.submit``). Kimi's editor (pi-tui's ``Editor``) has a paste-burst fallback
+    #: for terminals without bracketed paste: once eight plain characters arrive within 8 ms of
+    #: each other, an Enter in the next 120 ms inserts a newline instead of submitting, so a
+    #: typed-out prompt would sit unsubmitted in the input box. A bracketed paste resets that
+    #: detector, so the CR submits, and a multi-line prompt stays one turn. A paste over 1,000
+    #: characters or 10 lines shows as a ``[paste #N …]`` marker, which the editor expands on
+    #: submit.
+    _PASTE_SUBMIT = True

@@ -162,8 +162,9 @@ Shell-mode specifics, each with its own machinery here:
 
 - **No positional prompt**: turn 1 is *typed* like every follow-up
   (`WireSession._PREFILL_FIRST = False`); `kimi_argv(persistent=True)` rejects one.
-- **Bracketed paste**: `KimiProcess.submit` sends every prompt as one `ESC[200~ … ESC[201~`
-  paste, with the submitting CR after it. Kimi's editor has a paste-burst fallback for
+- **Bracketed paste**: `KimiProcess` sets `_PASTE_SUBMIT`, so the shared
+  `WirePtyProcess.submit` sends every prompt as one `ESC[200~ … ESC[201~` paste, with the
+  submitting CR after it. Kimi's editor has a paste-burst fallback for
   terminals without bracketed paste: once eight plain characters arrive within 8 ms of each
   other, an Enter in the next 120 ms inserts a newline instead of submitting. So a prompt
   typed out with its CR in one write never submits. A bracketed paste is one insertion and
