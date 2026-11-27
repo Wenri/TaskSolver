@@ -28,12 +28,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from multiprocessing.process import BaseProcess
+from typing import Final
 
 from wirecap.runtime.process import Target
 from wirecap.runtime.pty import WirePtyProcess
 
 from . import conversations as _conv
 from ._pty import PtyPopen
+
+
+#: agy's flags that select a stored conversation instead of starting one (``agy --help``):
+#: ``-c``/``--continue`` and ``-r``/``--resume``/``--conversation``, alone or ``=``-joined.
+_CONVERSATION_FLAGS: Final = frozenset({"-c", "--continue", "-r", "--resume", "--conversation"})
+
+
+def _selects_conversation(argv: Sequence[str]) -> bool:
+    """Whether an agy argv tail continues or resumes a stored conversation."""
+    return any(arg.split("=", 1)[0] in _CONVERSATION_FLAGS for arg in argv)
 
 
 def _agy_argv(prompt: str | None, persistent: bool, model: str | None,
@@ -91,6 +102,9 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
         self._capture = capture
         self._persistent = persistent  # long-lived interactive agy (drive via .ask()/.send())
         self._conversation_id = conversation_id  # resume id; else captured after first turn
+        # A run that starts a conversation: its id is the first store it opens that did not
+        # exist before launch. The argv decides, flags passed through extra_flags included.
+        self._fresh = conversation_id is None and not _selects_conversation(self._agy_args)
         self._data_dir = data_dir      # scope the conversation store to a project repo
         self._app_data_dir = app_data_dir  # subdirectory under ~/.gemini (default: pyagy)
         self._account = account        # named pyagy account profile (e.g. 'alt' -> pyagy-alt)
@@ -105,15 +119,16 @@ class AgyProcess(WirePtyProcess[PtyPopen]):
     @property
     def conversation_id(self) -> str | None:
         """agy's native conversation id for this run — the resume id, or the one captured
-        after launch (from the shim's conversation_id event, else the newest store db).
-        Persist it and pass ``conversation_id=`` to a new AgyProcess (or ``pyagy.resume``)
-        to continue this conversation with full prior context."""
+        after launch (from the shim's conversation_id events: for a new conversation the first
+        store absent before launch, else the first opened; failing those, the store dbs vs the
+        pre-launch snapshot). Persist it and pass ``conversation_id=`` to a new AgyProcess (or
+        ``pyagy.resume``) to continue this conversation with full prior context."""
         if self._conversation_id is None and self._popen is not None:
             self._conversation_id = _conv.capture_conversation_id(
                 self._popen._snap,
                 capture_path=self._popen._capture_path,
                 app_data_dir=self._popen._app_data_dir,
-                home=self._popen._home)
+                home=self._popen._home, fresh=self._fresh)
         return self._conversation_id
 
     # The decoded-answer collection helpers (collect / ask-turn / collect_many) live in the caller

@@ -398,13 +398,13 @@ def snapshot(app_data_dir: str | None = None, home: PathInput | None = None) -> 
                        for p in _all_db_paths(app_data_dir, home)}}
 
 
-def _id_from_capture(capture_path: PathInput | None) -> str | None:
-    """First ``{"kind":"conversation_id","id":...}`` event in the capture JSONL, or ``None``.
-    Emitted by the file_open book (AGY_PROC_CONV_ID) from the conversation-store path — exact
-    and in-process. FIRST = the main/top-level conversation (its store opens before any
-    subagent's)."""
+def _ids_from_capture(capture_path: PathInput | None) -> list[str]:
+    """The ids of the ``{"kind":"conversation_id","id":...}`` events in the capture JSONL, in
+    order of first appearance. The file_open book (AGY_PROC_CONV_ID) emits one whenever agy
+    opens a conversation-store path: exact and in-process, but an open is not a creation."""
+    ids: list[str] = []
     if not capture_path or not os.path.exists(capture_path):
-        return None
+        return ids
     try:
         with open(capture_path, errors="replace") as f:
             for line in f:
@@ -415,26 +415,37 @@ def _id_from_capture(capture_path: PathInput | None) -> str | None:
                 except ValueError:
                     continue
                 conversation_id = obj.get("id")
-                if obj.get("kind") == "conversation_id" and isinstance(conversation_id, str) and conversation_id:
-                    return conversation_id
+                if (obj.get("kind") == "conversation_id" and isinstance(conversation_id, str)
+                        and conversation_id and conversation_id not in ids):
+                    ids.append(conversation_id)
     except OSError:
-        return None
-    return None
+        return ids
+    return ids
 
 
 def capture_conversation_id(snapshot: ConversationSnapshot | None = None,
                             capture_path: PathInput | None = None, app_data_dir: str | None = None,
-                            home: PathInput | None = None) -> str | None:
+                            home: PathInput | None = None, *, fresh: bool = False) -> str | None:
     """Resolve the conversation a just-finished run created or continued, most-reliable first:
-      1. a ``conversation_id`` event from the file_open book in the capture JSONL (exact,
-         in-process — needs AGY_PROC_CONV_ID + a linked run);
+      1. the ``conversation_id`` events from the file_open book in the capture JSONL (exact,
+         in-process — needs AGY_PROC_CONV_ID + a linked run). A ``fresh`` run (no resume id,
+         no resume or continue flag) takes the first one absent from the pre-run ``snapshot``:
+         agy opens the most recent stored conversation before it creates its own (the
+         interactive TUI does, as of 1.5.18), so the first open can be another conversation.
+         Any other run takes the first, the conversation it continued; a subagent's store
+         opens after its parent's.
       2. vs the pre-run ``snapshot``: the newest conversation that is NEW or whose mtime
          advanced (covers both create and resume);
       3. else the newest conversation overall.
     Returns the conversation ID, or ``None`` if the store is empty."""
-    cid = _id_from_capture(capture_path)
-    if cid:
-        return cid
+    ids = _ids_from_capture(capture_path)
+    if fresh and snapshot is not None:
+        known = snapshot.get("mtimes", {})
+        created = [cid for cid in ids if cid not in known]
+        if created:
+            return created[0]
+    elif ids:
+        return ids[0]
     cur = {os.path.splitext(os.path.basename(p))[0]: _safe_mtime(p)
            for p in _all_db_paths(app_data_dir, home)}
     if snapshot:
