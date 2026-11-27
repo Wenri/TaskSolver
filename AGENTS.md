@@ -75,7 +75,11 @@ excluding `apps/desktop`'s cyclic `@moonshot-ai/app-client` ↔ `@moonshot-ai/ap
 symlinks that fail `pixi-build`'s directory walk; `package.nix`'s `preBuild` also restores
 `pnpmConfigHook`'s `store-dir` and `package-import-method` after moving `HOME=$TMPDIR`),
 `--store-dir=.pixi/pnpm-store` (under `CONDA_BUILD=1`), and
-`--config.confirm-modules-purge=false` to pnpm.
+`--config.confirm-modules-purge=false` to pnpm. `_build_codex` builds without debug info
+(`CARGO_PROFILE_RELEASE_DEBUG=none` unless set; bundling strips it anyway): measured on 4 CPUs,
+upstream's line tables raise the build's peak memory from 17.9 to 20.6 GB and the final link's
+from 9.8 to 15.5 GB, past a 16 GB hosted runner's RAM. `package.nix` replaces its cargo argv by
+literal text, which `test_reconstruct.py` checks.
 
 **Redistributable bundles.** agy and Claude Code are built from proprietary upstream executables.
 A non-editable conda build (`pixi publish`, a conda source dependency; `redistributable_bundle`

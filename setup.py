@@ -125,6 +125,11 @@ class BuildPyNative(build_py):
         conda = env.get("CONDA_PREFIX")
         if conda and not env.get("LIBCLANG_PATH"):
             env["LIBCLANG_PATH"] = os.path.join(conda, "lib")
+        # No debug info: bundling strips it anyway, and upstream's line tables cost memory a 16 GB
+        # hosted runner lacks. Measured on 4 CPUs, they raise the build's peak anonymous memory
+        # from 17.9 to 20.6 GB (four crates compiling at once) and the final link's from 9.8 to
+        # 15.5 GB. An explicit setting still wins.
+        env.setdefault("CARGO_PROFILE_RELEASE_DEBUG", "none")
         subprocess.run(["cargo", "build", "--release", "-p", "codex-cli"],
                        cwd=codex_rs, env=env, check=True)
         sys.stderr.write("[setup] codex built (gnu-dynamic, wirecap-patched)\n")
@@ -178,7 +183,7 @@ class BuildPyNative(build_py):
         return [
             (os.path.join(root, "antigravity", "vendor", "libagy.so"),      "pyagy", "libagy.so",      False),  # build-id coupled to symbols.json — never strip
             (os.path.join(root, "antigravity", "vendor", "agy"),            "pyagy", "agy",            False),
-            (os.path.join(root, "codex", "vendor", "codex-rs", "target", "release", "codex"), "pycodex", "codex", True),  # ~72% debuginfo — strip for the wheel
+            (os.path.join(root, "codex", "vendor", "codex-rs", "target", "release", "codex"), "pycodex", "codex", True),  # what debug info remains (_build_codex omits codex's own)
             (os.path.join(root, "kimi", "vendor", "kimi-code", "apps", "kimi-code", "dist", "main.mjs"), "pykimi", "main.mjs", False),
             (os.path.join(root, "kimi", "vendor", "kimi-code", "apps", "kimi-code", "dist", "search-worker.mjs"), "pykimi", "search-worker.mjs", False),
             (os.path.join(root, "kimi", "native", "build", "wirecap_node.node"), "pykimi", "wirecap_node.node", False),
