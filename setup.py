@@ -125,14 +125,36 @@ class BuildPyNative(build_py):
         conda = env.get("CONDA_PREFIX")
         if conda and not env.get("LIBCLANG_PATH"):
             env["LIBCLANG_PATH"] = os.path.join(conda, "lib")
-        # No debug info: bundling strips it anyway, and upstream's line tables cost memory a 16 GB
-        # hosted runner lacks. Measured on 4 CPUs, they raise the build's peak anonymous memory
-        # from 17.9 to 20.6 GB (four crates compiling at once) and the final link's from 9.8 to
-        # 15.5 GB. An explicit setting still wins.
+        # No debug info: bundling strips it anyway, and upstream's line tables cost memory. Measured
+        # on 4 CPUs, they raise the build's peak anonymous memory from 17.9 to 20.6 GB (four crates
+        # compiling at once) and the final link's from 9.8 to 15.5 GB. An explicit setting wins.
         env.setdefault("CARGO_PROFILE_RELEASE_DEBUG", "none")
+        # Fewer jobs below 24 GiB of RAM (an explicit CARGO_BUILD_JOBS wins). At four jobs on a
+        # 16 GB hosted runner, codex-core, -tui, -app-server and -exec compile together, and only
+        # 0.5-1.0 GiB of memory stays available; a runner went silent there as it began to swap,
+        # and GitHub declared it lost 45 minutes later. At two jobs, 2.5-3.1 GiB stayed available.
+        if (jobs := self._codex_jobs()) is not None:
+            env.setdefault("CARGO_BUILD_JOBS", str(jobs))
         subprocess.run(["cargo", "build", "--release", "-p", "codex-cli"],
                        cwd=codex_rs, env=env, check=True)
         sys.stderr.write("[setup] codex built (gnu-dynamic, wirecap-patched)\n")
+
+    @staticmethod
+    def _codex_jobs(meminfo: str = "/proc/meminfo") -> int | None:
+        """Cargo jobs for codex below 24 GiB of RAM: one per 6 GiB, if fewer than the usable CPUs.
+
+        None leaves cargo's default. The four large crates fit together in 24 GiB (17.9 GB at
+        their peak on 4 CPUs). A 16 GB runner (15.3-15.6 GiB) gets two, which is measured; the
+        other values are not."""
+        try:
+            with open(meminfo, encoding="ascii") as f:
+                kib = next(int(line.split()[1]) for line in f if line.startswith("MemTotal:"))
+        except (OSError, StopIteration, ValueError, IndexError):
+            return None
+        if kib >= 24 << 20:
+            return None
+        jobs = max(1, kib // (6 << 20))
+        return jobs if jobs < len(os.sched_getaffinity(0)) else None
 
     def _build_kimi(self, root: str, env: Mapping[str, str]) -> None:
         vendor = os.path.join(root, "kimi", "vendor", "kimi-code")
