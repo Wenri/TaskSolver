@@ -355,6 +355,34 @@ class BundleModeTests(unittest.TestCase):
                 self.assertEqual(cargo.call_args.args[0], argv)
                 self.assertEqual(cargo.call_args.kwargs["env"]["CARGO_PROFILE_RELEASE_DEBUG"], expected)
 
+    def test_codex_jobs_fit_memory(self) -> None:
+        # Below 24 GiB of RAM, one cargo job per 6 GiB, exported only when that is fewer than the
+        # usable CPUs: a 16 GB hosted runner (MemTotal 15.3-15.6 GiB, 4 CPUs) builds with two.
+        # Larger machines keep cargo's default. An explicit CARGO_BUILD_JOBS still wins.
+        from setuptools import Distribution
+
+        builder_type = cast("type[BuildPyNative]", self.setup_namespace["BuildPyNative"])
+        cases: list[tuple[int, int, int | None]] = [
+            (15701 << 10, 4, 2), (15983 << 10, 4, 2), (4 << 20, 4, 1), (20 << 20, 8, 3),
+            (20 << 20, 2, None), (24 << 20, 4, None), (125 << 20, 24, None)]
+        with tempfile.TemporaryDirectory() as directory:
+            meminfo = Path(directory) / "meminfo"
+            for kib, cpus, expected in cases:
+                _ = meminfo.write_text(f"MemTotal:       {kib} kB\nMemFree:        1 kB\n", encoding="ascii")
+                with patch("os.sched_getaffinity", return_value=set(range(cpus))):
+                    self.assertEqual(builder_type._codex_jobs(str(meminfo)), expected, (kib, cpus))
+            self.assertIsNone(builder_type._codex_jobs(str(Path(directory) / "absent")))
+            builder = builder_type(Distribution({"name": "tasksolver-codex-jobs-test",
+                                                 "script_name": str(ROOT / "setup.py")}))
+            (Path(directory) / "codex/vendor/codex-rs").mkdir(parents=True)
+            exported: list[tuple[int | None, dict[str, str], str | None]] = [
+                (2, {}, "2"), (2, {"CARGO_BUILD_JOBS": "8"}, "8"), (None, {}, None)]
+            for jobs, given, expected_jobs in exported:
+                with patch.object(builder, "_codex_jobs", return_value=jobs), patch("subprocess.run") as cargo:
+                    builder._build_codex(directory, given)
+                env = cast(dict[str, str], cargo.call_args.kwargs["env"])
+                self.assertEqual(env.get("CARGO_BUILD_JOBS"), expected_jobs)
+
     def test_local_build_keeps_everything(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             environment = {key: value for key, value in os.environ.items() if key != "CONDA_BUILD"}

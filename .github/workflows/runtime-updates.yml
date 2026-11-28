@@ -158,8 +158,8 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/share/swift
           sudo docker system prune --all --force > /dev/null || true
           sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
-          # Codex's build peaks near 18 GB on 4 CPUs (four large crates compiling at once, without
-          # debug info: setup.py), so swap keeps 16 GB runners from OOM-killing it.
+          # Swap is a last resort, not headroom: a runner went silent as it began to swap at codex's
+          # compile peak, so setup.py builds codex with two cargo jobs on 16 GB runners.
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile
           sudo fallocate -l 16G /mnt/swapfile && sudo chmod 600 /mnt/swapfile
@@ -242,23 +242,24 @@ jobs:
 
       - name: Build the workspace (agy, Codex, Claude Code and Kimi Code)
         run: |
-          # How close the build comes to the runner's memory: RAM and swap in use every 5 s, in a
-          # .tsv (the hand-over quotes the newest *.log, which must stay build.log).
+          # How close the build comes to the runner's memory: MemAvailable and swap in use (GiB)
+          # every 5 s, in a .tsv (the hand-over quotes the newest *.log, which must stay build.log).
           while sleep 5; do
-            LC_ALL=C awk '{v[$1] = $2} END {ram = v["MemTotal:"] - v["MemAvailable:"]
-              swap = v["SwapTotal:"] - v["SwapFree:"]; print ram / 1048576, swap / 1048576}' /proc/meminfo
+            LC_ALL=C awk '{v[$1] = $2} END {print v["MemAvailable:"] / 1048576,
+              (v["SwapTotal:"] - v["SwapFree:"]) / 1048576}' /proc/meminfo
           done > "$RUNNER_TEMP/memory.tsv" &
           sampler=$!
           pixi install --locked 2>&1 | tee "$RUNNER_TEMP/build.log"
           kill "$sampler" 2> /dev/null || true
-          peak() {
-            LC_ALL=C awk '$1 > ram {ram = $1} $2 > swap {swap = $2}
-              END {printf "%.1f GB RAM and %.1f GB swap", ram, swap}'
-          }
-          # The whole build peaks while codex's large crates compile together; its last 25 minutes
-          # are codex's final link (26-33 minutes on these runners), which must stay in RAM.
-          echo "::notice::Build memory high-water mark: $(peak < "$RUNNER_TEMP/memory.tsv") in use;" \
-            "in its last 25 minutes (codex's final link): $(tail -n 300 "$RUNNER_TEMP/memory.tsv" | peak)"
+          read -r available swap < <(LC_ALL=C awk 'NR == 1 || $1 < low {low = $1} $2 > swap {swap = $2}
+            END {printf "%.1f %.1f\n", low, swap}' "$RUNNER_TEMP/memory.tsv")
+          echo "::notice::Build memory: at least $available GiB stayed available, at most $swap GiB of swap in use"
+          # Codex's compile peak sets the low point: two cargo jobs (setup.py) kept 2.5-3.1 GiB
+          # available on these runners, four kept 0.5-1.0, and a runner went silent at four.
+          if LC_ALL=C awk -v low="$available" 'BEGIN {exit !(low < 2)}'; then
+            echo "::warning::Only $available GiB of memory stayed available during the build; codex's" \
+              "compile peak is outgrowing the runner (setup.py's _build_codex sets its cargo jobs)"
+          fi
 
       - name: Refresh the Nix hashes
         if: steps.adopt.outputs.mode != 'validate' && hashFiles('nix/update-hashes') != ''
