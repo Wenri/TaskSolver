@@ -77,12 +77,13 @@ symlinks that fail `pixi-build`'s directory walk; `package.nix`'s `preBuild` als
 `--store-dir=.pixi/pnpm-store` (under `CONDA_BUILD=1`), and
 `--config.confirm-modules-purge=false` to pnpm. `_build_codex` builds without debug info
 (`CARGO_PROFILE_RELEASE_DEBUG=none` unless set; bundling strips it anyway). Below 24 GiB of
-RAM it also runs one cargo job per 6 GiB when that is fewer than the usable CPUs
-(`CARGO_BUILD_JOBS` unless set), so a 16 GB hosted runner builds with two. At four jobs there,
-codex-core, -tui, -app-server and -exec compile together and leave 0.5-1.0 GiB of memory
-available. A runner went silent there as it began to swap, and GitHub declared it lost 45 minutes
-later, so a loss's time is not where it died. `package.nix` replaces the cargo argv by literal
-text, which `test_reconstruct.py` checks.
+RAM, when one cargo job per 6 GiB is fewer than the usable CPUs and `CARGO_BUILD_JOBS` is unset,
+it builds codex-cli's lib target (every crate under it) at that many jobs, two on a 16 GB hosted
+runner, then the binaries' thin-LTO link at cargo's default. At four jobs there, codex-core,
+-tui, -app-server and -exec compile together and leave 0.5-1.0 GiB of memory available. A runner
+went silent there as it began to swap, and GitHub declared it lost 45 minutes later, so a loss's
+time is not where it died. `package.nix` replaces the cargo argv's literal text with `["true"]`,
+which `test_reconstruct.py` checks covers every cargo call.
 
 **Redistributable bundles.** agy and Claude Code are built from proprietary upstream executables.
 A non-editable conda build (`pixi publish`, a conda source dependency; `redistributable_bundle`

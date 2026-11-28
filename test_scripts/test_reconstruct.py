@@ -336,12 +336,15 @@ class BundleModeTests(unittest.TestCase):
 
     def test_codex_builds_without_debug_info(self) -> None:
         # Upstream's line tables cost the codex build memory a hosted runner lacks, and bundling
-        # strips them; an explicit setting still wins. package.nix replaces the cargo argv by its
-        # literal text (substituteInPlace --replace-fail), so the literal stays as written.
+        # strips them; an explicit setting still wins, on every cargo call. package.nix replaces
+        # the cargo argv's literal text with ["true"] (substituteInPlace --replace-fail), so the
+        # literal stays as written, and no cargo call may bypass it.
         from setuptools import Distribution
 
         argv = ["cargo", "build", "--release", "-p", "codex-cli"]
-        self.assertIn(json.dumps(argv), (ROOT / "setup.py").read_text())
+        source = (ROOT / "setup.py").read_text()
+        self.assertIn(json.dumps(argv), source)
+        self.assertNotIn('"cargo"', source.replace(json.dumps(argv), '["true"]'))
         builder_type = cast("type[BuildPyNative]", self.setup_namespace["BuildPyNative"])
         builder = builder_type(Distribution({"name": "tasksolver-codex-build-test",
                                              "script_name": str(ROOT / "setup.py")}))
@@ -349,11 +352,15 @@ class BundleModeTests(unittest.TestCase):
             ({}, "none"), ({"CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only"}, "line-tables-only")]
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "codex/vendor/codex-rs").mkdir(parents=True)
-            for given, expected in cases:
-                with patch("subprocess.run") as cargo:
-                    builder._build_codex(directory, given)
-                self.assertEqual(cargo.call_args.args[0], argv)
-                self.assertEqual(cargo.call_args.kwargs["env"]["CARGO_PROFILE_RELEASE_DEBUG"], expected)
+            for jobs in (None, 2):  # one cargo call, or the capped lib build and then the link
+                for given, expected in cases:
+                    with patch.object(builder, "_codex_jobs", return_value=jobs), \
+                            patch("subprocess.run") as cargo:
+                        builder._build_codex(directory, given)
+                    self.assertEqual(cargo.call_args.args[0], argv)
+                    for call in cargo.call_args_list:
+                        env = cast(dict[str, str], call.kwargs["env"])
+                        self.assertEqual(env["CARGO_PROFILE_RELEASE_DEBUG"], expected, (jobs, call.args))
 
     def test_codex_jobs_fit_memory(self) -> None:
         # Below 24 GiB of RAM, one cargo job per 6 GiB, exported only when that is fewer than the
@@ -375,13 +382,19 @@ class BundleModeTests(unittest.TestCase):
             builder = builder_type(Distribution({"name": "tasksolver-codex-jobs-test",
                                                  "script_name": str(ROOT / "setup.py")}))
             (Path(directory) / "codex/vendor/codex-rs").mkdir(parents=True)
-            exported: list[tuple[int | None, dict[str, str], str | None]] = [
-                (2, {}, "2"), (2, {"CARGO_BUILD_JOBS": "8"}, "8"), (None, {}, None)]
-            for jobs, given, expected_jobs in exported:
+            # The capped jobs build codex-cli's lib target and every crate under it; then the
+            # binaries' link runs at cargo's default. An explicit setting, or no cap: one call.
+            argv = ["cargo", "build", "--release", "-p", "codex-cli"]
+            runs: list[tuple[int | None, dict[str, str], list[tuple[list[str], str | None]]]] = [
+                (2, {}, [([*argv, "--lib"], "2"), (argv, None)]),
+                (2, {"CARGO_BUILD_JOBS": "8"}, [(argv, "8")]),
+                (None, {}, [(argv, None)])]
+            for jobs, given, expected_calls in runs:
                 with patch.object(builder, "_codex_jobs", return_value=jobs), patch("subprocess.run") as cargo:
                     builder._build_codex(directory, given)
-                env = cast(dict[str, str], cargo.call_args.kwargs["env"])
-                self.assertEqual(env.get("CARGO_BUILD_JOBS"), expected_jobs)
+                made = [(cast(list[str], call.args[0]), cast(dict[str, str], call.kwargs["env"]).get("CARGO_BUILD_JOBS"))
+                        for call in cargo.call_args_list]
+                self.assertEqual(made, expected_calls, (jobs, given))
 
     def test_local_build_keeps_everything(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

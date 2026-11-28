@@ -133,10 +133,14 @@ class BuildPyNative(build_py):
         # 16 GB hosted runner, codex-core, -tui, -app-server and -exec compile together, and only
         # 0.5-1.0 GiB of memory stays available; a runner went silent there as it began to swap,
         # and GitHub declared it lost 45 minutes later. At two jobs, 2.5-3.1 GiB stayed available.
-        if (jobs := self._codex_jobs()) is not None:
-            env.setdefault("CARGO_BUILD_JOBS", str(jobs))
-        subprocess.run(["cargo", "build", "--release", "-p", "codex-cli"],
-                       cwd=codex_rs, env=env, check=True)
+        # The capped jobs build codex-cli's lib target, which takes every crate under it; then
+        # the binaries' thin-LTO link runs alone at cargo's default, keeping its threads. That
+        # needs codex-cli to keep a [lib]: without one, the build fails here below 24 GiB.
+        cargo = ["cargo", "build", "--release", "-p", "codex-cli"]  # package.nix: ["true"]
+        if (jobs := self._codex_jobs()) is not None and "CARGO_BUILD_JOBS" not in env:
+            subprocess.run([*cargo, "--lib"], cwd=codex_rs, env={**env, "CARGO_BUILD_JOBS": str(jobs)},
+                           check=True)
+        subprocess.run(cargo, cwd=codex_rs, env=env, check=True)
         sys.stderr.write("[setup] codex built (gnu-dynamic, wirecap-patched)\n")
 
     @staticmethod
